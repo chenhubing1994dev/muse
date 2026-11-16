@@ -1,0 +1,8 @@
+MUSE ORIGINAL FILM — 火種不滅：致未知的征服者
+
+Visuals: original procedural Canvas 2D animation authored for this film.
+Music and foley: original procedural synthesis authored for this film; no sampled commercial recordings.
+Narration: Microsoft Edge TTS neural voice zh-HK-HiuMaanNeural (Cantonese, female), generated online for this film. Voice service/source: https://learn.microsoft.com/azure/ai-services/speech-service/ ; Edge TTS client: https://github.com/rany2/edge-tts . Use is subject to Microsoft's applicable service terms.
+Rendering: Lemo-Opuscar shared rendering tools (MIT-licensed library), Node.js, Playwright Core, FFmpeg (see upstream project licences and notices).
+Fonts: operating-system CJK sans-serif fallback only; no font files bundled.
+No third-party film footage, music, logos, characters, or stock images are used.

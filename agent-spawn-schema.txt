@@ -1,0 +1,65 @@
+﻿    name: 'agent_spawn',
+    description: 'Spawn a Ruflo-tracked agent with cost attribution + memory persistence + swarm coordination. Use when native Task tool is wrong because you need (a) cost tracking per agent in the cost-tracking namespace, (b) cross-session learning via the patterns namespace, or (c) coordination with other agents in a swarm topology (hierarchical / mesh / consensus). For one-shot subtasks with no learning loop, native Task is fine. Pair with hooks_route to pick the right model first.',
+    category: 'agent',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        agentType: { type: 'string', description: 'Type of agent to spawn (a legacy `type` key is accepted as an alias)' },
+        agentId: { type: 'string', description: 'Optional custom agent ID' },
+        name: { type: 'string', description: 'Optional display name for the agent (shown by agent_list, agent_status and ruflo-console)' },
+        // #2085 鈥?accept swarmId so spawned agents register in the
+        // swarm.agents array that swarm_status reports. Omit to register
+        // with the most-recently-created swarm.
+        swarmId: { type: 'string', description: 'Optional swarm to register the agent with (defaults to most-recent swarm)' },
+        config: { type: 'object', description: 'Agent configuration' },
+        domain: { type: 'string', description: 'Agent domain' },
+        model: {
+          type: 'string',
+          enum: ['haiku', 'sonnet', 'opus', 'opus-4.7', 'inherit'],
+          description: 'Claude model alias (haiku=fast/cheap, sonnet=balanced, opus=current Opus 4.8, opus-4.7=prior Opus pin)'
+        },
+        task: { type: 'string', description: 'Task description for intelligent model routing' },
+        memoryBase: { type: 'string', description: 'Opt-in: base .rvf memory file to fork a per-agent Copy-On-Write branch from (agenticow). When set, the agent gets an isolated ~162-byte COW branch instead of a full copy 鈥?promote on success, discard on terminate. Requires the optional `agenticow` dep; degrades to a no-op when absent or when CLAUDE_FLOW_NO_COW_MEMORY=1.' },
+        memoryDimension: { type: 'integer', description: 'Vector dimension for the COW base (required only when memoryBase does not exist yet)' },
+      },
+      required: ['agentType'],
+    },
+    handler: async (rawInput) => {
+      // #4542: agent and command docs that `init` installed before 3.63.7 call
+      // agent_spawn with `type`. Accept it as an alias for `agentType`, and
+      // name the missing key ourselves: validateAgentSpawn maps agentType onto
+      // the security schema's `type` field and would report "type: Required".
+      let input = rawInput;
+      if (input.agentType === undefined && typeof input.type === 'string') {
+        const { type, ...rest } = input;
+        input = { ...rest, agentType: type };
+      }
+      if (typeof input.agentType !== 'string' || input.agentType === '') {
+        return { success: false, error: 'Input validation failed: agentType is required and must be a non-empty string (for example agentType: "coder")' };
+      }
+      // Validate user-provided input (#1425: wire security validators to runtime)
+      const validation = await validateAgentSpawn(input);
+      if (!validation.valid) {
+        return { success: false, error: `Input validation failed: ${validation.errors.join('; ')}` };
+      }
+
+      const agentId = (input.agentId as string) || `agent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const agentType = input.agentType as string;
+      // #4300 鈥?older callers (including `agent spawn` before this fix) send
+      // the name only as metadata.name.
+      const metadata = input.metadata as Record<string, unknown> | undefined;
+      const rawName = input.name ?? metadata?.name;
+      let name: string | undefined;
+      if (rawName !== undefined && rawName !== '') {
+        const vName = validateText(rawName, 'name', 200);
+        if (!vName.valid) {
+          return { success: false, error: `Input validation failed: ${vName.error}` };
+        }
+        name = vName.sanitized;
+      }
+      const config = (input.config as Record<string, unknown>) || {};
+
+      // Add explicit model to config if provided
+      if (input.model) {
+        config.model = input.model;
+      }

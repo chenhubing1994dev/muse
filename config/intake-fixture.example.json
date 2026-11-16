@@ -1,0 +1,11 @@
+[
+  {
+    "source": "github",
+    "event_id": "demo-event-001",
+    "actor_id": "replace-with-verified-actor-id",
+    "addressed": false,
+    "payload": {
+      "text": "Please review this security vulnerability report."
+    }
+  }
+]

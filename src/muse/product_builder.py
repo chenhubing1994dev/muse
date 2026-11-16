@@ -1,0 +1,690 @@
+"""Build a self-contained offline product from a Muse initiative.
+
+The generated application uses a fixed, reviewed JavaScript/CSS template. Initiative
+content is treated as data, HTML-escaped, and never executed. No server, network,
+external asset, package installation, or generated-code execution is required.
+"""
+from __future__ import annotations
+
+import argparse
+import base64
+import hashlib
+import html
+from html.parser import HTMLParser
+import json
+import re
+import shutil
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+import zipfile
+
+from muse.initiative_engine import InitiativeStore
+from muse.progress import record_evolution_cycle_event
+
+
+class ProductBuildError(RuntimeError):
+    """A product could not be built or verified without overwriting data."""
+
+
+APP_CSS = r"""
+:root{color-scheme:dark;font-family:system-ui,"Microsoft YaHei",sans-serif;background:#0d1220;color:#edf2ff}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 80% 0,#263754,#0d1220 52%);min-height:100vh}
+header,main,footer{max-width:1120px;margin:auto;padding:1.2rem}
+header{padding-top:2.2rem}.eyebrow{color:#a7bbdf;letter-spacing:.14em;font-size:.76rem;text-transform:uppercase}
+h1{font-size:clamp(1.8rem,4vw,3rem);margin:.4rem 0}.lead{color:#b8c6dd;max-width:780px;line-height:1.7}
+.notice{border:1px solid #6d5c36;background:#2a251a;color:#f5dfaa;padding:.9rem 1rem;border-radius:12px}
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1rem}
+.panel,.card{background:#171f31;border:1px solid #34445f;border-radius:16px;padding:1rem}
+.panel h2{font-size:1.05rem;margin:.1rem 0 .7rem;color:#d8e4fa}
+label{display:block;color:#aebed8;font-size:.88rem;margin:.8rem 0 .35rem}
+input,textarea{width:100%;background:#0e1625;color:#f3f6fc;border:1px solid #425574;border-radius:9px;padding:.7rem;font:inherit}
+textarea{min-height:100px;resize:vertical;line-height:1.55}
+button{background:#b7c9e8;color:#142039;border:0;border-radius:9px;padding:.65rem .9rem;font:inherit;font-weight:650;cursor:pointer}
+button.secondary{background:#26354d;color:#dce7f8;border:1px solid #536887}
+button.danger{background:#432a32;color:#ffdbe1;border:1px solid #81515e}
+button:focus-visible,input:focus-visible,textarea:focus-visible{outline:2px solid #b7c9e8;outline-offset:2px}
+.toolbar{display:flex;flex-wrap:wrap;gap:.6rem;margin:1rem 0}
+.stack{display:grid;gap:.8rem}.card{padding:.9rem}.card-head{display:flex;align-items:center;justify-content:space-between;gap:.8rem}
+.card-head strong{color:#e0eaff}.small{font-size:.82rem;color:#9eafca}.status{min-height:1.4rem;color:#b8d9c2}
+footer{color:#93a2bc;font-size:.85rem;padding-bottom:2rem}
+@media(max-width:720px){.grid{grid-template-columns:1fr}header,main,footer{padding-left:1rem;padding-right:1rem}}
+""".strip()
+
+APP_SCRIPT = r"""
+(() => {
+  "use strict";
+  const seed = JSON.parse(document.getElementById("seed").textContent);
+  const storageKey = "muse.product.v1." + seed.id;
+  const defaults = () => ({
+    initiative_id: seed.id, title: seed.title, objective: seed.objective,
+    stable: "", changing: "", tensions: "", lessons: "",
+    hypotheses: seed.hypotheses.map((text, index) => ({
+      title: "研究假设 " + (index + 1), statement: text, test: "", falsifier: ""
+    })),
+    experiments: []
+  });
+  let state = defaults();
+  const $ = id => document.getElementById(id);
+  const status = message => { $("save-status").textContent = message; };
+  const sanitizeState = parsed => {
+    const next = defaults();
+    ["objective","stable","changing","tensions","lessons"].forEach(key => {
+      if (typeof parsed[key] === "string") next[key] = parsed[key].slice(0,12000);
+    });
+    const cleanRows = (rows, keys) => Array.isArray(rows) ? rows.slice(0,40).map(row => {
+      const clean = {};
+      keys.forEach(key => {
+        clean[key] = row && typeof row[key] === "string" ? row[key].slice(0,12000) : "";
+      });
+      return clean;
+    }) : null;
+    const hypotheses = cleanRows(parsed.hypotheses,["title","statement","test","falsifier"]);
+    const experiments = cleanRows(parsed.experiments,["title","method","expected","result"]);
+    if (hypotheses) next.hypotheses = hypotheses;
+    if (experiments) next.experiments = experiments;
+    return next;
+  };
+  const safeLoad = () => {
+    try {
+      const raw = localStorage.getItem(storageKey);
+      if (!raw) return defaults();
+      const parsed = JSON.parse(raw);
+      if (!parsed || parsed.initiative_id !== seed.id) return defaults();
+      return sanitizeState(parsed);
+    } catch (_) { return defaults(); }
+  };
+  const save = () => {
+    try {
+      localStorage.setItem(storageKey, JSON.stringify(state));
+      status("已保存在此浏览器。建议定期导出 JSON 备份。");
+    } catch (_) { status("浏览器未允许本地存储；请使用“导出 JSON”保存进度。"); }
+  };
+  const bindText = (id, key) => {
+    const node = $(id);
+    node.value = state[key] || "";
+    node.addEventListener("input", () => { state[key] = node.value; save(); });
+  };
+  const makeField = (labelText, value, onChange, multiline = false) => {
+    const wrap = document.createElement("label");
+    wrap.textContent = labelText;
+    const node = document.createElement(multiline ? "textarea" : "input");
+    if (!multiline) node.type = "text";
+    node.value = value || "";
+    node.addEventListener("input", () => onChange(node.value));
+    wrap.appendChild(node);
+    return wrap;
+  };
+  const renderRows = (containerId, items, kind) => {
+    const container = $(containerId);
+    container.replaceChildren();
+    items.forEach((item, index) => {
+      const card = document.createElement("article");
+      card.className = "card";
+      const head = document.createElement("div");
+      head.className = "card-head";
+      const name = document.createElement("strong");
+      name.textContent = (kind === "hypothesis" ? "假设 " : "实验 ") + (index + 1);
+      const remove = document.createElement("button");
+      remove.type = "button"; remove.className = "danger"; remove.textContent = "移除";
+      remove.addEventListener("click", () => { items.splice(index, 1); renderRows(containerId, items, kind); save(); });
+      head.append(name, remove);
+      card.appendChild(head);
+      const fields = kind === "hypothesis"
+        ? [["标题","title",false],["假设内容","statement",true],["验证方法","test",true],["反证条件","falsifier",true]]
+        : [["实验名称","title",false],["实验步骤","method",true],["预期观察","expected",true],["实际结果","result",true]];
+      fields.forEach(([labelText,key,multiline]) => {
+        card.appendChild(makeField(labelText, item[key], value => { item[key] = value; save(); }, multiline));
+      });
+      container.appendChild(card);
+    });
+  };
+  const renderSeedList = (id, items) => {
+    const list = $(id);
+    list.replaceChildren();
+    (items || []).forEach(value => {
+      const item = document.createElement("li");
+      item.textContent = value;
+      list.appendChild(item);
+    });
+    if (!list.children.length) {
+      const item = document.createElement("li");
+      item.textContent = "尚未记录";
+      list.appendChild(item);
+    }
+  };
+  const render = () => {
+    bindText("objective","objective"); bindText("stable","stable");
+    bindText("changing","changing"); bindText("tensions","tensions");
+    bindText("lessons","lessons");
+    renderRows("hypotheses",state.hypotheses,"hypothesis");
+    renderRows("experiments",state.experiments,"experiment");
+    renderSeedList("uncertainties",seed.uncertainties);
+    renderSeedList("inspiration-refs",seed.inspiration_refs);
+  };
+  $("add-hypothesis").addEventListener("click", () => {
+    state.hypotheses.push({title:"新假设",statement:"",test:"",falsifier:""});
+    renderRows("hypotheses",state.hypotheses,"hypothesis"); save();
+  });
+  $("add-experiment").addEventListener("click", () => {
+    state.experiments.push({title:"新实验",method:"",expected:"",result:""});
+    renderRows("experiments",state.experiments,"experiment"); save();
+  });
+  $("export-json").addEventListener("click", () => {
+    const blob = new Blob([JSON.stringify(state,null,2)],{type:"application/json"});
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url; link.download = "muse-inspiration-lab-" + seed.id + ".json";
+    document.body.appendChild(link); link.click(); link.remove(); URL.revokeObjectURL(url);
+    status("已导出 JSON 备份。");
+  });
+  $("import-json").addEventListener("change", event => {
+    const file = event.target.files && event.target.files[0];
+    if (!file) return;
+    if (file.size > 1024 * 1024) { status("文件过大，最多导入 1 MiB。"); return; }
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(String(reader.result));
+        if (!parsed || parsed.initiative_id !== seed.id) throw new Error("initiative mismatch");
+        state = sanitizeState(parsed);
+        render(); save(); status("已导入本地 JSON。");
+      } catch (_) { status("导入失败：文件格式错误或不属于此项目。"); }
+      event.target.value = "";
+    };
+    reader.readAsText(file);
+  });
+  $("reset").addEventListener("click", () => {
+    if (!window.confirm("确定清除此项目在当前浏览器中的记录？请先导出备份。")) return;
+    localStorage.removeItem(storageKey); state = defaults(); render(); save();
+  });
+  state = safeLoad(); render(); status("本地工作台已就绪。");
+})();
+""".strip()
+
+
+class _ProductHTMLValidator(HTMLParser):
+    FORBIDDEN_TAGS = {"iframe", "object", "embed", "base", "form"}
+    RESOURCE_ATTRIBUTES = {
+        "src", "srcset", "action", "formaction", "poster", "data",
+        "background", "manifest", "ping", "xlink:href",
+    }
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.tags: set[str] = set()
+        self.errors: list[str] = []
+        self.scripts: list[tuple[str, str]] = []
+        self.styles: list[str] = []
+        self._current: str | None = None
+        self._buffer: list[str] = []
+        self.csp: str = ""
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        tag = tag.casefold()
+        self.tags.add(tag)
+        attr_map = {name.casefold(): value for name, value in attrs}
+        if tag in self.FORBIDDEN_TAGS:
+            self.errors.append("forbidden tag: " + tag)
+        for name, value in attr_map.items():
+            if name.startswith("on"):
+                self.errors.append("event handler attribute: " + name)
+            if name in self.RESOURCE_ATTRIBUTES and value:
+                self.errors.append("resource loading attribute: " + name)
+            if name == "style" and value:
+                self.errors.append("inline style attribute is not permitted")
+            if name == "href" and value and not value.startswith("#"):
+                self.errors.append("non-local hyperlink")
+        if tag == "meta" and attr_map.get("http-equiv", "").casefold() == "content-security-policy":
+            self.csp = attr_map.get("content") or ""
+        if tag in {"script", "style"}:
+            if self._current is not None:
+                self.errors.append("nested active content element")
+            self._current = tag
+            self._buffer = []
+            if tag == "script":
+                script_type = (attr_map.get("type") or "text/javascript").casefold()
+                if attr_map.get("src"):
+                    self.errors.append("external script is not permitted")
+                self.scripts.append((script_type, ""))
+
+    def handle_data(self, data: str) -> None:
+        if self._current:
+            self._buffer.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.casefold()
+        if self._current == tag:
+            content = "".join(self._buffer)
+            if tag == "script":
+                script_type, _ = self.scripts[-1]
+                self.scripts[-1] = (script_type, content)
+            else:
+                self.styles.append(content)
+            self._current = None
+            self._buffer = []
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.handle_starttag(tag, attrs)
+        self.handle_endtag(tag)
+
+
+class LocalProductBuilder:
+    """Build versioned, offline, interactive HTML products from initiative records."""
+
+    BUILDER_VERSION = 2
+    MAX_SEED_ITEMS = 40
+
+    def __init__(self, workspace: str | Path) -> None:
+        self.workspace = Path(workspace).resolve()
+        if not self.workspace.is_dir():
+            raise ProductBuildError("workspace must be an existing directory")
+
+    @staticmethod
+    def _sha256(data: bytes) -> str:
+        return hashlib.sha256(data).hexdigest()
+
+    @staticmethod
+    def _safe_json(value: Any) -> str:
+        return (
+            json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+            .replace("&", r"\u0026").replace("<", r"\u003c").replace(">", r"\u003e")
+            .replace("\u2028", r"\u2028").replace("\u2029", r"\u2029")
+        )
+
+    @staticmethod
+    def _product_root(workspace: Path) -> Path:
+        data_root = workspace / "data"
+        product_root = data_root / "products"
+        for candidate in (data_root, product_root):
+            if candidate.is_symlink():
+                raise ProductBuildError("product output path must not contain symlinks")
+        if not product_root.resolve().is_relative_to(workspace):
+            raise ProductBuildError("product output escapes the workspace")
+        return product_root
+
+    @staticmethod
+    def _assert_no_symlink(path: Path, root: Path) -> None:
+        try:
+            relative = path.relative_to(root)
+        except ValueError as exc:
+            raise ProductBuildError("product path escapes output root") from exc
+        current = root
+        if current.is_symlink():
+            raise ProductBuildError("product output root is a symlink")
+        for part in relative.parts:
+            current = current / part
+            if current.is_symlink():
+                raise ProductBuildError("product path contains a symlink")
+
+    @staticmethod
+    def _canonical_initiative(initiative: dict[str, Any]) -> dict[str, Any]:
+        fields = (
+            "id", "title", "kind", "creator_value", "concept", "first_step",
+            "expected_output", "interest_signals", "inspiration_refs",
+            "capability_gap", "priority", "autonomy_level",
+        )
+        return {key: initiative.get(key) for key in fields}
+
+    @classmethod
+    def _seed(cls, initiative: dict[str, Any]) -> dict[str, Any]:
+        try:
+            concept = json.loads(str(initiative.get("concept") or "{}"))
+        except json.JSONDecodeError:
+            concept = {}
+        if not isinstance(concept, dict):
+            concept = {}
+        discoveries = concept.get("key_discoveries")
+        if not isinstance(discoveries, dict):
+            discoveries = {}
+        hypotheses = discoveries.get("creator_inspired_hypotheses")
+        if not isinstance(hypotheses, list):
+            hypotheses = []
+        clean_hypotheses = [
+            str(item)[:4000] for item in hypotheses[:cls.MAX_SEED_ITEMS]
+            if isinstance(item, (str, int, float)) and str(item).strip()
+        ]
+        uncertainties = discoveries.get("uncertainties")
+        if not isinstance(uncertainties, list):
+            uncertainties = []
+        return {
+            "id": initiative["id"],
+            "title": str(initiative.get("title") or "Muse 灵感实验台")[:300],
+            "creator_value": str(initiative.get("creator_value") or "")[:2000],
+            "objective": str(concept.get("research_question") or initiative.get("concept") or "")[:4000],
+            "hypotheses": clean_hypotheses,
+            "uncertainties": [
+                str(item)[:2000] for item in uncertainties[:cls.MAX_SEED_ITEMS]
+                if isinstance(item, (str, int, float)) and str(item).strip()
+            ],
+            "inspiration_refs": [
+                str(item)[:2000] for item in (initiative.get("inspiration_refs") or [])[:cls.MAX_SEED_ITEMS]
+                if isinstance(item, str) and item.strip()
+            ],
+        }
+
+    @classmethod
+    def _render_html(cls, seed: dict[str, Any]) -> str:
+        seed_text = html.escape(cls._safe_json(seed), quote=False)
+        script_hash = base64.b64encode(hashlib.sha256(APP_SCRIPT.encode("utf-8")).digest()).decode("ascii")
+        style_hash = base64.b64encode(hashlib.sha256(APP_CSS.encode("utf-8")).digest()).decode("ascii")
+        csp = (
+            "default-src 'none'; "
+            f"script-src 'sha256-{script_hash}'; "
+            f"style-src 'sha256-{style_hash}'; "
+            "connect-src 'none'; img-src 'none'; font-src 'none'; media-src 'none'; "
+            "object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'"
+        )
+        title = html.escape(seed["title"], quote=True)
+        objective = html.escape(seed["objective"], quote=True)
+        return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="{html.escape(csp, quote=True)}">
+<title>{title} · Muse 灵感实验台</title>
+<style>{APP_CSS}</style>
+</head>
+<body>
+<header>
+<p class="eyebrow">MUSE · OFFLINE PRODUCT / V1</p>
+<h1>灵感实验台</h1>
+<p class="lead">{title}</p>
+<p class="lead">{html.escape(seed["creator_value"], quote=True)}</p>
+<p class="lead">{objective}</p>
+<div class="notice">研究、易经、奇门、紫微等内容在此仅作灵感与待验证假设，不是事实证据或预测结论。请记录反例，并用可重复实验决定是否采纳。</div>
+<div class="toolbar">
+<button id="export-json" type="button">导出 JSON</button>
+<label class="secondary">导入 JSON <input id="import-json" type="file" accept=".json,application/json"></label>
+<button id="reset" class="danger" type="button">清除此项目记录</button>
+</div>
+<p id="save-status" class="status" role="status" aria-live="polite"></p>
+</header>
+<main id="app">
+<section class="panel">
+<h2>研究目标</h2>
+<label for="objective">当前要解决的问题</label>
+<textarea id="objective">{objective}</textarea>
+</section>
+<section class="panel">
+<h2>研究边界与来源</h2>
+<p class="small">以下内容来自本次研究提案，仅作背景与待核查线索。</p>
+<h3>仍未确定</h3><ul id="uncertainties"></ul>
+<h3>灵感来源引用</h3><ul id="inspiration-refs"></ul>
+</section>
+<div class="grid">
+<section class="panel"><h2>一 · 稳定条件</h2><p class="small">哪些约束、目标或事实在当前周期内相对不变？</p><label for="stable">稳定条件</label><textarea id="stable" placeholder="例如：数据必须留在本机；不允许自动付费；关键结果需要可追溯"></textarea></section>
+<section class="panel"><h2>二 · 变化事件</h2><p class="small">哪些状态、资源、依赖或外部条件正在变化？</p><label for="changing">变化事件</label><textarea id="changing" placeholder="例如：新来源出现、任务失败、依赖升级、资源下降"></textarea></section>
+<section class="panel"><h2>三 · 未解矛盾</h2><p class="small">哪些观察彼此冲突，哪些关键问题还没有答案？</p><label for="tensions">未解矛盾</label><textarea id="tensions" placeholder="写下支持证据、反例、未知项和冲突来源"></textarea></section>
+<section class="panel"><h2>经验沉淀</h2><p class="small">记录成功、失败、偏差和下一轮要改变的策略。</p><label for="lessons">经验与教训</label><textarea id="lessons" placeholder="发生了什么？结果如何？下次怎么调整？"></textarea></section>
+</div>
+<section class="panel">
+<div class="card-head"><h2>待验证假设</h2><button id="add-hypothesis" type="button">新增假设</button></div>
+<div id="hypotheses" class="stack"></div>
+</section>
+<section class="panel">
+<div class="card-head"><h2>最小可逆实验</h2><button id="add-experiment" type="button">新增实验</button></div>
+<p class="small">优先选择成本低、可回滚、能区分不同假设的实验。失败结果也要保留。</p>
+<div id="experiments" class="stack"></div>
+</section>
+</main>
+<footer>
+<p>本产品为单文件离线应用。数据只保存在当前浏览器的本地存储；导出 JSON 可备份或迁移。没有服务器、网络请求、外部脚本或第三方依赖。</p>
+<p>产品版本 1 · 由 Muse Initiative 自动生成 · 尚处于测试阶段，正式发布前仍需人工验收。</p>
+</footer>
+<script type="application/json" id="seed">{seed_text}</script>
+<script>{APP_SCRIPT}</script>
+</body>
+</html>
+"""
+
+    @staticmethod
+    def _render_readme(seed: dict[str, Any], input_hash: str) -> str:
+        return (
+            "# Muse 灵感实验台\n\n"
+            f"- Initiative ID: {seed['id']}\n"
+            f"- Input SHA-256: {input_hash}\n"
+            "- Product version: 2\n\n"
+            "## 使用方法\n\n"
+            "1. 解压 product.zip，或直接打开产品目录中的 index.html。\n"
+            "2. 使用 Chrome、Edge 或其他现代浏览器双击打开 index.html。\n"
+            "3. 记录稳定条件、变化事件、未解矛盾、待验证假设和最小可逆实验。\n"
+            "4. 浏览器支持时会自动保存在本地；使用“导出 JSON”定期备份。\n"
+            "5. 迁移数据时，在同一产品页面使用“导入 JSON”。\n\n"
+            "## 隐私与安全\n\n"
+            "- 离线单文件应用，不需要 Muse 服务端、网络、安装依赖或账号。\n"
+            "- 数据保存在当前浏览器的 localStorage；不同浏览器/文件地址的存储隔离行为可能不同。\n"
+            "- 导出 JSON 是推荐的备份方式。产品不会把数据发送到网络。\n"
+            "- 灵感和象征内容只作为假设，不构成事实证据或预测结论。\n"
+            "- 当前状态是 testing，不代表已经正式发布。\n"
+        )
+
+    @staticmethod
+    def _validate_html(content: str) -> None:
+        parser = _ProductHTMLValidator()
+        try:
+            parser.feed(content)
+            parser.close()
+        except Exception as exc:
+            raise ProductBuildError("generated product HTML could not be parsed") from exc
+        required = {"html", "head", "body", "main", "header", "textarea", "button", "script", "style"}
+        if not required.issubset(parser.tags):
+            raise ProductBuildError("generated product is missing required structure")
+        if parser.errors:
+            raise ProductBuildError("product violates offline policy: " + "; ".join(parser.errors))
+        if len(parser.scripts) != 2:
+            raise ProductBuildError("product must contain exactly one seed block and one trusted app script")
+        script_types = [item[0] for item in parser.scripts]
+        if script_types.count("application/json") != 1 or script_types.count("text/javascript") != 1:
+            raise ProductBuildError("product contains an unexpected script type")
+        executable = next(text for kind, text in parser.scripts if kind == "text/javascript")
+        if executable.strip() != APP_SCRIPT:
+            raise ProductBuildError("product executable script differs from the reviewed template")
+        if parser.styles != [APP_CSS]:
+            raise ProductBuildError("product styles differ from the reviewed template")
+        expected_script_hash = base64.b64encode(hashlib.sha256(APP_SCRIPT.encode("utf-8")).digest()).decode("ascii")
+        expected_style_hash = base64.b64encode(hashlib.sha256(APP_CSS.encode("utf-8")).digest()).decode("ascii")
+        if f"script-src 'sha256-{expected_script_hash}'" not in parser.csp:
+            raise ProductBuildError("product CSP does not pin the trusted application script")
+        if f"style-src 'sha256-{expected_style_hash}'" not in parser.csp or "connect-src 'none'" not in parser.csp:
+            raise ProductBuildError("product CSP does not enforce local-only resources")
+
+    def _verify_existing(self, target: Path, input_hash: str, initiative_id: str) -> dict[str, Any]:
+        manifest_path = target / "manifest.json"
+        if target.is_symlink() or manifest_path.is_symlink() or not manifest_path.is_file():
+            raise ProductBuildError("existing product is incomplete or unsafe; refusing to overwrite")
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ProductBuildError("existing product manifest is unreadable") from exc
+        if manifest.get("input_sha256") != input_hash or manifest.get("initiative_id") != initiative_id:
+            raise ProductBuildError("existing product input hash does not match")
+        files = manifest.get("files")
+        expected_names = {"index.html", "README.md", "product.zip"}
+        if not isinstance(files, dict) or set(files) != expected_names:
+            raise ProductBuildError("existing product manifest has an invalid file list")
+        for name, expected_hash in files.items():
+            path = target / name
+            if path.is_symlink() or not path.is_file():
+                raise ProductBuildError("existing product artifact is missing or unsafe")
+            if self._sha256(path.read_bytes()) != expected_hash:
+                raise ProductBuildError("existing product artifact was modified; refusing to overwrite")
+        self._validate_html((target / "index.html").read_text(encoding="utf-8"))
+        package_path = target / "product.zip"
+        try:
+            with zipfile.ZipFile(package_path) as archive:
+                if set(archive.namelist()) != {"index.html", "README.md"} or archive.testzip() is not None:
+                    raise ProductBuildError("existing product package is invalid")
+                if archive.read("index.html") != (target / "index.html").read_bytes():
+                    raise ProductBuildError("product package HTML does not match")
+                if archive.read("README.md") != (target / "README.md").read_bytes():
+                    raise ProductBuildError("product package README does not match")
+        except (OSError, zipfile.BadZipFile, KeyError) as exc:
+            raise ProductBuildError("existing product package is unreadable") from exc
+        return {
+            "relative_path": str(target.relative_to(self.workspace)),
+            "html_path": str((target / "index.html").relative_to(self.workspace)),
+            "package_path": str(package_path.relative_to(self.workspace)),
+            "created": False,
+            "validated": True,
+            "input_sha256": input_hash,
+            "package_sha256": files["product.zip"],
+            "status": "testing",
+        }
+
+    def _target(self, initiative: dict[str, Any]) -> tuple[Path, str]:
+        item = self._canonical_initiative(initiative)
+        canonical = json.dumps(
+            {"builder_version": self.BUILDER_VERSION, "initiative": item},
+            ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
+        )
+        input_hash = self._sha256(canonical.encode("utf-8"))
+        root = self._product_root(self.workspace)
+        parent = root / initiative["id"]
+        target = parent / input_hash[:20]
+        self._assert_no_symlink(parent, root)
+        self._assert_no_symlink(target, root)
+        return target, input_hash
+
+    @staticmethod
+    def _get_initiative(store: InitiativeStore, initiative_id: str) -> dict[str, Any]:
+        if not isinstance(initiative_id, str) or not re.fullmatch(r"[0-9a-f]{32}", initiative_id):
+            raise ValueError("initiative_id must be a 32-character lowercase UUID hex string")
+        initiative = next((item for item in store.list(limit=200) if item["id"] == initiative_id), None)
+        if initiative is None:
+            raise KeyError(initiative_id)
+        if initiative.get("status") in {"parked", "rejected", "shipped"}:
+            raise ProductBuildError("initiative status does not permit product generation")
+        return initiative
+
+    def verify(self, store: InitiativeStore, initiative_id: str) -> dict[str, Any]:
+        initiative = self._get_initiative(store, initiative_id)
+        target, input_hash = self._target(initiative)
+        if not target.exists():
+            raise ProductBuildError("product has not been built")
+        return self._verify_existing(target, input_hash, initiative_id)
+
+    def build(
+        self, store: InitiativeStore, initiative_id: str, *,
+        evolution_cycle_id: str | None = None,
+    ) -> dict[str, Any]:
+        if evolution_cycle_id is not None and (
+            not isinstance(evolution_cycle_id, str)
+            or not re.fullmatch(r"cycle_[0-9a-f]{32}", evolution_cycle_id)
+        ):
+            raise ValueError("evolution_cycle_id must be a valid Muse Evolution Cycle ID")
+        initiative = self._get_initiative(store, initiative_id)
+        target, input_hash = self._target(initiative)
+        if target.exists():
+            result = self._verify_existing(target, input_hash, initiative_id)
+        else:
+            root = self._product_root(self.workspace)
+            parent = target.parent
+            parent.mkdir(parents=True, exist_ok=True)
+            self._assert_no_symlink(parent, root)
+            temporary = Path(tempfile.mkdtemp(prefix=".product-", dir=parent))
+            try:
+                seed = self._seed(initiative)
+                html_bytes = self._render_html(seed).encode("utf-8")
+                readme_bytes = self._render_readme(seed, input_hash).encode("utf-8")
+                self._validate_html(html_bytes.decode("utf-8"))
+                (temporary / "index.html").write_bytes(html_bytes)
+                (temporary / "README.md").write_bytes(readme_bytes)
+                package_path = temporary / "product.zip"
+                with zipfile.ZipFile(package_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                    archive.writestr("index.html", html_bytes)
+                    archive.writestr("README.md", readme_bytes)
+                manifest = {
+                    "schema_version": 1,
+                    "builder_version": self.BUILDER_VERSION,
+                    "initiative_id": initiative_id,
+                    "title": seed["title"],
+                    "product_name": "Muse 灵感实验台",
+                    "status": "testing",
+                    "input_sha256": input_hash,
+                    "generated_at": datetime.now(timezone.utc).isoformat(),
+                    "files": {
+                        "index.html": self._sha256(html_bytes),
+                        "README.md": self._sha256(readme_bytes),
+                        "product.zip": self._sha256(package_path.read_bytes()),
+                    },
+                    "execution": {
+                        "arbitrary_code_executed": False,
+                        "network_access": False,
+                        "shell_invoked": False,
+                        "dependencies_installed": False,
+                        "browser_local_storage_only": True,
+                    },
+                    "validation": {
+                        "offline_product": "passed",
+                        "trusted_template_script": "passed",
+                        "content_security_policy": "passed",
+                        "package_integrity": "passed",
+                    },
+                }
+                (temporary / "manifest.json").write_text(
+                    json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+                )
+                try:
+                    temporary.rename(target)
+                except OSError:
+                    if target.exists():
+                        result = self._verify_existing(target, input_hash, initiative_id)
+                    else:
+                        raise
+                else:
+                    result = {
+                        "relative_path": str(target.relative_to(self.workspace)),
+                        "html_path": str((target / "index.html").relative_to(self.workspace)),
+                        "package_path": str((target / "product.zip").relative_to(self.workspace)),
+                        "created": True,
+                        "validated": True,
+                        "input_sha256": input_hash,
+                        "package_sha256": manifest["files"]["product.zip"],
+                        "status": "testing",
+                    }
+            finally:
+                if temporary.exists():
+                    shutil.rmtree(temporary, ignore_errors=True)
+        if evolution_cycle_id:
+            record_evolution_cycle_event(
+                self.workspace / "data" / "tasks" / "muse.sqlite3",
+                evolution_cycle_id, "progress",
+                summary=f"Idea-to-Reality product {result.get('status', 'unknown')}: initiative {initiative_id}",
+            )
+            result["evolution_cycle_id"] = evolution_cycle_id
+        if initiative.get("status") != "testing":
+            store.update(
+                initiative_id,
+                status="testing",
+                outcome=f"Offline interactive product validated at {result['relative_path']}; awaiting human review.",
+            )
+        store.record_product_artifact(
+            initiative_id,
+            relative_path=result["relative_path"],
+            package_sha256=result["package_sha256"],
+            validated=result["validated"],
+        )
+        return result
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Build or verify an offline Muse product")
+    parser.add_argument("action", choices=("build", "verify"))
+    parser.add_argument("initiative_id", help="Exact 32-character initiative UUID hex ID")
+    parser.add_argument("--workspace", default=".")
+    parser.add_argument("--db", default="")
+    args = parser.parse_args(argv)
+    workspace = Path(args.workspace).resolve()
+    database = Path(args.db) if args.db else workspace / "data" / "initiatives" / "muse.sqlite3"
+    with InitiativeStore(database) as store:
+        builder = LocalProductBuilder(workspace)
+        result = builder.build(store, args.initiative_id) if args.action == "build" else builder.verify(store, args.initiative_id)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

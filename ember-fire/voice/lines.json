@@ -1,0 +1,51 @@
+[
+  {
+    "id": "v01",
+    "text": "如果宇宙，從來冇畀過答案……",
+    "voice": "zh-HK-HiuMaanNeural",
+    "rate": "-8%",
+    "pitch": "-4Hz"
+  },
+  {
+    "id": "v02",
+    "text": "咁就由我哋，做第一個發問嘅人。",
+    "voice": "zh-HK-HiuMaanNeural",
+    "rate": "-8%",
+    "pitch": "-4Hz"
+  },
+  {
+    "id": "v03",
+    "text": "一粒火種，照亮萬卷。",
+    "voice": "zh-HK-HiuMaanNeural",
+    "rate": "-8%",
+    "pitch": "-4Hz"
+  },
+  {
+    "id": "v04",
+    "text": "萬卷相連，就會變成星河。",
+    "voice": "zh-HK-HiuMaanNeural",
+    "rate": "-8%",
+    "pitch": "-4Hz"
+  },
+  {
+    "id": "v05",
+    "text": "真正強大嘅，唔係一部替你思考嘅機器。",
+    "voice": "zh-HK-HiuMaanNeural",
+    "rate": "-8%",
+    "pitch": "-4Hz"
+  },
+  {
+    "id": "v06",
+    "text": "而係一個，陪你望得更遠嘅夥伴。",
+    "voice": "zh-HK-HiuMaanNeural",
+    "rate": "-8%",
+    "pitch": "-4Hz"
+  },
+  {
+    "id": "v07",
+    "text": "未知，從此唔再遙遠。",
+    "voice": "zh-HK-HiuMaanNeural",
+    "rate": "-8%",
+    "pitch": "-4Hz"
+  }
+]

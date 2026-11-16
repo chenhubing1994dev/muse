@@ -1,0 +1,24 @@
+{
+  "name": "muse-video-motion",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "studio": "remotion studio src/index.tsx",
+    "render:portrait": "remotion render src/index.tsx MuseBrandMotion out/muse-brand-motion-9x16.mp4 --props=props/portrait.json",
+    "render:landscape": "remotion render src/index.tsx MuseBrandMotion out/muse-brand-motion-16x9.mp4 --props=props/landscape.json",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@remotion/transitions": "4.0.543",
+    "remotion": "4.0.543",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "@remotion/cli": "4.0.543",
+    "@types/react": "18.3.24",
+    "@types/react-dom": "18.3.7",
+    "typescript": "5.9.3"
+  }
+}

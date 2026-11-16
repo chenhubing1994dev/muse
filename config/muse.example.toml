@@ -1,0 +1,28 @@
+[app]
+name = "Muse"
+environment = "development"
+log_level = "INFO"
+
+[memory]
+backend = "sqlite"
+database_path = "data/memory/muse.sqlite3"
+
+[scheduler]
+enabled = false
+timezone = "Asia/Shanghai"
+
+[notifications]
+enabled = false
+quiet_hours_start = "23:00"
+quiet_hours_end = "08:00"
+
+[tools.webcodex]
+enabled = false
+# Runner / Project identity should be configured only after explicit setup.
+project_id = ""
+
+[models]
+provider = "" # e.g. "lmstudio" or "llama_cpp"; environment variables override this value
+base_url = "http://127.0.0.1:1234/v1" # credential-free HTTP loopback OpenAI-compatible endpoint
+model = "" # empty means auto-detect the model exposed by /v1/models
+# Put API credentials in environment variables or a secret store, never here.

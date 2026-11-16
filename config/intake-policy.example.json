@@ -1,0 +1,16 @@
+{
+  "version": "local-demo-v1",
+  "mode": "observe",
+  "sources": {
+    "github": {
+      "enabled": true,
+      "allowed_actors": ["replace-with-verified-actor-id"],
+      "enabled_rules": ["security", "bugfix"],
+      "allowed_scopes": ["requested"]
+    }
+  },
+  "assessor_rules": {
+    "security": ["security", "vulnerability", "CVE"],
+    "bugfix": ["bug", "fix", "regression"]
+  }
+}

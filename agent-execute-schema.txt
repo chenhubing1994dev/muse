@@ -1,0 +1,62 @@
+﻿    name: 'agent_execute',
+    description: 'Run a task on a previously-spawned agent_spawn record via the Anthropic Messages API with that agent\'s configured model. Use when native Task tool is wrong because (a) you need the spawned agent\'s persistent config (model, instructions, cost-tracking attribution) to apply to this turn, (b) the result needs to feed back into the agent\'s lifecycle (taskCount, lastResult, swarm-coordinated state), or (c) you want explicit model routing via the spawn record\'s `model` field instead of inheriting. For one-shot Claude prompts without a tracked agent, native Task is fine. Requires ANTHROPIC_API_KEY in env.',
+    category: 'agent',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        agentId: { type: 'string', description: 'ID of the spawned agent' },
+        prompt: { type: 'string', description: 'Task / prompt for the agent to execute' },
+        systemPrompt: { type: 'string', description: 'Optional system prompt (overrides agent default)' },
+        maxTokens: { type: 'number', description: 'Max output tokens (default 1024)' },
+        temperature: { type: 'number', description: 'Sampling temperature 0..1 (default 0.7)' },
+      },
+      required: ['agentId', 'prompt'],
+    },
+    handler: async (input) => {
+      const vId = validateIdentifier(input.agentId, 'agentId');
+      if (!vId.valid) return { success: false, error: `Input validation failed: ${vId.error}` };
+      const vP = validateText(input.prompt as string, 'prompt');
+      if (!vP.valid) return { success: false, error: `Input validation failed: ${vP.error}` };
+      const pheromone = pheromoneAgentEligibility(input.agentId as string);
+      if (!pheromone.eligible) {
+        return {
+          success: false,
+          agentId: input.agentId,
+          suspended: true,
+          error: pheromone.reason,
+        };
+      }
+
+      // Delegate to the shared core (also used by the workflow runtime).
+      return executeAgentTask({
+        agentId: input.agentId as string,
+        prompt: input.prompt as string,
+        systemPrompt: input.systemPrompt as string | undefined,
+        maxTokens: input.maxTokens as number | undefined,
+        temperature: input.temperature as number | undefined,
+        timeoutMs: input.timeoutMs as number | undefined,
+      });
+    },
+  },
+  {
+    name: 'agent_terminate',
+    description: 'Remove a Ruflo-tracked agent from the registry and free its swarm slot. Use when you need to (a) clean up a spawned agent so its cost-tracking row finalizes, (b) reclaim a swarm-topology slot for another agent, or (c) end a stuck agent without restarting the whole swarm. For one-shot Task tool invocations that already self-terminate, this tool is not needed. Pair with agent_list first to confirm the agentId.',
+    category: 'agent',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        agentId: { type: 'string', description: 'ID of agent to terminate' },
+        force: { type: 'boolean', description: 'Force immediate termination' },
+        promoteMemory: { type: 'boolean', description: 'When the agent has a per-agent COW memory branch (spawned with memoryBase), promote (merge) its edits into the shared base on terminate. Default false 鈫?discard the branch (throw its edits away). No-op when the agent has no branch.' },
+      },
+      required: ['agentId'],
+    },
+    handler: async (input) => {
+      const v = validateIdentifier(input.agentId, 'agentId');
+      if (!v.valid) return { success: false, error: `Input validation failed: ${v.error}` };
+
+      const store = loadAgentStore();
+      const agentId = input.agentId as string;
+
+      if (store.agents[agentId]) {
+        const rec = store.agents[agentId];

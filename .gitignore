@@ -1,0 +1,92 @@
+# Local secrets and machine-specific configuration
+config/muse.toml
+config/model-runtime.json
+.env
+.env.*
+!.env.example
+
+# Local state, databases, research runs, generated products and model weights
+data/
+artifacts/
+models/
+vault/
+*.sqlite
+*.sqlite3
+*.db
+*.db-wal
+*.db-shm
+*.mp4
+*.mkv
+*.mov
+*.wav
+*.flac
+*.zip
+*.7z
+*.gguf
+*.safetensors
+*.onnx
+*.pt
+*.pth
+*.pdb
+*.rlib
+*.dll
+*.download
+*.incomplete
+*.log
+full-suite.log
+@{consecutive_link_misses=0}
+
+# Local upstream checkouts, vendored runtimes and downloaded applications
+external/
+third_party/
+
+# Python environments and caches
+.venv/
+venv/
+**/.venv/
+**/venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# JavaScript dependencies and generated bundles
+**/node_modules/
+**/dist/
+**/.vite/
+**/.cache/
+
+# Rust build outputs
+**/target/
+
+# Muse / agent local runtime state
+.muse-*/
+.swarm/
+.claude-flow/
+tmp/
+logs/
+reports/half-hourly/
+src/*.egg-info/
+desktop/src-tauri/gen/schemas/
+
+
+data/memory/*
+!data/memory/.gitkeep
+data/tasks/*
+!data/tasks/.gitkeep
+
+# Generated film outputs; keep source, treatment, poster and QA documentation
+ember-fire/out/
+ember-fire/voice/*.wav
+ember-fire/*.mp4
+
+# Local editor / operating-system files
+.DS_Store
+Thumbs.db
+/*.jpg
+*.bak
+*.tmp
+*.swp

@@ -1,0 +1,1543 @@
+"""Read-only, loopback-only status API for the Muse desktop client."""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import hmac
+import math
+import json
+import secrets
+import sqlite3
+import re
+import time
+import zipfile
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from threading import BoundedSemaphore, Lock, Thread
+from pathlib import Path
+from typing import Any
+from urllib.parse import parse_qs, quote, urlsplit
+from muse.agent_registry import AgentRegistry
+from muse.capabilities import CapabilityRegistry
+from muse.progress import ProgressEventStore
+from muse.task_queue import TaskQueue
+from muse.improvement import ImprovementStore
+from muse.capability_radar import scan_capabilities
+from muse.workflow_profiles import WorkflowController
+from muse.research_knowledge import ResearchKnowledgeStore
+from muse.product_builder import LocalProductBuilder, ProductBuildError
+from muse.video_product_builder import VideoProductBuilder, VideoProductError
+from muse.media import discover_media_tools
+from muse.video_engines import inspect_video_engines
+from datetime import datetime, timezone
+
+
+def _allowed_origin(origin: str | None) -> bool:
+    if origin is None:
+        return True
+    if origin in {"tauri://localhost", "http://tauri.localhost"}:
+        return True
+    parsed = urlsplit(origin)
+    return (
+        parsed.scheme in {"http", "https"}
+        and parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+        and parsed.username is None
+        and parsed.password is None
+    )
+
+
+def build_overview(task_db: str | Path, progress_db: str | Path) -> dict[str, Any]:
+    """Return bounded operational data only; never expose task payloads or chat text."""
+    with TaskQueue(task_db) as queue:
+        queue_snapshot = queue.snapshot(limit=50)
+        workflows = []
+        for task in queue_snapshot.get("active", [])[:20]:
+            if queue.workflow_revision(task["id"]) == 0:
+                continue
+            events_for_task = queue.workflow_events(task["id"])
+            bound = next((event for event in events_for_task if event["event_type"] == "workflow.bound"), None)
+            if bound is None:
+                continue
+            stage_event = next(
+                (event for event in reversed(events_for_task) if event["event_type"] == "workflow.stage_changed"),
+                None,
+            )
+            stage_payload = stage_event["payload"] if stage_event else {}
+            profile = bound["payload"].get("profile", {})
+            workflows.append({
+                "ticket_id": task["id"], "title": task["title"],
+                "workflow_id": bound["payload"].get("workflow_id"),
+                "profile_name": profile.get("name"),
+                "profile_version": profile.get("schema_version"),
+                "status": queue.workflow_status(task["id"]),
+                "stage": stage_payload.get("stage", "plan"),
+                "attempt": stage_payload.get("attempt", task.get("attempts", 0)),
+                "step_id": stage_payload.get("step_id"),
+                "next_action": stage_payload.get("next_action"),
+            })
+    with ProgressEventStore(progress_db) as progress:
+        workers = progress.list_workers(limit=50)
+        events = progress.list_events(limit=20)
+    return {"queue": queue_snapshot, "workers": workers, "recent_events": events, "workflow_runs": workflows}
+
+
+def build_capabilities(capability_db: str | Path) -> list[dict[str, Any]]:
+    """Expose display-safe capability metadata, excluding executable paths and opaque metadata."""
+    with CapabilityRegistry(capability_db) as registry:
+        items = registry.list_all()
+    fields = ("capability_id", "domain", "name", "description", "capabilities", "requirements", "trust", "license", "status", "version")
+    return [{key: item.get(key) for key in fields} for item in items]
+
+
+def build_agents(agent_db: str | Path, *, limit: int = 100) -> list[dict[str, Any]]:
+    """Return display-safe Agent state and aggregate outcome metrics."""
+    with AgentRegistry(agent_db) as registry:
+        agents = registry.list_agents(limit=limit)
+        return [{
+            "agent_id": agent["agent_id"], "role": agent["role"],
+            "display_name": agent["display_name"], "capabilities": agent["capabilities"],
+            "source": agent["source"], "enabled": agent["enabled"],
+            "status": agent["status"], "last_seen_at": agent["last_seen_at"],
+            "stale_after_seconds": agent["stale_after_seconds"],
+            "current_task_id": agent["current_task_id"],
+            "effectiveness": registry.effectiveness(str(agent["agent_id"])),        } for agent in agents]
+
+
+def build_feedback(improvement_db: str | Path, *, limit: int = 50) -> list[dict[str, Any]]:
+    """Return only allowlisted feedback fields; no free-text or identifiers."""
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+        raise ValueError("limit must be between 1 and 100")
+    with ImprovementStore(improvement_db) as store:
+        rows = store.list_feedback(limit=limit)
+    return [
+        {key: row[key] for key in ("category", "tag", "severity", "created_at")}
+        for row in rows
+    ]
+
+
+def build_improvements(improvement_db: str | Path, *, limit: int = 25) -> list[dict[str, Any]]:
+    """Return bounded proposal summaries, excluding arbitrary metadata and audit notes."""
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+        raise ValueError("limit must be between 1 and 100")
+    with ImprovementStore(improvement_db) as store:
+        rows = store.list_proposals()
+    return [
+        {
+            key: row[key]
+            for key in ("id", "title", "status", "priority", "created_at", "updated_at")
+        }
+        for row in rows[:limit]
+    ]
+
+
+def build_self_improvement_status(
+    improvement_db: str | Path, progress_db: str | Path,
+) -> dict[str, Any]:
+    """Expose aggregate improvement blockers and safe cycle state, never private checkpoint IDs."""
+    with ImprovementStore(improvement_db) as improvements:
+        rows = improvements.connection.execute(
+            "SELECT status, COUNT(*) AS count FROM improvement_proposals GROUP BY status"
+        ).fetchall()
+    counts = {str(row["status"]): int(row["count"]) for row in rows}
+    for state in ("proposed", "researching", "ready_for_review", "approved",
+                  "implemented", "rejected", "rolled_back"):
+        counts.setdefault(state, 0)
+    with ProgressEventStore(progress_db) as progress:
+        events = progress.list_events(category="evolution", limit=200)
+    latest_cycle = next((event for event in events if isinstance(event.get("subject_id"), str)
+                         and re.fullmatch(r"cycle_[0-9a-f]{32}", event["subject_id"])), None)
+    cycle_state = latest_cycle.get("event") if latest_cycle else "not_started"
+    cycle_resumable = cycle_state in {"started", "progress"}
+    review_blockers = counts["ready_for_review"]
+    execution_blockers = counts["approved"]
+    research_backlog = counts["proposed"] + counts["researching"]
+    return {
+        "status": "available", "proposal_counts": counts,
+        "pending_research": research_backlog,
+        "pending_human_review": review_blockers,
+        "approved_waiting_execution": execution_blockers,
+        "next_action": (
+            "human_review_required" if review_blockers else
+            "approved_ticket_required" if execution_blockers else
+            "continue_research" if research_backlog else
+            "discover_new_improvements"
+        ),
+        "cycle_state": cycle_state,
+        "cycle_resumable": cycle_resumable,
+        "cycle_updated_at": latest_cycle.get("created_at") if latest_cycle else None,
+        "topic_checkpoint_saved": bool(
+            latest_cycle and any(
+                event.get("subject_id") == latest_cycle.get("subject_id")
+                and isinstance(event.get("summary"), str)
+                and event["summary"].startswith("topic_key:")
+                for event in events
+            )
+        ),
+        "approval_required": True,
+        "automatic_code_changes": False,
+    }
+
+
+def build_improvement_detail(improvement_db: str | Path, proposal_id: str) -> dict[str, Any] | None:
+    """Return a bounded, allowlisted proposal detail without arbitrary metadata or audit notes."""
+    if not isinstance(proposal_id, str) or len(proposal_id) != 32 or any(c not in "0123456789abcdef" for c in proposal_id):
+        raise ValueError("invalid proposal id")
+    with ImprovementStore(improvement_db) as store:
+        row = store.get(proposal_id)
+    if row is None:
+        return None
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    evidence = metadata.get("evidence") if isinstance(metadata.get("evidence"), dict) else {}
+    safe_evidence = {
+        key: evidence[key] for key in (
+            "lookback_hours", "signal_count", "failed_tasks", "recent_task_failure_events",
+            "test_failures", "retry_attempts", "retried_tasks", "observed_at",
+        ) if key in evidence and isinstance(evidence[key], (str, int, float, bool, type(None)))
+    }
+    criteria = metadata.get("acceptance_criteria", [])
+    if not isinstance(criteria, list):
+        criteria = []
+    sources = [{
+        key: source.get(key) for key in (
+            "id", "title", "url", "license_status", "security_status", "created_at"
+        )
+    } for source in row.get("sources", [])[:30]]
+    events = [{
+        key: event.get(key) for key in ("from_status", "to_status", "actor", "created_at")
+    } for event in row.get("events", [])[-30:]]
+    return {
+        key: row.get(key) for key in (
+            "id", "title", "problem", "hypothesis", "status", "priority", "created_at", "updated_at"
+        )
+    } | {
+        "confidence": metadata.get("confidence") if isinstance(metadata.get("confidence"), (int, float)) else None,
+        "impact": metadata.get("impact") if isinstance(metadata.get("impact"), str) else "",
+        "evidence": safe_evidence,
+        "acceptance_criteria": [item[:500] for item in criteria[:20] if isinstance(item, str)],
+        "rollback_plan": (metadata.get("rollback_plan")[:2000]
+                          if isinstance(metadata.get("rollback_plan"), str) else ""),
+        "sources": sources,
+        "events": events,
+        "approval_required": True,
+    }
+
+
+def build_knowledge_node(knowledge_db: str | Path, node_id: str) -> dict[str, Any] | None:
+    """Return one safe, bounded Research Wiki node for local timeline traversal."""
+    if not isinstance(node_id, str) or not re.fullmatch(r"[0-9a-f]{32}", node_id):
+        raise ValueError("invalid knowledge node id")
+    with ResearchKnowledgeStore(knowledge_db) as store:
+        node = store.get_node(node_id)
+    if node is None:
+        return None
+    metadata = node.get("metadata", {}) if isinstance(node.get("metadata"), dict) else {}
+    metadata_fields = (
+        "origin", "epistemic_status", "review_state", "decision_kind",
+        "independent_review_state", "improvement_proposal_id", "source_feedback_id",
+        "evolution_cycle_id", "review_id", "reviewer_id", "approved",
+        "creator_initiative_id", "candidate_fingerprint",
+    )
+    safe_metadata = {
+        key: metadata[key] for key in metadata_fields
+        if key in metadata and isinstance(metadata[key], (str, int, float, bool, type(None)))
+    }
+    return {
+        "id": node["id"], "node_type": node["node_type"], "title": node["title"],
+        "summary": str(node.get("summary", ""))[:2000], "status": node["status"],
+        "provenance": [str(item)[:300] for item in node.get("provenance", [])[:30]],
+        "created_at": node["created_at"], "updated_at": node["updated_at"],
+        "metadata": safe_metadata,
+    }
+
+
+def build_inspirations(knowledge_db: str | Path, *, limit: int = 50) -> list[dict[str, Any]]:
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+        raise ValueError("limit must be between 1 and 100")
+    with ResearchKnowledgeStore(knowledge_db) as store:
+        nodes = store.list_nodes(node_type="claim", limit=500)
+    rows = [node for node in nodes if node.get("metadata", {}).get("origin") == "creator_inspiration_inbox"]
+    return [{
+        "id": node["id"], "title": node["title"], "content": node["summary"],
+        "created_at": node["created_at"], "updated_at": node["updated_at"],
+        "status": node.get("metadata", {}).get("review_state", "not_researched"),
+        "allow_external_research": node.get("metadata", {}).get("allow_external_research") is True,
+        "tags": list(node.get("metadata", {}).get("tags", [])),
+        "research_domains": list(node.get("metadata", {}).get("research_domains", [])),
+        "source": node.get("metadata", {}).get("source_kind", "muse_local_dashboard"),
+    } for node in rows[:limit]]
+
+
+def build_artifacts(report_dir: str | Path, *, limit: int = 50) -> list[dict[str, Any]]:
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+        raise ValueError("limit must be between 1 and 100")
+    root = Path(report_dir).resolve()
+    if not root.is_dir():
+        return []
+    rows = []
+    for path in root.iterdir():
+        if path.is_symlink() or not path.is_file() or path.suffix.lower() != ".md":
+            continue
+        resolved = path.resolve()
+        if resolved.parent != root:
+            continue
+        stat = resolved.stat()
+        rows.append({
+            "id": resolved.name, "name": resolved.name, "kind": "research_report",
+            "size_bytes": stat.st_size, "modified_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+            "download_path": "/api/v1/artifacts/" + resolved.name,
+        })
+    return sorted(rows, key=lambda item: item["modified_at"], reverse=True)[:limit]
+
+def _verified_product_files(products_dir: str | Path, initiative_id: str, version: str):
+    if not re.fullmatch(r"[0-9a-f]{32}", initiative_id) or not re.fullmatch(r"[0-9a-f]{20}", version):
+        raise ValueError("invalid product identity")
+    root = Path(products_dir)
+    if root.is_symlink() or root.parent.is_symlink():
+        raise ValueError("product root and parent must not be symlinks")
+    root = root.resolve()
+    initiative_root = root / initiative_id
+    product_dir = initiative_root / version
+    if initiative_root.is_symlink() or product_dir.is_symlink():
+        raise ValueError("product path must not contain symlinks")
+    if not product_dir.is_dir() or product_dir.resolve().parent != initiative_root.resolve():
+        raise FileNotFoundError("product not found")
+    manifest_path = product_dir / "manifest.json"
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        raise FileNotFoundError("product manifest not found")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    files = manifest.get("files")
+    if manifest.get("product_kind") == "video_creator":
+        VideoProductBuilder.verify_path(root, initiative_id, version)
+        resolved = {}
+        for name in ("README.md", "storyboard.json", "video.mp4", "product.zip", "qa-report.json"):
+            path = product_dir / name
+            if name == "qa-report.json" and not path.is_file():
+                continue
+            resolved[name] = (path, None if name in {"video.mp4", "product.zip"} else path.read_bytes())
+        return product_dir, manifest, resolved
+    expected = {"index.html", "README.md", "product.zip"}
+    if manifest.get("initiative_id") != initiative_id or not isinstance(files, dict) or set(files) != expected:
+        raise ValueError("product manifest is invalid")
+    resolved_files = {}
+    for name, digest in files.items():
+        path = product_dir / name
+        if path.is_symlink() or not path.is_file() or path.resolve().parent != product_dir.resolve():
+            raise FileNotFoundError("product file missing or unsafe")
+        body = path.read_bytes()
+        if len(body) > 20 * 1024 * 1024 or hashlib.sha256(body).hexdigest() != digest:
+            raise ValueError("product file integrity check failed")
+        resolved_files[name] = (path, body)
+    try:
+        LocalProductBuilder._validate_html(resolved_files["index.html"][1].decode("utf-8"))
+    except (UnicodeDecodeError, ProductBuildError) as exc:
+        raise ValueError("product HTML does not match the trusted offline template") from exc
+    with zipfile.ZipFile(resolved_files["product.zip"][0]) as archive:
+        if set(archive.namelist()) != {"index.html", "README.md"} or archive.testzip() is not None:
+            raise ValueError("product package structure is invalid")
+        if archive.read("index.html") != resolved_files["index.html"][1]:
+            raise ValueError("product package HTML mismatch")
+        if archive.read("README.md") != resolved_files["README.md"][1]:
+            raise ValueError("product package README mismatch")
+    return product_dir, manifest, resolved_files
+
+def _creator_initiative_map(products_root: Path) -> dict[str, str]:
+    """Resolve product-directory identities to their owning Creator Initiatives."""
+    database = products_root.parent / "initiatives" / "muse.sqlite3"
+    if database.is_symlink() or database.parent.is_symlink() or not database.is_file():
+        return {}
+    uri = "file:" + quote(database.resolve().as_posix(), safe="/:") + "?mode=ro"
+    try:
+        connection = sqlite3.connect(uri, uri=True, timeout=3)
+        try:
+            rows = connection.execute(
+                "SELECT initiative_id,details_json FROM initiative_events "
+                "WHERE event_type='product_built' ORDER BY sequence DESC LIMIT 10000"
+            ).fetchall()
+        finally:
+            connection.close()
+    except (OSError, sqlite3.Error):
+        return {}
+    mapping: dict[str, str] = {}
+    for initiative_id, encoded in rows:
+        if not isinstance(initiative_id, str) or not re.fullmatch(r"[0-9a-f]{32}", initiative_id):
+            continue
+        try:
+            details = json.loads(encoded)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        relative_path = details.get("relative_path") if isinstance(details, dict) else None
+        if isinstance(relative_path, str) and relative_path.startswith("data/products/"):
+            mapping.setdefault(relative_path, initiative_id)
+    return mapping
+
+
+def build_products(products_dir: str | Path, *, limit: int = 50) -> list[dict[str, Any]]:
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+        raise ValueError("limit must be between 1 and 100")
+    root = Path(products_dir)
+    if root.is_symlink() or not root.is_dir():
+        return []
+    rows = []
+    creator_initiatives = _creator_initiative_map(root)
+    for initiative_root in sorted(root.iterdir(), key=lambda item: item.name):
+        if initiative_root.is_symlink() or not initiative_root.is_dir() or not re.fullmatch(r"[0-9a-f]{32}", initiative_root.name):
+            continue
+        for product_dir in sorted(initiative_root.iterdir(), key=lambda item: item.name):
+            if product_dir.is_symlink() or not product_dir.is_dir() or not re.fullmatch(r"[0-9a-f]{20}", product_dir.name):
+                continue
+            try:
+                _, manifest, files = _verified_product_files(root, initiative_root.name, product_dir.name)
+            except (OSError, ValueError, RuntimeError, zipfile.BadZipFile, json.JSONDecodeError):
+                continue
+            modified = max(path.stat().st_mtime for path, _ in files.values())
+            product_kind = manifest.get("product_kind", "offline_product")
+            row = {
+                "id": initiative_root.name + "-" + product_dir.name,
+                "initiative_id": initiative_root.name,
+                "creator_initiative_id": creator_initiatives.get(
+                    f"data/products/{initiative_root.name}/{product_dir.name}"
+                ),
+                "creator_feedback_enabled": (
+                    f"data/products/{initiative_root.name}/{product_dir.name}" in creator_initiatives
+                ),
+                "version_id": product_dir.name,
+                "name": manifest.get("title") if isinstance(manifest.get("title"), str) else "Muse 本地产品 " + initiative_root.name[:8],
+                "kind": product_kind,
+                "status": manifest.get("status", "testing"),
+                "version": "v" + str(manifest.get("builder_version", 1)),
+                "size_bytes": files["product.zip"][0].stat().st_size,
+                "modified_at": datetime.fromtimestamp(modified, timezone.utc).isoformat(),
+                "download_path": f"/api/v1/products/{initiative_root.name}/{product_dir.name}/download",
+                "preview_path": f"/api/v1/products/{initiative_root.name}/{product_dir.name}/preview",
+            }
+            if product_kind == "video_creator":
+                row["video_path"] = f"/api/v1/products/{initiative_root.name}/{product_dir.name}/video"
+                row["video_bytes"] = files["video.mp4"][0].stat().st_size
+                metadata = manifest.get("video_metadata", {})
+                if isinstance(metadata, dict):
+                    motion = metadata.get("motion")
+                    if isinstance(motion, dict):
+                        motion_summary = {
+                            key: value[:80] for key in ("profile", "renderer", "remotion_version", "composition_id", "transition", "audio_mode")
+                            if isinstance((value := motion.get(key)), str) and value and len(value) <= 80
+                        }
+                        for key in ("transition_seconds", "scene_transition_seconds", "scene_count", "intro_seconds", "outro_seconds"):
+                            value = motion.get(key)
+                            if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+                                motion_summary[key] = value
+                        if motion_summary:
+                            row["motion"] = motion_summary
+                    metric_keys = (
+                        "duration_seconds", "fps", "frames", "width", "height",
+                        "encoder", "model", "seed", "steps", "aspect_ratio",
+                    )
+                    row["video_metrics"] = {
+                        key: value for key in metric_keys
+                        if isinstance((value := metadata.get(key)), (str, int, float))
+                        and not isinstance(value, bool)
+                        and (not isinstance(value, float) or math.isfinite(value))
+                    }
+                    motion_duration = motion.get("duration_seconds") if isinstance(motion, dict) else None
+                    if (isinstance(motion_duration, (int, float)) and not isinstance(motion_duration, bool)
+                            and math.isfinite(motion_duration)):
+                        row["video_metrics"]["duration_seconds"] = motion_duration
+                        fps_value = row["video_metrics"].get("fps")
+                        if isinstance(fps_value, (int, float)) and not isinstance(fps_value, bool) and math.isfinite(fps_value):
+                            row["video_metrics"]["frames"] = max(0, int(round(float(fps_value) * float(motion_duration))))
+                manifest_files = manifest.get("files", {})
+                quality_gate = manifest.get("quality_gate")
+                if isinstance(quality_gate, dict):
+                    row["quality_gate"] = {
+                        "status": quality_gate.get("status") if quality_gate.get("status") in {"passed", "failed", "blocked"} else "unknown",
+                        "review_warning_count": quality_gate.get("review_warning_count", 0) if isinstance(quality_gate.get("review_warning_count"), int) else 0,
+                        "review_warning_codes": [code for code in quality_gate.get("review_warning_codes", []) if isinstance(code, str)][:20] if isinstance(quality_gate.get("review_warning_codes"), list) else [],
+                        "warning_review_required": quality_gate.get("warning_review_required") is True,
+                    }
+                qa_entry = files.get("qa-report.json")
+                if qa_entry and qa_entry[0].is_file():
+                    try:
+                        qa_report = json.loads(qa_entry[0].read_text(encoding="utf-8"))
+                    except (OSError, json.JSONDecodeError):
+                        qa_report = {}
+                    raw_warnings = qa_report.get("warnings", []) if isinstance(qa_report, dict) else []
+                    row["quality_warnings"] = [
+                        {
+                            "code": warning.get("code"),
+                            "message": warning.get("message"),
+                            "start_seconds": warning.get("start_seconds"),
+                            "duration_seconds": warning.get("duration_seconds"),
+                            "review_threshold_seconds": warning.get("review_threshold_seconds"),
+                        }
+                        for warning in raw_warnings[:50]
+                        if isinstance(warning, dict)
+                        and isinstance(warning.get("code"), str)
+                        and isinstance(warning.get("start_seconds"), (int, float))
+                        and isinstance(warning.get("duration_seconds"), (int, float))
+                    ] if isinstance(raw_warnings, list) else []
+
+                if isinstance(manifest_files, dict):
+                    row["video_mp4_sha256"] = manifest_files.get("video.mp4")
+                    row["video_package_sha256"] = manifest_files.get("product.zip")
+            rows.append(row)
+    return sorted(rows, key=lambda item: item["modified_at"], reverse=True)[:limit]
+
+def build_initiative_timeline(
+    initiative_db: str | Path, initiative_id: str, *, limit: int = 100,
+) -> dict[str, Any] | None:
+    """Read a bounded, allowlisted initiative timeline without creating or mutating its database."""
+    if not isinstance(initiative_id, str) or not re.fullmatch(r"[0-9a-f]{32}", initiative_id):
+        raise ValueError("invalid initiative id")
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 200:
+        raise ValueError("limit must be between 1 and 200")
+    path = Path(initiative_db)
+    if not path.is_file():
+        raise FileNotFoundError("initiative store is not configured")
+    uri = "file:" + quote(path.resolve().as_posix(), safe="/:") + "?mode=ro"
+    connection = sqlite3.connect(uri, uri=True, timeout=3)
+    connection.row_factory = sqlite3.Row
+    try:
+        try:
+            initiative = connection.execute(
+                """SELECT id,title,kind,status,created_at,updated_at
+                FROM creator_initiatives WHERE id=?""",
+                (initiative_id,),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return None
+        if initiative is None:
+            return None
+        history_complete = False
+        try:
+            rows = connection.execute(
+                """SELECT id,event_type,from_status,to_status,actor,source,
+                    details_json,created_at,sequence
+                FROM (
+                    SELECT * FROM initiative_events WHERE initiative_id=?
+                    ORDER BY sequence DESC LIMIT ?
+                ) ORDER BY sequence ASC""",
+                (initiative_id, limit),
+            ).fetchall()
+            history_complete = connection.execute(
+                """SELECT 1 FROM initiative_events
+                WHERE initiative_id=? AND event_type='created' LIMIT 1""",
+                (initiative_id,),
+            ).fetchone() is not None
+        except sqlite3.OperationalError:
+            rows = []
+            history_complete = False
+        events = []
+        event_order: dict[str, int] = {}
+        for row in rows:
+            try:
+                details = json.loads(row["details_json"])
+            except (TypeError, json.JSONDecodeError):
+                details = {}
+            if not isinstance(details, dict):
+                details = {}
+            event_type = row["event_type"]
+            if event_type == "feedback_recorded":
+                details = {
+                    "feedback_id": details.get("feedback_id")
+                    if isinstance(details.get("feedback_id"), str)
+                    and re.fullmatch(r"[0-9a-f]{32}", details["feedback_id"]) else "",
+                    "decision": details.get("decision")
+                    if details.get("decision") in {"accept", "revise", "reject"} else "",
+                    "evolution_cycle_id": details.get("evolution_cycle_id")
+                    if isinstance(details.get("evolution_cycle_id"), str)
+                    and re.fullmatch(r"cycle_[0-9a-f]{32}", details["evolution_cycle_id"]) else None,
+                }
+            elif event_type == "product_built":
+                relative_path = details.get("relative_path")
+                if (
+                    not isinstance(relative_path, str)
+                    or not relative_path.startswith("data/products/")
+                    or chr(92) in relative_path
+                    or ".." in relative_path.split("/")
+                ):
+                    relative_path = ""
+                artifact = details.get("artifact_metadata")
+                if not isinstance(artifact, dict):
+                    artifact = {}
+                artifact_allowlist = {
+                    key: artifact[key] for key in (
+                        "mp4_sha256", "manifest_sha256", "storyboard_sha256", "readme_sha256",
+                        "source_asset_hashes", "generation_metadata", "validation",
+                        "evolution_cycle_id", "product_id", "version_id",
+                    ) if key in artifact
+                }
+                details = {
+                    "relative_path": relative_path,
+                    "package_sha256": details.get("package_sha256")
+                    if isinstance(details.get("package_sha256"), str)
+                    and re.fullmatch(r"[0-9a-f]{64}", details["package_sha256"]) else "",
+                    "validated": details.get("validated") is True,
+                    "artifact_metadata": artifact_allowlist,
+                }
+            elif event_type == "status_changed":
+                details = {"outcome_recorded": details.get("outcome_recorded") is True}
+            else:
+                details = {}
+            events.append({
+                "id": row["id"],
+                "event_type": event_type,
+                "from_status": row["from_status"],
+                "to_status": row["to_status"],
+                "actor": row["actor"],
+                "source": row["source"],
+                "created_at": row["created_at"],
+                "details": details,
+            })
+            event_order[row["id"]] = row["sequence"]
+        try:
+            links = connection.execute(
+                "SELECT id,knowledge_node_id,node_type,relationship,evolution_cycle_id,created_at "
+                "FROM initiative_knowledge_links WHERE initiative_id=? ORDER BY created_at,id LIMIT ?",
+                (initiative_id, limit),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            links = []
+        for link in links:
+            events.append({
+                "id": link["id"], "event_type": "knowledge_linked",
+                "from_status": None, "to_status": None, "actor": "system",
+                "source": "research_knowledge", "created_at": link["created_at"],
+                "details": {
+                    "knowledge_node_id": link["knowledge_node_id"],
+                    "node_type": link["node_type"], "relationship": link["relationship"],
+                    "evolution_cycle_id": link["evolution_cycle_id"],
+                },
+            })
+            event_order[link["id"]] = 2**63 - 1
+        try:
+            failures = connection.execute(
+                "SELECT id,failure_code,error_type,evolution_cycle_id,created_at "
+                "FROM initiative_failures WHERE initiative_id=? ORDER BY created_at,id LIMIT ?",
+                (initiative_id, limit),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            failures = []
+        for failure in failures:
+            events.append({
+                "id": failure["id"], "event_type": "product_failed",
+                "from_status": None, "to_status": None, "actor": "system",
+                "source": "video_product_job", "created_at": failure["created_at"],
+                "details": {
+                    "failure_code": failure["failure_code"],
+                    "error_type": failure["error_type"],
+                    "evolution_cycle_id": failure["evolution_cycle_id"] or None,
+                },
+            })
+            event_order[failure["id"]] = 2**63 - 1
+        events.sort(key=lambda item: (
+            item["created_at"], event_order.get(item["id"], 2**63 - 1), item["id"]
+        ))
+        return {
+            "initiative": dict(initiative),
+            "events": events,
+            "history_complete": history_complete,
+        }
+    finally:
+        connection.close()
+
+
+def build_gpu_resource_status(database: str | Path) -> dict[str, Any]:
+    """Return a redacted GPU lease/supervisor snapshot for the local dashboard."""
+    try:
+        from muse.gpu_resources import GpuResourceCoordinator
+        return GpuResourceCoordinator(database).status_snapshot()
+    except Exception:
+        return {
+            "status": "unknown", "lease": None,
+            "model_supervisor": {
+                "status": "unknown", "action": "state_unavailable",
+                "heartbeat_age_seconds": None, "restore_pending": False,
+                "managed_child": False,
+            },
+            "comfyui_memory_release": {"status": "not_observed", "updated_age_seconds": None},
+            "policy": "exclusive_gpu_lease; unknown_vram_is_not_guessed; external_processes_are_never_stopped",
+        }
+
+
+class BoundedStatusServer(ThreadingHTTPServer):
+    """Bound request concurrency and socket lifetime for the local control plane."""
+    request_queue_size = 16
+
+    def __init__(self, address: tuple[str, int], handler: type[BaseHTTPRequestHandler]) -> None:
+        self._request_slots = BoundedSemaphore(8)
+        super().__init__(address, handler)
+        self.daemon_threads = True
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        if not self._request_slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._request_slots.release()
+            raise
+
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._request_slots.release()
+
+    def get_request(self) -> tuple[Any, Any]:
+        request, client_address = super().get_request()
+        request.settimeout(5.0)
+        return request, client_address
+
+
+def create_status_server(
+    *, task_db: str | Path, progress_db: str | Path, capability_db: str | Path,
+    agent_db: str | Path | None = None, improvement_db: str | Path | None = None,
+    port: int = 0, token: str | None = None,
+    knowledge_db: str | Path | None = None, report_dir: str | Path | None = None,
+    products_dir: str | Path | None = None, gpu_resource_db: str | Path | None = None,
+) -> tuple[BoundedStatusServer, str]:
+    """Create a loopback API with bounded reads and narrow, authenticated feedback writes."""
+    if isinstance(port, bool) or not isinstance(port, int) or not 0 <= port <= 65535:
+        raise ValueError("port must be between 0 and 65535")
+    bearer = token or secrets.token_urlsafe(32)
+    if not isinstance(bearer, str) or len(bearer) < 32:
+        raise ValueError("token must contain at least 32 characters")
+    task_path, progress_path, capability_path = Path(task_db), Path(progress_db), Path(capability_db)
+    resolved_task_path = task_path.resolve()
+    default_gpu_db = (resolved_task_path.parent.parent / "gpu-resources.sqlite3"
+                      if resolved_task_path.parent.name == "tasks"
+                      else resolved_task_path.parent / "gpu-resources.sqlite3")
+    gpu_resource_path = Path(gpu_resource_db) if gpu_resource_db is not None else default_gpu_db
+    agent_path = Path(agent_db) if agent_db is not None else None
+    improvement_path = Path(improvement_db) if improvement_db is not None else None
+    knowledge_path = Path(knowledge_db) if knowledge_db is not None else None
+    reports_path = Path(report_dir) if report_dir is not None else None
+    products_path = Path(products_dir) if products_dir is not None else None
+    initiatives_path = (
+        products_path.parent / "initiatives" / "muse.sqlite3"
+        if products_path is not None else None
+    )
+    video_jobs: dict[str, dict[str, Any]] = {}
+    video_jobs_lock = Lock()
+    video_job_slot = BoundedSemaphore(1)
+
+    def _run_video_job(job_id: str, payload: dict[str, Any]) -> None:
+        from muse.initiative_engine import InitiativeStore
+        with video_jobs_lock:
+            video_jobs[job_id]["status"] = "running"
+        try:
+            if initiatives_path is not None:
+                with InitiativeStore(initiatives_path) as attempts:
+                    attempts.mark_video_attempt_running(job_id)
+            workspace = products_path.parent.parent if products_path is not None else Path.cwd()
+            builder = VideoProductBuilder(workspace)
+            if payload.get("mode", "local_assets") == "prompt_to_video":
+                result = builder.build_from_prompt(
+                    payload["title"], payload["prompt"],
+                    negative_prompt=payload.get("negative_prompt", ""),
+                    aspect_ratio=payload.get("aspect_ratio", "16:9"),
+                    duration_seconds=payload.get("duration_seconds", 2.0),
+                    steps=payload.get("steps", 8), seed=payload.get("seed"),
+                    timeout_seconds=1800, creator_initiative_id=payload.get("creator_initiative_id"),
+                    evolution_cycle_id=payload.get("evolution_cycle_id"),
+                    motion_profile=payload.get("motion_profile", "none"),
+                )
+            else:
+                result = builder.build_from_source(
+                    payload["source"], payload["title"], audio_name=payload.get("audio"),
+                    audio_mode=payload.get("audio_mode", "music"),
+                    aspect_ratio=payload.get("aspect_ratio", "16:9"), fps=payload.get("fps", 30),
+                    image_seconds=payload.get("image_seconds", 4.0), encoder=payload.get("encoder", "auto"),
+                    creator_initiative_id=payload.get("creator_initiative_id"),
+                    evolution_cycle_id=payload.get("evolution_cycle_id"),
+                    motion_profile=payload.get("motion_profile", "none"),
+                )
+            if initiatives_path is not None:
+                with InitiativeStore(initiatives_path) as attempts:
+                    attempts.complete_video_attempt(
+                        job_id, initiative_id=result["creator_initiative_id"],
+                        product_id=result["initiative_id"], version_id=result["version_id"],
+                        mp4_sha256=result["mp4_sha256"], package_sha256=result["package_sha256"],
+                    )
+            outcome = {"status": "succeeded", "product": {
+                "initiative_id": result["initiative_id"], "version_id": result["version_id"],
+                "title": result["title"], "kind": "video_creator",
+                "creator_initiative_id": result["creator_initiative_id"],
+                "ledger_event_id": result["ledger_event_id"],
+                "mp4_sha256": result["mp4_sha256"], "package_sha256": result["package_sha256"],
+            }}
+        except Exception as exc:
+            initiative_id = payload.get("creator_initiative_id")
+            if initiatives_path is not None:
+                try:
+                    with InitiativeStore(initiatives_path) as attempts:
+                        attempts.fail_video_attempt(
+                            job_id, failure_code="video.product_job_failed",
+                            error_type=type(exc).__name__,
+                        )
+                        if isinstance(initiative_id, str):
+                            attempts.record_product_failure(
+                                initiative_id, failure_code="video.product_job_failed",
+                                error_type=type(exc).__name__,
+                                evolution_cycle_id=payload.get("evolution_cycle_id"),
+                            )
+                except Exception:
+                    pass
+            outcome = {"status": "failed", "error": str(exc)[:500]}
+        finally:
+            video_job_slot.release()
+        with video_jobs_lock:
+            video_jobs[job_id].update(outcome, updated_at=datetime.now(timezone.utc).isoformat())
+
+    class StatusHandler(BaseHTTPRequestHandler):
+        server_version = "MuseStatus/1"
+        sys_version = ""
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+        def _send(self, status: int, payload: dict[str, Any]) -> None:
+            body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "no-referrer")
+            origin = self.headers.get("Origin")
+            if origin and _allowed_origin(origin):
+                self.send_header("Access-Control-Allow-Origin", origin)
+                self.send_header("Vary", "Origin")
+            self.end_headers()
+            self.wfile.write(body)
+        def do_GET(self) -> None:
+            if not self.client_address or self.client_address[0] not in {"127.0.0.1", "::1"}:
+                self._send(403, {"error": "loopback clients only"})
+                return
+            if not _allowed_origin(self.headers.get("Origin")):
+                self._send(403, {"error": "origin not allowed"})
+                return
+            if not hmac.compare_digest(self.headers.get("Authorization", ""), "Bearer " + bearer):
+                self._send(401, {"error": "unauthorized"})
+                return
+            parsed = urlsplit(self.path)
+            try:
+                if parsed.path == "/api/v1/health":
+                    self._send(200, {
+                        "service": "muse-status-api", "status": "ok", "api_version": 1,
+                        "agent_registry_configured": agent_path is not None,
+                    })
+                elif parsed.path == "/api/v1/gpu-resources":
+                    self._send(200, {"api_version": 1, **build_gpu_resource_status(gpu_resource_path)})
+                elif parsed.path == "/api/v1/overview":
+                    self._send(200, {"api_version": 1, **build_overview(task_path, progress_path)})
+                elif parsed.path == "/api/v1/events/stream":
+                    # Finite SSE batches keep each connection below the 5s socket budget.
+                    cursor = self.headers.get("Last-Event-ID", "")
+                    if cursor and not re.fullmatch(r"[a-f0-9-]{16,64}", cursor):
+                        raise ValueError("invalid event cursor")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                    self.send_header("Cache-Control", "no-store")
+                    self.send_header("Connection", "close")
+                    self.send_header("X-Content-Type-Options", "nosniff")
+                    origin = self.headers.get("Origin")
+                    if origin and _allowed_origin(origin):
+                        self.send_header("Access-Control-Allow-Origin", origin)
+                        self.send_header("Vary", "Origin")
+                    self.end_headers()
+                    self.close_connection = True
+                    deadline = time.monotonic() + 3.5
+                    last_id = cursor
+                    while time.monotonic() < deadline:
+                        with ProgressEventStore(progress_path) as store:
+                            batch = list(reversed(store.list_events(limit=100)))
+                        if last_id and not any(event["id"] == last_id for event in batch):
+                            self.wfile.write(b"event: muse-reset\ndata: {}\n\n")
+                            self.wfile.flush()
+                            return
+                        fresh = []
+                        passed_cursor = not last_id
+                        for event in batch:
+                            if event["id"] == last_id:
+                                passed_cursor = True
+                                continue
+                            if passed_cursor:
+                                fresh.append(event)
+                        for event in fresh:
+                            # Public stream excludes subject identifiers and free-text summaries.
+                            payload = {key: event[key] for key in ("category", "event", "created_at")}
+                            frame = (f"id: {event['id']}\nevent: muse-progress\ndata: "
+                                     + json.dumps(payload, separators=(",", ":")) + "\n\n")
+                            self.wfile.write(frame.encode("utf-8"))
+                            self.wfile.flush()
+                            last_id = event["id"]
+                        if not fresh:
+                            self.wfile.write(b": keep-alive\n\n")
+                            self.wfile.flush()
+                        time.sleep(0.25)
+                    return
+                elif parsed.path == "/api/v1/events":
+                    limit = int(parse_qs(parsed.query).get("limit", ["30"])[0])
+                    if not 1 <= limit <= 100:
+                        raise ValueError("limit must be between 1 and 100")
+                    with ProgressEventStore(progress_path) as store:
+                        events = store.list_events(limit=limit)
+                    self._send(200, {"api_version": 1, "events": events})
+                elif parsed.path == "/api/v1/video-attempts":
+                    if initiatives_path is None or not initiatives_path.is_file():
+                        self._send(200, {"api_version": 1, "metrics": {
+                            "total": 0, "succeeded": 0, "failed": 0, "pending": 0,
+                            "terminal": 0, "success_rate": None,
+                            "success_rate_numerator": 0, "success_rate_denominator": 0,
+                            "scope": "persisted_video_attempts",
+                        }, "attempts": []})
+                        return
+                    from muse.initiative_engine import InitiativeStore
+                    with InitiativeStore(initiatives_path) as attempts_store:
+                        metrics = attempts_store.aggregate_video_attempt_metrics()
+                        attempts = attempts_store.list_video_attempts(limit=50)
+                    metrics["success_rate_numerator"] = metrics["succeeded"]
+                    metrics["success_rate_denominator"] = metrics["terminal"]
+                    metrics["queued"] = sum(1 for item in attempts if item["status"] == "queued")
+                    metrics["running"] = sum(1 for item in attempts if item["status"] == "running")
+                    metrics["leased"] = sum(1 for item in attempts if item.get("worker_id") and item["status"] == "running")
+                    public_attempts = [{
+                        "attempt_id": item["attempt_id"], "mode": item["mode"],
+                        "status": item["status"], "created_at": item["created_at"],
+                        "started_at": item["started_at"], "finished_at": item["finished_at"],
+                        "initiative_id": item["initiative_id"], "evolution_cycle_id": item["evolution_cycle_id"] or None,
+                        "product_id": item["product_id"], "version_id": item["version_id"],
+                        "failure_code": item["failure_code"], "error_type": item["error_type"],
+                        "worker_id": item.get("worker_id"), "lease_expires_at": item.get("lease_expires_at"),
+                        "attempt_count": item.get("attempt_count", 0),
+                        "cancel_requested": bool(item.get("cancel_requested", 0)),
+                    } for item in attempts]
+                    self._send(200, {"api_version": 1, "metrics": metrics, "attempts": public_attempts})
+                elif parsed.path == "/api/v1/video-engines":
+                    inventory = discover_media_tools()
+                    tools = {item.tool_id: item.executable for item in inventory.tools}
+                    engines = inspect_video_engines(timeout_seconds=0.5)
+                    self._send(200, {
+                        "api_version": 1,
+                        "ffmpeg_available": bool(tools.get("ffmpeg")),
+                        "ffprobe_available": bool(tools.get("ffprobe")),
+                        "ffmpeg_version": inventory.ffmpeg_version,
+                        "hardware_encoders": list(inventory.hardware_encoders),
+                        "comfyui": engines["comfyui"],
+                        "velorn": engines["velorn"],
+                    })
+                elif parsed.path == "/api/v1/capabilities":
+                    self._send(200, {"api_version": 1, "capabilities": build_capabilities(capability_path)})
+                elif parsed.path == "/api/v1/feedback":
+                    if improvement_path is None:
+                        self._send(503, {"error": "feedback store is not configured"})
+                        return
+                    limit = int(parse_qs(parsed.query).get("limit", ["50"])[0])
+                    feedback = build_feedback(improvement_path, limit=limit)
+                    self._send(200, {"api_version": 1, "count": len(feedback), "feedback": feedback})
+                elif parsed.path == "/api/v1/self-improvement":
+                    if improvement_path is None:
+                        self._send(503, {"error": "improvement store is not configured"})
+                        return
+                    self._send(200, {"api_version": 1, **build_self_improvement_status(improvement_path, progress_path)})
+                elif parsed.path == "/api/v1/improvements":
+                    if improvement_path is None:
+                        self._send(503, {"error": "improvement store is not configured"})
+                        return
+                    proposals = build_improvements(improvement_path)
+                    self._send(200, {"api_version": 1, "count": len(proposals), "proposals": proposals})
+                elif parsed.path.startswith("/api/v1/improvements/"):
+                    if improvement_path is None:
+                        self._send(503, {"error": "improvement store is not configured"})
+                        return
+                    proposal_id = parsed.path.rsplit("/", 1)[-1]
+                    detail = build_improvement_detail(improvement_path, proposal_id)
+                    if detail is None:
+                        self._send(404, {"error": "proposal not found"})
+                    else:
+                        self._send(200, {"api_version": 1, "proposal": detail})
+                elif re.fullmatch(r"/api/v1/knowledge/nodes/[0-9a-f]{32}", parsed.path):
+                    if knowledge_path is None or not knowledge_path.is_file():
+                        self._send(503, {"error": "knowledge store is not configured"})
+                        return
+                    node_id = parsed.path.rsplit("/", 1)[-1]
+                    node = build_knowledge_node(knowledge_path, node_id)
+                    if node is None:
+                        self._send(404, {"error": "knowledge node not found"})
+                    else:
+                        self._send(200, {"api_version": 1, "node": node})
+                elif parsed.path == "/api/v1/agents":
+                    if agent_path is None:
+                        agents = []
+                    else:
+                        limit = int(parse_qs(parsed.query).get("limit", ["100"])[0])
+                        if not 1 <= limit <= 200:
+                            raise ValueError("limit must be between 1 and 200")
+                        agents = build_agents(agent_path, limit=limit)
+                    self._send(200, {
+                        "api_version": 1, "registry_configured": agent_path is not None,
+                        "count": len(agents), "agents": agents,
+                    })
+                elif parsed.path == "/api/v1/inspirations":
+                    if knowledge_path is None:
+                        self._send(503, {"error": "inspiration store is not configured"})
+                        return
+                    limit = int(parse_qs(parsed.query).get("limit", ["50"])[0])
+                    inspirations = build_inspirations(knowledge_path, limit=limit)
+                    self._send(200, {"api_version": 1, "count": len(inspirations), "inspirations": inspirations})
+                elif re.fullmatch(r"/api/v1/video-jobs/[0-9a-f]{32}", parsed.path):
+                    job_id = parsed.path.rsplit("/", 1)[-1]
+                    with video_jobs_lock:
+                        job = video_jobs.get(job_id)
+                    if job is not None:
+                        self._send(200, {"api_version": 1, "job": {**dict(job), "worker_available": True}})
+                        return
+                    if initiatives_path is None or not initiatives_path.is_file():
+                        self._send(404, {"error": "video job not found"})
+                        return
+                    from muse.initiative_engine import InitiativeStore
+                    with InitiativeStore(initiatives_path) as attempts_store:
+                        attempt = attempts_store.get_video_attempt(job_id)
+                    if attempt is None:
+                        self._send(404, {"error": "video job not found"})
+                        return
+                    recovered = {
+                        "id": job_id,
+                        "status": attempt["status"],
+                        "worker_available": False,
+                    }
+                    if attempt["status"] == "failed":
+                        recovered["error"] = (
+                            "视频任务已失败 · " + str(attempt.get("failure_code") or "video.product_job_failed")
+                            + " · " + str(attempt.get("error_type") or "UnknownError")
+                        )
+                    elif attempt["status"] == "succeeded":
+                        recovered["product"] = {
+                            "initiative_id": attempt.get("product_id"),
+                            "version_id": attempt.get("version_id"),
+                            "kind": "video_creator",
+                        }
+                    self._send(200, {"api_version": 1, "job": recovered})
+                elif re.fullmatch(r"/api/v1/initiatives/[0-9a-f]{32}/timeline", parsed.path):
+                    if initiatives_path is None or not initiatives_path.is_file():
+                        self._send(503, {"error": "initiative store is not configured"})
+                        return
+                    initiative_id = parsed.path.split("/")[-2]
+                    limit = int(parse_qs(parsed.query).get("limit", ["100"])[0])
+                    timeline = build_initiative_timeline(
+                        initiatives_path, initiative_id, limit=limit,
+                    )
+                    if timeline is None:
+                        self._send(404, {"error": "initiative not found"})
+                    else:
+                        self._send(200, {"api_version": 1, **timeline})
+                elif parsed.path == "/api/v1/products":
+                    if products_path is None:
+                        self._send(503, {"error": "product store is not configured"})
+                        return
+                    limit = int(parse_qs(parsed.query).get("limit", ["50"])[0])
+                    products = build_products(products_path, limit=limit)
+                    self._send(200, {"api_version": 1, "count": len(products), "products": products})
+                elif parsed.path.startswith("/api/v1/products/"):
+                    if products_path is None:
+                        self._send(503, {"error": "product store is not configured"})
+                        return
+                    match = re.fullmatch(r"/api/v1/products/([0-9a-f]{32})/([0-9a-f]{20})/(download|preview|video)", parsed.path)
+                    if not match:
+                        self._send(400, {"error": "invalid product path"})
+                        return
+                    initiative_id, version, action = match.groups()
+                    try:
+                        _, manifest, files = _verified_product_files(products_path, initiative_id, version)
+                    except FileNotFoundError:
+                        self._send(404, {"error": "product not found"})
+                        return
+                    except (OSError, ValueError, RuntimeError, zipfile.BadZipFile, json.JSONDecodeError):
+                        self._send(409, {"error": "product integrity check failed"})
+                        return
+                    is_video = manifest.get("product_kind") == "video_creator"
+                    if is_video:
+                        if action == "preview":
+                            name, content_type, disposition = "video.mp4", "video/mp4", "inline"
+                        elif action == "video":
+                            name, content_type, disposition = "video.mp4", "video/mp4", "attachment"
+                        else:
+                            name, content_type, disposition = "product.zip", "application/zip", "attachment"
+                        file_path = files[name][0]
+                        size = file_path.stat().st_size
+                        if size > 2 * 1024 * 1024 * 1024:
+                            self._send(413, {"error": "video product exceeds 2 GiB"})
+                            return
+                        body = None
+                    else:
+                        if action == "video":
+                            self._send(404, {"error": "video file not found"})
+                            return
+                        name = "product.zip" if action == "download" else "index.html"
+                        body = files[name][1]
+                        file_path = files[name][0]
+                        size = len(body)
+                        content_type = "application/zip" if action == "download" else "text/html; charset=utf-8"
+                        disposition = "attachment" if action == "download" else "inline"
+                        if size > 20 * 1024 * 1024:
+                            self._send(413, {"error": "product exceeds 20 MiB"})
+                            return
+                    self.send_response(200)
+                    self.send_header("Content-Type", content_type)
+                    self.send_header("Content-Length", str(size))
+                    filename = (f"muse-video-{initiative_id[:8]}.mp4" if is_video and name == "video.mp4"
+                                else f"muse-product-{initiative_id[:8]}.zip" if name == "product.zip" else "index.html")
+                    self.send_header("Content-Disposition", disposition + '; filename="' + filename + '"')
+                    self.send_header("Cache-Control", "no-store")
+                    self.send_header("X-Content-Type-Options", "nosniff")
+                    self.end_headers()
+                    if body is not None:
+                        self.wfile.write(body)
+                    else:
+                        with file_path.open("rb") as stream:
+                            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                                self.wfile.write(chunk)
+                elif parsed.path == "/api/v1/artifacts":
+                    if reports_path is None:
+                        self._send(503, {"error": "artifact store is not configured"})
+                        return
+                    limit = int(parse_qs(parsed.query).get("limit", ["50"])[0])
+                    artifacts = build_artifacts(reports_path, limit=limit)
+                    self._send(200, {"api_version": 1, "count": len(artifacts), "artifacts": artifacts})
+                elif parsed.path.startswith("/api/v1/artifacts/"):
+                    if reports_path is None:
+                        self._send(503, {"error": "artifact store is not configured"})
+                        return
+                    name = parsed.path.rsplit("/", 1)[-1]
+                    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,180}\.md", name):
+                        self._send(400, {"error": "invalid artifact name"})
+                        return
+                    root = reports_path.resolve()
+                    target = (root / name).resolve()
+                    if target.parent != root or not target.is_file() or target.is_symlink():
+                        self._send(404, {"error": "artifact not found"})
+                        return
+                    if target.stat().st_size > 10 * 1024 * 1024:
+                        self._send(413, {"error": "artifact exceeds 10 MiB"})
+                        return
+                    body = target.read_bytes()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/markdown; charset=utf-8")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.send_header("Content-Disposition", 'attachment; filename="' + name + '"')
+                    self.send_header("Cache-Control", "no-store")
+                    self.send_header("X-Content-Type-Options", "nosniff")
+                    self.end_headers()
+                    self.wfile.write(body)
+                else:
+                    self._send(404, {"error": "not found"})
+            except (ValueError, OSError) as exc:
+                self._send(400, {"error": str(exc)})
+            except Exception:
+                self._send(503, {"error": "status source unavailable"})
+        def do_OPTIONS(self) -> None:
+            if not self.client_address or self.client_address[0] not in {"127.0.0.1", "::1"}:
+                self._send(403, {"error": "loopback clients only"})
+                return
+            origin = self.headers.get("Origin")
+            if not origin or not _allowed_origin(origin):
+                self._send(403, {"error": "origin not allowed"})
+                return
+            requested_method = self.headers.get("Access-Control-Request-Method", "").upper()
+            requested_headers = {
+                value.strip().lower()
+                for value in self.headers.get("Access-Control-Request-Headers", "").split(",")
+                if value.strip()
+            }
+            if requested_method not in {"GET", "POST"} or not requested_headers.issubset({"authorization", "accept", "content-type"}):
+                self._send(403, {"error": "preflight request not allowed"})
+                return
+            self.send_response(204)
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Access-Control-Allow-Methods", "GET, POST")
+            self.send_header("Access-Control-Allow-Headers", "Authorization, Accept, Content-Type")
+            self.send_header("Access-Control-Max-Age", "300")
+            self.send_header("Vary", "Origin")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def do_POST(self) -> None:
+            if not self.client_address or self.client_address[0] not in {"127.0.0.1", "::1"}:
+                self._send(403, {"error": "loopback clients only"})
+                return
+            if not _allowed_origin(self.headers.get("Origin")):
+                self._send(403, {"error": "origin not allowed"})
+                return
+            if not hmac.compare_digest(self.headers.get("Authorization", ""), "Bearer " + bearer):
+                self._send(401, {"error": "unauthorized"})
+                return
+            parsed = urlsplit(self.path)
+            initiative_feedback_match = re.fullmatch(r"/api/v1/initiatives/([0-9a-f]{32})/feedback", parsed.path)
+            if initiative_feedback_match:
+                if initiatives_path is None or not initiatives_path.is_file():
+                    self._send(503, {"error": "initiative store is not configured"})
+                    return
+                if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json":
+                    self._send(415, {"error": "application/json required"})
+                    return
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                    if length < 1 or length > 8192:
+                        raise ValueError("request body must contain 1-8192 bytes")
+                    raw = self.rfile.read(length)
+                    if len(raw) != length:
+                        raise ValueError("incomplete request body")
+                    payload = json.loads(raw.decode("utf-8"))
+                    allowed = {"feedback", "decision", "reviewer", "source", "evolution_cycle_id"}
+                    required = {"feedback", "decision"}
+                    if not isinstance(payload, dict) or not required.issubset(payload) or set(payload) - allowed:
+                        raise ValueError("body requires feedback and decision with only documented optional fields")
+                    from muse.initiative_engine import InitiativeStore
+                    with InitiativeStore(initiatives_path) as initiatives:
+                        try:
+                            saved = initiatives.record_feedback(
+                                initiative_feedback_match.group(1), payload["feedback"],
+                                decision=payload["decision"], reviewer=payload.get("reviewer", "creator"),
+                                source=payload.get("source", "dashboard"),
+                                evolution_cycle_id=payload.get("evolution_cycle_id"),
+                            )
+                        except KeyError:
+                            self._send(404, {"error": "initiative not found"})
+                            return
+                    self._send(201, {"api_version": 1, "feedback": {
+                        "id": saved["id"], "decision": saved["decision"],
+                        "created_at": saved["created_at"],
+                        "evolution_cycle_id": saved["evolution_cycle_id"],
+                    }})
+                except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+                    self._send(400, {"error": str(exc)})
+                except (OSError, sqlite3.Error):
+                    self._send(503, {"error": "initiative feedback store unavailable"})
+                return
+            if parsed.path == "/api/v1/video-products":
+                if products_path is None:
+                    self._send(503, {"error": "product store is not configured"})
+                    return
+                if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json":
+                    self._send(415, {"error": "application/json required"})
+                    return
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                    if length < 1 or length > 8192:
+                        raise ValueError("request body must contain 1-8192 bytes")
+                    raw = self.rfile.read(length)
+                    if len(raw) != length:
+                        raise ValueError("incomplete request body")
+                    payload = json.loads(raw.decode("utf-8"))
+                    if not isinstance(payload, dict):
+                        raise ValueError("body must be a JSON object")
+                    mode = payload.get("mode", "local_assets")
+                    if mode not in {"local_assets", "prompt_to_video"}:
+                        raise ValueError("mode must be local_assets or prompt_to_video")
+                    title = payload.get("title")
+                    if not isinstance(title, str) or not title.strip() or len(title.strip()) > 160:
+                        raise ValueError("title must contain 1-160 characters")
+                    creator_initiative_id = payload.get("creator_initiative_id")
+                    evolution_cycle_id = payload.get("evolution_cycle_id")
+                    if creator_initiative_id is not None and (
+                        not isinstance(creator_initiative_id, str) or not re.fullmatch(r"[0-9a-f]{32}", creator_initiative_id)
+                    ):
+                        raise ValueError("creator_initiative_id must be a 32-character lowercase UUID hex string")
+                    if evolution_cycle_id is not None and (
+                        not isinstance(evolution_cycle_id, str) or not re.fullmatch(r"cycle_[0-9a-f]{32}", evolution_cycle_id)
+                    ):
+                        raise ValueError("evolution_cycle_id must be a valid Muse Evolution Cycle ID")
+                    motion_profile = payload.get("motion_profile", "none")
+                    if motion_profile not in {"none", "brand_intro_outro", "brand_scene_transitions"}:
+                        raise ValueError("motion_profile must be none, brand_intro_outro or brand_scene_transitions")
+                    if payload.get("aspect_ratio", "16:9") not in {"16:9", "9:16", "1:1"}:
+                        raise ValueError("aspect_ratio must be 16:9, 9:16 or 1:1")
+                    if mode == "prompt_to_video":
+                        if motion_profile == "brand_scene_transitions":
+                            raise ValueError("brand_scene_transitions is available for multi-scene local assets; AI clip uses brand_intro_outro")
+                        allowed = {"mode", "title", "prompt", "negative_prompt", "aspect_ratio", "duration_seconds", "steps", "seed", "creator_initiative_id", "evolution_cycle_id", "motion_profile"}
+                        if set(payload) - allowed or "prompt" not in payload:
+                            raise ValueError("AI video body requires title and prompt with only documented generation settings")
+                        prompt = payload["prompt"]
+                        negative_prompt = payload.get("negative_prompt", "")
+                        duration_seconds = payload.get("duration_seconds", 2.0)
+                        steps = payload.get("steps", 8)
+                        seed = payload.get("seed")
+                        if not isinstance(prompt, str) or not prompt.strip() or len(prompt.strip()) > 2000:
+                            raise ValueError("prompt must contain 1-2000 characters")
+                        if not isinstance(negative_prompt, str) or len(negative_prompt) > 1000:
+                            raise ValueError("negative_prompt must be at most 1000 characters")
+                        if isinstance(duration_seconds, bool) or not isinstance(duration_seconds, (int, float)) or not 1 <= duration_seconds <= 5:
+                            raise ValueError("duration_seconds must be between 1 and 5")
+                        if isinstance(steps, bool) or not isinstance(steps, int) or not 8 <= steps <= 30:
+                            raise ValueError("steps must be between 8 and 30")
+                        if seed is not None and (isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed <= 2**32 - 1):
+                            raise ValueError("seed must be an unsigned 32-bit integer")
+                    else:
+                        allowed = {"mode", "source", "title", "audio", "audio_mode", "aspect_ratio", "fps", "image_seconds", "encoder", "creator_initiative_id", "evolution_cycle_id", "motion_profile"}
+                        if set(payload) - allowed or "source" not in payload:
+                            raise ValueError("local asset mode requires source and title with only documented optional settings")
+                        workspace = products_path.parent.parent
+                        VideoProductBuilder(workspace)._source(payload["source"], payload.get("audio"))
+                        fps = payload.get("fps", 30)
+                        if isinstance(fps, bool) or not isinstance(fps, int) or fps not in {24, 25, 30, 50, 60}:
+                            raise ValueError("fps must be one of 24, 25, 30, 50 or 60")
+                        image_seconds = payload.get("image_seconds", 4.0)
+                        if isinstance(image_seconds, bool) or not isinstance(image_seconds, (int, float)) or not 0.5 <= image_seconds <= 60:
+                            raise ValueError("image_seconds must be between 0.5 and 60")
+                        if payload.get("encoder", "auto") not in {"auto", "amf", "software"}:
+                            raise ValueError("encoder must be auto, amf or software")
+                        if payload.get("audio_mode", "music") not in {"music", "narration"}:
+                            raise ValueError("audio_mode must be music or narration")
+                    if not video_job_slot.acquire(blocking=False):
+                        self._send(409, {"error": "another video render is already running"})
+                        return
+                    job_id = secrets.token_hex(16)
+                    now = datetime.now(timezone.utc).isoformat()
+                    from muse.initiative_engine import InitiativeStore
+                    try:
+                        with InitiativeStore(initiatives_path) as attempts_store:
+                            attempts_store.start_video_attempt(
+                                job_id, mode=mode, initiative_id=creator_initiative_id,
+                                evolution_cycle_id=payload.get("evolution_cycle_id"),
+                            )
+                    except Exception:
+                        video_job_slot.release()
+                        raise
+                    with video_jobs_lock:
+                        if len(video_jobs) >= 50:
+                            for old_id in list(video_jobs):
+                                if video_jobs[old_id].get("status") in {"succeeded", "failed"}:
+                                    del video_jobs[old_id]
+                                    if len(video_jobs) < 40:
+                                        break
+                        video_jobs[job_id] = {"id": job_id, "status": "queued", "created_at": now, "updated_at": now}
+
+                    thread = Thread(target=_run_video_job, args=(job_id, payload), daemon=True, name="MuseVideoProduct")
+                    try:
+                        thread.start()
+                    except RuntimeError:
+                        video_job_slot.release()
+                        try:
+                            with InitiativeStore(initiatives_path) as attempts_store:
+                                attempts_store.fail_video_attempt(
+                                    job_id, error_type="RuntimeError",
+                                    failure_code="video.worker_start_failed",
+                                    initiative_id=creator_initiative_id,
+                                )
+                        except Exception:
+                            pass
+                        with video_jobs_lock:
+                            video_jobs[job_id]["status"] = "failed"
+                            video_jobs[job_id]["error"] = "video worker could not start"
+                        raise
+                    self._send(202, {"api_version": 1, "job": {"id": job_id, "status": "queued"}})
+                except (UnicodeDecodeError, json.JSONDecodeError, ValueError, OSError) as exc:
+                    self._send(400, {"error": str(exc)})
+                except Exception:
+                    self._send(503, {"error": "video product request unavailable"})
+                return
+            if parsed.path == "/api/v1/radar/scan":
+                if improvement_path is None:
+                    self._send(503, {"error": "improvement store is not configured"})
+                    return
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                except ValueError:
+                    self._send(400, {"error": "invalid content length"})
+                    return
+                if length != 0:
+                    self._send(400, {"error": "radar scan does not accept a request body"})
+                    return
+                try:
+                    result = scan_capabilities(task_path, improvement_path, lookback_hours=24)
+                    self._send(200, {
+                        "api_version": 1,
+                        "signals_seen": result["signals_seen"],
+                        "created": result["created"],
+                        "existing": result["existing"],
+                        "trend": result["trend"],
+                        "approval_required": True,
+                    })
+                except (ValueError, FileNotFoundError) as exc:
+                    self._send(400, {"error": str(exc)})
+                except (OSError, sqlite3.Error):
+                    self._send(503, {"error": "capability scan unavailable"})
+                except Exception:
+                    self._send(503, {"error": "capability scan unavailable"})
+                return
+            if parsed.path == "/api/v1/inspirations":
+                if knowledge_path is None:
+                    self._send(503, {"error": "inspiration store is not configured"})
+                    return
+                if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json":
+                    self._send(415, {"error": "application/json required"})
+                    return
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                except ValueError:
+                    self._send(400, {"error": "invalid content length"})
+                    return
+                if length < 1:
+                    self._send(400, {"error": "request body is required"})
+                    return
+                if length > 8192:
+                    self._send(413, {"error": "request body exceeds 8192 bytes"})
+                    return
+                try:
+                    raw = self.rfile.read(length)
+                    if len(raw) != length:
+                        raise ValueError("incomplete request body")
+                    payload = json.loads(raw.decode("utf-8"))
+                    required_fields = {"content", "allow_external_research"}
+                    optional_fields = {"title", "tags", "research_domains", "source"}
+                    if (
+                        not isinstance(payload, dict)
+                        or not required_fields.issubset(payload)
+                        or set(payload) - required_fields - optional_fields
+                    ):
+                        raise ValueError("body must contain content and allow_external_research, with optional title/tags/research_domains/source")
+                    content = payload["content"]
+                    allow_external = payload["allow_external_research"]
+                    if not isinstance(content, str) or not content.strip() or len(content.strip()) > 2000:
+                        raise ValueError("content must contain 1-2000 characters")
+                    if not isinstance(allow_external, bool):
+                        raise ValueError("allow_external_research must be boolean")
+                    content = content.strip()
+                    raw_title = payload.get("title")
+                    if raw_title is not None and (
+                        not isinstance(raw_title, str) or not raw_title.strip() or len(raw_title.strip()) > 80
+                    ):
+                        raise ValueError("title must contain 1-80 characters")
+                    title = raw_title.strip() if isinstance(raw_title, str) else (content.splitlines()[0].strip()[:80] or "未命名灵感")
+
+                    def normalize_labels(field: str) -> list[str]:
+                        values = payload.get(field, [])
+                        if not isinstance(values, list) or len(values) > 12:
+                            raise ValueError(f"{field} must be a list containing at most 12 labels")
+                        normalized: list[str] = []
+                        seen: set[str] = set()
+                        for value in values:
+                            if not isinstance(value, str) or not value.strip() or len(value.strip()) > 60:
+                                raise ValueError(f"{field} labels must contain 1-60 characters")
+                            label = " ".join(value.split())
+                            if label.casefold() not in seen:
+                                normalized.append(label)
+                                seen.add(label.casefold())
+                        return normalized
+
+                    tags = normalize_labels("tags")
+                    research_domains = normalize_labels("research_domains")
+                    source_kind = payload.get("source", "muse_local_dashboard")
+                    if not isinstance(source_kind, str) or source_kind not in {"chatgpt_daily_inspiration", "muse_local_dashboard", "user_manual"}:
+                        raise ValueError("source must be chatgpt_daily_inspiration, muse_local_dashboard, or user_manual")
+                    content_sha256 = hashlib.sha256(content.encode("utf-8")).hexdigest()
+                    external_ref = "creator-inspiration:sha256:" + content_sha256
+                    with ResearchKnowledgeStore(knowledge_path) as knowledge:
+                        node = knowledge.upsert_node(
+                            "claim", title, summary=content,
+                            external_ref=external_ref,
+                            metadata={
+                                "origin": "creator_inspiration_inbox",
+                                "epistemic_status": "creator_inspired_hypothesis_only",
+                                "creator_context_is_evidence": False,
+                                "requires_support_and_counter_evidence": True,
+                                "review_state": "not_researched",
+                                "allow_external_research": allow_external,
+                                "submitted_via": "muse_local_dashboard",
+                                "source_kind": source_kind,
+                                "content_sha256": content_sha256,
+                                "tags": tags,
+                                "research_domains": research_domains,
+                            },
+                            provenance=(source_kind,),
+                            status="proposed",
+                        )
+                    self._send(201, {"api_version": 1, "inspiration": {
+                        "id": node["id"], "title": node["title"], "content": node["summary"],
+                        "created_at": node["created_at"], "status": node.get("metadata", {}).get("review_state", "not_researched"),
+                        "allow_external_research": allow_external,
+                        "tags": tags, "research_domains": research_domains, "source": source_kind,
+                    }})
+                except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+                    self._send(400, {"error": str(exc)})
+                except (OSError, sqlite3.Error):
+                    self._send(503, {"error": "inspiration store unavailable"})
+                return
+            if parsed.path != "/api/v1/feedback":
+                self._send(405, {"error": "mutation not allowed"})
+                return
+            if improvement_path is None:
+                self._send(503, {"error": "feedback store is not configured"})
+                return
+            if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json":
+                self._send(415, {"error": "application/json required"})
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                self._send(400, {"error": "invalid content length"})
+                return
+            if length < 1:
+                self._send(400, {"error": "request body is required"})
+                return
+            if length > 4096:
+                self._send(413, {"error": "request body exceeds 4096 bytes"})
+                return
+            try:
+                raw = self.rfile.read(length)
+                if len(raw) != length:
+                    raise ValueError("incomplete request body")
+                payload = json.loads(raw.decode("utf-8"))
+                if not isinstance(payload, dict) or set(payload) != {"category", "tag", "severity"}:
+                    raise ValueError("body must contain category, tag and severity only")
+                if not isinstance(payload["category"], str) or not isinstance(payload["tag"], str):
+                    raise ValueError("category and tag must be strings")
+                severity = payload["severity"]
+                if isinstance(severity, bool) or not isinstance(severity, int):
+                    raise ValueError("severity must be an integer from 1 to 5")
+                with ImprovementStore(improvement_path) as store:
+                    saved = store.record_feedback(
+                        payload["category"], payload["tag"], severity=severity
+                    )
+                safe = {key: saved[key] for key in ("category", "tag", "severity", "created_at")}
+                self._send(201, {"api_version": 1, "feedback": safe})
+            except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+                self._send(400, {"error": str(exc)})
+            except (OSError, sqlite3.Error):
+                self._send(503, {"error": "feedback store unavailable"})
+
+        do_PUT = do_POST
+        do_PATCH = do_POST
+        do_DELETE = do_POST
+
+    server = BoundedStatusServer(("127.0.0.1", port), StatusHandler)
+    return server, bearer
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Start Muse loopback status and structured-feedback API")
+    parser.add_argument("--task-db", required=True)
+    parser.add_argument("--progress-db", required=True)
+    parser.add_argument("--capability-db", required=True)
+    parser.add_argument("--agent-db")
+    parser.add_argument("--improvement-db")
+    parser.add_argument("--port", type=int, default=8765)
+    args = parser.parse_args(argv)
+    server, token = create_status_server(
+        task_db=args.task_db, progress_db=args.progress_db,
+        capability_db=args.capability_db, agent_db=args.agent_db,
+        improvement_db=args.improvement_db, port=args.port,
+    )
+    print(json.dumps({"address": "127.0.0.1", "port": server.server_address[1], "token": token}))
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
