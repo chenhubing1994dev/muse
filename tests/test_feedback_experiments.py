@@ -144,6 +144,7 @@ class FeedbackResearchExperimentTests(unittest.TestCase):
     def test_distinct_reviewer_reviews_engineering_result_once_without_claim_promotion(self):
         import json
         from muse.review_gate import IndependentReviewGate, ReviewStore
+        from muse.task_queue import TaskQueue
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -191,6 +192,8 @@ class FeedbackResearchExperimentTests(unittest.TestCase):
                     self.assertEqual(first["review_node_id"], second["review_node_id"])
                     self.assertEqual(len(reviewer_calls), 1)
                     self.assertEqual(len(reviews.list_for_artifact(first["review_artifact_id"])), 1)
+                    with TaskQueue(root / "progress.sqlite3") as queue:
+                        self.assertEqual(queue.list_tasks(kind="review_followup_research", limit=10), [])
                     self.assertEqual(knowledge.get_node(claim["id"])["status"], "proposed")
                     self.assertFalse(reviewer_calls[0]["test_evidence"].find("raw_experiment_output") >= 0)
                     self.assertEqual(knowledge.get_node(plan_id)["metadata"]["independent_review_scope"], "distinct_model_same_local_endpoint")
@@ -213,6 +216,85 @@ class FeedbackResearchExperimentTests(unittest.TestCase):
                 finally:
                     reviews.close()
 
+
+    def test_rejected_review_queues_one_idempotent_read_only_research_followup(self):
+        import json
+        from muse.review_gate import IndependentReviewGate, ReviewStore
+        from muse.task_queue import TaskQueue
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = self._workspace(root)
+            with ResearchKnowledgeStore(root / "knowledge.sqlite3") as knowledge:
+                plan_id = self._plan(knowledge)
+                reviews = ReviewStore(root / "reviews.sqlite3")
+                try:
+                    reviewer_calls = []
+                    def reviewer(prompt):
+                        reviewer_calls.append(json.loads(prompt))
+                        return json.dumps({
+                            "approved": False,
+                            "summary": "Coverage gap remains unresolved.",
+                            "findings": [{
+                                "severity": "medium",
+                                "title": "Broader regression coverage required",
+                                "detail": "The evidence covers only a small fixture.",
+                            }],
+                        })
+                    gate = IndependentReviewGate(
+                        reviews, reviewer_id="local-reviewer:second-model", call=reviewer,
+                    )
+
+                    def fake_runner(_start_directory, _pattern, **kwargs):
+                        result = kwargs["experiment_bridge"].record_result(
+                            kwargs["manifest_id"], status="succeeded", duration_seconds=1.0,
+                            metrics={"tests_run": 7, "failures": 0, "errors": 0, "skipped": 0},
+                            summary="Allowlisted feedback research regression suite passed.",
+                            exit_code=0, run_id=kwargs["run_id"],
+                        )
+                        return {"status": "succeeded", "exit_code": 0, "duration_seconds": 1.0,
+                                "metrics": result["metrics"], "run_ref": result["run_ref"],
+                                "experiment_record_error": False}
+
+                    with patch("muse.test_runner._run_isolated_suite", side_effect=fake_runner):
+                        first = run_feedback_research_experiment(
+                            workspace, knowledge, root / "progress.sqlite3",
+                            proposal_id="proposal-1", feedback_id="feedback-1", plan_node_id=plan_id,
+                            review_gate=gate, reviewer_scope="distinct_model_other_loopback_endpoint_provider_unverified",
+                        )
+                        second = run_feedback_research_experiment(
+                            workspace, knowledge, root / "progress.sqlite3",
+                            proposal_id="proposal-1", feedback_id="feedback-1", plan_node_id=plan_id,
+                            review_gate=gate, reviewer_scope="distinct_model_other_loopback_endpoint_provider_unverified",
+                        )
+
+                    self.assertEqual(first["independent_review_state"], "reviewed_rejected")
+                    self.assertEqual(second["independent_review_state"], "reviewed_rejected")
+                    self.assertEqual(first["review_id"], second["review_id"])
+                    self.assertEqual(first["review_followup_task_id"], second["review_followup_task_id"])
+                    self.assertTrue(first["review_followup_task_id"])
+                    self.assertEqual(len(reviewer_calls), 1)
+                    with TaskQueue(root / "progress.sqlite3") as queue:
+                        tasks = queue.list_tasks(kind="review_followup_research", limit=10)
+                        self.assertEqual(len(tasks), 1)
+                        task = tasks[0]
+                        self.assertEqual(task["id"], first["review_followup_task_id"])
+                        self.assertEqual(task["status"], "queued")
+                        self.assertEqual(task["workload_class"], "research")
+                        payload = task["payload"]
+                        self.assertEqual(payload["task_scope"], "read_only_research")
+                        self.assertTrue(payload["reviewer_output_is_untrusted_data"])
+                        self.assertTrue(payload["requires_separate_code_change_approval"])
+                        self.assertTrue(payload["not_claim_evidence"])
+                        self.assertEqual(len(queue.events(task["id"])), 2)
+                        self.assertEqual(
+                            [event["event_type"] for event in queue.events(task["id"])],
+                            ["ticket.created", "review.followup.requested"],
+                        )
+                    plan = knowledge.get_node(plan_id)
+                    self.assertEqual(plan["metadata"]["review_followup_task_id"], first["review_followup_task_id"])
+                finally:
+                    reviews.close()
 
     def test_real_test_runner_executes_allowlisted_suite_and_persists_linked_result(self):
         workspace = Path(__file__).resolve().parents[1]

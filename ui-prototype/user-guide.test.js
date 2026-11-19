@@ -4,7 +4,17 @@ import { USER_GUIDE_STEPS, getGuideStep, getGuideProgress } from "./user-guide.j
 
 test("user guide covers each existing primary workspace with a real anchor", () => {
   const ids = USER_GUIDE_STEPS.map((step) => step.id);
-  assert.deepEqual(ids, ["overview", "inspiration", "research-privacy", "video", "products", "agents", "queue", "evolution", "events"]);
+  assert.deepEqual(ids, [
+    "overview",
+    "celestial-lab",
+    "knowledge-starmap",
+    "agents",
+    "prometheus-core",
+    "inspiration",
+    "video",
+    "queue",
+    "evolution",
+  ]);
   for (const step of USER_GUIDE_STEPS) {
     assert.ok(step.title && step.purpose && step.howToUse && step.result && step.target.startsWith("#"));
   }

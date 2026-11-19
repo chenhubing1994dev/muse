@@ -14,9 +14,12 @@ export function createApiClient({ baseUrl, token, fetchImpl = globalThis.fetch, 
     throw new Error("Muse API 只允许连接本机或已配对的同源控制台");
   }
   if (typeof fetchImpl !== "function") throw new Error("当前环境不支持 Fetch API");
-  async function request(path, { method = "GET", body } = {}) {
+  async function request(path, { method = "GET", body, requestTimeoutMs } = {}) {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    const effectiveTimeout = (Number.isInteger(requestTimeoutMs) && requestTimeoutMs >= 100 && requestTimeoutMs <= 120000)
+      ? requestTimeoutMs
+      : timeoutMs;
+    const timeout = setTimeout(() => controller.abort(), effectiveTimeout);
     const headers = { Authorization: "Bearer " + token, Accept: "application/json" };
     if (body !== undefined) headers["Content-Type"] = "application/json";
     try {
@@ -115,21 +118,134 @@ export function createApiClient({ baseUrl, token, fetchImpl = globalThis.fetch, 
       }
       return get(`/api/v1/initiatives/${initiativeId}/timeline?limit=${limit}`);
     },
+    initiativePerformance: (initiativeId) => {
+      if (typeof initiativeId !== "string" || !/^[0-9a-f]{32}$/.test(initiativeId)) throw new Error("创作项目编号无效");
+      return get(`/api/v1/initiatives/${initiativeId}/performance`);
+    },
+    recordInitiativePerformance: (initiativeId, payload) => {
+      if (typeof initiativeId !== "string" || !/^[0-9a-f]{32}$/.test(initiativeId)) throw new Error("创作项目编号无效");
+      if (!payload || typeof payload !== "object" || !/^[A-Za-z0-9._:-]{8,128}$/.test(payload.idempotency_key || "")) throw new Error("表现快照幂等键无效");
+      if (!["youtube", "tiktok", "douyin", "instagram", "facebook", "bilibili", "other"].includes(payload.platform)) throw new Error("平台无效");
+      if (!["manual_entry", "official_analytics"].includes(payload.source)) throw new Error("数据来源无效");
+      if (!payload.metrics || typeof payload.metrics !== "object" || Array.isArray(payload.metrics)) throw new Error("表现指标无效");
+      return request(`/api/v1/initiatives/${initiativeId}/performance`, { method: "POST", body: payload });
+    },
     knowledgeNode: (nodeId) => {
       if (typeof nodeId !== "string" || !/^[0-9a-f]{32}$/.test(nodeId)) throw new Error("知识节点编号无效");
       return get(`/api/v1/knowledge/nodes/${nodeId}`);
     },
+    knowledgeClaimDossier: (claimId, evidenceLimit = 12) => {
+      if (typeof claimId !== "string" || !/^[0-9a-f]{32}$/.test(claimId)) throw new Error("Claim 编号无效");
+      if (!Number.isInteger(evidenceLimit) || evidenceLimit < 1 || evidenceLimit > 100) throw new RangeError("证据条数必须介于 1 和 100 之间");
+      return get(`/api/v1/knowledge/claims/${claimId}/dossier?evidence_limit=${evidenceLimit}`);
+    },
+    knowledgeGraph: ({ limit = 160, nodeType = null, q = "" } = {}) => {
+      if (!Number.isInteger(limit) || limit < 1 || limit > 250) {
+        throw new RangeError("星图节点数量必须介于 1 和 250 之间");
+      }
+      const params = new URLSearchParams({ limit: String(limit) });
+      if (nodeType) {
+        if (typeof nodeType !== "string" || !["source", "idea", "experiment", "claim", "decision", "failure"].includes(nodeType)) {
+          throw new Error("知识节点类型无效");
+        }
+        params.set("node_type", nodeType);
+      }
+      if (typeof q === "string" && q.trim()) {
+        if (q.trim().length > 120) throw new Error("搜索关键词不能超过 120 个字符");
+        params.set("q", q.trim());
+      }
+      return get(`/api/v1/knowledge/graph?${params.toString()}`);
+    },
+    prometheusCore: () => get("/api/v1/prometheus/core"),
+    galaxy: () => get("/api/v1/galaxy"),
+    previewRoute: (goal) => {
+      if (typeof goal !== "string" || !goal.trim() || goal.trim().length > 500) {
+        throw new Error("路由预演目标必须为 1-500 个字符");
+      }
+      return request("/api/v1/galaxy/route-preview", { method: "POST", body: { goal: goal.trim() } });
+    },
+    celestialCatalog: () => get("/api/v1/metaphysics/celestial"),
+    castYijing: (payload) => {
+      if (!payload || typeof payload !== "object") throw new Error("易经推演参数无效");
+      const mode = payload.mode ?? "seeded_cast";
+      if (!["seeded_cast", "manual_lines", "trigram_pair"].includes(mode)) {
+        throw new Error("易经推演模式无效");
+      }
+      return request("/api/v1/metaphysics/yijing", { method: "POST", body: { ...payload, mode } });
+    },
     videoEngines: () => get("/api/v1/video-engines"),
     gpuResources: () => get("/api/v1/gpu-resources"),
+    daemonStatus: () => get("/api/v1/daemon/status"),
+    daemonControl: (action) => {
+      if (!["start", "pause", "resume", "stop", "once"].includes(action)) {
+        throw new Error("运行时控制动作无效");
+      }
+      return request("/api/v1/daemon/" + action, { method: "POST" });
+    },
+    // ── Muse 视频创作工作室 ──
+    studioStyles: () => get("/api/v1/studio/styles"),
+    studioJobs: (limit = 30) => {
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new RangeError("任务数量必须介于 1 和 100 之间");
+      return get(`/api/v1/studio/render?limit=${limit}`);
+    },
+    studioJob: (id) => {
+      if (typeof id !== "string" || !/^[0-9a-f]{32}$/.test(id)) throw new Error("渲染任务编号无效");
+      return get(`/api/v1/studio/render/${id}`);
+    },
+    studioSearchMedia: (payload) => request("/api/v1/studio/search-media", { method: "POST", body: payload, requestTimeoutMs: 30000 }),
+    studioGenerateScript: (payload) => request("/api/v1/studio/generate-script", { method: "POST", body: payload, requestTimeoutMs: 30000 }),
+    studioPhilosophyInject: (payload) => request("/api/v1/studio/philosophy-inject", { method: "POST", body: payload }),
+    studioRender: (payload) => request("/api/v1/studio/render", { method: "POST", body: payload, requestTimeoutMs: 60000 }),
+    pipelineRecipes: () => get("/api/v1/pipelines/recipes"),
+    pipelineJobs: (limit = 30) => {
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new RangeError("任务数量必须介于 1 和 100 之间");
+      return get(`/api/v1/pipelines/jobs?limit=${limit}`);
+    },
+    pipelineJob: (id) => {
+      if (typeof id !== "string" || !/^[0-9a-f]{32}$/.test(id)) throw new Error("流水线任务编号无效");
+      return get(`/api/v1/pipelines/jobs/${id}`);
+    },
+    submitPipeline: (payload) => {
+      if (!payload || typeof payload.recipe_id !== "string" || !payload.recipe_id) {
+        throw new Error("缺少流水线配方编号");
+      }
+      return request("/api/v1/pipelines/submit", { method: "POST", body: payload });
+    },
     downloadProduct: (initiativeId, versionId) => productBlob(initiativeId, versionId, "download"),
     previewProduct: (initiativeId, versionId) => productBlob(initiativeId, versionId, "preview"),
     downloadVideo: (initiativeId, versionId) => productBlob(initiativeId, versionId, "video"),
+    subtitleReview: (initiativeId, versionId) => {
+      if (typeof initiativeId !== "string" || !/^[0-9a-f]{32}$/.test(initiativeId)
+          || typeof versionId !== "string" || !/^[0-9a-f]{20}$/.test(versionId)) {
+        throw new Error("产品编号无效");
+      }
+      return get("/api/v1/products/" + initiativeId + "/" + versionId + "/subtitle-review");
+    },
+    approveSubtitleReview: (initiativeId, versionId, payload) => {
+      if (typeof initiativeId !== "string" || !/^[0-9a-f]{32}$/.test(initiativeId)
+          || typeof versionId !== "string" || !/^[0-9a-f]{20}$/.test(versionId)) {
+        throw new Error("产品编号无效");
+      }
+      return request("/api/v1/products/" + initiativeId + "/" + versionId + "/subtitle-review/approve", {
+        method: "POST", body: payload,
+      });
+    },
     createVideoProduct: (payload) => request("/api/v1/video-products", { method: "POST", body: payload }),
     videoJob: (id) => {
       if (typeof id !== "string" || !/^[0-9a-f]{32}$/.test(id)) throw new Error("视频任务编号无效");
       return get(`/api/v1/video-jobs/${id}`);
     },
     submitInspiration: (inspiration) => request("/api/v1/inspirations", { method: "POST", body: inspiration }),
+    evolveInspiration: (payload = {}) => {
+      if (payload.inspiration_id !== undefined && (typeof payload.inspiration_id !== "string" || !/^[0-9a-f]{32}$/.test(payload.inspiration_id))) {
+        throw new Error("灵感编号无效");
+      }
+      return request("/api/v1/inspirations/evolve", {
+        method: "POST",
+        body: payload,
+        requestTimeoutMs: 90000,
+      });
+    },
     downloadArtifact: async (name) => {
       if (typeof name !== "string" || !/^[A-Za-z0-9_.-]{1,180}\.md$/.test(name)) throw new Error("成品文件名无效");
       const response = await fetchImpl(new URL("/api/v1/artifacts/" + encodeURIComponent(name), origin), {
@@ -167,6 +283,7 @@ export function createApiClient({ baseUrl, token, fetchImpl = globalThis.fetch, 
     submitFeedback: (feedback) => request("/api/v1/feedback", { method: "POST", body: feedback }),
     runRadarScan: () => request("/api/v1/radar/scan", { method: "POST" }),
     overview: () => get("/api/v1/overview"),
+    mempalaceStatus: () => get("/api/v1/mempalace/status"),
     events: (limit = 30) => {
       if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
         throw new RangeError("事件数量必须介于 1 和 100 之间");

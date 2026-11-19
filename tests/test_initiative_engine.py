@@ -97,6 +97,211 @@ class InitiativeStoreTests(unittest.TestCase):
                 self.assertEqual(store.list_feedback(), [])
 
 
+    def test_performance_snapshots_are_validated_append_only_and_idempotent(self):
+        import sqlite3
+
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "initiatives.sqlite3"
+            with InitiativeStore(database) as store:
+                item = store.propose(
+                    "Commercial short", kind="creative_output", creator_value="measurable content",
+                    concept="publish and measure", first_step="produce a pilot", expected_output="a short video",
+                )
+                metrics = {
+                    "views": 1200, "likes": 80, "comments": 12, "saves": 30,
+                    "shares": 9, "cta_clicks": 15, "qualified_leads": 4, "orders": 1,
+                    "reported_revenue_minor": 9900, "settled_revenue_minor": 5000,
+                    "production_cost_minor": 1200, "three_second_retention_pct": 72.5,
+                    "completion_rate_pct": 31.0, "avg_watch_seconds": 18.4,
+                }
+                kwargs = dict(
+                    idempotency_key="yt-2026-11-17-snapshot-1", platform="youtube",
+                    source="official_analytics", currency="SGD", metrics=metrics,
+                    published_at="2026-11-16T12:00:00+08:00", source_reference="studio-export-001",
+                )
+                first = store.record_performance(item["id"], **kwargs)
+                replay = store.record_performance(item["id"], **kwargs)
+                self.assertEqual(first["id"], replay["id"])
+                self.assertEqual(store.aggregate_performance(initiative_id=item["id"])[0]["settled_revenue_minor"], 5000)
+                self.assertEqual(store.list_performance(initiative_id=item["id"])[0]["views"], 1200)
+                changed = dict(kwargs, metrics={**metrics, "views": 1201})
+                with self.assertRaises(ValueError):
+                    store.record_performance(item["id"], **changed)
+                with self.assertRaises(ValueError):
+                    store.record_performance(item["id"], **dict(kwargs, metrics={"completion_rate_pct": 101}))
+                with self.assertRaises(ValueError):
+                    store.record_performance(item["id"], **dict(kwargs, metrics={"views": -1}))
+                with self.assertRaises(KeyError):
+                    store.record_performance("f" * 32, **kwargs)
+                with self.assertRaises(sqlite3.IntegrityError):
+                    store.connection.execute(
+                        "UPDATE initiative_performance_snapshots SET views=0 WHERE id=?", (first["id"],)
+                    )
+                store.connection.rollback()
+                with self.assertRaises(sqlite3.IntegrityError):
+                    store.connection.execute(
+                        "DELETE FROM initiative_performance_snapshots WHERE id=?", (first["id"],)
+                    )
+                store.connection.rollback()
+            with InitiativeStore(database) as reopened:
+                self.assertEqual(reopened.list_performance(initiative_id=item["id"])[0]["views"], 1200)
+
+    def test_performance_content_profile_is_allowlisted_versioned_and_idempotent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with InitiativeStore(Path(directory) / "initiatives.sqlite3") as store:
+                item = store.propose(
+                    "Creative profile", kind="creative_output", creator_value="measurable",
+                    concept="tag content", first_step="annotate", expected_output="profiled snapshots",
+                )
+                profile = {
+                    "topic": "AI 创作", "hook_style": "反常识提问",
+                    "narrative_structure": "问题-冲突-解决", "editing_pace": "快切",
+                    "visual_style": "电影写实", "voice_language": "粤语（香港）",
+                    "cta_style": "评论引导", "format": "短视频",
+                }
+                first = store.record_performance(
+                    item["id"], idempotency_key="profile-1", platform="youtube",
+                    source="manual_entry", currency="USD", source_reference="profile-video",
+                    metrics={"views": 1200}, content_profile=profile,
+                )
+                replay = store.record_performance(
+                    item["id"], idempotency_key="profile-1", platform="youtube",
+                    source="manual_entry", currency="USD", source_reference="profile-video",
+                    metrics={"views": 1200}, content_profile=profile,
+                )
+                self.assertEqual(first["content_profile"], profile)
+                self.assertEqual(replay["id"], first["id"])
+                self.assertEqual(store.list_performance(initiative_id=item["id"])[0]["content_profile"], profile)
+                with self.assertRaises(ValueError):
+                    store.record_performance(
+                        item["id"], idempotency_key="profile-1", platform="youtube",
+                        source="manual_entry", currency="USD", source_reference="profile-video",
+                        metrics={"views": 1200}, content_profile={"topic": "different"},
+                    )
+                with self.assertRaises(ValueError):
+                    store.record_performance(
+                        item["id"], idempotency_key="profile-invalid", platform="youtube",
+                        source="manual_entry", currency="USD", source_reference="bad-profile",
+                        metrics={"views": 1}, content_profile={"unapproved_dimension": "x"},
+                    )
+                with self.assertRaises(ValueError):
+                    store.record_performance(
+                        item["id"], idempotency_key="profile-long", platform="youtube",
+                        source="manual_entry", currency="USD", source_reference="long-profile",
+                        metrics={"views": 1}, content_profile={"topic": "x" * 81},
+                    )
+
+    def test_performance_analysis_deduplicates_latest_content_and_separates_sources(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with InitiativeStore(Path(directory) / "initiatives.sqlite3") as store:
+                item = store.propose(
+                    "Performance analysis", kind="creative_output", creator_value="measurable",
+                    concept="compare content", first_step="publish pilots", expected_output="cohort signals",
+                )
+
+                def add(key, reference, *, source="official_analytics", currency="USD",
+                        views=1000, likes=100, retention=70.0, settled=500):
+                    store.record_performance(
+                        item["id"], idempotency_key=key, platform="youtube", source=source,
+                        currency=currency, source_reference=reference,
+                        metrics={
+                            "views": views, "likes": likes,
+                            "three_second_retention_pct": retention,
+                            "completion_rate_pct": 30.0,
+                            "reported_revenue_minor": settled * 2,
+                            "settled_revenue_minor": settled,
+                        },
+                    )
+
+                add("v1-old", "video-1", views=400, likes=20, retention=40.0)
+                add("v1-new", "video-1", views=1000, likes=100, retention=70.0, settled=700)
+                add("v2", "video-2", views=1000, likes=80, retention=60.0)
+                add("v3", "video-3", views=1000, likes=60, retention=50.0)
+                add("manual-1", "manual-video", source="manual_entry", currency="EUR", views=1200)
+                add("unidentified", "", views=500)
+
+                analysis = store.analyze_performance(initiative_id=item["id"])
+                self.assertEqual(analysis["unidentified_snapshots_excluded"], 1)
+                self.assertEqual(len(analysis["cohorts"]), 2)
+                official = next(c for c in analysis["cohorts"] if c["source"] == "official_analytics")
+                self.assertEqual(official["status"], "ready_for_review")
+                self.assertEqual(official["sample_count"], 3)
+                self.assertEqual(official["total_views"], 3000)
+                self.assertAlmostEqual(official["rates"]["three_second_retention_pct"], 60.0)
+                self.assertEqual(official["revenue_minor"]["reported"], 3400)
+
+                self.assertEqual(official["revenue_minor"]["settled"], 1700)
+                self.assertEqual(official["interpretation"], "descriptive_observation_not_causal_evidence")
+                manual = next(c for c in analysis["cohorts"] if c["source"] == "manual_entry")
+                self.assertEqual(manual["currency"], "EUR")
+                self.assertEqual(manual["status"], "insufficient_sample")
+                self.assertIn("unidentified_snapshots_excluded", manual["warnings"])
+
+    def test_performance_analysis_ranks_metric_specific_content_examples(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with InitiativeStore(Path(directory) / "initiatives.sqlite3") as store:
+                item = store.propose(
+                    "Rank content examples", kind="creative_output", creator_value="measurable",
+                    concept="compare content", first_step="publish pilots", expected_output="metric comparisons",
+                )
+                for index, retention in enumerate((20, 30, 40, 60, 80, 90), start=1):
+                    store.record_performance(
+                        item["id"], idempotency_key=f"ranking-{index}", platform="youtube",
+                        source="official_analytics", currency="USD",
+                        source_reference=f"video-{index}",
+                        metrics={
+                            "views": 500, "likes": index * 10,
+                            "three_second_retention_pct": retention,
+                            "completion_rate_pct": retention / 2,
+                            "cta_clicks": index,
+                        },
+                    )
+                cohort = store.analyze_performance(initiative_id=item["id"])["cohorts"][0]
+                retention = cohort["item_comparisons"]["three_second_retention_pct"]
+                self.assertEqual(retention["status"], "descriptive_comparison")
+                self.assertEqual(retention["eligible_item_count"], 6)
+                self.assertEqual(
+                    [entry["source_reference"] for entry in retention["top"]],
+                    ["video-6", "video-5", "video-4"],
+                )
+                self.assertEqual(
+                    [entry["source_reference"] for entry in retention["bottom"]],
+                    ["video-1", "video-2", "video-3"],
+                )
+                self.assertIn("not an overall success score", cohort["comparison_note"])
+
+    def test_performance_analysis_marks_small_samples_and_preserves_missing_rates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with InitiativeStore(Path(directory) / "initiatives.sqlite3") as store:
+                item = store.propose(
+                    "Small sample", kind="creative_output", creator_value="value",
+                    concept="concept", first_step="step", expected_output="output",
+                )
+                store.record_performance(
+                    item["id"], idempotency_key="one", platform="tiktok",
+                    source="manual_entry", currency="USD", source_reference="one-video",
+                    metrics={"views": 900, "likes": 9},
+                )
+                cohort = store.analyze_performance(initiative_id=item["id"])["cohorts"][0]
+                self.assertEqual(cohort["status"], "insufficient_sample")
+                self.assertEqual(cohort["sample_count"], 1)
+                self.assertIsNone(cohort["rates"]["completion_rate_pct"])
+                self.assertIsNone(cohort["rates"]["avg_watch_seconds"])
+                self.assertIn("insufficient_content_samples", cohort["warnings"])
+                self.assertIn("insufficient_views", cohort["warnings"])
+
+    def test_performance_analysis_rejects_invalid_thresholds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with InitiativeStore(Path(directory) / "initiatives.sqlite3") as store:
+                item = store.propose(
+                    "Threshold validation", kind="creative_output", creator_value="value",
+                    concept="concept", first_step="step", expected_output="output",
+                )
+                with self.assertRaises(ValueError):
+                    store.analyze_performance(initiative_id=item["id"], min_sample_count=1)
+                with self.assertRaises(ValueError):
+                    store.analyze_performance(initiative_id=item["id"], min_views=True)
+
     def test_initiative_timeline_is_append_only_and_records_lifecycle_without_feedback_body(self):
         import sqlite3
 

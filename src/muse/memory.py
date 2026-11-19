@@ -93,6 +93,29 @@ class MemoryStore:
                 FOREIGN KEY(candidate_id) REFERENCES memory_candidates(id)
             )"""
         )
+        self._connection.execute(
+            """CREATE TABLE IF NOT EXISTS memory_evidence (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                memory_id INTEGER NOT NULL,
+                relation TEXT NOT NULL CHECK(relation IN ('supports', 'refutes', 'qualifies', 'related')),
+                source_url TEXT NOT NULL DEFAULT '',
+                source_title TEXT NOT NULL,
+                excerpt TEXT NOT NULL,
+                source_hash TEXT NOT NULL,
+                verification_status TEXT NOT NULL DEFAULT 'unverified'
+                    CHECK(verification_status IN ('unverified', 'verified', 'rejected')),
+                created_by TEXT NOT NULL,
+                verified_by TEXT,
+                verification_note TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                verified_at TEXT,
+                FOREIGN KEY(memory_id) REFERENCES memories(id)
+            )"""
+        )
+        self._connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_memory_evidence_memory "
+            "ON memory_evidence(memory_id, created_at DESC, id DESC)"
+        )
         self._migrate_memory_metadata()
         self._connection.commit()
     def _migrate_memory_metadata(self) -> None:
@@ -504,6 +527,74 @@ class MemoryStore:
             self._connection.rollback()
             raise
         result = self.get_candidate(candidate_id)
+        assert result is not None
+        return result
+
+    def add_evidence(
+        self, memory_id: int, *, relation: str, source_title: str,
+        excerpt: str, created_by: str, source_url: str = "",
+    ) -> dict[str, Any]:
+        """Attach a source-backed evidence candidate; it remains unverified by default."""
+        if isinstance(memory_id, bool) or not isinstance(memory_id, int) or memory_id < 1:
+            raise ValueError("memory_id must be a positive integer")
+        if not isinstance(relation, str) or relation not in {"supports", "refutes", "qualifies", "related"}:
+            raise ValueError("unsupported evidence relation")
+        source_title = self._validate_text(source_title, "source_title")
+        excerpt = self._validate_text(excerpt, "excerpt")
+        created_by = self._validate_text(created_by, "created_by")
+        if len(source_title) > 300 or len(excerpt) > 4000:
+            raise ValueError("source_title or excerpt exceeds its size limit")
+        if not isinstance(source_url, str) or len(source_url) > 2000:
+            raise ValueError("source_url must be text of at most 2000 characters")
+        if source_url and not source_url.startswith(("https://", "http://")):
+            raise ValueError("source_url must use http or https")
+        memory = self.get(memory_id)
+        if memory is None:
+            raise ValueError("evidence must reference an active canonical memory")
+        source_hash = hashlib.sha256(excerpt.encode("utf-8")).hexdigest()
+        cursor = self._connection.execute(
+            """INSERT INTO memory_evidence
+               (memory_id, relation, source_url, source_title, excerpt, source_hash, created_by, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (memory_id, relation, source_url.strip(), source_title, excerpt, source_hash, created_by, self._now()),
+        )
+        self._connection.commit()
+        return self.get_evidence(int(cursor.lastrowid))
+
+    def get_evidence(self, evidence_id: int) -> dict[str, Any] | None:
+        row = self._connection.execute(
+            "SELECT * FROM memory_evidence WHERE id = ?", (evidence_id,),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def list_evidence(self, memory_id: int, *, limit: int = 100) -> list[dict[str, Any]]:
+        if isinstance(memory_id, bool) or not isinstance(memory_id, int) or memory_id < 1:
+            raise ValueError("memory_id must be a positive integer")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
+            raise ValueError("limit must be between 1 and 500")
+        rows = self._connection.execute(
+            "SELECT * FROM memory_evidence WHERE memory_id = ? ORDER BY created_at, id LIMIT ?",
+            (memory_id, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def verify_evidence(
+        self, evidence_id: int, *, status: str, verified_by: str, note: str = "",
+    ) -> dict[str, Any]:
+        if not isinstance(status, str) or status not in {"verified", "rejected"}:
+            raise ValueError("status must be verified or rejected")
+        verified_by = self._validate_text(verified_by, "verified_by")
+        if not isinstance(note, str) or len(note) > 1000:
+            raise ValueError("note must be text of at most 1000 characters")
+        cursor = self._connection.execute(
+            """UPDATE memory_evidence SET verification_status = ?, verified_by = ?,
+               verification_note = ?, verified_at = ? WHERE id = ?""",
+            (status, verified_by, note.strip(), self._now(), evidence_id),
+        )
+        if cursor.rowcount != 1:
+            raise ValueError("evidence record does not exist")
+        self._connection.commit()
+        result = self.get_evidence(evidence_id)
         assert result is not None
         return result
 

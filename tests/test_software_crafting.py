@@ -53,6 +53,36 @@ class MCPStdioClientTests(unittest.TestCase):
             self.assertEqual(sent[1]["method"], "notifications/initialized")
             self.assertEqual(sent[-1]["method"], "tools/call")
 
+    @patch("muse.software_crafting.subprocess.run")
+    def test_mcp_child_environment_overrides_are_applied_before_secret_scrubbing(self, run: Mock) -> None:
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            "os.environ", {"MUSE_TEST_TOKEN": "ambient-secret"}, clear=False,
+        ):
+            client = MCPStdioClient(
+                command=("node.exe", "daemon-cli.mjs"), workspace=Path(directory),
+                allowed_tools={"safe_read"},
+                environment={
+                    "ELECTRON_RUN_AS_NODE": "1",
+                    "MUSE_OPEN_DESIGN_API_KEY": "must-not-be-forwarded",
+                },
+            )
+            run.return_value = __import__("subprocess").CompletedProcess(
+                args=[], returncode=0, stdout="\n".join([
+                    json.dumps({"jsonrpc": "2.0", "id": 1, "result": {
+                        "protocolVersion": "2025-06-18", "serverInfo": {"name": "fixture", "version": "1"},
+                    }}),
+                    json.dumps({"jsonrpc": "2.0", "id": 2, "result": {"tools": [
+                        {"name": "safe_read", "annotations": {"readOnlyHint": True}},
+                    ]}}),
+                ]), stderr="",
+            )
+            client.list_tools()
+            child_env = run.call_args.kwargs["env"]
+            self.assertEqual(child_env["ELECTRON_RUN_AS_NODE"], "1")
+            self.assertNotIn("MUSE_TEST_TOKEN", child_env)
+            self.assertNotIn("MUSE_OPEN_DESIGN_API_KEY", child_env)
+
+
     def test_multi_tool_batch_runs_sequentially_in_one_mcp_session(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

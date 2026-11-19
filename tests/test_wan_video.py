@@ -96,6 +96,36 @@ class WanWorkflowTests(unittest.TestCase):
                 self.assertEqual(result["status"], "completed")
                 self.assertEqual(result["prompt_id"], "prompt-123")
         self.assertIn(("submit", set(WAN21_NODE_ALLOWLIST), True, "mp4"), calls)
+    def test_generate_retries_temporary_comfyui_history_transport_failure(self):
+        calls = []
+
+        class FlakyClient:
+            def __init__(self, endpoint, **kwargs):
+                pass
+            def gpu_memory(self):
+                return {"vram_total_bytes": 1000, "vram_free_bytes": 900, "vram_free_ratio": 0.9}
+            def submit_workflow(self, workflow, *, node_allowlist, approved):
+                return {"prompt_id": "prompt-flaky"}
+            def history(self, prompt_id):
+                calls.append(prompt_id)
+                if len(calls) == 1:
+                    raise RuntimeError("local video engine is unavailable")
+                return {prompt_id: {"status": {"status_str": "success"}, "outputs": {
+                    "11": {"gifs": [{"filename": "muse_wan21_retry.mp4", "subfolder": "", "type": "output"}]}
+                }}}
+
+        def fake_download(_client, _metadata, target):
+            target.write_bytes(bytes.fromhex("000000186674797069736f6d66697874757265"))
+            return target.stat().st_size
+
+        with tempfile.TemporaryDirectory() as temp:
+            with patch("muse.wan_video.ComfyUIClient", FlakyClient), patch(
+                "muse.wan_video._download_local_output", side_effect=fake_download
+            ), patch("muse.wan_video.time.sleep"):
+                result = generate_wan21_t2v("A red fox", Path(temp) / "video.mp4", timeout_seconds=30)
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(calls, ["prompt-flaky", "prompt-flaky"])
+
     def test_generate_uses_exclusive_gpu_lease_when_resource_database_is_supplied(self):
         from muse.gpu_resources import GpuResourceCoordinator
         calls = []
@@ -161,6 +191,38 @@ class WanWorkflowTests(unittest.TestCase):
             result = _request_comfyui_model_release("http://127.0.0.1:8188", timeout_seconds=0)
         self.assertEqual(result["status"], "released")
         self.assertEqual(calls, ["free", "stats"])
+
+    def test_small_rocm_allocator_pool_does_not_override_device_headroom(self):
+        from muse.wan_video import _require_gpu_headroom
+
+        class TinyAllocatorPool:
+            def gpu_memory(self):
+                return {
+                    "vram_total_bytes": 12 * 1024**3,
+                    "vram_free_bytes": 11 * 1024**3,
+                    "vram_free_ratio": 11 / 12,
+                    "torch_vram_total_bytes": 64 * 1024**2,
+                    "torch_vram_free_bytes": 32 * 1024**2,
+                }
+
+        result = _require_gpu_headroom(TinyAllocatorPool())
+        self.assertEqual(result["torch_vram_total_bytes"], 64 * 1024**2)
+
+    def test_large_torch_allocator_pool_still_enforces_free_memory_threshold(self):
+        from muse.wan_video import _require_gpu_headroom
+
+        class LargeAllocatorPool:
+            def gpu_memory(self):
+                return {
+                    "vram_total_bytes": 12 * 1024**3,
+                    "vram_free_bytes": 11 * 1024**3,
+                    "vram_free_ratio": 11 / 12,
+                    "torch_vram_total_bytes": 8 * 1024**3,
+                    "torch_vram_free_bytes": 5 * 1024**3,
+                }
+
+        with self.assertRaisesRegex(WanVideoError, "PyTorch GPU memory"):
+            _require_gpu_headroom(LargeAllocatorPool())
 
     def test_generate_blocks_when_measured_gpu_headroom_is_below_threshold(self):
         class LowMemoryClient:

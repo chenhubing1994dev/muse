@@ -108,16 +108,93 @@ def _write_srt(path: Path, segments: Iterable[dict[str, Any]]) -> dict[str, Any]
     if path.is_symlink():
         raise CantoneseASRError("refusing to overwrite a symlink subtitle output")
     cues: list[str] = []
+    word_timed_segments = 0
+    segment_fallback_count = 0
+
+    def append_cue(start: float, end: float, text: str) -> None:
+        text = text.strip()
+        if not text:
+            return
+        if (not math.isfinite(start) or not math.isfinite(end) or start < 0 or end <= start):
+            raise CantoneseASRError("ASR word/segment has invalid start/end timestamps")
+        cues.append(f"{len(cues) + 1}\n{_srt_timestamp(start)} --> {_srt_timestamp(end)}\n{text}")
+
     for segment in segments:
         text = str(segment.get("text", "")).strip()
         if not text:
             continue
-        start, end = segment.get("start"), segment.get("end")
-        if (not isinstance(start, (int, float)) or isinstance(start, bool)
-                or not isinstance(end, (int, float)) or isinstance(end, bool)
-                or not math.isfinite(start) or not math.isfinite(end) or start < 0 or end <= start):
+        segment_start, segment_end = segment.get("start"), segment.get("end")
+        if (not isinstance(segment_start, (int, float)) or isinstance(segment_start, bool)
+                or not isinstance(segment_end, (int, float)) or isinstance(segment_end, bool)
+                or not math.isfinite(segment_start) or not math.isfinite(segment_end)
+                or segment_start < 0 or segment_end <= segment_start):
             raise CantoneseASRError("ASR segment has invalid start/end timestamps")
-        cues.append(f"{len(cues) + 1}\n{_srt_timestamp(float(start))} --> {_srt_timestamp(float(end))}\n{text}")
+
+        words = segment.get("words")
+        normalized_words: list[tuple[float, float, str]] = []
+        word_timing_valid = isinstance(words, list) and bool(words)
+        previous_start = -1.0
+        if word_timing_valid:
+            pending_prefix = ""
+            for index, word in enumerate(words):
+                if not isinstance(word, dict):
+                    word_timing_valid = False
+                    break
+                raw_text, start, end = word.get("text"), word.get("start"), word.get("end")
+                if not isinstance(raw_text, str) or not raw_text.strip():
+                    # Whisper may emit blank alignment tokens; they carry no caption text.
+                    continue
+                if (not isinstance(start, (int, float)) or isinstance(start, bool)
+                        or not isinstance(end, (int, float)) or isinstance(end, bool)
+                        or not math.isfinite(start) or not math.isfinite(end)
+                        or start < 0 or end < start or start < previous_start):
+                    word_timing_valid = False
+                    break
+                if end == start:
+                    next_word = words[index + 1] if index + 1 < len(words) else None
+                    next_start = next_word.get("start") if isinstance(next_word, dict) else None
+                    next_end = next_word.get("end") if isinstance(next_word, dict) else None
+                    if (isinstance(next_start, (int, float)) and not isinstance(next_start, bool)
+                            and isinstance(next_end, (int, float)) and not isinstance(next_end, bool)
+                            and math.isfinite(next_start) and math.isfinite(next_end)
+                            and math.isclose(float(next_start), float(start), abs_tol=0.02)
+                            and next_end > next_start):
+                        # A zero-duration token at the next token's exact onset can be
+                        # joined to that token without inventing a new time interval.
+                        pending_prefix += raw_text
+                        continue
+                    word_timing_valid = False
+                    break
+                if pending_prefix:
+                    raw_text = pending_prefix + raw_text
+                    pending_prefix = ""
+                normalized_words.append((float(start), float(end), raw_text))
+                previous_start = float(start)
+            if pending_prefix:
+                word_timing_valid = False
+        if word_timing_valid and normalized_words:
+            word_timed_segments += 1
+            chunk_text = ""
+            chunk_start = chunk_end = None
+            for start, end, word_text in normalized_words:
+                if chunk_text and (
+                    len(chunk_text) + len(word_text) > 16
+                    or end - float(chunk_start) > 4.5
+                    or chunk_text.rstrip().endswith(("。", "！", "？", "；", ".", "!", "?"))
+                ):
+                    append_cue(float(chunk_start), float(chunk_end), chunk_text)
+                    chunk_text, chunk_start, chunk_end = "", None, None
+                if chunk_start is None:
+                    chunk_start = start
+                chunk_text += word_text
+                chunk_end = end
+            if chunk_text and chunk_start is not None and chunk_end is not None:
+                append_cue(chunk_start, chunk_end, chunk_text)
+        else:
+            if isinstance(words, list) and words:
+                segment_fallback_count += 1
+            # Use the model's real segment bounds; never invent missing word timings.
+            append_cue(float(segment_start), float(segment_end), text)
     if not cues:
         raise CantoneseASRError("ASR returned no non-empty subtitle segments")
     payload = "\n\n".join(cues) + "\n"
@@ -130,7 +207,15 @@ def _write_srt(path: Path, segments: Iterable[dict[str, Any]]) -> dict[str, Any]
     finally:
         if temporary.exists():
             temporary.unlink()
-    return {"path": str(path), "bytes": path.stat().st_size, "sha256": _sha256(path), "cue_count": len(cues)}
+    timing_mode = "mixed" if word_timed_segments and segment_fallback_count else (
+        "word" if word_timed_segments else "segment"
+    )
+    return {
+        "path": str(path), "bytes": path.stat().st_size, "sha256": _sha256(path),
+        "cue_count": len(cues), "timing_mode": timing_mode,
+        "word_timed_segment_count": word_timed_segments,
+        "segment_fallback_count": segment_fallback_count,
+    }
 
 
 def _verified_model(model_dir: str | Path) -> tuple[Path, str]:
@@ -190,8 +275,13 @@ def transcribe_cantonese(
         )
         segments: list[dict[str, Any]] = []
         for item in raw_segments:
+            word_items = getattr(item, "words", None) or []
+            words = [{
+                "start": float(word.start), "end": float(word.end), "text": str(word.word),
+            } for word in word_items]
             segments.append({
                 "start": float(item.start), "end": float(item.end), "text": str(item.text).strip(),
+                "words": words,
                 "avg_logprob": getattr(item, "avg_logprob", None),
                 "no_speech_prob": getattr(item, "no_speech_prob", None),
             })
@@ -219,5 +309,6 @@ def transcribe_cantonese(
         "segments": segments,
         "comparison": comparison,
         "subtitles": subtitle,
+        "subtitle_timing": ({key: subtitle[key] for key in ("timing_mode", "word_timed_segment_count", "segment_fallback_count")} if subtitle else None),
         "human_listening_review_required": True,
     }

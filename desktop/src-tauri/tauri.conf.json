@@ -13,8 +13,8 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "MUSE · 灵枢调度中心",
-        "width": 1440,
+        "title": "MUSE · 赛博玄枢 · 普罗米修斯星舰中枢",
+        "width": 1500,
         "height": 960,
         "minWidth": 960,
         "minHeight": 680,

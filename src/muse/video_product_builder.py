@@ -1,9 +1,8 @@
-"""Build versioned Muse video products from user-provided local assets.
+"""Build versioned Muse video products from local assets or local Wan prompts.
 
-This is an asset-assembly product builder, not a prompt-to-video generator. It
-reuses the existing FFmpeg factory and never installs models or calls cloud APIs.
+Uses the existing FFmpeg factory and local ComfyUI/Wan generation; it never
+installs models or calls cloud video APIs.
 """
-from __future__ import annotations
 
 import argparse
 import hashlib
@@ -12,6 +11,7 @@ import re
 import math
 import secrets
 import shutil
+import sys
 import subprocess
 import tempfile
 import zipfile
@@ -21,7 +21,7 @@ from typing import Any, Sequence
 
 from muse.media import discover_media_tools
 from muse.video_factory import AUDIO_EXTENSIONS, assemble_video_from_folder, discover_video_assets
-from muse.video_qa import inspect_video_file
+from muse.video_qa import inspect_video_file, map_warnings_to_storyboard_scenes
 
 _SOURCE_KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 _MAX_INPUT_BYTES = 8 * 1024 * 1024 * 1024
@@ -40,8 +40,143 @@ def _hash_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _probe_media_duration_seconds(path: Path, ffprobe_path: str, *, stream_type: str) -> float:
+    """Read one media stream's duration; fail closed when ffprobe cannot prove it."""
+    if stream_type not in {"video", "audio"}:
+        raise ValueError("stream_type must be video or audio")
+    result = subprocess.run(
+        [ffprobe_path, "-v", "error", "-show_entries", "format=duration:stream=codec_type,duration",
+         "-of", "json", str(path)],
+        capture_output=True, text=True, timeout=60, check=False,
+    )
+    if result.returncode != 0:
+        raise VideoProductError(f"FFprobe could not measure {stream_type} duration: " + str((result.stderr or "")[-500:]))
+    try:
+        document = json.loads(result.stdout)
+        streams = document.get("streams") if isinstance(document, dict) else None
+        stream = next(item for item in streams if isinstance(item, dict) and item.get("codec_type") == stream_type)
+        raw_duration = stream.get("duration") or document.get("format", {}).get("duration")
+        duration = float(raw_duration)
+    except (TypeError, ValueError, KeyError, StopIteration, AttributeError):
+        raise VideoProductError(f"FFprobe did not return a usable {stream_type} duration") from None
+    if not math.isfinite(duration) or duration <= 0:
+        raise VideoProductError(f"FFprobe returned an invalid {stream_type} duration")
+    return duration
+
+
+def _validate_narration_timeline(video_duration: float, narration_duration: float, *, tolerance_seconds: float = 0.0) -> dict[str, Any]:
+    """Reject narration that would be silently truncated by FFmpeg -shortest."""
+    values = (video_duration, narration_duration, tolerance_seconds)
+    if any(isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) for value in values):
+        raise VideoProductError("video and narration durations must be finite numbers")
+    if video_duration <= 0 or narration_duration <= 0 or tolerance_seconds < 0:
+        raise VideoProductError("video and narration durations must be positive")
+    if narration_duration > video_duration + tolerance_seconds:
+        raise VideoProductError(
+            f"narration ({narration_duration:.3f}s) exceeds generated video ({video_duration:.3f}s); "
+            "refusing to truncate voiceover—generate additional shots or extend the video first"
+        )
+    return {
+        "status": "passed", "video_duration_seconds": round(float(video_duration), 6),
+        "narration_duration_seconds": round(float(narration_duration), 6),
+        "tolerance_seconds": float(tolerance_seconds),
+        "policy": "narration_must_fit_video_no_silent_truncation",
+    }
+
+
+def _allocate_wan_scene_durations(
+    scenes: list[dict[str, Any]], narration_duration: float, *, fps: int = 12,
+    max_total_seconds: float = 60.0,
+) -> list[dict[str, Any]]:
+    """Extend shots in Wan's 4n+1 frame increments so narration fits before GPU work."""
+    if (isinstance(narration_duration, bool) or not isinstance(narration_duration, (int, float))
+            or not math.isfinite(narration_duration) or narration_duration <= 0):
+        raise VideoProductError("Cantonese narration duration must be finite and positive")
+    if isinstance(fps, bool) or not isinstance(fps, int) or fps <= 0:
+        raise ValueError("fps must be a positive integer")
+    frame_counts: list[int] = []
+    for scene in scenes:
+        frames = max(13, min(61, int(round(float(scene["duration_seconds"]) * fps))))
+        frames = min(61, ((frames - 1 + 3) // 4) * 4 + 1)
+        frame_counts.append(frames)
+    target_frames = math.ceil((float(narration_duration) + 1.0 / fps) * fps - 1e-9)
+    while sum(frame_counts) < target_frames:
+        candidates = [index for index, frames in enumerate(frame_counts) if frames <= 57]
+        if not candidates:
+            raise VideoProductError(
+                "Cantonese narration exceeds the maximum duration of the supplied Wan scenes; add more scenes"
+            )
+        index = min(candidates, key=lambda item: (frame_counts[item] / max(1.0, float(scenes[item]["duration_seconds"])), item))
+        frame_counts[index] += 4
+        planned_seconds = sum((frames - 1) / fps for frames in frame_counts)
+        if planned_seconds > max_total_seconds + 1e-9:
+            raise VideoProductError(
+                "Cantonese narration cannot fit within the 60-second multi-scene preview limit; add more scenes"
+            )
+    planned_seconds = sum((frames - 1) / fps for frames in frame_counts)
+    if planned_seconds > max_total_seconds + 1e-9:
+        raise VideoProductError(
+            "Cantonese narration cannot fit within the 60-second multi-scene preview limit; add more scenes"
+        )
+    return [
+        {**scene, "duration_seconds": (frames - 1) / fps}
+        for scene, frames in zip(scenes, frame_counts)
+    ]
+
+
 def _safe_json(value: Any) -> bytes:
     return (json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n").encode("utf-8")
+
+
+def _revalidate_claim_grounded_contract(workspace: Path, contract: dict[str, Any]) -> None:
+    """Rebuild a publishable contract from the live local ResearchKnowledgeStore."""
+    from muse.narration_evidence_contract import (
+        build_evidence_by_claim_from_dossier,
+        build_narration_evidence_contract,
+    )
+    from muse.research_knowledge import ResearchKnowledgeStore
+
+    database = workspace / "data" / "research" / "knowledge.sqlite3"
+    if database.is_symlink() or not database.is_file():
+        raise VideoProductError("claim-grounded narration requires the live ResearchKnowledgeStore database")
+    segments: list[dict[str, Any]] = []
+    claim_ids: list[str] = []
+    for item in contract["segments"]:
+        segment = {
+            "index": item["index"],
+            "text": item["text"],
+            "factual": item["factual"],
+            "claim_ids": item["claim_ids"],
+        }
+        timecode = item.get("timecode")
+        if isinstance(timecode, dict):
+            segment["start_seconds"] = timecode.get("start_seconds")
+            segment["end_seconds"] = timecode.get("end_seconds")
+        segments.append(segment)
+        for claim_id in item["claim_ids"]:
+            if not isinstance(claim_id, str) or not re.fullmatch(r"[a-f0-9]{32}", claim_id):
+                raise VideoProductError("claim-grounded narration contains an invalid Claim ID")
+            if claim_id not in claim_ids:
+                claim_ids.append(claim_id)
+
+    evidence_by_claim: dict[str, list[dict[str, Any]]] = {}
+    try:
+        with ResearchKnowledgeStore(database) as research:
+            for claim_id in claim_ids:
+                try:
+                    dossier = research.claim_dossier(claim_id, evidence_limit=50)
+                except ValueError:
+                    continue
+                evidence_by_claim.update(build_evidence_by_claim_from_dossier(dossier))
+        rebuilt = build_narration_evidence_contract(segments, evidence_by_claim)
+    except (TypeError, ValueError, KeyError, RuntimeError) as exc:
+        raise VideoProductError(
+            f"claim-grounded narration could not be revalidated against ResearchKnowledgeStore: {type(exc).__name__}"
+        ) from None
+    if rebuilt != contract:
+        raise VideoProductError(
+            "claim-grounded narration contract does not match live ResearchKnowledgeStore reviews and citations"
+        )
 
 
 def _inspect_product_video(
@@ -107,6 +242,77 @@ def _finalize_video_metadata(
     return result
 
 
+def _default_scene_motion_directives(scene_count: int) -> list[dict[str, str]]:
+    """Apply subtle deterministic camera motion so imported static shots do not remain inert."""
+    if isinstance(scene_count, bool) or not isinstance(scene_count, int) or scene_count < 1:
+        raise ValueError("scene_count must be a positive integer")
+    camera_moves = ("push_in", "drift_left", "pull_out", "rise", "drift_right")
+    return [
+        {"camera_move": camera_moves[index % len(camera_moves)], "vfx": "none"}
+        for index in range(scene_count)
+    ]
+
+_SCENE_COMPOSITION_FIELDS = (
+    "subject_center_x", "subject_center_y", "subject_scale",
+    "negative_space_left", "negative_space_right",
+    "negative_space_top", "negative_space_bottom", "motion_level",
+)
+
+
+def _content_aware_scene_motion_directives(
+    scene_analysis_metadata: Any, *, scene_count: int | None = None,
+    metadata_source: str = "caller_supplied",
+) -> list[dict[str, Any]]:
+    """Choose conservative camera moves from caller-supplied, normalized composition facts.
+    This deliberately does not infer visual facts from media. Missing, malformed or
+    mismatched metadata falls back for the entire sequence to the stable legacy cycle.
+    """
+    count = scene_count
+    if count is None and isinstance(scene_analysis_metadata, list):
+        count = len(scene_analysis_metadata)
+    if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+        raise ValueError("scene_count must be a positive integer")
+
+    valid = isinstance(scene_analysis_metadata, list) and len(scene_analysis_metadata) == count
+    normalized: list[dict[str, float]] = []
+    if valid:
+        for scene in scene_analysis_metadata:
+            if not isinstance(scene, dict) or any(
+                isinstance(scene.get(field), bool)
+                or not isinstance(scene.get(field), (int, float))
+                or not math.isfinite(scene[field])
+                or not 0.0 <= scene[field] <= 1.0
+                for field in _SCENE_COMPOSITION_FIELDS
+            ):
+                valid = False
+                break
+            normalized.append({field: float(scene[field]) for field in _SCENE_COMPOSITION_FIELDS})
+
+    if not valid:
+        return _default_scene_motion_directives(count)
+    directives: list[dict[str, Any]] = []
+    for scene in normalized:
+        move = "none"
+        if scene["motion_level"] >= 0.7:
+            move = "none"
+        elif scene["subject_scale"] <= 0.3:
+            move = "push_in"
+        elif scene["subject_scale"] >= 0.7:
+            move = "pull_out"
+        if move == "none" and scene["subject_center_x"] <= 0.5:
+            if scene["negative_space_right"] - scene["negative_space_left"] >= 0.25:
+                move = "drift_right"
+        elif move == "none" and scene["subject_center_x"] >= 0.5:
+            if scene["negative_space_left"] - scene["negative_space_right"] >= 0.25:
+                move = "drift_left"
+
+
+        directives.append({
+            "camera_move": move, "vfx": "none", "strategy": "explicit_composition_v1",
+            "metadata_source": metadata_source, "scene_analysis": scene,
+        })
+    return directives
+
 def _quality_gate_summary(report: dict[str, Any]) -> dict[str, Any]:
     status = report.get("status")
     if status not in {"passed", "failed", "blocked"}:
@@ -135,7 +341,8 @@ def _quality_gate_summary(report: dict[str, Any]) -> dict[str, Any]:
 class VideoProductBuilder:
     """Create a product-library entry from assets in data/video_sources/<key>."""
 
-    BUILDER_VERSION = 7
+    BUILDER_VERSION = 15
+
     def __init__(self, workspace: str | Path, *, motion_workspace: str | Path | None = None) -> None:
         self.workspace = Path(workspace).resolve()
         if not self.workspace.is_dir():
@@ -143,6 +350,7 @@ class VideoProductBuilder:
         self.motion_workspace = Path(motion_workspace).resolve() if motion_workspace is not None else self.workspace
         if not self.motion_workspace.is_dir():
             raise VideoProductError("motion workspace must be an existing directory")
+
 
     def _roots(self) -> tuple[Path, Path]:
         data = self.workspace / "data"
@@ -186,6 +394,7 @@ class VideoProductBuilder:
         title: str, width: int, height: int, fps: int,
         ffmpeg_path: str, ffprobe_path: str, timeout_seconds: int, audio_mode: str = "narration",
         scene_assets: list[Path] | None = None, image_seconds: float = 4.0,
+        shot_directives: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         if motion_profile == "none":
             base_video.replace(output_video)
@@ -207,6 +416,7 @@ class VideoProductBuilder:
                 scene_motion = adapter.render_scene_timeline(
                     scene_assets, base_video, motion_source, width=width, height=height,
                     fps=fps, image_seconds=image_seconds,
+                    shot_directives=shot_directives or _default_scene_motion_directives(len(scene_assets)),
                 )
             result = adapter.render(
                 motion_source, output_video, title=title,
@@ -228,6 +438,7 @@ class VideoProductBuilder:
         audio_mode: str = "music", aspect_ratio: str = "16:9", fps: int = 30, image_seconds: float = 4.0,
         encoder: str = "auto", timeout_seconds: int = 3600, motion_profile: str = "none",
         creator_initiative_id: str | None = None, evolution_cycle_id: str | None = None,
+        scene_analysis_metadata: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         if not isinstance(title, str) or not title.strip() or len(title.strip()) > 160:
             raise ValueError("title must contain 1-160 characters")
@@ -241,11 +452,37 @@ class VideoProductBuilder:
             raise ValueError("aspect_ratio must be 16:9, 9:16 or 1:1")
         if isinstance(fps, bool) or not isinstance(fps, int) or fps not in {24, 25, 30, 50, 60}:
             raise ValueError("fps must be one of 24, 25, 30, 50 or 60")
+
         if encoder not in {"auto", "amf", "software"}:
             raise ValueError("encoder must be auto, amf or software")
         if motion_profile not in {"none", "brand_intro_outro", "brand_scene_transitions"}:
             raise ValueError("motion_profile must be none, brand_intro_outro or brand_scene_transitions")
         source, assets, audio = self._source(source_key, audio_name)
+        analysis_source = "caller_supplied"
+        scene_analysis_report = None
+        if motion_profile == "brand_scene_transitions" and scene_analysis_metadata is None:
+            try:
+                from .scene_analysis import analyze_scene_assets
+                analysis = analyze_scene_assets(assets)
+                if isinstance(analysis, dict):
+                    scene_analysis_report = {
+                        key: analysis[key] for key in (
+                            "status", "source", "semantic_recognition", "reason", "motion_diagnostics",
+                        ) if key in analysis
+                    }
+                if analysis.get("status") == "completed" and isinstance(analysis.get("scenes"), list):
+                    scene_analysis_metadata = analysis["scenes"]
+                    analysis_source = str(analysis.get("source") or "local_visual_heuristic")
+            except Exception:
+                # Optional analysis must never prevent the established safe fallback.
+                scene_analysis_metadata = None
+                scene_analysis_report = {"status": "unavailable", "reason": "analysis_exception"}
+        shot_directives = (
+            _content_aware_scene_motion_directives(
+                scene_analysis_metadata, scene_count=len(assets), metadata_source=analysis_source,
+            )
+            if motion_profile == "brand_scene_transitions" else None
+        )
         inventory = discover_media_tools()
         tools = {item.tool_id: item.executable for item in inventory.tools}
         ffmpeg, ffprobe = tools.get("ffmpeg"), tools.get("ffprobe")
@@ -255,6 +492,10 @@ class VideoProductBuilder:
         audio_fact = ({"name": audio.name, "bytes": audio.stat().st_size, "sha256": _hash_file(audio)} if audio else None)
         identity = hashlib.sha256(("muse-video:" + source_key + ":" + title.strip()).encode("utf-8")).hexdigest()[:32]
         settings = {"aspect_ratio": aspect_ratio, "fps": fps, "image_seconds": float(image_seconds), "encoder": encoder, "audio_mode": audio_mode, "motion_profile": motion_profile}
+        if shot_directives is not None:
+            settings["shot_directives"] = shot_directives
+        if scene_analysis_report is not None:
+            settings["scene_analysis"] = scene_analysis_report
         fingerprint = hashlib.sha256(_safe_json({"builder_version": self.BUILDER_VERSION, "assets": source_facts, "audio": audio_fact, "settings": settings})).hexdigest()
         version = fingerprint[:20]
         _, products_root = self._roots()
@@ -297,7 +538,7 @@ class VideoProductBuilder:
                 width=width, height=height, fps=fps, ffmpeg_path=ffmpeg,
                 ffprobe_path=ffprobe, timeout_seconds=timeout_seconds, audio_mode=audio_mode,
                 scene_assets=assets if motion_profile == "brand_scene_transitions" else None,
-                image_seconds=float(image_seconds),
+                image_seconds=float(image_seconds), shot_directives=shot_directives,
             )
             current_source_facts = [{"name": path.name, "bytes": path.stat().st_size, "sha256": _hash_file(path)} for path in assets]
             current_audio_fact = ({"name": audio.name, "bytes": audio.stat().st_size, "sha256": _hash_file(audio)} if audio else None)
@@ -312,15 +553,43 @@ class VideoProductBuilder:
             )
             quality_gate = _quality_gate_summary(qa_report)
             result = _finalize_video_metadata(result, qa_report, rendered, motion=motion)
-            (staging / "qa-report.json").write_bytes(_safe_json(qa_report))
+            storyboard_scenes = [
+                {"id": f"shot-{index:02d}", "order": index, "source_asset": path.name,
+                 "source_sha256": fact["sha256"], "generation_status": "imported_asset",
+                 **({key: directive[key] for key in (
+                     "camera_move", "vfx", "strategy", "metadata_source", "scene_analysis",
+                 ) if key in directive} if shot_directives and (directive := shot_directives[index - 1]) else {})}
+                for index, (path, fact) in enumerate(zip(assets, source_facts), start=1)
+            ]
+
+            scene_timeline = motion.get("scene_timeline") if isinstance(motion, dict) else None
+            scene_timings = scene_timeline.get("scene_timings") if isinstance(scene_timeline, dict) else None
+            if scene_timeline is not None:
+                if not isinstance(scene_timings, list) or len(scene_timings) != len(storyboard_scenes):
+                    raise VideoProductError("Remotion scene timeline is missing per-scene timing records")
+                for scene, timing in zip(storyboard_scenes, scene_timings):
+                    if (not isinstance(timing, dict)
+                            or not isinstance(timing.get("timeline_start_seconds"), (int, float))
+                            or not isinstance(timing.get("timeline_end_seconds"), (int, float))
+                            or not isinstance(timing.get("duration_seconds"), (int, float))):
+                        raise VideoProductError("Remotion scene timeline contains invalid per-scene timing records")
+                    scene.update({
+                        "duration_seconds": timing["duration_seconds"],
+                        "timeline_start_seconds": timing["timeline_start_seconds"],
+                        "timeline_end_seconds": timing["timeline_end_seconds"],
+                        "transition_in_seconds": timing.get("transition_in_seconds", 0.0),
+                        "transition_out_seconds": timing.get("transition_out_seconds", 0.0),
+                    })
+                qa_report["storyboard_mapping"] = map_warnings_to_storyboard_scenes(
+                    qa_report.get("warnings", []), {"scenes": storyboard_scenes},
+                )
             storyboard = {
                 "schema_version": 1, "title": title.strip(), "production_mode": "local_asset_assembly",
                 "final_output": {key: result[key] for key in ("duration_seconds", "frames", "width", "height", "fps", "has_audio", "bytes") if key in result},
                 "ai_generation": "not_requested", "source_folder": source_key, "settings": settings,
-                "motion": motion,
-                "scenes": [{"order": index, "source_asset": path.name, "source_sha256": fact["sha256"],
-                            "generation_status": "imported_asset"} for index, (path, fact) in enumerate(zip(assets, source_facts), start=1)],
+                "motion": motion, "scenes": storyboard_scenes,
             }
+            (staging / "qa-report.json").write_bytes(_safe_json(qa_report))
             readme = (
                 f"# {title.strip()}\n\nMuse 视频产品（本地素材合成版）。本次流程只组合你提供的图片/视频素材，没有声称生成 AI 镜头。\n\n"
                 f"- 来源目录：`data/video_sources/{source_key}`\n- 场景素材：{len(assets)}\n"
@@ -363,14 +632,224 @@ class VideoProductBuilder:
             if staging.exists():
                 shutil.rmtree(staging, ignore_errors=True)
 
+    def build_from_scenes(
+        self, title: str, scenes: list[dict[str, Any]], *, negative_prompt: str = "",
+        aspect_ratio: str = "16:9", steps: int = 8, timeout_seconds: int = 1800,
+        motion_profile: str = "none", narration_script: str | None = None,
+        narration_model_dir: str | Path | None = None,
+        narration_asr_model_dir: str | Path | None = None,
+        narration_evidence_contract: dict[str, Any] | None = None,
+        creator_initiative_id: str | None = None, evolution_cycle_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Generate 2-20 independent local Wan shots, concatenate, then package once."""
+        if not isinstance(title, str) or not title.strip() or len(title.strip()) > 160:
+            raise ValueError("title must contain 1-160 characters")
+        if not isinstance(scenes, list) or not 2 <= len(scenes) <= 20:
+            raise ValueError("scenes must contain between 2 and 20 scene specifications")
+        if aspect_ratio not in {"16:9", "9:16", "1:1"}:
+            raise ValueError("aspect_ratio must be 16:9, 9:16 or 1:1")
+        if isinstance(steps, bool) or not isinstance(steps, int) or not 8 <= steps <= 30:
+            raise ValueError("steps must be between 8 and 30")
+        if motion_profile not in {"none", "brand_intro_outro"}:
+            raise ValueError("motion_profile must be none or brand_intro_outro")
+        if not isinstance(negative_prompt, str) or len(negative_prompt) > 1000:
+            raise ValueError("negative_prompt must be at most 1000 characters")
+        normalized: list[dict[str, Any]] = []
+        planned_total = 0.0
+        for index, scene in enumerate(scenes, start=1):
+            if not isinstance(scene, dict) or set(scene) - {"prompt", "duration_seconds", "seed"}:
+                raise ValueError("each scene must contain only prompt, duration_seconds and optional seed")
+            scene_prompt = scene.get("prompt")
+            duration = scene.get("duration_seconds")
+            seed = scene.get("seed")
+            if not isinstance(scene_prompt, str) or not scene_prompt.strip() or len(scene_prompt.strip()) > 2000:
+                raise ValueError(f"scene {index} prompt must contain 1-2000 characters")
+            if (isinstance(duration, bool) or not isinstance(duration, (int, float))
+                    or not math.isfinite(duration) or not 1 <= duration <= 5):
+                raise ValueError(f"scene {index} duration_seconds must be between 1 and 5")
+            if seed is None:
+                seed = secrets.randbelow(2**32)
+            if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed <= 2**32 - 1:
+                raise ValueError(f"scene {index} seed must be an unsigned 32-bit integer")
+            planned_total += float(duration)
+            normalized.append({"order": index, "prompt": scene_prompt.strip(),
+                               "duration_seconds": float(duration), "seed": seed})
+        if planned_total > 60:
+            raise ValueError("multi-scene preview duration must not exceed 60 seconds")
+        if narration_script is not None:
+            if not isinstance(narration_script, str) or not narration_script.strip() or len(narration_script) > 12000:
+                raise ValueError("narration_script must contain 1-12000 characters")
+            if narration_model_dir is None:
+                raise ValueError("narration_model_dir is required when narration_script is provided")
+            from muse.cantonese_tts import preflight_cantonese_tts_runtime
+            preflight_cantonese_tts_runtime(self.workspace / ".muse-canto-tts-py314", narration_model_dir)
+            if narration_asr_model_dir is not None and sys.version_info[:2] != (3, 14):
+                raise VideoProductError("Cantonese ASR currently requires the Python 3.14 main runtime")
+        elif narration_model_dir is not None or narration_asr_model_dir is not None:
+            raise ValueError("narration model paths require narration_script")
+        if narration_evidence_contract is not None:
+            if narration_script is None:
+                raise ValueError("narration_evidence_contract requires narration_script")
+            _revalidate_claim_grounded_contract(self.workspace, narration_evidence_contract)
+
+        inventory = discover_media_tools()
+        tools = {item.tool_id: item.executable for item in inventory.tools}
+        ffmpeg, ffprobe = tools.get("ffmpeg"), tools.get("ffprobe")
+        if not ffmpeg or not ffprobe:
+            raise VideoProductError("FFmpeg and FFprobe are required for multi-scene generation")
+        from muse.wan_video import generate_wan21_t2v
+
+        with tempfile.TemporaryDirectory(prefix=".muse-wan-scenes-", dir=self.workspace) as temporary_dir:
+            staging = Path(temporary_dir)
+            effective_scenes = normalized
+            narration_audio: Path | None = None
+            narration_synthesis: dict[str, Any] | None = None
+            narration_asr: dict[str, Any] | None = None
+            subtitle_path: Path | None = None
+            if narration_script is not None:
+                from muse.cantonese_tts import synthesize_cantonese_with_runtime
+                narration_audio = staging / "voiceover.wav"
+                narration_synthesis = synthesize_cantonese_with_runtime(
+                    narration_script, narration_audio, model_dir=narration_model_dir,
+                    packages_dir=self.workspace / ".muse-canto-tts-py314", quality="duration_filter",
+                )
+                if narration_synthesis.get("status") != "completed" or not narration_audio.is_file():
+                    raise VideoProductError("Cantonese TTS did not produce a validated WAV; Wan generation was not started")
+                narration_duration = _probe_media_duration_seconds(narration_audio, ffprobe, stream_type="audio")
+                effective_scenes = _allocate_wan_scene_durations(normalized, narration_duration)
+                if narration_asr_model_dir is not None:
+                    from muse.cantonese_asr import transcribe_cantonese
+                    subtitle_path = staging / "subtitles.srt"
+                    narration_asr = transcribe_cantonese(
+                        narration_audio, model_dir=narration_asr_model_dir, output_srt=subtitle_path,
+                        reference_text=narration_script,
+                    )
+                    if narration_asr.get("status") != "passed":
+                        comparison = narration_asr.get("comparison") or {}
+                        raise VideoProductError(
+                            f"Cantonese ASR CER gate failed (status={narration_asr.get('status')}, "
+                            f"cer={comparison.get('cer')}); refusing to start Wan generation"
+                        )
+            planned_effective_total = sum(float(item["duration_seconds"]) for item in effective_scenes)
+            clip_paths: list[Path] = []
+            scene_records: list[dict[str, Any]] = []
+            first_metadata: dict[str, Any] | None = None
+            stream_signature: tuple[int, int, float] | None = None
+            actual_total = 0.0
+            total_frames = 0
+            for scene in effective_scenes:
+                index = scene["order"]
+                clip_path = staging / f"shot_{index:02d}.mp4"
+                result = generate_wan21_t2v(
+                    scene["prompt"], clip_path, negative_prompt=negative_prompt,
+                    aspect_ratio=aspect_ratio, duration_seconds=scene["duration_seconds"],
+                    steps=steps, seed=scene["seed"], timeout_seconds=timeout_seconds,
+                    resource_db=self.workspace / "data" / "gpu-resources.sqlite3",
+                    workspace=self.workspace,
+                )
+                if result.get("status") != "completed" or not clip_path.is_file():
+                    raise VideoProductError(f"Wan scene {index} did not produce a completed MP4; refusing partial delivery")
+                signature = (result.get("width"), result.get("height"), float(result.get("fps") or 0))
+                if (isinstance(signature[0], bool) or not isinstance(signature[0], int)
+                        or isinstance(signature[1], bool) or not isinstance(signature[1], int)
+                        or signature[0] <= 0 or signature[1] <= 0 or signature[2] <= 0):
+                    raise VideoProductError(f"Wan scene {index} returned incomplete video stream metadata")
+                if stream_signature is None:
+                    stream_signature = signature
+                    first_metadata = dict(result)
+                elif signature != stream_signature:
+                    raise VideoProductError("Wan scenes have mismatched dimensions or frame rates; refusing unsafe stream-copy concatenation")
+                measured_duration = _probe_media_duration_seconds(clip_path, ffprobe, stream_type="video")
+                actual_total += measured_duration
+                frames = result.get("frames")
+                if isinstance(frames, bool) or not isinstance(frames, int) or frames <= 0:
+                    raise VideoProductError(f"Wan scene {index} returned invalid frame count")
+                total_frames += frames
+                clip_paths.append(clip_path)
+                scene_records.append({
+                    "order": index, "prompt": scene["prompt"], "prompt_id": result.get("prompt_id"),
+                    "seed": scene["seed"], "generation_status": "generated",
+                    "source_file": clip_path.name, "duration_seconds": measured_duration,
+                    "frames": frames, "width": signature[0], "height": signature[1], "fps": signature[2],
+                })
+
+            concat_list = staging / "concat.txt"
+            concat_lines = []
+            for clip in clip_paths:
+                safe_path = clip.resolve().as_posix().replace("'", "'\\''")
+                concat_lines.append("file '" + safe_path + "'")
+            concat_list.write_text(chr(10).join(concat_lines) + chr(10), encoding="utf-8")
+            combined = staging / "combined.mp4"
+            mux = subprocess.run(
+                [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-n", "-f", "concat", "-safe", "0", "-i", str(concat_list), "-c", "copy", "-movflags", "+faststart", str(combined)],
+                capture_output=True, text=True, timeout=max(900, timeout_seconds * len(clip_paths)), check=False,
+            )
+            if mux.returncode != 0 or not combined.is_file() or combined.stat().st_size <= 12:
+                raise VideoProductError("Wan multi-scene concatenation failed: " + str((mux.stderr or "")[-1000:]))
+            with combined.open("rb") as stream:
+                if stream.read(12)[4:8] != b"ftyp":
+                    raise VideoProductError("multi-scene concatenation did not produce an MP4")
+            combined_duration = _probe_media_duration_seconds(combined, ffprobe, stream_type="video")
+            if abs(combined_duration - actual_total) > max(0.25, 1.0 / (stream_signature[2] if stream_signature else 12.0)):
+                raise VideoProductError("concatenated video duration does not match the sum of generated Wan scenes")
+            if narration_audio is not None:
+                narration_duration = _probe_media_duration_seconds(narration_audio, ffprobe, stream_type="audio")
+                _validate_narration_timeline(combined_duration, narration_duration, tolerance_seconds=0.0)
+            aggregate = {
+                "status": "completed", "prompt_id": (first_metadata or {}).get("prompt_id"),
+                "model": "Wan 2.1 T2V 1.3B", "seed": effective_scenes[0]["seed"],
+                "aspect_ratio": aspect_ratio, "fps": stream_signature[2],
+                "duration_seconds": combined_duration, "frames": total_frames,
+                "width": stream_signature[0], "height": stream_signature[1],
+                "steps": steps, "bytes": combined.stat().st_size, "has_audio": False,
+                "scene_count": len(scene_records),
+            }
+            combined_prompt = ("多镜头分镜：" + "；".join(item["prompt"] for item in effective_scenes))[:2000]
+            package_args = {
+                "scene_asset_paths": clip_paths,
+                "negative_prompt": negative_prompt, "generation_metadata": aggregate,
+                "scene_records": scene_records, "motion_profile": motion_profile,
+                "creator_initiative_id": creator_initiative_id, "evolution_cycle_id": evolution_cycle_id,
+                "narration_evidence_contract": narration_evidence_contract,
+            }
+            if narration_audio is not None:
+                packaged = self.package_generated_clip(
+                    title.strip(), combined_prompt, combined,
+                    narration_path=narration_audio, narration_script=narration_script,
+                    subtitle_path=subtitle_path, narration_asr=narration_asr, **package_args,
+                )
+                packaged["narration_synthesis"] = {
+                    key: narration_synthesis[key] for key in (
+                        "status", "engine", "model_repo", "model_revision", "license",
+                        "language", "sample_rate", "channels", "frames", "duration_seconds", "bytes",
+                    ) if key in narration_synthesis
+                }
+                if narration_asr is not None:
+                    packaged["narration_asr"] = narration_asr
+            else:
+                packaged = self.package_generated_clip(title.strip(), combined_prompt, combined, **package_args)
+            packaged["scene_generation"] = {
+                "status": "completed", "scene_count": len(scene_records),
+                "requested_duration_seconds": planned_total,
+                "planned_duration_seconds": planned_effective_total,
+                "generated_duration_seconds": combined_duration,
+                "duration_planning": "cantonese_narration_frame_quantized" if narration_audio is not None else "caller_requested",
+                "scenes": scene_records,
+                "concatenation": "ffmpeg_concat_demuxer_stream_copy",
+            }
+            return packaged
+
     def build_from_prompt(
         self, title: str, prompt: str, *, negative_prompt: str = "",
         aspect_ratio: str = "16:9", duration_seconds: float = 2.0,
         steps: int = 8, seed: int | None = None, timeout_seconds: int = 1800,
         motion_profile: str = "none",
         creator_initiative_id: str | None = None, evolution_cycle_id: str | None = None,
+        narration_script: str | None = None, narration_model_dir: str | Path | None = None,
+        narration_asr_model_dir: str | Path | None = None,
+        narration_evidence_contract: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Generate one local Wan 2.1 clip and package it as a versioned Muse product."""
+        """Generate one local Wan 2.1 clip and optionally package verified Cantonese narration."""
         if not isinstance(title, str) or not title.strip() or len(title.strip()) > 160:
             raise ValueError("title must contain 1-160 characters")
         if not isinstance(prompt, str) or not prompt.strip() or len(prompt.strip()) > 2000:
@@ -389,6 +868,18 @@ class VideoProductBuilder:
             raise ValueError("seed must be an unsigned 32-bit integer")
         if motion_profile not in {"none", "brand_intro_outro"}:
             raise ValueError("motion_profile must be none or brand_intro_outro")
+        if narration_script is not None and (
+            not isinstance(narration_script, str) or not narration_script.strip() or len(narration_script) > 20_000
+        ):
+            raise ValueError("narration_script must contain 1-20000 characters")
+        if narration_script is not None and narration_model_dir is None:
+            raise ValueError("narration_model_dir is required when narration_script is provided")
+        if narration_script is None and (narration_model_dir is not None or narration_asr_model_dir is not None):
+            raise ValueError("narration model paths require narration_script")
+        if narration_evidence_contract is not None and narration_script is None:
+            raise ValueError("narration_evidence_contract requires narration_script")
+        if narration_evidence_contract is not None:
+            _revalidate_claim_grounded_contract(self.workspace, narration_evidence_contract)
         from muse.wan_video import generate_wan21_t2v
 
         settings = {
@@ -398,7 +889,14 @@ class VideoProductBuilder:
             "vae_decode_mode": "tiled_temporal_8", "motion_profile": motion_profile,
         }
         identity = hashlib.sha256(("muse-video-ai:" + title.strip() + ":" + prompt.strip()).encode("utf-8")).hexdigest()[:32]
-        fingerprint = hashlib.sha256(_safe_json({"builder_version": self.BUILDER_VERSION, "prompt": prompt.strip(), "settings": settings, "motion_profile": motion_profile})).hexdigest()
+        fingerprint_data = {
+            "builder_version": self.BUILDER_VERSION, "prompt": prompt.strip(),
+            "settings": settings, "motion_profile": motion_profile,
+            "narration_script": narration_script,
+        }
+        if narration_evidence_contract is not None:
+            fingerprint_data["narration_evidence_contract"] = narration_evidence_contract
+        fingerprint = hashlib.sha256(_safe_json(fingerprint_data)).hexdigest()
         version = fingerprint[:20]
         _, products_root = self._roots()
         initiative_root = products_root / identity
@@ -409,6 +907,11 @@ class VideoProductBuilder:
         if target.exists():
             result = self.verify_path(products_root, identity, version)
             return self._record_creator_artifact(result, title=title, prompt=prompt, creator_initiative_id=creator_initiative_id, evolution_cycle_id=evolution_cycle_id)
+        if narration_script is not None:
+            from muse.cantonese_tts import preflight_cantonese_tts_runtime
+            preflight_cantonese_tts_runtime(self.workspace / ".muse-canto-tts-py314", narration_model_dir)
+            if narration_asr_model_dir is not None and sys.version_info[:2] != (3, 14):
+                raise VideoProductError("Cantonese ASR currently requires the Python 3.14 main runtime")
         initiative_root.mkdir(parents=True, exist_ok=True)
         if initiative_root.is_symlink() or initiative_root.resolve().parent != products_root:
             raise VideoProductError("AI video product destination escapes product root")
@@ -425,6 +928,16 @@ class VideoProductBuilder:
             )
             if generated.get("status") != "completed" or not base_rendered.is_file():
                 raise VideoProductError("local Wan generation did not return a completed MP4")
+            if narration_script is not None:
+                return self.package_generated_clip_with_cantonese_narration(
+                    title.strip(), prompt.strip(), base_rendered,
+                    narration_script=narration_script, model_dir=narration_model_dir,
+                    asr_model_dir=narration_asr_model_dir,
+                    negative_prompt=negative_prompt, generation_metadata=generated,
+                    motion_profile=motion_profile, creator_initiative_id=creator_initiative_id,
+                    evolution_cycle_id=evolution_cycle_id,
+                    narration_evidence_contract=narration_evidence_contract,
+                )
             inventory = discover_media_tools()
             tools = {item.tool_id: item.executable for item in inventory.tools}
             motion = self._apply_motion_profile(
@@ -499,12 +1012,14 @@ class VideoProductBuilder:
         self, title: str, prompt: str, source_path: str | Path, *,
         negative_prompt: str = "", generation_metadata: dict[str, Any],
         scene_records: list[dict[str, Any]] | None = None,
+        scene_asset_paths: list[str | Path] | None = None,
         narration_path: str | Path | None = None, narration_script: str | None = None,
         subtitle_path: str | Path | None = None, narration_asr: dict[str, Any] | None = None,
+        narration_evidence_contract: dict[str, Any] | None = None,
         background_music_path: str | Path | None = None, motion_profile: str = "none",
         creator_initiative_id: str | None = None, evolution_cycle_id: str | None = None,
     ) -> dict[str, Any]:
-        """Package a completed local AI MP4, optionally adding a verified narration track."""
+        """Package a completed local AI MP4, optionally enforcing claim-grounded narration."""
         if not isinstance(title, str) or not title.strip() or len(title.strip()) > 160:
             raise ValueError("title must contain 1-160 characters")
         if not isinstance(prompt, str) or not prompt.strip() or len(prompt.strip()) > 2000:
@@ -526,7 +1041,10 @@ class VideoProductBuilder:
                 raise ValueError("scene_records must contain between 1 and 20 scenes")
             normalized_scenes = []
             for index, scene in enumerate(scene_records, start=1):
-                if not isinstance(scene, dict) or set(scene) - {"order", "prompt", "prompt_id", "seed", "generation_status", "source_file"}:
+                if not isinstance(scene, dict) or set(scene) - {
+                    "order", "prompt", "prompt_id", "seed", "generation_status", "source_file",
+                    "duration_seconds", "frames", "width", "height", "fps",
+                }:
                     raise ValueError("scene_records contains an invalid scene shape")
                 order = scene.get("order", index)
                 scene_prompt = scene.get("prompt")
@@ -541,12 +1059,53 @@ class VideoProductBuilder:
                     raise ValueError("scene_records contains an invalid seed")
                 if source_file is not None and (not isinstance(source_file, str) or not source_file or Path(source_file).name != source_file):
                     raise ValueError("scene_records contains an invalid source_file")
+                details = {key: scene[key] for key in ("duration_seconds", "frames", "width", "height", "fps") if key in scene}
+                if "duration_seconds" in details and (
+                    isinstance(details["duration_seconds"], bool) or not isinstance(details["duration_seconds"], (int, float))
+                    or not math.isfinite(details["duration_seconds"]) or details["duration_seconds"] <= 0
+                ):
+                    raise ValueError("scene_records contains an invalid duration_seconds")
+                for key in ("frames", "width", "height"):
+                    if key in details and (isinstance(details[key], bool) or not isinstance(details[key], int) or details[key] <= 0):
+                        raise ValueError(f"scene_records contains invalid {key}")
+                if "fps" in details and (isinstance(details["fps"], bool) or not isinstance(details["fps"], (int, float)) or not math.isfinite(details["fps"]) or details["fps"] <= 0):
+                    raise ValueError("scene_records contains invalid fps")
                 normalized_scenes.append({
                     "order": order, "prompt": scene_prompt.strip(), "generation_status": "generated",
-                    "prompt_id": prompt_id, "seed": seed, **({"source_file": source_file} if source_file else {}),
+                    "prompt_id": prompt_id, "seed": seed,
+                    **({"source_file": source_file} if source_file else {}), **details,
                 })
             if len(_safe_json(normalized_scenes)) > 32 * 1024:
                 raise ValueError("scene_records exceeds 32 KiB")
+        scene_asset_sources: list[Path] = []
+        scene_asset_facts: list[dict[str, Any]] = []
+        if scene_asset_paths is not None:
+            if not isinstance(scene_asset_paths, list) or len(scene_asset_paths) != len(normalized_scenes):
+                raise ValueError("scene_asset_paths must match the number of normalized scenes")
+            scene_asset_total = 0
+            seen_scene_names: set[str] = set()
+            for index, raw_path in enumerate(scene_asset_paths, start=1):
+                path = Path(raw_path).expanduser()
+                if (path.suffix.casefold() != ".mp4" or any(parent.is_symlink() for parent in (path, *path.parents))
+                        or not path.is_file()):
+                    raise VideoProductError(f"scene asset {index} must be a regular MP4 without symlink parents")
+                path = path.resolve(strict=True)
+                size = path.stat().st_size
+                if size < 12:
+                    raise VideoProductError(f"scene asset {index} is empty or invalid")
+                scene_asset_total += size
+                if scene_asset_total > _MAX_PRODUCT_BYTES:
+                    raise VideoProductError("combined source scene assets exceed the 2 GiB product limit")
+                if path.name in seen_scene_names:
+                    raise VideoProductError("scene asset filenames must be unique")
+                seen_scene_names.add(path.name)
+                if normalized_scenes[index - 1].get("source_file") not in {None, path.name}:
+                    raise VideoProductError("scene asset filename does not match its storyboard source_file")
+                scene_asset_sources.append(path)
+                scene_asset_facts.append({
+                    "order": index, "name": path.name, "archive_path": f"scenes/{path.name}",
+                    "bytes": size, "sha256": _hash_file(path),
+                })
 
         source = Path(source_path).expanduser()
         if any(parent.is_symlink() for parent in (source, *source.parents)):
@@ -555,6 +1114,8 @@ class VideoProductBuilder:
             raise VideoProductError("generated clip source must be a regular MP4 file")
         source = source.resolve(strict=True)
         source_size = source.stat().st_size
+        if scene_asset_sources and sum(fact["bytes"] for fact in scene_asset_facts) + source_size > _MAX_PRODUCT_BYTES:
+            raise VideoProductError("combined scene sources and final MP4 exceed the 2 GiB product limit")
         if source_size < 12 or source_size > _MAX_PRODUCT_BYTES:
             raise VideoProductError("generated MP4 is empty, invalid or exceeds the 2 GiB product limit")
         with source.open("rb") as stream:
@@ -568,6 +1129,39 @@ class VideoProductBuilder:
             not isinstance(narration_script, str) or not narration_script.strip() or len(narration_script) > 20000
         ):
             raise ValueError("narration_script must contain 1-20000 characters when provided")
+        if narration_evidence_contract is not None:
+            contract = narration_evidence_contract
+            if (not isinstance(contract, dict)
+                    or contract.get("schema_version") != 1
+                    or contract.get("contract") != "claim_grounded_narration"
+                    or contract.get("publishable") is not True
+                    or contract.get("status") != "ready"
+                    or not isinstance(contract.get("segments"), list)
+                    or not contract["segments"]):
+                raise VideoProductError("claim-grounded narration evidence contract is blocked or invalid")
+            if narration is None or narration_script is None:
+                raise VideoProductError("claim-grounded narration requires matching narration audio and script")
+            contract_text = []
+            for segment in contract["segments"]:
+                if (not isinstance(segment, dict) or not isinstance(segment.get("text"), str)
+                        or not segment["text"].strip() or not isinstance(segment.get("factual"), bool)):
+                    raise VideoProductError("claim-grounded narration contract contains an invalid segment")
+                if segment["factual"]:
+                    if (not isinstance(segment.get("claim_ids"), list) or not segment["claim_ids"]
+                            or segment.get("gate_status") != "ready"):
+                        raise VideoProductError("claim-grounded factual narration segment lacks verified Claim support")
+                elif segment.get("gate_status") != "not_applicable":
+                    raise VideoProductError("non-factual narration segment has an invalid gate state")
+                contract_text.append("".join(segment["text"].split()))
+            if "".join(contract_text) != "".join(narration_script.split()):
+                raise VideoProductError("claim-grounded narration contract text does not match the packaged script")
+            try:
+                contract_bytes = _safe_json(contract)
+            except (TypeError, ValueError):
+                raise VideoProductError("claim-grounded narration contract is not valid bounded JSON") from None
+            if len(contract_bytes) > 1024 * 1024:
+                raise VideoProductError("claim-grounded narration contract exceeds 1 MiB")
+            _revalidate_claim_grounded_contract(self.workspace, contract)
         if narration is not None:
             if (narration.suffix.casefold() not in AUDIO_EXTENSIONS
                     or any(parent.is_symlink() for parent in (narration, *narration.parents))
@@ -639,7 +1233,7 @@ class VideoProductBuilder:
                 raise ValueError("narration_asr provenance does not match the pinned model, audio and SRT assets")
             asr_fact = {key: narration_asr[key] for key in (
                 "status", "engine", "model_repo", "model_revision", "model_sha256",
-                "audio_sha256", "transcript", "segment_count", "comparison",
+                "audio_sha256", "transcript", "segment_count", "subtitle_timing", "comparison",
                 "human_listening_review_required",
             ) if key in narration_asr}
             if len(_safe_json(asr_fact)) > 64 * 1024:
@@ -659,14 +1253,18 @@ class VideoProductBuilder:
             raise ValueError("generation_metadata exceeds 16 KiB")
         settings = {key: value for key, value in metadata.items() if key != "status"}
         identity = hashlib.sha256(("muse-video-ai:" + title.strip() + ":" + prompt.strip()).encode("utf-8")).hexdigest()[:32]
-        fingerprint = hashlib.sha256(_safe_json({
+        fingerprint_data = {
             "builder_version": self.BUILDER_VERSION, "prompt": prompt.strip(),
             "negative_prompt": negative_prompt, "generation_metadata": metadata,
             "scene_records": normalized_scenes, "generated_clip_sha256": source_sha256,
             "narration_asset": narration_fact, "narration_script": narration_script,
             "motion_profile": motion_profile, "subtitle_asset": subtitle_fact,
             "narration_asr": asr_fact, "background_music_asset": background_music_fact,
-        })).hexdigest()
+            "scene_assets": scene_asset_facts,
+        }
+        if narration_evidence_contract is not None:
+            fingerprint_data["narration_evidence_contract"] = narration_evidence_contract
+        fingerprint = hashlib.sha256(_safe_json(fingerprint_data)).hexdigest()
         version = fingerprint[:20]
         _, products_root = self._roots()
         initiative_root = products_root / identity
@@ -688,6 +1286,21 @@ class VideoProductBuilder:
             inventory = discover_media_tools()
             tools = {item.tool_id: item.executable for item in inventory.tools}
             ffmpeg, ffprobe = tools.get("ffmpeg"), tools.get("ffprobe")
+            narration_timeline = None
+            scene_asset_copies: list[tuple[Path, str]] = []
+            for path, fact in zip(scene_asset_sources, scene_asset_facts):
+                copy_path = staging / fact["archive_path"]
+                copy_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(path, copy_path)
+                if _hash_file(path) != fact["sha256"] or _hash_file(copy_path) != fact["sha256"]:
+                    raise VideoProductError("source scene MP4 changed while being packaged")
+                scene_asset_copies.append((copy_path, fact["archive_path"]))
+            if narration is not None:
+                if not ffprobe:
+                    raise VideoProductError("FFprobe is required to verify narration/video duration alignment")
+                video_duration = _probe_media_duration_seconds(source, ffprobe, stream_type="video")
+                narration_duration = _probe_media_duration_seconds(narration, ffprobe, stream_type="audio")
+                narration_timeline = _validate_narration_timeline(video_duration, narration_duration)
             base_rendered, rendered = staging / "base-video.mp4", staging / "video.mp4"
             shutil.copyfile(source, base_rendered)
             if _hash_file(source) != source_sha256 or _hash_file(base_rendered) != source_sha256:
@@ -702,10 +1315,11 @@ class VideoProductBuilder:
                     mux_args.extend([
                         "-stream_loop", "-1", "-i", str(background_music),
                         "-filter_complex",
-                        "[1:a]aresample=48000,apad,asplit=2[voice_sc][voice_mix];"
+                        "[1:a]aresample=48000,apad,volume=2.0,asplit=2[voice_sc][voice_mix];"
                         "[2:a]aresample=48000,volume=0.22[music];"
                         "[music][voice_sc]sidechaincompress=threshold=0.025:ratio=8:attack=20:release=450[ducked];"
-                        "[voice_mix][ducked]amix=inputs=2:duration=first:dropout_transition=2[aout]",
+                        "[voice_mix][ducked]amix=inputs=2:duration=first:dropout_transition=2[mixed];"
+                        "[mixed]loudnorm=I=-16:TP=-1.5:LRA=11[aout]",
                         "-map", "0:v:0", "-map", "[aout]", "-c:v", "copy",
                         "-c:a", "aac", "-b:a", "192k", "-shortest",
                         "-movflags", "+faststart", str(narrated),
@@ -713,7 +1327,7 @@ class VideoProductBuilder:
                 else:
                     mux_args.extend([
                         "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy",
-                        "-c:a", "aac", "-b:a", "192k", "-af", "apad", "-shortest",
+                        "-c:a", "aac", "-b:a", "192k", "-af", "loudnorm=I=-16:TP=-1.5:LRA=11,apad", "-shortest",
                         "-movflags", "+faststart", str(narrated),
                     ])
                 mux = subprocess.run(
@@ -746,6 +1360,14 @@ class VideoProductBuilder:
                 require_audio=(narration is not None or metadata.get("has_audio") is True),
             )
             quality_gate = _quality_gate_summary(qa_report)
+            if narration_timeline is not None:
+                qa_report["narration_timeline"] = narration_timeline
+                qa_report.setdefault("checks", {})["narration_duration_coverage"] = {
+                    "passed": True,
+                    "detail": (f"narration={narration_timeline['narration_duration_seconds']:.3f}s; "
+                               f"video={narration_timeline['video_duration_seconds']:.3f}s; "
+                               f"tolerance={narration_timeline['tolerance_seconds']:.3f}s"),
+                }
             video_metadata = _finalize_video_metadata(metadata, qa_report, rendered, motion=motion)
             storyboard = {
                 "schema_version": 1, "title": title.strip(),
@@ -758,14 +1380,21 @@ class VideoProductBuilder:
                 "settings": settings, "source_video_sha256": source_sha256, "motion": motion,
                 "narration": ({
                     "script": narration_script, "audio": narration_fact, "language": "zh-HK",
+                    **({"timeline": narration_timeline} if narration_timeline is not None else {}),
+                    "loudness_normalization": {"method": "ffmpeg_loudnorm", "target_lufs": -16, "true_peak_db": -1.5, "lra": 11},
                     **({"subtitles": subtitle_fact, "asr": asr_fact} if subtitles else {}),
                 } if narration else None),
+                **({"narration_evidence_contract": narration_evidence_contract}
+                   if narration_evidence_contract is not None else {}),
                 "background_music": ({
                     **background_music_fact, "archive_path": background_music_member,
-                    "mix": {"method": "ffmpeg_sidechaincompress", "music_gain": 0.22,
-                            "threshold": 0.025, "ratio": 8, "attack_ms": 20, "release_ms": 450},
+                    "mix": {"method": "ffmpeg_sidechaincompress", "voice_gain": 2.0,
+                            "music_gain": 0.22, "threshold": 0.025, "ratio": 8,
+                            "attack_ms": 20, "release_ms": 450,
+                            "loudness_normalization": {"method": "ffmpeg_loudnorm", "target_lufs": -16, "true_peak_db": -1.5, "lra": 11}},
                 } if background_music_fact else None),
                 "scenes": normalized_scenes,
+                "scene_assets": scene_asset_facts,
             }
             readme = (
                 f"# {title.strip()}\n\nMuse 本地 AI 视频产品。此包由已完成的本机生成 MP4 恢复封装。\n\n"
@@ -784,6 +1413,8 @@ class VideoProductBuilder:
                 archive.write(staging / "storyboard.json", "storyboard.json")
                 archive.write(staging / "qa-report.json", "qa-report.json")
                 archive.write(rendered, "video.mp4")
+                for copy_path, archive_path in scene_asset_copies:
+                    archive.write(copy_path, archive_path)
                 if narration is not None:
                     archive.write(narration, "narration/voiceover" + narration.suffix.casefold())
                     if narration_script:
@@ -795,6 +1426,7 @@ class VideoProductBuilder:
                 if subtitles is not None:
                     archive.write(subtitles, "subtitles.srt")
             file_names = ["README.md", "storyboard.json", "qa-report.json", "video.mp4", "product.zip"]
+
             if subtitles is not None:
                 shutil.copyfile(subtitles, staging / "subtitles.srt")
                 if _hash_file(staging / "subtitles.srt") != subtitle_fact["sha256"]:
@@ -810,22 +1442,28 @@ class VideoProductBuilder:
                 "input_sha256": fingerprint, "files": files, "video_metadata": video_metadata,
                 "quality_gate": quality_gate,
                 "generated_clip": {"name": source.name, "bytes": source_size, "sha256": source_sha256},
+                "scene_assets": scene_asset_facts,
                 "subtitles": subtitle_fact, "narration_asr": asr_fact,
+                "narration_timeline": narration_timeline,
                 "background_music": ({
                     **background_music_fact, "archive_path": background_music_member,
-                    "mix": {"method": "ffmpeg_sidechaincompress", "music_gain": 0.22,
-                            "threshold": 0.025, "ratio": 8, "attack_ms": 20, "release_ms": 450},
+                    "mix": {"method": "ffmpeg_sidechaincompress", "voice_gain": 2.0,
+                            "music_gain": 0.22, "threshold": 0.025, "ratio": 8,
+                            "attack_ms": 20, "release_ms": 450,
+                            "loudness_normalization": {"method": "ffmpeg_loudnorm", "target_lufs": -16, "true_peak_db": -1.5, "lra": 11}},
                 } if background_music_fact else None),
                 "source_assets": [], "audio_asset": narration_fact,
                 "narration": ({
                     "script": narration_script, "language": "zh-HK",
+                    "loudness_normalization": {"method": "ffmpeg_loudnorm", "target_lufs": -16, "true_peak_db": -1.5, "lra": 11},
                     "audio_file": "narration/voiceover" + narration.suffix.casefold(),
                     **({"subtitles_file": "subtitles.srt"} if subtitles else {}),
                     **({"asr_status": asr_fact["status"]} if asr_fact else {}),
                     **({"background_music_file": background_music_member} if background_music_member else {}),
                 } if narration else None),
+                **({"narration_evidence_contract": narration_evidence_contract}
+                   if narration_evidence_contract is not None else {}),
                 "execution": {
-                    "arbitrary_code_executed": False, "network_access": False,
                     "local_tools_invoked": ["comfyui", "wan21"] + (["ffmpeg"] if narration else [])
                     + (["node", "remotion", "ffmpeg"] if motion_profile != "none" else []),
                     "ai_generation": "completed",
@@ -857,12 +1495,13 @@ class VideoProductBuilder:
             raise ValueError("narration_script must contain 1-20000 characters")
         if any(key in package_options for key in ("narration_path", "narration_script", "subtitle_path", "narration_asr")):
             raise ValueError("narration and ASR assets are managed by the Cantonese narration wrapper")
-        from muse.cantonese_tts import synthesize_cantonese
+        from muse.cantonese_tts import synthesize_cantonese_with_runtime
 
         with tempfile.TemporaryDirectory(prefix=".muse-cantonese-", dir=self.workspace) as temporary_dir:
             audio_path = Path(temporary_dir) / "voiceover.wav"
-            synthesis = synthesize_cantonese(
-                narration_script, audio_path, model_dir=model_dir, quality="duration_filter",
+            synthesis = synthesize_cantonese_with_runtime(
+                narration_script, audio_path, model_dir=model_dir,
+                packages_dir=self.workspace / ".muse-canto-tts-py314", quality="duration_filter",
             )
             asr_result = None
             subtitle_path = None
@@ -873,6 +1512,12 @@ class VideoProductBuilder:
                     audio_path, model_dir=asr_model_dir, output_srt=subtitle_path,
                     reference_text=narration_script,
                 )
+                if asr_result.get("status") != "passed":
+                    comparison = asr_result.get("comparison") or {}
+                    cer = comparison.get("cer")
+                    raise VideoProductError(
+                        f"Cantonese ASR CER gate failed (status={asr_result.get('status')}, cer={cer}); refusing to package narration"
+                    )
             packaged = self.package_generated_clip(
                 title, prompt, source_path, narration_path=audio_path,
                 narration_script=narration_script, subtitle_path=subtitle_path,
@@ -887,6 +1532,257 @@ class VideoProductBuilder:
         if asr_result is not None:
             packaged["narration_asr"] = asr_result
         return packaged
+
+    def package_approved_subtitle_revision(
+        self, initiative_id: str, version: str, review_document: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Create a new immutable product version with a human-approved MP4 subtitle track.
+
+        The existing product remains untouched. Technical QA and Creator publication
+        readiness remain independent gates; subtitle approval alone never ships a product.
+        """
+        from muse.initiative_engine import InitiativeStore
+        from muse.subtitle_review import parse_srt_cues, render_approved_subtitles
+
+        verified = self.verify_path(self.workspace / "data" / "products", initiative_id, version)
+        if not verified.get("validated") or not verified.get("subtitles") or not verified.get("narration_asr"):
+            raise VideoProductError("approved subtitle replacement requires a verified narrated video product")
+        if not isinstance(review_document, dict) or review_document.get("human_approved") is not True or review_document.get("review_status") != "approved":
+            raise VideoProductError("explicit human subtitle approval is required")
+        approved_by = review_document.get("approved_by")
+        approval_timestamp = review_document.get("approval_timestamp")
+        if not isinstance(approved_by, str) or not approved_by.strip() or not isinstance(approval_timestamp, str) or not approval_timestamp.strip():
+            raise VideoProductError("approved subtitle review identity and timestamp are required")
+
+        source_dir = (self.workspace / verified["relative_path"]).resolve(strict=True)
+        if source_dir.is_symlink() or source_dir.parent.is_symlink():
+            raise VideoProductError("source product path must not contain symlinks")
+        manifest_path = source_dir / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("subtitle_review") is not None:
+            raise VideoProductError("this product version already has an approved subtitle revision")
+        narration = manifest.get("narration")
+        audio_fact = manifest.get("audio_asset")
+        asr_fact = manifest.get("narration_asr")
+        review_asr = review_document.get("asr")
+        if (not isinstance(narration, dict) or not isinstance(audio_fact, dict)
+                or not isinstance(asr_fact, dict) or not isinstance(review_asr, dict)
+                or not isinstance(review_document.get("subtitle_file"), str)
+                or Path(review_document.get("subtitle_file", "")).name != review_document.get("subtitle_file")
+                or Path(review_document.get("subtitle_file", "")).suffix.casefold() != ".srt"
+                or review_document.get("reference_script") != narration.get("script")
+                or review_document.get("raw_asr_transcript") != asr_fact.get("transcript")
+                or review_asr.get("audio_sha256") != audio_fact.get("sha256")
+                or review_asr.get("audio_sha256") != asr_fact.get("audio_sha256")
+                or review_asr.get("model_repo") != asr_fact.get("model_repo")
+                or review_asr.get("model_revision") != asr_fact.get("model_revision")):
+            raise VideoProductError("subtitle review does not match this product's narration, ASR model and audio")
+        segments = review_document.get("segments")
+        if (not isinstance(segments, list) or not segments
+                or review_document.get("subtitle_cue_count") != len(segments)):
+            raise VideoProductError("approved subtitle review cue count is invalid")
+        approved_srt = render_approved_subtitles(review_document)
+        cues = parse_srt_cues(approved_srt)
+        if len(cues) != len(segments):
+            raise VideoProductError("approved subtitle SRT cue count does not match the review")
+        review_bytes = (json.dumps(review_document, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+        subtitle_bytes = approved_srt.encode("utf-8")
+        review_sha256 = hashlib.sha256(review_bytes).hexdigest()
+        subtitle_sha256 = hashlib.sha256(subtitle_bytes).hexdigest()
+
+        # Resolve the exact existing Creator Initiative from its product_built ledger event.
+        initiative_database = self.workspace / "data" / "initiatives" / "muse.sqlite3"
+        creator_matches: list[tuple[str, str | None]] = []
+        with InitiativeStore(initiative_database) as store:
+            for candidate in store.list(limit=200):
+                for event in store.list_events(initiative_id=candidate["id"], limit=200):
+                    details = event.get("details", {})
+                    artifact = details.get("artifact_metadata", {}) if isinstance(details, dict) else {}
+                    if (event.get("event_type") == "product_built"
+                            and details.get("relative_path") == verified["relative_path"].replace("\\", "/")
+                            and artifact.get("product_id") == initiative_id
+                            and artifact.get("version_id") == version):
+                        creator_matches.append((candidate["id"], artifact.get("evolution_cycle_id")))
+            if len(creator_matches) != 1:
+                raise VideoProductError("could not resolve one exact Creator Initiative for this product version")
+            creator_initiative_id, evolution_cycle_id = creator_matches[0]
+            creator = next((item for item in store.list(limit=200) if item["id"] == creator_initiative_id), None)
+            if creator is None or creator.get("status") in {"parked", "rejected", "shipped"}:
+                raise VideoProductError("Creator Initiative does not permit a subtitle revision")
+
+        inventory = discover_media_tools()
+        tools = {item.tool_id: item.executable for item in inventory.tools}
+        ffmpeg, ffprobe = tools.get("ffmpeg"), tools.get("ffprobe")
+        if not ffmpeg or not ffprobe:
+            raise VideoProductError("FFmpeg and FFprobe are required to mux approved subtitles")
+        products_root = self.workspace / "data" / "products"
+        initiative_root = products_root / initiative_id
+        if (products_root.is_symlink() or initiative_root.is_symlink()
+                or initiative_root.resolve().parent != products_root.resolve()):
+            raise VideoProductError("video product destination is unsafe")
+        staging = Path(tempfile.mkdtemp(prefix=".approved-subtitles-", dir=initiative_root))
+        try:
+            for name in ("README.md", "storyboard.json", "qa-report.json", "subtitles.srt"):
+                source = source_dir / name
+                if source.is_symlink() or not source.is_file() or source.resolve().parent != source_dir:
+                    raise VideoProductError("source product is missing a required safe artifact")
+                shutil.copyfile(source, staging / name)
+            source_video_copy = staging / "source-video.mp4"
+            source_video = source_dir / "video.mp4"
+            if source_video.is_symlink() or not source_video.is_file() or source_video.resolve().parent != source_dir:
+                raise VideoProductError("source product MP4 is missing or unsafe")
+            shutil.copyfile(source_video, source_video_copy)
+
+            source_probe = subprocess.run(
+                [ffprobe, "-v", "error", "-show_entries",
+                 "stream=codec_type,codec_name,width,height,avg_frame_rate",
+                 "-of", "json", str(source_video_copy)],
+                capture_output=True, text=True, timeout=60, check=False,
+            )
+            if source_probe.returncode != 0:
+                raise VideoProductError("could not inspect the source MP4 before subtitle mux")
+            try:
+                source_streams = json.loads(source_probe.stdout).get("streams", [])
+            except (json.JSONDecodeError, AttributeError) as exc:
+                raise VideoProductError("source MP4 stream metadata is invalid") from exc
+            source_video = next((item for item in source_streams if item.get("codec_type") == "video"), None)
+            source_audio = [item for item in source_streams if item.get("codec_type") == "audio"]
+            if not source_video or not source_audio:
+                raise VideoProductError("source MP4 must contain video and narration audio streams")
+
+            srt_path = staging / "approved-subtitles.srt"
+            srt_path.write_bytes(subtitle_bytes)
+            output_video = staging / "video.mp4"
+            mux = subprocess.run(
+                [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-n",
+                 "-i", str(source_video_copy), "-i", str(srt_path),
+                 "-map", "0:v:0", "-map", "0:a?", "-map", "1:0",
+                 "-c:v", "copy", "-c:a", "copy", "-c:s", "mov_text",
+                 "-metadata:s:s:0", "language=yue",
+                 "-metadata:s:s:0", "title=粵語人工校對字幕",
+                 "-movflags", "+faststart", str(output_video)],
+                capture_output=True, text=True, timeout=900, check=False,
+            )
+            if mux.returncode != 0 or not output_video.is_file() or output_video.stat().st_size <= 12:
+                raise VideoProductError("approved subtitle MP4 mux failed: " + str((mux.stderr or "")[-1000:]))
+            # The temporary input copy is distinct from the mux output after FFmpeg succeeds.
+            output_probe = subprocess.run(
+                [ffprobe, "-v", "error", "-show_entries",
+                 "stream=codec_type,codec_name,width,height,avg_frame_rate:stream_tags=language,title",
+                 "-of", "json", str(output_video)],
+                capture_output=True, text=True, timeout=60, check=False,
+            )
+            if output_probe.returncode != 0:
+                raise VideoProductError("could not inspect the remuxed MP4")
+            try:
+                output_streams = json.loads(output_probe.stdout).get("streams", [])
+            except (json.JSONDecodeError, AttributeError) as exc:
+                raise VideoProductError("remuxed MP4 stream metadata is invalid") from exc
+            output_video_stream = next((item for item in output_streams if item.get("codec_type") == "video"), None)
+            output_audio = [item for item in output_streams if item.get("codec_type") == "audio"]
+            subtitle_streams = [item for item in output_streams if item.get("codec_type") == "subtitle"]
+            if (not output_video_stream or not output_audio
+                    or any(output_video_stream.get(key) != source_video.get(key)
+                           for key in ("codec_name", "width", "height", "avg_frame_rate"))
+                    or not any(item.get("codec_name") == "mov_text"
+                               and item.get("tags", {}).get("language") == "yue"
+                               for item in subtitle_streams)):
+                raise VideoProductError("remuxed MP4 failed video/audio preservation or mov_text subtitle verification")
+            source_video_copy.unlink()
+            srt_path.unlink()
+
+            qa_report = _inspect_product_video(
+                output_video, ffprobe_path=ffprobe, ffmpeg_path=ffmpeg,
+                expected_width=source_video.get("width"), expected_height=source_video.get("height"),
+                expected_fps=None, require_audio=True,
+            )
+            quality_gate = _quality_gate_summary(qa_report)
+            video_metadata = _finalize_video_metadata(
+                manifest.get("video_metadata", {}), qa_report, output_video,
+            )
+            subtitle_fact = {
+                "name": "subtitles.srt", "bytes": len(subtitle_bytes), "sha256": subtitle_sha256,
+                "cue_count": len(cues), "review_status": "approved",
+            }
+            review_record = {
+                "schema_version": 1, "status": "approved", "human_approved": True,
+                "approved_by": approved_by.strip(), "approval_timestamp": approval_timestamp,
+                "review_sha256": review_sha256, "approved_srt_sha256": subtitle_sha256,
+                "video_sha256": _hash_file(output_video), "muxed_subtitle_codec": "mov_text",
+                "language": "yue",
+            }
+            (staging / "subtitles.srt").write_bytes(subtitle_bytes)
+            (staging / "subtitle-review.json").write_bytes(review_bytes)
+            (staging / "qa-report.json").write_bytes(_safe_json(qa_report))
+            storyboard = json.loads((staging / "storyboard.json").read_text(encoding="utf-8"))
+            storyboard_narration = storyboard.get("narration")
+            if not isinstance(storyboard_narration, dict):
+                raise VideoProductError("storyboard narration metadata is missing")
+            storyboard_narration["subtitles"] = subtitle_fact
+            storyboard_narration["subtitle_review"] = review_record
+            (staging / "storyboard.json").write_bytes(_safe_json(storyboard))
+            readme = (staging / "README.md").read_text(encoding="utf-8")
+            readme += (
+                "\n\n## 人工校对字幕\n\n"
+                f"- 审核者：{approved_by.strip()}\n"
+                f"- 审核时间：{approval_timestamp}\n"
+                "- MP4 已封装可切换的粤语 mov_text 字幕轨；原视频与音频流均采用 stream copy。\n"
+                "- 人工字幕批准不等于技术质检、版权/肖像、平台规则或正式发布审批。\n"
+            )
+            (staging / "README.md").write_text(readme, encoding="utf-8")
+
+            archive_path = source_dir / "product.zip"
+            if archive_path.is_symlink() or not archive_path.is_file():
+                raise VideoProductError("source product ZIP is missing or unsafe")
+            replaced = {"README.md", "storyboard.json", "qa-report.json", "video.mp4", "subtitles.srt", "subtitle-review.json"}
+            with zipfile.ZipFile(archive_path, "r") as original, zipfile.ZipFile(
+                staging / "product.zip", "w", compression=zipfile.ZIP_DEFLATED,
+            ) as updated:
+                for info in original.infolist():
+                    if info.filename not in replaced:
+                        updated.writestr(info, original.read(info.filename))
+                for name in ("README.md", "storyboard.json", "qa-report.json", "video.mp4", "subtitles.srt", "subtitle-review.json"):
+                    updated.write(staging / name, name)
+            if (staging / "product.zip").stat().st_size > _MAX_PRODUCT_BYTES:
+                raise VideoProductError("updated video product ZIP exceeds the 2 GiB limit")
+
+            files = dict(manifest.get("files", {}))
+            for name in ("README.md", "storyboard.json", "qa-report.json", "video.mp4", "subtitles.srt", "subtitle-review.json", "product.zip"):
+                files[name] = _hash_file(staging / name)
+            fingerprint = hashlib.sha256(_safe_json({
+                "source_version": version, "source_manifest_sha256": verified["manifest_sha256"],
+                "review_sha256": review_sha256, "approved_srt_sha256": subtitle_sha256,
+                "video_sha256": files["video.mp4"],
+            })).hexdigest()
+            new_version = fingerprint[:20]
+            manifest.update({
+                "version_id": new_version, "status": "testing",
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "input_sha256": fingerprint, "files": files,
+                "video_metadata": video_metadata, "quality_gate": quality_gate,
+                "subtitles": subtitle_fact, "subtitle_review": review_record,
+            })
+            manifest["video_metadata"]["output"] = "video.mp4"
+            (staging / "manifest.json").write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
+            )
+            target = initiative_root / new_version
+            if target.exists():
+                existing = self.verify_path(products_root, initiative_id, new_version)
+                shutil.rmtree(staging, ignore_errors=True)
+                return self._record_creator_artifact(
+                    existing, title=existing["title"], prompt="Human-approved Cantonese subtitle revision",
+                    creator_initiative_id=creator_initiative_id, evolution_cycle_id=evolution_cycle_id,
+                )
+            staging.rename(target)
+            result = self.verify_path(products_root, initiative_id, new_version)
+            return self._record_creator_artifact(
+                result, title=result["title"], prompt="Human-approved Cantonese subtitle revision",
+                creator_initiative_id=creator_initiative_id, evolution_cycle_id=evolution_cycle_id,
+            )
+        finally:
+            if staging.exists():
+                shutil.rmtree(staging, ignore_errors=True)
 
     def _publish_staging(
         self, staging: Path, products_root: Path, identity: str, version: str, *,
@@ -956,6 +1852,7 @@ class VideoProductBuilder:
                 "generation_metadata": generation_summary,
                 "validation": result["validation_summary"],
                 "quality_gate": result.get("quality_gate"),
+                **({"subtitle_review": result["subtitle_review"]} if result.get("subtitle_review") else {}),
                 "product_id": result["initiative_id"],
                 "version_id": result["version_id"],
             }
@@ -995,6 +1892,7 @@ class VideoProductBuilder:
                                 "generation_metadata": generation_summary,
                                 "validation": result["validation_summary"],
                                 "quality_gate": result.get("quality_gate"),
+                                **({"subtitle_review": result["subtitle_review"]} if result.get("subtitle_review") else {}),
                                 **({"evolution_cycle_id": evolution_cycle_id} if evolution_cycle_id else {}),
                             },
                             provenance=(result["relative_path"],),
@@ -1062,11 +1960,34 @@ class VideoProductBuilder:
         legacy_expected = {"README.md", "storyboard.json", "video.mp4", "product.zip"}
         qa_expected = legacy_expected | {"qa-report.json"}
         subtitle_expected = qa_expected | {"subtitles.srt"}
+        reviewed_subtitle_expected = subtitle_expected | {"subtitle-review.json"}
         files = manifest.get("files")
         if (manifest.get("product_kind") != "video_creator" or manifest.get("initiative_id") != initiative_id
                 or manifest.get("version_id") != version or not isinstance(files, dict)
-                or set(files) not in (legacy_expected, qa_expected, subtitle_expected)):
+                or set(files) not in (legacy_expected, qa_expected, subtitle_expected, reviewed_subtitle_expected)):
             raise VideoProductError("video product manifest is invalid")
+        scene_assets = manifest.get("scene_assets", [])
+        if not isinstance(scene_assets, list) or len(scene_assets) > 20:
+            raise VideoProductError("video scene asset manifest is invalid")
+        scene_asset_paths: dict[str, Path] = {}
+        for index, fact in enumerate(scene_assets, start=1):
+            if not isinstance(fact, dict):
+                raise VideoProductError("video scene asset metadata is invalid")
+            name, archive_path = fact.get("name"), fact.get("archive_path")
+            size, digest = fact.get("bytes"), fact.get("sha256")
+            if (fact.get("order") != index or not isinstance(name, str) or Path(name).name != name
+                    or not name.lower().endswith(".mp4") or archive_path != f"scenes/{name}"
+                    or isinstance(size, bool) or not isinstance(size, int) or size <= 0
+                    or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)
+                    or archive_path in scene_asset_paths):
+                raise VideoProductError("video scene asset provenance is invalid")
+            asset_path = directory / archive_path
+            scenes_dir = directory / "scenes"
+            if (scenes_dir.is_symlink() or asset_path.is_symlink() or not asset_path.is_file()
+                    or not asset_path.resolve().is_relative_to(directory.resolve())
+                    or asset_path.stat().st_size != size or _hash_file(asset_path) != digest):
+                raise VideoProductError("video scene asset is missing, unsafe or has changed")
+            scene_asset_paths[archive_path] = asset_path
 
         expected = set(files)
         resolved: dict[str, tuple[Path, bytes | None]] = {}
@@ -1093,6 +2014,34 @@ class VideoProductBuilder:
                 raise VideoProductError("video subtitle manifest does not match the SRT artifact")
         elif subtitle_fact is not None or narration_asr is not None:
             raise VideoProductError("video subtitle/ASR metadata exists without a subtitle artifact")
+
+        subtitle_review_fact = manifest.get("subtitle_review")
+        if "subtitle-review.json" in expected:
+            review_document = json.loads(resolved["subtitle-review.json"][0].read_text(encoding="utf-8"))
+            if (not isinstance(review_document, dict)
+                    or not isinstance(subtitle_review_fact, dict)
+                    or subtitle_review_fact.get("schema_version") != 1
+                    or subtitle_review_fact.get("status") != "approved"
+                    or not isinstance(subtitle_review_fact.get("approved_by"), str)
+                    or not subtitle_review_fact.get("approved_by", "").strip()
+                    or not isinstance(subtitle_review_fact.get("approval_timestamp"), str)
+                    or not subtitle_review_fact.get("approval_timestamp", "").strip()
+                    or subtitle_review_fact.get("human_approved") is not True
+                    or subtitle_review_fact.get("muxed_subtitle_codec") != "mov_text"
+                    or subtitle_review_fact.get("language") != "yue"
+                    or subtitle_review_fact.get("review_sha256") != files["subtitle-review.json"]
+                    or subtitle_review_fact.get("approved_srt_sha256") != files.get("subtitles.srt")
+                    or subtitle_review_fact.get("video_sha256") != files.get("video.mp4")
+                    or review_document.get("human_approved") is not True
+                    or review_document.get("review_status") != "approved"
+                    or review_document.get("approved_by") != subtitle_review_fact.get("approved_by")
+                    or review_document.get("approval_timestamp") != subtitle_review_fact.get("approval_timestamp")):
+                raise VideoProductError("approved subtitle review provenance does not match the product artifacts")
+            from muse.subtitle_review import render_approved_subtitles
+            if render_approved_subtitles(review_document).encode("utf-8") != resolved["subtitles.srt"][0].read_bytes():
+                raise VideoProductError("approved subtitle SRT does not match its human review document")
+        elif subtitle_review_fact is not None:
+            raise VideoProductError("subtitle review metadata exists without its review artifact")
 
         if narration_asr is not None:
             audio_fact = manifest.get("audio_asset")
@@ -1140,6 +2089,7 @@ class VideoProductBuilder:
             expected_members = expected - {"product.zip"}
             narration = manifest.get("narration")
             allowed_members = set(expected_members)
+            allowed_members.update(scene_asset_paths)
             narration_member = None
             background_music_member = None
             if background_music_fact is not None:
@@ -1190,6 +2140,11 @@ class VideoProductBuilder:
                 if (len(music_bytes) != background_music_fact.get("bytes")
                         or hashlib.sha256(music_bytes).hexdigest() != background_music_fact.get("sha256")):
                     raise VideoProductError("video background music integrity check failed")
+            for archive_path, asset_path in scene_asset_paths.items():
+                scene_bytes = archive.read(archive_path)
+                if (len(scene_bytes) != asset_path.stat().st_size
+                        or hashlib.sha256(scene_bytes).hexdigest() != _hash_file(asset_path)):
+                    raise VideoProductError("video scene asset ZIP integrity check failed")
             if narration_member:
                 audio_fact = manifest.get("audio_asset")
                 if not isinstance(audio_fact, dict):
@@ -1206,6 +2161,7 @@ class VideoProductBuilder:
             "status": manifest.get("status", "testing"), "video_metadata": manifest.get("video_metadata", {}),
             "quality_gate": quality_gate, "source_assets": manifest.get("source_assets", []),
             "subtitles": subtitle_fact, "narration_asr": narration_asr,
+            "subtitle_review": subtitle_review_fact,
             "background_music": background_music_fact,
             "package_sha256": files["product.zip"], "mp4_sha256": files["video.mp4"],
             "manifest_sha256": _hash_file(manifest_path),

@@ -108,5 +108,23 @@ class RemotionMotionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "hex color"):
             _validate_shot_directives([{"accent": "gold"}], 1)
 
+    def test_scene_timing_records_include_crossfade_overlap_offsets(self):
+        from muse.remotion_motion import _scene_timing_records
+
+        records = _scene_timing_records(
+            [{"durationInFrames": 120}, {"durationInFrames": 90}, {"durationInFrames": 60}],
+            transition_frames=12, fps=30,
+        )
+        self.assertEqual(
+            [(item["start_frame"], item["end_frame"]) for item in records],
+            [(0, 120), (108, 198), (186, 246)],
+        )
+        self.assertEqual(records[0]["timeline_start_seconds"], 0.0)
+        self.assertEqual(records[1]["timeline_start_seconds"], 3.6)
+        self.assertEqual(records[1]["timeline_end_seconds"], 6.6)
+        self.assertEqual(records[1]["transition_in_seconds"], 0.4)
+        self.assertEqual(records[1]["transition_out_seconds"], 0.4)
+        self.assertEqual(records[-1]["timeline_end_seconds"], 8.2)
+
 if __name__ == "__main__":
     unittest.main()

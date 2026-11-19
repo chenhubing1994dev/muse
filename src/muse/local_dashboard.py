@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Sequence
 from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import ProxyHandler, Request, build_opener
 
 from muse.status_api import create_status_server
 
@@ -56,6 +56,13 @@ def _local_ipv4_addresses() -> list[str]:
 class LocalDashboardServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = False
+
+    def handle_error(self, request, client_address):
+        """Keep normal browser disconnects from producing noisy server tracebacks."""
+        _exc_type, exc, _traceback = sys.exc_info()
+        if isinstance(exc, (BrokenPipeError, ConnectionAbortedError, ConnectionResetError)):
+            return
+        super().handle_error(request, client_address)
 
     def __init__(self, address, handler, *, api_server, bearer, dist_dir,
                  lan_mode=False, pairing_code=None):
@@ -230,7 +237,9 @@ def create_local_dashboard_server(
             )
             streaming_started = False
             try:
-                response = urlopen(request, timeout=8)
+                # This upstream is always the local status API; never send it through
+                # an environment-configured corporate/HTTP proxy.
+                response = build_opener(ProxyHandler({})).open(request, timeout=8)
                 status = response.status
                 response_headers = response.headers
                 if binary_product_route and status == 200:
@@ -327,6 +336,12 @@ def create_local_dashboard_server(
                 body = ("window.__MUSE_LOCAL_CONNECTION__ = Object.freeze("
                         + json.dumps(config, separators=(",", ":")) + ");").encode("utf-8")
                 self._send_bytes(200, body, "application/javascript; charset=utf-8")
+                return
+            if path == "/favicon.ico":
+                self.send_response(204)
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
                 return
             if path == "/":
                 index = (self.server.dist_dir / "index.html").read_text(encoding="utf-8")

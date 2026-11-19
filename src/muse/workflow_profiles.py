@@ -61,7 +61,7 @@ class WorkflowProfile:
     def team(cls, *, max_attempts: int = 2, max_runtime_seconds: int = 1800) -> "WorkflowProfile":
         return cls(
             name="team",
-            stages=("plan", "architect", "critic", "execute", "verify", "fix", "complete"),
+            stages=("plan", "plan_ready", "architect", "critic", "execute", "verify", "fix", "complete"),
             verification=VerificationPolicy(max_attempts, max_runtime_seconds),
         )
 
@@ -94,6 +94,101 @@ class WorkflowProfile:
         )
 
 
+@dataclass(frozen=True)
+class WorkflowContract:
+    """Versioned statement of the outcome a Commander workflow must achieve."""
+
+    goal: str
+    desired_outcome: str
+    acceptance_criteria: tuple[str, ...]
+    scope: tuple[str, ...] = ()
+    exclusions: tuple[str, ...] = ()
+    source_precedence: tuple[str, ...] = ()
+    escalation_conditions: tuple[str, ...] = ()
+    feedback_metrics: tuple[str, ...] = ()
+    schema_version: int = 1
+
+    def __post_init__(self) -> None:
+        if (isinstance(self.schema_version, bool) or not isinstance(self.schema_version, int)
+                or self.schema_version != 1):
+            raise ValueError(f"unsupported workflow contract schema_version: {self.schema_version}")
+        for field_name, value, limit in (
+            ("goal", self.goal, 1200),
+            ("desired_outcome", self.desired_outcome, 1200),
+        ):
+            if not isinstance(value, str) or not value.strip() or len(value) > limit:
+                raise ValueError(f"{field_name} must be non-empty text of at most {limit} characters")
+        for field_name, values, maximum in (
+            ("acceptance_criteria", self.acceptance_criteria, 32),
+            ("scope", self.scope, 8),
+            ("exclusions", self.exclusions, 8),
+            ("source_precedence", self.source_precedence, 8),
+            ("escalation_conditions", self.escalation_conditions, 8),
+            ("feedback_metrics", self.feedback_metrics, 8),
+        ):
+            if not isinstance(values, tuple):
+                raise ValueError(f"{field_name} must be a tuple")
+            if field_name == "acceptance_criteria" and not 1 <= len(values) <= maximum:
+                raise ValueError("acceptance_criteria must contain 1-32 items")
+            if len(values) > maximum or any(
+                not isinstance(item, str) or not item.strip() or len(item) > 500 for item in values
+            ):
+                raise ValueError(f"{field_name} items must be non-empty text of at most 500 characters")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "goal": self.goal,
+            "desired_outcome": self.desired_outcome,
+            "acceptance_criteria": list(self.acceptance_criteria),
+            "scope": list(self.scope),
+            "exclusions": list(self.exclusions),
+            "source_precedence": list(self.source_precedence),
+            "escalation_conditions": list(self.escalation_conditions),
+            "feedback_metrics": list(self.feedback_metrics),
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "WorkflowContract":
+        fields = {
+            "schema_version", "goal", "desired_outcome", "acceptance_criteria",
+            "scope", "exclusions", "source_precedence", "escalation_conditions",
+            "feedback_metrics",
+        }
+        if not isinstance(value, Mapping) or set(value) != fields:
+            raise ValueError("workflow contract has an invalid shape")
+        collections = fields - {"schema_version", "goal", "desired_outcome"}
+        if any(not isinstance(value[name], list) for name in collections):
+            raise ValueError("workflow contract collections must be serialized as lists")
+        return cls(
+            schema_version=value["schema_version"],
+            goal=value["goal"],
+            desired_outcome=value["desired_outcome"],
+            acceptance_criteria=tuple(value["acceptance_criteria"]),
+            scope=tuple(value["scope"]),
+            exclusions=tuple(value["exclusions"]),
+            source_precedence=tuple(value["source_precedence"]),
+            escalation_conditions=tuple(value["escalation_conditions"]),
+            feedback_metrics=tuple(value["feedback_metrics"]),
+        )
+
+    @classmethod
+    def from_plan(cls, plan: CommanderPlan) -> "WorkflowContract":
+        """Create a conservative goal contract from an already validated Commander DAG."""
+        if not isinstance(plan, CommanderPlan):
+            raise TypeError("plan must be a validated CommanderPlan")
+        criteria = tuple(f"{step.step_id}: {step.objective}"[:500] for step in plan.steps)
+        return cls(
+            goal=plan.goal,
+            desired_outcome=(
+                "All declared Commander steps are completed with evidence, and the "
+                "independent Reviewer verifies the requested outcome."
+            ),
+            acceptance_criteria=criteria,
+            scope=(plan.goal[:500],),
+        )
+
+
 class WorkflowController:
     """Ticket-backed lifecycle controls; TaskQueue remains the only durable store."""
 
@@ -105,12 +200,16 @@ class WorkflowController:
     def bind_plan(
         self, plan: CommanderPlan, ticket_ids: Mapping[str, str], *,
         profile: WorkflowProfile | None = None, actor: str = "commander",
+        contract: WorkflowContract | None = None,
     ) -> str:
         if not isinstance(plan, CommanderPlan):
             raise TypeError("plan must be a validated CommanderPlan")
         profile = profile or WorkflowProfile.team()
         if not isinstance(profile, WorkflowProfile):
             raise TypeError("profile must be a WorkflowProfile")
+        contract = contract or WorkflowContract.from_plan(plan)
+        if not isinstance(contract, WorkflowContract):
+            raise TypeError("contract must be a WorkflowContract")
         if not isinstance(ticket_ids, Mapping) or set(ticket_ids) != {step.step_id for step in plan.steps}:
             raise ValueError("ticket_ids must map every Commander step exactly once")
         if any(not isinstance(value, str) or not value.strip() or len(value) > 128
@@ -136,6 +235,7 @@ class WorkflowController:
                 "payload": {
                     "workflow_id": plan.plan_id,
                     "profile": profile.to_dict(),
+                    "contract": contract.to_dict(),
                     "commander_plan_id": plan.plan_id,
                     "step_id": step.step_id,
                     "depends_on_ticket_ids": [ticket_ids[item] for item in step.depends_on],
@@ -147,6 +247,7 @@ class WorkflowController:
     def bind_plan_to_ticket(
         self, plan: CommanderPlan, ticket_id: str, *, worker_id: str,
         profile: WorkflowProfile | None = None,
+        contract: WorkflowContract | None = None,
     ) -> str:
         """Bind the existing Commander DAG to its already-claimed parent Ticket."""
         if not isinstance(plan, CommanderPlan):
@@ -154,6 +255,9 @@ class WorkflowController:
         profile = profile or WorkflowProfile.team()
         if not isinstance(profile, WorkflowProfile):
             raise TypeError("profile must be a WorkflowProfile")
+        contract = contract or WorkflowContract.from_plan(plan)
+        if not isinstance(contract, WorkflowContract):
+            raise TypeError("contract must be a WorkflowContract")
         task = self._require_running_lease(ticket_id, worker_id)
         if self.queue.workflow_revision(ticket_id) != 0:
             raise ValueError("Ticket is already bound to a workflow")
@@ -161,6 +265,7 @@ class WorkflowController:
             "workflow_id": plan.plan_id,
             "commander_plan_id": plan.plan_id,
             "profile": profile.to_dict(),
+            "contract": contract.to_dict(),
             "plan_source": plan.source,
             "step_ids": [step.step_id for step in plan.steps],
             "steps": [
@@ -193,6 +298,8 @@ class WorkflowController:
             "ticket_id": ticket_id,
             "workflow_id": bound["payload"]["workflow_id"],
             "profile": bound["payload"]["profile"],
+            "contract": bound["payload"].get("contract"),
+            "outcome_verification": terminal_payload.get("outcome_verification"),
             "status": status,
             "revision": self.queue.workflow_revision(ticket_id),
             "stage": stage,
@@ -295,13 +402,128 @@ class WorkflowController:
 
     def complete(
         self, ticket_id: str, *, worker_id: str, expected_revision: int,
-        evidence_refs: tuple[str, ...] = (),
+        evidence_refs: tuple[str, ...], outcome_verified: bool,
+        criteria_evidence: Mapping[str, tuple[str, ...]],
     ) -> dict[str, Any]:
+        if outcome_verified is not True:
+            raise ValueError("workflow completion requires an explicit verified outcome")
+        if not isinstance(evidence_refs, tuple) or not 1 <= len(evidence_refs) <= 32 or any(
+            not isinstance(ref, str) or not ref.strip() or len(ref) > 240 for ref in evidence_refs
+        ):
+            raise ValueError("evidence_refs must contain 1-32 bounded evidence references")
+        events = self.queue.workflow_events(ticket_id)
+        bound = next((event for event in events if event["event_type"] == "workflow.bound"), None)
+        if bound is None or "contract" not in bound["payload"]:
+            raise ValueError("workflow completion requires a persisted outcome contract")
+        contract = WorkflowContract.from_dict(bound["payload"]["contract"])
+        if not isinstance(criteria_evidence, Mapping) or set(criteria_evidence) != set(contract.acceptance_criteria):
+            raise ValueError("criteria_evidence must cover every acceptance criterion exactly once")
+
+        bound_payload = bound["payload"]
+        plan_id = bound_payload.get("commander_plan_id")
+        declared_steps = bound_payload.get("steps")
+        if not isinstance(plan_id, str) or not plan_id or not isinstance(declared_steps, list) or not declared_steps:
+            raise ValueError("workflow completion requires a bound Commander plan and declared steps")
+        step_ids = []
+        for step in declared_steps:
+            if not isinstance(step, Mapping) or not isinstance(step.get("step_id"), str) or not step["step_id"]:
+                raise ValueError("bound Commander steps are invalid")
+            step_ids.append(step["step_id"])
+        if len(set(step_ids)) != len(step_ids):
+            raise ValueError("bound Commander step IDs must be unique")
+
+        ticket_events = self.queue.events(ticket_id, limit=500)
+        plan_approved = any(
+            event["event_type"] == "commander.plan_consensus"
+            and event["actor"] == "commander"
+            and event["payload"].get("plan_id") == plan_id
+            and event["payload"].get("approved") is True
+            for event in ticket_events
+        )
+        if not plan_approved:
+            raise ValueError("workflow completion requires an approved Commander plan consensus event")
+
+        run_refs = [ref for ref in evidence_refs if ref.startswith("orchestration-run:")]
+        if len(run_refs) != 1 or not run_refs[0].partition(":")[2]:
+            raise ValueError("workflow completion requires exactly one orchestration run reference")
+        run_id = run_refs[0].partition(":")[2]
+        run_finish_events = [
+            event for event in ticket_events
+            if event["event_type"] == "commander.execution_finished"
+            and event["payload"].get("plan_id") == plan_id
+        ]
+        latest_run_finished = run_finish_events[-1] if run_finish_events else None
+        run_finished = bool(
+            latest_run_finished
+            and latest_run_finished["actor"] == "commander"
+            and latest_run_finished["payload"].get("orchestration_run_id") == run_id
+            and latest_run_finished["payload"].get("status") == "succeeded"
+            and latest_run_finished["payload"].get("orchestration_status") == "succeeded"
+            and latest_run_finished["payload"].get("review_approved") is True
+        )
+        if not run_finished:
+            raise ValueError("workflow completion requires a successful run with independent Reviewer approval")
+
+        submitted_steps = {
+            event["payload"].get("step_id")
+            for event in ticket_events
+            if event["event_type"] == "report.step_submitted"
+            and event["actor"] == "ruflo"
+            and isinstance(event["payload"].get("step_id"), str)
+            and isinstance(event["payload"].get("output_chars"), int)
+            and not isinstance(event["payload"].get("output_chars"), bool)
+            and event["payload"]["output_chars"] > 0
+        }
+        if not set(step_ids).issubset(submitted_steps):
+            raise ValueError("workflow completion requires a non-empty submitted output for every Commander step")
+
+        required_refs = {run_refs[0], "step:independent_review"}
+        required_refs.update(f"step:{step_id}" for step_id in step_ids)
+        if set(evidence_refs) != required_refs:
+            raise ValueError("evidence_refs must exactly identify the verified run, all steps and independent review")
+
+        normalized_evidence: dict[str, list[str]] = {}
+        for criterion in contract.acceptance_criteria:
+            refs = criteria_evidence[criterion]
+            if not isinstance(refs, tuple) or not 1 <= len(refs) <= 16 or any(
+                not isinstance(ref, str) or not ref.strip() or len(ref) > 240 for ref in refs
+            ):
+                raise ValueError("each acceptance criterion requires 1-16 bounded evidence references")
+            if not set(refs).issubset(required_refs):
+                raise ValueError("criterion evidence must reference verified Commander evidence")
+            criterion_prefix = criterion.partition(":")[0]
+            relevant_step = criterion_prefix if criterion_prefix in step_ids else None
+            if run_refs[0] not in refs or "step:independent_review" not in refs:
+                raise ValueError("each acceptance criterion requires run and independent review evidence")
+            if relevant_step is not None and f"step:{relevant_step}" not in refs:
+                raise ValueError("criterion evidence must include its declared Commander step")
+            if relevant_step is None and not any(f"step:{step_id}" in refs for step_id in step_ids):
+                raise ValueError("criterion evidence must include at least one submitted Commander step")
+            normalized_evidence[criterion] = list(refs)
+
+        verification = {
+            "verified": True,
+            "verified_at": datetime.now(timezone.utc).isoformat(),
+            "criteria_evidence": normalized_evidence,
+            "evidence_validation": {
+                "source": "commander_event_ledger",
+                "plan_id": plan_id,
+                "orchestration_run_id": run_id,
+                "verified_steps": step_ids,
+                "independent_review_approved": True,
+            },
+        }
         return self.queue.record_workflow_event(
             ticket_id, "workflow.completed", actor=worker_id,
             expected_revision=expected_revision, expected_worker_id=worker_id,
-            payload={"evidence_refs": list(evidence_refs), "next_action": None, "stop_reason": None},
+            payload={
+                "evidence_refs": list(evidence_refs),
+                "outcome_verification": verification,
+                "next_action": None,
+                "stop_reason": None,
+            },
         )
+
 
     def fail(
         self, ticket_id: str, *, worker_id: str, expected_revision: int,

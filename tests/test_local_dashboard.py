@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 from http.cookiejar import CookieJar
 from pathlib import Path
 from urllib.error import HTTPError
-from urllib.request import HTTPCookieProcessor, Request, build_opener
+from urllib.request import HTTPCookieProcessor, ProxyHandler, Request, build_opener
 from muse.local_dashboard import create_local_dashboard_server, main as dashboard_main
 from muse.status_api import create_status_server
 
@@ -51,6 +51,17 @@ class LocalDashboardTests(unittest.TestCase):
             thread.join(timeout=2)
         self.temp.cleanup()
 
+    def test_expected_browser_disconnects_do_not_emit_server_tracebacks(self):
+        import io
+        from unittest.mock import patch
+
+        for error_type in (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+            error = error_type("browser closed the connection")
+            with (self.subTest(error=error_type.__name__),
+                  patch("muse.local_dashboard.sys.exc_info", return_value=(error_type, error, None)),
+                  patch("sys.stderr", new_callable=io.StringIO) as stderr):
+                self.dashboard.handle_error(None, ("127.0.0.1", 12345))
+                self.assertEqual(stderr.getvalue(), "")
     def test_root_bootstraps_ephemeral_connection_with_security_headers(self):
         with self.opener.open(self.base + "/", timeout=3) as response:
             html = response.read().decode("utf-8")
@@ -105,6 +116,11 @@ class LocalDashboardTests(unittest.TestCase):
         self.assertEqual(denied.exception.code, 421)
         denied.exception.close()
 
+    def test_browser_favicon_probe_returns_empty_success(self):
+        with self.opener.open(self.base + "/favicon.ico", timeout=3) as response:
+            self.assertEqual(response.status, 204)
+            self.assertEqual(response.read(), b"")
+
     def test_static_assets_have_security_headers(self):
         with self.opener.open(self.base + "/assets/app.js", timeout=3) as response:
             self.assertEqual(response.read(), b"console.log('Muse');")
@@ -144,7 +160,9 @@ class LocalDashboardTests(unittest.TestCase):
             self.base + "/api/v1/products/" + "a" * 32 + "/" + "b" * 20 + "/video",
             headers={"Sec-Fetch-Site": "same-origin"},
         )
-        with patch("muse.local_dashboard.urlopen", return_value=fake):
+        upstream_opener = MagicMock()
+        upstream_opener.open.return_value = fake
+        with patch("muse.local_dashboard.build_opener", return_value=upstream_opener):
             with self.opener.open(request, timeout=10) as response:
                 received = response.read()
                 self.assertEqual(response.status, 200)
@@ -167,7 +185,9 @@ class LocalDashboardTests(unittest.TestCase):
             # The route-selected first interface is the local virtual switch in CI,
             # which permits self-connect even before firewall setup.
             lan_base = lan_dashboard.lan_urls[0].rstrip("/")
-            remote = build_opener(HTTPCookieProcessor(CookieJar()))
+            # This is a direct local-network integration test; do not route its private
+            # interface URL through the host's configured corporate HTTP proxy.
+            remote = build_opener(ProxyHandler({}), HTTPCookieProcessor(CookieJar()))
             with remote.open(lan_base + "/", timeout=3) as response:
                 login = response.read().decode("utf-8")
             self.assertIn("Muse 局域网设备配对", login)

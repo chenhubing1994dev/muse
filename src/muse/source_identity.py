@@ -215,6 +215,51 @@ def extract_html_source_metadata(html: str, page_url: str) -> dict[str, Any]:
     }
 
 
+def find_exact_content_matches(
+    sources: list[dict[str, Any]], *,
+    existing_sources: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Find exact fetched-text hash matches; exclude truncated snapshots and never assert independence."""
+    def prepare(records: list[dict[str, Any]], limit: int) -> list[dict[str, str]]:
+        prepared: list[dict[str, str]] = []
+        for source in records[:limit]:
+            metadata = source.get("metadata") or source.get("source_metadata") or {}
+            if not isinstance(metadata, dict):
+                continue
+            digest = metadata.get("content_hash") or metadata.get("sha256")
+            truncated = metadata.get("truncated", False)
+            node_id = str(source.get("source_node_id") or source.get("id") or "")
+            url = source.get("url") or source.get("external_ref")
+            if (not node_id or not isinstance(url, str) or truncated is True
+                    or not isinstance(digest, str) or not re.fullmatch(r"[a-f0-9]{64}", digest)):
+                continue
+            try:
+                normalized_url = normalize_source_url(url)
+            except (ValueError, TypeError):
+                continue
+            prepared.append({"id": node_id, "url": normalized_url, "sha256": digest})
+        return prepared
+
+    current = prepare(sources, 32)
+    historical = prepare(existing_sources or [], 500)
+    matches: dict[tuple[str, str], dict[str, Any]] = {}
+    for left in current:
+        for right in [*current, *historical]:
+            if left["id"] == right["id"] or left["sha256"] != right["sha256"]:
+                continue
+            pair = tuple(sorted((left["id"], right["id"])))
+            matches[pair] = {
+                "source_node_id": pair[0],
+                "related_source_node_id": pair[1],
+                "sha256": left["sha256"],
+                "source_urls": sorted({left["url"], right["url"]}),
+                "match_type": "exact_fetched_text_hash",
+                "candidate_only": True,
+                "independence_is_not_assessed": True,
+            }
+    return list(matches.values())
+
+
 def build_source_identity_candidates(
     sources: list[dict[str, Any]], *,
     existing_sources: list[dict[str, Any]] | None = None,
@@ -267,7 +312,10 @@ def build_source_identity_candidates(
     current = prepare(sources, 32)
     historical = prepare(existing_sources or [], 500)
 
-    def add(left: dict[str, Any], right: dict[str, Any], kind: str, confidence: float, basis: str) -> None:
+    def add(
+        left: dict[str, Any], right: dict[str, Any], kind: str,
+        confidence: float, basis: str, matched_values: dict[str, Any],
+    ) -> None:
         if left["id"] == right["id"]:
             return
         if kind in {"canonical_equivalent", "same_publisher", "same_author"} and right["id"] < left["id"]:
@@ -280,6 +328,7 @@ def build_source_identity_candidates(
             "confidence": confidence,
             "evidence": {
                 "rule": basis,
+                "matched_values": matched_values,
                 "candidate_only": True,
                 "normalization": "source_url_v1",
                 "identity_is_not_ownership_proof": True,
@@ -290,19 +339,46 @@ def build_source_identity_candidates(
         if left["id"] == right["id"]:
             return
         if left["canonical"] == right["canonical"]:
-            add(left, right, "canonical_equivalent", 0.95, "canonical_url_match")
+            add(left, right, "canonical_equivalent", 0.95, "canonical_url_match", {
+                "normalized_canonical_url": left["canonical"],
+            })
         if left["publisher"] and left["publisher"] == right["publisher"]:
-            add(left, right, "same_publisher", 0.8, "exact_publisher_name_match")
-        if left["authors"] & right["authors"]:
-            add(left, right, "same_author", 0.7, "exact_author_name_overlap")
-        if right["url"] in left["citations"] or right["canonical"] in left["citations"]:
-            add(left, right, "cites", 0.9, "citation_url_matches_source")
-        if right["url"] in left["based_on"] or right["canonical"] in left["based_on"]:
-            add(left, right, "derived_from", 0.9, "isBasedOn_url_matches_source")
-        if left["url"] in right["citations"] or left["canonical"] in right["citations"]:
-            add(right, left, "cites", 0.9, "citation_url_matches_source")
-        if left["url"] in right["based_on"] or left["canonical"] in right["based_on"]:
-            add(right, left, "derived_from", 0.9, "isBasedOn_url_matches_source")
+            add(left, right, "same_publisher", 0.8, "exact_publisher_name_match", {
+                "normalized_publisher_name": left["publisher"],
+            })
+        matched_authors = sorted(left["authors"] & right["authors"])
+        if matched_authors:
+            add(left, right, "same_author", 0.7, "exact_author_name_overlap", {
+                "matched_author_names": matched_authors[:12],
+            })
+        citation_matches = sorted(
+            {right["url"], right["canonical"]} & left["citations"]
+        )
+        if citation_matches:
+            add(left, right, "cites", 0.9, "citation_url_matches_source", {
+                "matched_reference_urls": citation_matches,
+            })
+        based_on_matches = sorted(
+            {right["url"], right["canonical"]} & left["based_on"]
+        )
+        if based_on_matches:
+            add(left, right, "derived_from", 0.9, "isBasedOn_url_matches_source", {
+                "matched_reference_urls": based_on_matches,
+            })
+        reverse_citation_matches = sorted(
+            {left["url"], left["canonical"]} & right["citations"]
+        )
+        if reverse_citation_matches:
+            add(right, left, "cites", 0.9, "citation_url_matches_source", {
+                "matched_reference_urls": reverse_citation_matches,
+            })
+        reverse_based_on_matches = sorted(
+            {left["url"], left["canonical"]} & right["based_on"]
+        )
+        if reverse_based_on_matches:
+            add(right, left, "derived_from", 0.9, "isBasedOn_url_matches_source", {
+                "matched_reference_urls": reverse_based_on_matches,
+            })
 
     for index, left in enumerate(current):
         for right in current[index + 1:]:

@@ -88,12 +88,13 @@ class WorkflowProfileTests(unittest.TestCase):
                 ticket = ids["research"]
                 queue.claim_next(worker_id="worker-a", task_id=ticket)
                 result = controller.record_stage(
-                    ticket, worker_id="worker-a", stage="plan", attempt=1,
+                    ticket, worker_id="worker-a", stage="plan_ready", attempt=1,
                     expected_revision=1, checkpoint={"cursor": "phase-1"},
                     evidence_refs=("test://evidence/1",), next_action="architect",
                 )
                 self.assertEqual(result["event_type"], "workflow.stage_changed")
                 self.assertEqual(controller.snapshot(ticket)["checkpoint"], {"cursor": "phase-1"})
+                self.assertEqual(controller.snapshot(ticket)["stage"], "plan_ready")
                 with self.assertRaises(PermissionError):
                     controller.record_stage(
                         ticket, worker_id="worker-b", stage="verify", attempt=1,
@@ -251,6 +252,243 @@ class WorkflowProfileTests(unittest.TestCase):
                      if event["event_type"] == "workflow.stage_changed"],
                     ["verify"],
                 )
+
+    def test_workflow_contract_is_versioned_and_round_trips(self):
+        from muse.workflow_profiles import WorkflowContract
+
+        contract = WorkflowContract(
+            goal="Publish a verified research brief",
+            desired_outcome="A cited brief is independently reviewed",
+            acceptance_criteria=("Every material claim has a source",),
+        )
+        self.assertEqual(WorkflowContract.from_dict(contract.to_dict()), contract)
+        with self.assertRaises(ValueError):
+            WorkflowContract(goal=" ", desired_outcome="Done", acceptance_criteria=("Check",))
+        with self.assertRaises(ValueError):
+            WorkflowContract(goal="Goal", desired_outcome="Done", acceptance_criteria=())
+        with self.assertRaises(ValueError):
+            WorkflowContract.from_dict({**contract.to_dict(), "unexpected": True})
+        maximum_contract = WorkflowContract(
+            goal="A goal", desired_outcome="A verified result",
+            acceptance_criteria=tuple(f"Criterion {index}" for index in range(32)),
+        )
+        self.assertEqual(len(maximum_contract.acceptance_criteria), 32)
+        with self.assertRaises(ValueError):
+            WorkflowContract(
+                goal="A goal", desired_outcome="A verified result",
+                acceptance_criteria=tuple(f"Criterion {index}" for index in range(33)),
+            )
+
+    def test_bind_plan_persists_contract_in_existing_ticket_event_log(self):
+        from muse.workflow_profiles import WorkflowContract
+
+        with tempfile.TemporaryDirectory() as directory:
+            with TaskQueue(Path(directory) / "tasks.sqlite3") as queue:
+                plan = CommanderPlanner().plan("build a research feature")
+                ids = {step.step_id: queue.enqueue(step.step_id, {})["id"] for step in plan.steps}
+                contract = WorkflowContract(
+                    goal=plan.goal,
+                    desired_outcome="The requested feature passes independent verification",
+                    acceptance_criteria=("Implementation tests pass", "Reviewer records approval"),
+                    exclusions=("No external publication",),
+                )
+                controller = WorkflowController(queue)
+                controller.bind_plan(plan, ids, contract=contract)
+                snapshot = controller.snapshot(ids["research"])
+                self.assertEqual(snapshot["contract"], contract.to_dict())
+                self.assertEqual(queue.workflow_events(ids["research"])[0]["payload"]["contract"], contract.to_dict())
+                self.assertEqual(queue.workflow_revision(ids["research"]), 1)
+
+    def test_bind_plan_derives_goal_contract_when_none_is_supplied(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with TaskQueue(Path(directory) / "tasks.sqlite3") as queue:
+                plan = CommanderPlanner().plan("build a research feature")
+                ids = {step.step_id: queue.enqueue(step.step_id, {})["id"] for step in plan.steps}
+                controller = WorkflowController(queue)
+                controller.bind_plan(plan, ids)
+                contract = controller.snapshot(ids["research"])["contract"]
+                self.assertEqual(contract["goal"], plan.goal)
+                self.assertTrue(contract["acceptance_criteria"])
+                self.assertIn("independent Reviewer", contract["desired_outcome"])
+
+    def test_bind_plan_to_ticket_persists_contract_under_existing_worker_lease(self):
+        from muse.workflow_profiles import WorkflowContract
+
+        with tempfile.TemporaryDirectory() as directory:
+            with TaskQueue(Path(directory) / "tasks.sqlite3") as queue:
+                plan = CommanderPlanner().plan("build a research feature")
+                ticket = queue.enqueue("Commander workflow", {})["id"]
+                queue.claim_next(worker_id="worker-a", task_id=ticket)
+                contract = WorkflowContract(
+                    goal=plan.goal,
+                    desired_outcome="The requested work is verified",
+                    acceptance_criteria=("All plan steps have evidence",),
+                )
+                controller = WorkflowController(queue)
+                controller.bind_plan_to_ticket(plan, ticket, worker_id="worker-a", contract=contract)
+                self.assertEqual(controller.snapshot(ticket)["contract"], contract.to_dict())
+
+    def test_workflow_completion_rejects_fabricated_commander_evidence(self):
+        from muse.workflow_profiles import WorkflowContract
+
+        with tempfile.TemporaryDirectory() as directory:
+            with TaskQueue(Path(directory) / "tasks.sqlite3") as queue:
+                plan = CommanderPlanner().plan("build a research feature")
+                ticket = queue.enqueue("Commander workflow", {})["id"]
+                queue.claim_next(worker_id="worker-a", task_id=ticket)
+                step_id = plan.steps[0].step_id
+                criterion = f"{step_id}: tests pass"
+                contract = WorkflowContract(
+                    goal=plan.goal,
+                    desired_outcome="All declared steps ran and the independent Reviewer approved",
+                    acceptance_criteria=(criterion,),
+                )
+                controller = WorkflowController(queue)
+                controller.bind_plan_to_ticket(plan, ticket, worker_id="worker-a", contract=contract)
+
+                # A caller-supplied boolean and plausible-looking strings are not
+                # proof unless matching Commander events exist in this Ticket log.
+                with self.assertRaises(ValueError):
+                    controller.complete(
+                        ticket, worker_id="worker-a", expected_revision=1,
+                        evidence_refs=(
+                            "orchestration-run:forged-run",
+                            f"step:{step_id}",
+                            "step:independent_review",
+                        ),
+                        outcome_verified=True,
+                        criteria_evidence={
+                            criterion: (
+                                "orchestration-run:forged-run",
+                                f"step:{step_id}",
+                                "step:independent_review",
+                            ),
+                        },
+                    )
+
+    def test_workflow_completion_rejects_unapproved_independent_review(self):
+        from muse.workflow_profiles import WorkflowContract
+
+        with tempfile.TemporaryDirectory() as directory:
+            with TaskQueue(Path(directory) / "tasks.sqlite3") as queue:
+                plan = CommanderPlanner().plan("build a research feature")
+                ticket = queue.enqueue("Commander workflow", {})["id"]
+                queue.claim_next(worker_id="worker-a", task_id=ticket)
+                step_ids = [step.step_id for step in plan.steps]
+                criterion = f"{step_ids[0]}: verified output"
+                contract = WorkflowContract(
+                    goal=plan.goal,
+                    desired_outcome="Every step succeeds and an independent Reviewer approves",
+                    acceptance_criteria=(criterion,),
+                )
+                controller = WorkflowController(queue)
+                controller.bind_plan_to_ticket(plan, ticket, worker_id="worker-a", contract=contract)
+                queue.record_event(
+                    ticket, "commander.plan_consensus", actor="commander",
+                    payload={"plan_id": plan.plan_id, "approved": True},
+                )
+                for step in plan.steps:
+                    queue.record_event(
+                        ticket, "report.step_submitted", actor="ruflo",
+                        payload={"step_id": step.step_id, "agent_id": f"agent-{step.step_id}", "output_chars": 32},
+                    )
+                queue.record_event(
+                    ticket, "commander.execution_finished", actor="commander",
+                    payload={
+                        "plan_id": plan.plan_id, "status": "failed",
+                        "orchestration_status": "succeeded", "review_approved": False,
+                        "orchestration_run_id": "review-rejected",
+                    },
+                )
+                run_ref = "orchestration-run:review-rejected"
+                refs = (run_ref, *(f"step:{step_id}" for step_id in step_ids), "step:independent_review")
+                with self.assertRaises(ValueError):
+                    controller.complete(
+                        ticket, worker_id="worker-a", expected_revision=1,
+                        evidence_refs=refs, outcome_verified=True,
+                        criteria_evidence={
+                            criterion: (run_ref, f"step:{step_ids[0]}", "step:independent_review"),
+                        },
+                    )
+
+    def test_workflow_completion_requires_verified_outcome_and_evidence_for_every_criterion(self):
+        from muse.workflow_profiles import WorkflowContract
+
+        with tempfile.TemporaryDirectory() as directory:
+            with TaskQueue(Path(directory) / "tasks.sqlite3") as queue:
+                plan = CommanderPlanner().plan("build a research feature")
+                ticket = queue.enqueue("Commander workflow", {})["id"]
+                queue.claim_next(worker_id="worker-a", task_id=ticket)
+                step_ids = [step.step_id for step in plan.steps]
+                contract = WorkflowContract(
+                    goal=plan.goal,
+                    desired_outcome="A tested feature approved by an independent Reviewer",
+                    acceptance_criteria=(f"{step_ids[0]}: Tests pass", f"{step_ids[1]}: Reviewer approves"),
+                )
+                controller = WorkflowController(queue)
+                controller.bind_plan_to_ticket(plan, ticket, worker_id="worker-a", contract=contract)
+                run_ref = "orchestration-run:run-verified"
+                evidence_refs = (run_ref, *(f"step:{step_id}" for step_id in step_ids), "step:independent_review")
+                evidence = {
+                    contract.acceptance_criteria[0]: (run_ref, f"step:{step_ids[0]}", "step:independent_review"),
+                    contract.acceptance_criteria[1]: (run_ref, f"step:{step_ids[1]}", "step:independent_review"),
+                }
+                with self.assertRaises(ValueError):
+                    controller.complete(
+                        ticket, worker_id="worker-a", expected_revision=1,
+                        evidence_refs=evidence_refs, outcome_verified=False,
+                        criteria_evidence=evidence,
+                    )
+                with self.assertRaises(ValueError):
+                    controller.complete(
+                        ticket, worker_id="worker-a", expected_revision=1,
+                        evidence_refs=evidence_refs, outcome_verified=True,
+                        criteria_evidence={contract.acceptance_criteria[0]: evidence[contract.acceptance_criteria[0]]},
+                    )
+                with self.assertRaises(ValueError):
+                    controller.complete(
+                        ticket, worker_id="worker-a", expected_revision=1,
+                        evidence_refs=evidence_refs, outcome_verified=True,
+                        criteria_evidence={
+                            item: ("orchestration-run:other-run",) for item in contract.acceptance_criteria
+                        },
+                    )
+
+                queue.record_event(
+                    ticket, "commander.plan_consensus", actor="commander",
+                    payload={"plan_id": plan.plan_id, "approved": True},
+                )
+                for step in plan.steps:
+                    queue.record_event(
+                        ticket, "report.step_submitted", actor="ruflo",
+                        payload={"step_id": step.step_id, "agent_id": f"agent-{step.step_id}", "output_chars": 64},
+                    )
+                queue.record_event(
+                    ticket, "commander.execution_finished", actor="commander",
+                    payload={
+                        "plan_id": plan.plan_id, "status": "succeeded",
+                        "orchestration_status": "succeeded", "review_approved": True,
+                        "orchestration_run_id": "run-verified",
+                    },
+                )
+                completed = controller.complete(
+                    ticket, worker_id="worker-a", expected_revision=1,
+                    evidence_refs=evidence_refs, outcome_verified=True,
+                    criteria_evidence=evidence,
+                )
+                self.assertTrue(completed["payload"]["outcome_verification"]["verified"])
+                self.assertEqual(
+                    set(completed["payload"]["outcome_verification"]["criteria_evidence"]),
+                    set(contract.acceptance_criteria),
+                )
+                self.assertEqual(
+                    completed["payload"]["outcome_verification"]["evidence_validation"]["verified_steps"],
+                    step_ids,
+                )
+                self.assertTrue(controller.snapshot(ticket)["outcome_verification"]["verified"])
+
+    def test_team_profile_declares_plan_ready_checkpoint_before_execution(self):
+        self.assertIn("plan_ready", WorkflowProfile.team().stages)
 
 if __name__ == "__main__":
     unittest.main()

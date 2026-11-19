@@ -125,6 +125,109 @@ def _audio_quality_report(stderr: str, *, has_audio: bool) -> tuple[dict[str, ob
 
 
 
+def map_warnings_to_storyboard_scenes(
+    warnings: list[dict[str, object]],
+    storyboard: dict[str, object],
+    *,
+    timeline_offset_seconds: float = 0.0,
+) -> list[dict[str, object]]:
+    """Attach heuristic QA intervals to explicit or sequential storyboard timing.
+
+    Explicit timeline_start_seconds/timeline_end_seconds already include all
+    transitions and offsets. Otherwise scene durations are accumulated and the
+    caller must provide any intro/bookend offset; this function never guesses.
+    """
+    if not isinstance(warnings, list):
+        raise ValueError("warnings must be a list")
+    if not isinstance(storyboard, dict) or not isinstance(storyboard.get("scenes"), list):
+        raise ValueError("storyboard must contain a scenes list")
+    if (isinstance(timeline_offset_seconds, bool)
+            or not isinstance(timeline_offset_seconds, (int, float))
+            or not math.isfinite(timeline_offset_seconds)
+            or timeline_offset_seconds < 0):
+        raise ValueError("timeline_offset_seconds must be finite and non-negative")
+
+    scene_ranges: list[dict[str, object]] = []
+    scenes = storyboard["scenes"]
+    if any(not isinstance(scene, dict) for scene in scenes):
+        raise ValueError("each storyboard scene must be an object")
+    explicit_timing_flags = [
+        "timeline_start_seconds" in scene or "timeline_end_seconds" in scene
+        for scene in scenes
+    ]
+    if any(explicit_timing_flags) and not all(
+        "timeline_start_seconds" in scene and "timeline_end_seconds" in scene
+        for scene in scenes
+    ):
+        raise ValueError("each scene must provide both timeline_start_seconds and timeline_end_seconds")
+    explicit_timeline = bool(explicit_timing_flags and all(explicit_timing_flags))
+    if explicit_timeline and timeline_offset_seconds != 0:
+        raise ValueError("timeline_offset_seconds must be zero when explicit scene timeline intervals are provided")
+    cursor = float(timeline_offset_seconds)
+    for index, scene in enumerate(scenes, start=1):
+        if explicit_timeline:
+            start = scene.get("timeline_start_seconds")
+            end = scene.get("timeline_end_seconds")
+            if (isinstance(start, bool) or not isinstance(start, (int, float))
+                    or not math.isfinite(start) or start < 0
+                    or isinstance(end, bool) or not isinstance(end, (int, float))
+                    or not math.isfinite(end) or end <= start):
+                raise ValueError(f"scene timeline interval must be finite and increasing (scene {index})")
+            scene_start, scene_end = float(start), float(end)
+        else:
+            duration = scene.get("duration_seconds", scene.get("source_duration_seconds"))
+            if (isinstance(duration, bool) or not isinstance(duration, (int, float))
+                    or not math.isfinite(duration) or duration <= 0):
+                raise ValueError(f"scene duration must be positive and finite (scene {index})")
+            scene_start = cursor
+            scene_end = round(cursor + float(duration), 6)
+            cursor = scene_end
+        scene_ranges.append({
+            "scene_id": scene.get("id"),
+            "source_file": scene.get("source_file", scene.get("source_asset")),
+            "scene_start_seconds": round(scene_start, 6),
+            "scene_end_seconds": round(scene_end, 6),
+        })
+    mapped: list[dict[str, object]] = []
+    for warning in warnings:
+        if not isinstance(warning, dict):
+            raise ValueError("warning interval must be an object")
+        start, duration = warning.get("start_seconds"), warning.get("duration_seconds")
+        if start is None and duration is None:
+            mapped.append({
+                **warning,
+                "mapping_status": "not_time_based",
+                "storyboard_matches": [],
+            })
+            continue
+        if (isinstance(start, bool) or not isinstance(start, (int, float))
+                or not math.isfinite(start) or start < 0
+                or isinstance(duration, bool) or not isinstance(duration, (int, float))
+                or not math.isfinite(duration) or duration <= 0):
+            raise ValueError("warning interval must have finite non-negative start and positive duration")
+        warning_start, warning_end = float(start), float(start) + float(duration)
+        matches: list[dict[str, object]] = []
+        for scene_range in scene_ranges:
+            overlap_start = max(warning_start, float(scene_range["scene_start_seconds"]))
+            overlap_end = min(warning_end, float(scene_range["scene_end_seconds"]))
+            # FFmpeg and storyboard timestamps are rounded independently; ignore
+            # sub-10-microsecond boundary noise rather than inventing a second match.
+            if overlap_end - overlap_start <= 1e-5:
+                continue
+            matches.append({
+                **scene_range,
+                "overlap_start_seconds": round(overlap_start, 6),
+                "overlap_end_seconds": round(overlap_end, 6),
+                "overlap_seconds": round(overlap_end - overlap_start, 6),
+            })
+        mapped.append({
+            **warning,
+            "mapping_status": "mapped" if matches else "outside_storyboard",
+            "storyboard_matches": matches,
+        })
+    return mapped
+
+
 def inspect_video_file(
     path: str | Path,
     *,
@@ -272,6 +375,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--black-warning-seconds", type=float, default=0.5)
     parser.add_argument("--freeze-warning-seconds", type=float, default=1.0)
     parser.add_argument("--silence-warning-seconds", type=float, default=1.0)
+    parser.add_argument("--storyboard", type=Path, help="Optional storyboard JSON for mapping QA warning times to source scenes")
+    parser.add_argument("--storyboard-offset-seconds", type=float, default=0.0, help="Seconds before the first storyboard scene (for example, an intro card)")
+    parser.add_argument("--motion-diagnostics", action="store_true",
+                        help="Add advisory OpenCV optical-flow diagnostics; does not affect QA pass/fail")
+    parser.add_argument("--motion-max-frames", type=int, default=180,
+                        help="Maximum frames sampled by optional motion diagnostics")
     args = parser.parse_args(argv)
     inventory = discover_media_tools()
     tools = {item.tool_id: item.executable for item in inventory.tools}
@@ -284,6 +393,29 @@ def main(argv: list[str] | None = None) -> int:
         freeze_warning_seconds=args.freeze_warning_seconds,
         silence_warning_seconds=args.silence_warning_seconds,
     )
+    if args.motion_diagnostics:
+        from muse.video_motion_diagnostics import inspect_video_motion
+        try:
+            result["motion_diagnostics"] = inspect_video_motion(
+                args.video, max_frames=args.motion_max_frames,
+            )
+        except (OSError, ValueError) as exc:
+            result["motion_diagnostics"] = {
+                "status": "failed", "reason": f"{type(exc).__name__}: {exc}",
+                "note": "Advisory diagnostics only; technical QA status is unchanged.",
+            }
+    if args.storyboard is not None:
+        try:
+            storyboard = json.loads(args.storyboard.read_text(encoding="utf-8"))
+            result["storyboard_mapping"] = map_warnings_to_storyboard_scenes(
+                result.get("warnings", []), storyboard,
+                timeline_offset_seconds=args.storyboard_offset_seconds,
+            )
+        except (OSError, UnicodeError, ValueError) as exc:
+            result["storyboard_mapping_error"] = f"{type(exc).__name__}: {exc}"
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 2
+
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0 if result["status"] == "passed" else (2 if result["status"] == "blocked" else 1)
 

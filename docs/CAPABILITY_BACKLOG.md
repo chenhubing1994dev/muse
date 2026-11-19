@@ -327,14 +327,20 @@
 - 边界：独立 Reviewer 仍待真实不同身份/Provider 配置；工程回归只验证 Muse 软件流程，不是外部事实证据。Windows Job Object 资源限制不等于 OS 网络隔离或完整 sandbox。
 - 验收：反馈实验专项 4/4、自主研究 39/39、进化执行器 12/12、TestRunner 7/7；本轮 ExperimentBridge/反馈实验/自主研究/知识图谱定向回归 **51/51**；Python 3.11 `compileall -q src tests` 通过；全项目 unittest **1,221 项运行，1,220 通过、1 项可选依赖跳过，0 failures / 0 errors**（127.485 秒）。non-Git source freshness 仍为 `unproven`，不宣称机器审计全绿。
 ### B-063 可选独立 Reviewer 通道
-- 状态：接线已完成并通过定向测试；真实运行环境尚无第二模型，因此当前审查状态保持 pending。
+- 状态：**反馈实验真实模型批准/拒绝双分支、拒绝 Ticket、Worker handoff 与后续研究周期均已验证**；Builder/Provider 独立性仍 pending。
 - 配置：`MUSE_REVIEWER_MODEL` 必须与 `[models].model` 不同；可选 `MUSE_REVIEWER_URL` 必须为 loopback HTTP；启动前确认 reviewer model 在本地 `/v1/models` 中存在。
-- 可用时使用 `IndependentReviewGate`/`ReviewStore` 审查结构化工程回归结果；稳定 artifact ID + reviewer identity 实现幂等；保存 review ID、reviewer ID、范围、摘要和 findings。
-- 任何审查结果都不等于外部 Claim 证据，不改变 Claim/Improvement 状态，不批准或执行代码变更。same endpoint 的不同模型仅是 distinct model，不等于 provider-level independence。
-- 当前 Builder 配置 `DeepSeek-V4-Pro-Qwen3.5-9B` 指向 `127.0.0.1:1235/v1`，本轮实测该端点不可达；`127.0.0.1:1234/v1` 可达并暴露多个本地模型，其中 Gemma 可作为 distinct-model 候选。相同 endpoint 的不同模型不构成 Provider 独立性；尚未配置并执行真实 Reviewer 调用，状态仍为 pending。不得把模型清单、测试 mock 或 gate 装配测试描述为生产审查完成。
-- 验收：`test_feedback_experiments.py` 5/5、`test_autonomous_runtime.py` 13/13、`test_autonomous_research.py` 39/39；最终完整回归 Python 3.11 `compileall` 通过，unittest **814 项，0 failures、0 errors**（63.867 秒）。
-
+- 2026-11-19 实测：Builder 当前配置 `DeepSeek-V4-Pro-Qwen3.5-9B` 指向 `127.0.0.1:1235/v1`，该端点当前不可达；`127.0.0.1:1234/v1` 可达并暴露 5 个模型，其中 Gemma 4 E4B 候选可真实响应。
+- 通过显式 Reviewer URL/Model 环境变量，实际装配 `AutonomousSupervisor._build_feedback_reviewer()`，调用真实 Gemma 模型，并经 `IndependentReviewGate.review()` 完成结构化审查；临时 SQLite ReviewStore 写入后重新读取成功。合成样本只证明端到端调用、协议解析与持久化链路可用，不代表生产代码审查质量。
+- 第一轮模型把 findings 返回为字符串数组，Gate 正确 fail-closed；已收紧 system prompt，要求每条 finding 必须为 `severity/title/detail` 对象。新增 timeout 与错误 findings schema 测试。
+- 任何审查结果都不等于外部 Claim 证据，不升级 Claim/Improvement，不批准或执行代码变更。源码审查通过不代表生产拒绝回路或 Provider 独立性已完成。
+- 验收：B-063 focused regression **18/18**、`test_worker.py` **32/32**、`test_autonomous_runtime.py` **19/19**；`compileall -q src tests` 通过；全仓 unittest **1,563 项运行、1,554 通过、9 项跳过、0 失败/错误**。详见 `docs/PROGRESS_20261119_B063_REJECTION_FEEDBACK_LOOP.md`。
+- 2026-11-19 真实源码差异审查：Reviewer `local-reviewer:011d7c5831f7d581e81cce35`，Review ID `ecc33bb2e31f47d58f296801bff2f90b`，approved=true、4 findings（含 1 条 medium）；只覆盖所提交的两个文件 diff，不覆盖整个 workspace。详见 `docs/PROGRESS_20261119_B063_REJECTION_FEEDBACK_LOOP.md`。
+- 最新源码复审：Reviewer `local-reviewer:011d7c5831f7d581e81cce35`，Review ID `b3add74f52b64c87b14270aa99bb173c`，approved=true、1 条 info finding；ReviewStore 读回成功。
+- 真实模型拒绝 smoke：合成 SQL 注入样本获 `approved=false`，包含 critical/high findings，临时 ReviewStore 读回成功；未写入生产库。
+- 最新真实闭环验收（2026-11-19）：正向真实 Gemma 审查 56 项反馈实验回归并批准；负向隔离副本 57 项测试中 1 项受控失败，Gemma 实际拒绝，ReviewStore 持久化并生成唯一 read_only_research follow-up Ticket；随后 AutonomousResearchEngine.run_once() 实际消费拒绝主题，支持/反证方向各入库 1 条，Claim 保持 hypothesis-only，下一轮 query-pair 去重通过。全部使用临时数据库/副本，未写生产库。
+- 当前 B-063 状态：反馈实验真实模型批准/拒绝双分支、拒绝 Ticket 与后续研究周期已验证；Builder 1235 不可达，Provider/进程独立性仍 pending。修复后全仓 Python 3.11 unittest 1,595 tests，1 skipped，0 failures / 0 errors；另有未定位的 FFmpeg moov atom not found 警告。详见 docs/PROGRESS_20261119_B063_REJECTION_FEEDBACK_LOOP.md。
 ### B-064 证据覆盖与来源质量画像
+
 - 状态：已实现并通过专项与完整回归。
 - Claim dossier 统计支持/反证/上下文覆盖、已审/未审证据、最新 verdict、质量/独立性等级、reviewer 数量与 verdict 冲突。
 - 汇总 SHA-256、正文长度、HTTPS、发布日期状态、hostname/启发式 registrable-domain，以及经过审查的来源依赖/独立关系。
@@ -482,3 +488,15 @@
 - 原始 BGM 进入 ZIP，manifest/storyboard 记录 BGM 哈希、文件大小、archive path 与混音参数；`verify_path` 校验来源哈希。Builder version 7。
 - 视频/粤语旁白定向回归 42/42；全项目回归 1,229 通过、1 跳过；真实 FFmpeg 8.1.1 sidechain 混音及 VideoProductBuilder 合成素材端到端 ZIP 验证通过。
 - 合成音不代表真实粤语旁白或 Wan 成片验收；产品仍为 testing，ready_to_publish=false。详见 `docs/PROGRESS_B139_VOICE_AWARE_BGM_DUCKING.md`。
+
+### B-164 MemPalace 选择性超融合
+- 状态：MP-M1 适配器基础完成；MP-M2 D 盘固定版本安装、EmbeddingGemma 缓存和本机 stdio MCP smoke 完成（CPU 推理）；MP-M3 只读检索联邦完成但默认关闭；MP-M4 Agent Track outbox、Commander 审批 Ticket、checkpoint 回执校验、备份/恢复和合成 Palace 索引重建 smoke 已实现并验证；MP-M5 只读健康 API 与赛博控制台面板已接通，远端 MCP 在线探测、索引 freshness、pause/resume 与生产启用门禁仍未完成。
+- 决策：MemPalace 只作为可选本地语义召回层；Muse MemoryStore 保留 User/Agent Track、审批与修订权威，Research Wiki 保留 claim/evidence 权威，TaskQueue/Commander 保留唯一调度权，Obsidian 继续单向镜像。
+- 实装：mempalace_adapter.py 复用 Muse MCPStdioClient，固定 argv、离线模型缓存环境、严格 allowlist；MuseRuntime.search_memories 返回 unverified_retrieval_candidate，不混合评分。mempalace_projection.py 以 memory_id/revision + SHA-256 建立 outbox；发送要求绑定精确 outbox/idempotency key 的 Commander approval Ticket 与持久化 human.decision=approved 事件。回执必须确认恰好一条 added 或 exact-content duplicate 且 errors 为空，语义近似但内容不同的 duplicate 不算成功。
+- 本机安装：固定 mempalace==3.12.0，D:\\AI AGENT\\MuseRuntime\\MemPalace-3.12.0 独立 venv；EmbeddingGemma 约 330 MB 缓存到 D 盘；PyPI wheel SHA-256 与 metadata/provenance subject 一致。Muse 原 .venv 未被修改。
+- MCP 实测：本机 stdio 发现上游 47 工具，Muse 21 项 allowlist 全部存在；status/taxonomy/search 和真实 checkpoint 回执通过；相同合成内容重放返回 exact_duplicate 且 drawer ID 一致。未启动 MemPalace HTTP daemon 或 remote hub。
+- 多语言 smoke：5 条合成粤语/中文/英文/时间/来源查询 Recall@5=5/5、Top-1=3/5；仅小型 smoke set，不代表正式 benchmark。生产 palace 仍为空且未初始化，未导入私人对话或 User Track。
+- 安全边界：outbox 只允许 confidence>=0.75 的 Agent Track skill/case/foresight，凭据样式内容拒绝；Commander Ticket 绑定单条内容哈希和 revision，不能跨投影复用；User Track 仍禁止写入；不开放 mine/delete/sync-apply/hooks/远程管理。
+- 回归：lifecycle 9/9、adapter 16/16、projection 12/12、ack contract 7/7，共 44 项 MemPalace 核心专项测试通过；UnifiedRuntime 46/46 另有专项覆盖。B189 Status API 3/3、UI Node tests 46/46、Svelte check 0/0、Vite build 134 modules 通过。最新全仓 Python 回归 1,558 tests OK、9 skipped；随后全仓 compileall 通过，详见 docs/PROGRESS_B189_MEMPALACE_DASHBOARD_STATUS.md。
+- 最新全仓 Python 3.11 unittest：1,558 tests OK、9 skipped；并行写入期间 compileall 曾捕获瞬时语法状态，写入落盘后全仓 compileall 复跑通过。MemPalace 核心定向回归 90/90 的既有记录与 B189 UI/API 验证分开记录。
+- 下一步 MP-M5：增加限频、显式启用的只读 MCP health probe 和可审计索引 freshness 信号；随后实现显式 pause/resume 状态机与可追溯错误报告。任何后台同步、服务自启动和生产 User Track 写入仍需独立审批。DirectML provider 尚未启用，当前明确 CPU 推理。

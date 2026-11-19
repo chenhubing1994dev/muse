@@ -58,6 +58,40 @@ def approved_plan_intake_handler(payload: dict[str, Any]) -> dict[str, Any]:
     return {"status": "work_packet_prepared", "path": str(destination), "plan_id": plan_id}
 
 
+def review_followup_research_handler(payload: dict[str, Any]) -> dict[str, Any]:
+    """Register a read-only handoff; the autonomous research routine consumes the linked decision node."""
+    if not isinstance(payload, dict) or payload.get("kind") != "review_followup_research":
+        raise ValueError("unsupported review follow-up task kind")
+    if payload.get("task_scope") != "read_only_research":
+        raise PermissionError("review follow-up handoff must remain read-only research")
+    for flag in ("reviewer_output_is_untrusted_data", "not_claim_evidence",
+                 "requires_separate_code_change_approval"):
+        if payload.get(flag) is not True:
+            raise PermissionError("review follow-up safety boundary is missing: " + flag)
+    identifiers = ("review_id", "review_node_id", "review_artifact_id",
+                   "proposal_id", "feedback_id", "plan_node_id")
+    values = {}
+    for field in identifiers:
+        value = payload.get(field)
+        if not isinstance(value, str) or not value.strip() or len(value) > 160:
+            raise ValueError("review follow-up is missing a valid " + field)
+        values[field] = value
+    findings = payload.get("review_findings", [])
+    if not isinstance(findings, list) or len(findings) > 16:
+        raise ValueError("review follow-up findings must be a bounded list")
+    return {
+        "status": "handoff_registered",
+        "handoff_target": "autonomous_research_topic_queue",
+        "preferred_topic_key": "rejected-review:" + values["review_node_id"],
+        "review_id": values["review_id"],
+        "review_node_id": values["review_node_id"],
+        "research_completed": False,
+        "code_changes_performed": False,
+        "requires_separate_code_change_approval": True,
+    }
+
+
+
 class ApprovedPlanCapabilityRouter:
     """Route approved plans only to trusted, explicitly injected local handlers.
 
@@ -176,13 +210,15 @@ def trigger_work_proposal_handler(payload: dict[str, Any]) -> dict[str, Any]:
     return {"status": "proposal_packet_prepared", "path": str(destination), "trigger_id": trigger_id}
 
 
-DEFAULT_APPROVAL_REQUIRED_KINDS = frozenset({"trigger_work_proposal", "approved_code_change", "software_reconstruction"})
+DEFAULT_APPROVAL_REQUIRED_KINDS = frozenset({"trigger_work_proposal", "approved_code_change", "software_reconstruction", "open_design_run"})
 
 DEFAULT_HANDLERS: dict[str, Handler] = {
     "echo": echo_handler,
     "approved_plan_intake": approved_plan_intake_handler,
     "trigger_work_proposal": trigger_work_proposal_handler,
+    "review_followup_research": review_followup_research_handler,
 }
+
 def _record_progress(
     database: str | Path, task_id: str, event: str, summary: str,
     *, error_code: str | None = None,
@@ -226,6 +262,10 @@ def run_once(
         if handler is None and handlers is None and kind == "software_reconstruction":
             from muse.software_crafting import SoftwareReconstructionHandler
             handler = SoftwareReconstructionHandler(workspace=Path.cwd(), database=database)
+            registry[kind] = handler
+        if handler is None and handlers is None and kind == "open_design_run":
+            from muse.open_design import OpenDesignTaskHandler
+            handler = OpenDesignTaskHandler(workspace=Path.cwd(), database=database)
             registry[kind] = handler
         if handler is None:
             failure = FailureDescriptor(
@@ -494,8 +534,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     with ExitStack() as stack:
         handlers = dict(DEFAULT_HANDLERS)
+        from muse.pipeline_control import PipelineTaskHandler
+        handlers["video_pipeline"] = PipelineTaskHandler(Path.cwd())
         from muse.software_crafting import SoftwareReconstructionHandler
         handlers["software_reconstruction"] = SoftwareReconstructionHandler(
+            workspace=Path.cwd(), database=args.db,
+        )
+        from muse.open_design import OpenDesignTaskHandler
+        handlers["open_design_run"] = OpenDesignTaskHandler(
             workspace=Path.cwd(), database=args.db,
         )
         approval_required_kinds: set[str] = set(DEFAULT_APPROVAL_REQUIRED_KINDS)

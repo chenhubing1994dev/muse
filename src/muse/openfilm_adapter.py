@@ -71,21 +71,26 @@ def export_openfilm_project(
     *,
     shots: list[dict[str, Any]],
     audio_tracks: list[dict[str, Any]] | None = None,
+    title_cues: list[dict[str, Any]] | None = None,
     title: str = "Muse Film",
     width: int = 1080,
     height: int = 1920,
     fps: int = 24,
 ) -> dict[str, Any]:
-    """Create a new OpenFilm folder with editable footage, title pages and audio tracks.
+    """Create an editable OpenFilm folder with footage, timed title overlays and audio tracks.
 
-    Each shot requires source, at, duration; optional in_point, id, title.
+    Each shot requires source, at, duration; optional in_point, id, title, volume.
     Audio tracks require source, kind, at, duration; optional in_point, volume.
+    title_cues require start, end and text and become independently timed title overlays.
     Existing projects are never overwritten.
     """
     if not isinstance(shots, list) or not shots or len(shots) > 100:
         raise OpenFilmExportError("shots must contain between 1 and 100 entries")
     if not isinstance(audio_tracks if audio_tracks is not None else [], list):
         raise OpenFilmExportError("audio_tracks must be a list")
+    if not isinstance(title_cues if title_cues is not None else [], list) or len(title_cues or []) > 500:
+        raise OpenFilmExportError("title_cues must be a list containing at most 500 cues")
+
     for name, value, low, high in (("width", width, 320, 7680), ("height", height, 320, 7680), ("fps", fps, 1, 120)):
         if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
             raise OpenFilmExportError(f"{name} must be an integer in [{low}, {high}]")
@@ -121,11 +126,16 @@ def export_openfilm_project(
         if not isinstance(shot_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", shot_id):
             raise OpenFilmExportError("shot id contains unsupported characters")
         shot_ranges.append((at, at + duration))
+        duration_end = max(duration_end, at + duration)
+
         asset_index += 1
         asset_ref, digest = _copy_asset(source, assets_dir, asset_index)
         manifest_assets.append({"role": "footage", "shot_id": shot_id, "source": str(source),
                                 "asset": asset_ref, "sha256": digest})
-        video_clips.append(_clip(asset_ref, at, in_point, duration, tag="video",
+        shot_volume = _number(shot.get("volume", 1.0), "shot.volume")
+        if shot_volume > 4:
+            raise OpenFilmExportError("shot.volume must be <= 4")
+        video_clips.append(_clip(asset_ref, at, in_point, duration, tag="video", volume=shot_volume,
                                  style=f"left:0px;top:0px;width:{width}px;height:{height}px;object-fit:cover"))
         shot_title = shot.get("title")
         if shot_title is not None:
@@ -157,7 +167,42 @@ def export_openfilm_project(
                 f'<section><iframe src="pages/{page_name}#t=0,{duration:.3f}" at="{at:.3f}" '
                 f'style="left:0px;top:0px;width:{width}px;height:{height}px"></iframe></section>'
             )
-        duration_end = max(duration_end, at + duration)
+
+    previous_title_end = 0.0
+    for index, cue in enumerate(title_cues or [], start=1):
+        if not isinstance(cue, dict) or set(cue) != {"start", "end", "text"}:
+            raise OpenFilmExportError("title cue must contain only start, end and text")
+        cue_start = _number(cue.get("start"), "title_cue.start")
+        cue_end = _number(cue.get("end"), "title_cue.end")
+        cue_text = cue.get("text")
+        if (cue_start < previous_title_end - 0.001 or cue_end <= cue_start
+                or not isinstance(cue_text, str) or not cue_text.strip() or len(cue_text) > 200):
+            raise OpenFilmExportError("title cue timing or text is invalid")
+        previous_title_end = cue_end
+        duration_end = max(duration_end, cue_end)
+        cue_duration = cue_end - cue_start
+        page_name = f"subtitle-{index:03d}.html"
+        page_path = pages_dir / page_name
+        safe_title = json.dumps(cue_text.strip(), ensure_ascii=False).replace("</", "<\\/")
+        page_path.write_text(
+            "<!doctype html><html><head><meta charset=\"utf-8\">"
+            f"<meta name=\"viewport\" content=\"width={width},height={height}\">"
+            "<style>html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent}"
+            "#title{position:absolute;left:8%;right:8%;bottom:12%;color:#fff;"
+            "font:700 3.4vw/1.3 system-ui,sans-serif;text-align:center;"
+            "text-shadow:0 3px 18px #000,0 1px 4px #000;opacity:0;}</style></head>"
+            "<body><div id=\"title\"></div><script>const label=" + safe_title + ";"
+            "const node=document.getElementById('title');node.textContent=label;"
+            "window.film={duration:" + f"{cue_duration:.3f}" + ",frame(t){"
+            "const p=Math.max(0,Math.min(1,t/Math.max(0.001," + f"{cue_duration:.3f}" + ")));"
+            "const a=Math.min(1,p*8);const b=Math.min(1,(" + f"{cue_duration:.3f}" + "-t)*8);"
+            "node.style.opacity=String(Math.min(a,b));}};</script></body></html>",
+            encoding="utf-8",
+        )
+        title_tracks.append(
+            f'<section><iframe src="pages/{page_name}#t=0,{cue_duration:.3f}" at="{cue_start:.3f}" '
+            f'style="left:0px;top:0px;width:{width}px;height:{height}px"></iframe></section>'
+        )
 
     ordered_ranges = sorted(shot_ranges)
     for previous, current in zip(ordered_ranges, ordered_ranges[1:]):
@@ -202,5 +247,12 @@ def export_openfilm_project(
         "title": title, "width": width, "height": height, "fps": fps,
         "duration_seconds": round(duration_end, 3), "assets": manifest_assets,
         "tracks": ["titles", "footage"] + audio_kinds,
+        "subtitle_cue_count": len(title_cues or []),
         "creator_review_state": "content_review_pending",
-    }; manifest_path = output / "muse-openfilm-manifest.json"; manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"); return {"project_dir": str(output), "film_html": str(output / "film.html"), "manifest": str(manifest_path), "duration_seconds": manifest["duration_seconds"], "asset_count": len(manifest_assets), "track_count": len(manifest["tracks"]), "manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest()}
+    }
+    manifest_path = output / "muse-openfilm-manifest.json"
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"project_dir": str(output), "film_html": str(output / "film.html"), "manifest": str(manifest_path),
+            "duration_seconds": manifest["duration_seconds"], "asset_count": len(manifest_assets),
+            "track_count": len(manifest["tracks"]), "subtitle_cue_count": len(title_cues or []),
+            "manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest()}

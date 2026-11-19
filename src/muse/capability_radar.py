@@ -182,9 +182,32 @@ def scan_capabilities(
         "failure_signature_groups": 0, "repeated_failure_groups": 0,
         "repeated_failure_occurrences": 0, "proposed_claim_backlog": 0, "failed_experiments": 0,
     }
+    research_followups: list[dict[str, Any]] = []
     if knowledge_path.is_file():
         with ResearchKnowledgeStore(knowledge_path) as knowledge:
             research_metrics = knowledge.aggregate_improvement_signals(since=cutoff)
+            experiments = knowledge.list_nodes(node_type="experiment", limit=500)
+            for experiment in experiments:
+                metadata = experiment.get("metadata", {})
+                outcome = metadata.get("outcome")
+                status = metadata.get("status")
+                if experiment.get("updated_at", "") < cutoff.isoformat():
+                    continue
+                if outcome not in {"refutes", "inconclusive", "failed"} and status != "failed":
+                    continue
+                research_followups.append({
+                    "key": "research-experiment-followup:" + experiment["id"],
+                    "title": "复核未成功研究实验的边界条件与替代解释",
+                    "source_experiment_id": experiment["id"],
+                    "source_run_id": metadata.get("run_id"),
+                    "source_hypothesis_id": metadata.get("hypothesis_id"),
+                    "outcome": outcome or status,
+                    "candidate_only": True,
+                    "engineering_proposal_created": False,
+                    "next_step": "检查实验设计、测量误差、反例与替代解释；必要时设计新的可复现实验",
+                })
+            research_followups.sort(key=lambda item: item["source_experiment_id"])
+            research_followups = research_followups[-50:]
     initiative_path = Path(initiative_database) if initiative_database else (
         (task_path.parent.parent if task_path.parent.name.casefold() == "tasks" else task_path.parent)
         / "initiatives" / "muse.sqlite3"
@@ -393,6 +416,7 @@ def scan_capabilities(
         "existing": existing,
         "trend": trend,
         "research_knowledge_signals": research_metrics,
+        "research_followups": research_followups,
         "creator_video_failures": creator_video_failures,
         "knowledge_link_errors": knowledge_link_errors,
         "knowledge_state_sync": knowledge_state_sync,

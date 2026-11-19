@@ -1,6 +1,6 @@
 """Create a researched vertical short using verified local Wan shots."""
 from __future__ import annotations
-import hashlib, json, math, struct, subprocess, wave, zipfile
+import hashlib, json, math, os, shutil, struct, subprocess, wave, zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -8,6 +8,7 @@ from muse.media import discover_media_tools
 from muse.progress import new_evolution_cycle_id, record_evolution_cycle_event
 from muse.research_knowledge import ResearchKnowledgeStore
 from muse.video_product_builder import VideoProductBuilder
+from muse.subtitle_review import build_subtitle_review, parse_srt_cues
 
 SCENES = [
  { "id":"shot-01","file":"shot-01.mp4","duration":2.083333,"caption":"你敢信 AI 的每一句话？","prompt_id":None,"seed":None}, { "id":"shot-02","file":"shot-02.mp4","duration":2.083333,"caption":"流畅表达\n不等于真实。","prompt_id":None,"seed":None},
@@ -19,6 +20,7 @@ NIST_URL = "https://doi.org/10.6028/NIST.AI.600-1"
 NIST_PDF = "https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.600-1.pdf"
 NIST_TITLE = "Artificial Intelligence Risk Management Framework: Generative Artificial Intelligence Profile"
 TITLE = "别把 AI 的自信，当成事实｜三步查证法"
+CANTONESE_NARRATION = "你有冇試過，見到人工智能講得好肯定，就以為一定係真？記住，講得流暢唔代表有證據。第一，拆開人名、日期同數字，逐樣核實。第二，返去睇原始來源，唔好只睇轉述。第三，主動搵反面證據。搵唔到可靠來源，就標示未證實。"
 
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -28,7 +30,8 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 def run(command: list[str], cwd: Path, timeout: int = 900) -> subprocess.CompletedProcess[str]:
-    result = subprocess.run(command, cwd=cwd, capture_output=True, text=True, timeout=timeout, check=False)
+    result = subprocess.run(command, cwd=cwd, capture_output=True, text=True,
+        encoding="utf-8", errors="replace", timeout=timeout, check=False)
     if result.returncode:
         detail = (result.stderr or result.stdout or "unknown process error")[-3000:]
         raise RuntimeError(f"command failed ({result.returncode}): {detail}")
@@ -63,9 +66,17 @@ def srt_time(seconds: float) -> str:
     whole, milliseconds = divmod(milliseconds, 1000)
     return f"{hours:02d}:{minutes:02d}:{whole:02d},{milliseconds:03d}"
 
-def build(workspace: Path, output_dir: Path) -> dict[str, Any]:
+
+def build(workspace: Path, output_dir: Path, title: str = TITLE,
+          recipe_id: str = "high_value_short_v2") -> dict[str, Any]:
     workspace, output_dir = workspace.resolve(), output_dir.resolve()
-    if output_dir.exists(): raise FileExistsError(f"refusing to overwrite existing output directory: {output_dir}")
+    title = title.strip()[:160] if isinstance(title, str) and title.strip() else TITLE
+    if recipe_id not in {"high_value_short_v2", "cantonese_pilot_v2"}:
+        raise ValueError("unsupported video recipe")
+    if workspace not in output_dir.parents:
+        raise ValueError("output directory must remain inside the Muse workspace")
+    if output_dir.exists():
+        raise FileExistsError(f"refusing to overwrite existing output directory: {output_dir}")
     source_dir = workspace / "data" / "video_sources" / "muse-cosmos-film"
     sources = [source_dir / item["file"] for item in SCENES]
     if not source_dir.is_dir() or any(not path.is_file() or path.is_symlink() for path in sources):
@@ -131,13 +142,15 @@ def build(workspace: Path, output_dir: Path) -> dict[str, Any]:
             caption_files.append(caption_path)
 
         final_path = output_dir / "ai-verification-three-steps-9x16.mp4"
-        filters = ["[0:v]format=yuv420p,setpts=PTS-STARTPTS[v0]"]
+        filters = ["[0:v]noise=alls=12:allf=t+u,format=yuv420p,setpts=PTS-STARTPTS[v0]"]
         for index in range(1,len(SCENES)+1):
-            filters.append(f"[{index}:v]scale=1080:1920:force_original_aspect_ratio=increase,"
-                f"crop=1080:1920,setsar=1,fps=24,eq=contrast=1.06:saturation=1.08:"
-                f"brightness=-0.025,format=yuv420p,setpts=PTS-STARTPTS[v{index}]")
+            filters.append(f"[{index}:v]scale=1124:1998:force_original_aspect_ratio=increase,"
+                f"crop=1124:1998,setsar=1,fps=24,"
+                f"zoompan=z='min(zoom+0.0006,1.08)':d=1:s=1080x1920:fps=24:"
+                f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)',"
+                f"eq=contrast=1.06:saturation=1.08:brightness=-0.025,format=yuv420p,setpts=PTS-STARTPTS[v{index}]")
         outro_index = len(SCENES)+1
-        filters.append(f"[{outro_index}:v]format=yuv420p,setpts=PTS-STARTPTS[v{outro_index}]")
+        filters.append(f"[{outro_index}:v]noise=alls=12:allf=t+u,format=yuv420p,setpts=PTS-STARTPTS[v{outro_index}]")
         labels = "".join(f"[v{i}]" for i in range(outro_index+1))
         filters.append(f"{labels}concat=n={outro_index+1}:v=1:a=0[vcat]")
         font_path = "C\\:/Windows/Fonts/msyh.ttc"
@@ -156,9 +169,9 @@ def build(workspace: Path, output_dir: Path) -> dict[str, Any]:
         filters.append(f"[{current_label}]fade=t=in:st=0:d=0.25,"
             f"fade=t=out:st={duration-0.25:.3f}:d=0.25[v]")
         command = [ffmpeg,"-hide_banner","-y","-f","lavfi","-i",
-            "color=c=0x07111e:s=1080x1920:r=24:d=3"]
+            "color=c=0x17283f:s=1080x1920:r=24:d=3"]
         for path in sources: command.extend(["-i",str(path)])
-        command.extend(["-f","lavfi","-i","color=c=0x07111e:s=1080x1920:r=24:d=3",
+        command.extend(["-f","lavfi","-i","color=c=0x17283f:s=1080x1920:r=24:d=3",
             "-i",str(audio_path),"-filter_complex",";".join(filters),
             "-map","[v]","-map",f"{outro_index+1}:a:0"])
         encoder = "h264_amf" if "h264_amf" in set(inventory.hardware_encoders) else "libx264"
@@ -227,31 +240,90 @@ def build(workspace: Path, output_dir: Path) -> dict[str, Any]:
                 f"Existing Wan 2.1 T2V source shot {index:02d}; original prompt text not retained in this source folder.")
             scene_records.append({"order":index,"prompt":prompt,"prompt_id":scene["prompt_id"],
                 "seed":scene["seed"],"generation_status":"generated","source_file":scene["file"]})
-        product=builder.package_generated_clip(TITLE,
-            "A concise Chinese educational short: decompose AI claims, check original sources, and actively look for counter-evidence.",
-            final_path,generation_metadata={"status":"completed",
-                "model":"Wan 2.1 T2V 1.3B (six existing AI shots) + FFmpeg editorial assembly",
-                "aspect_ratio":"9:16","fps":24,"duration_seconds":round(actual_duration,3),
-                "frames":round(actual_duration*24),"width":1080,"height":1920,"bytes":final_path.stat().st_size},
-            scene_records=scene_records,evolution_cycle_id=cycle_id)
-        verified=builder.verify_path(workspace/"data"/"products",product["initiative_id"],product["version_id"])
-        if not verified.get("validated") or verified.get("mp4_sha256")!=sha256(final_path):
+        prompt_text = "A concise educational short: decompose AI claims, check original sources, and actively look for counter-evidence."
+        generation_metadata = {
+            "status": "completed",
+            "model": "Wan 2.1 T2V 1.3B (six existing AI shots) + FFmpeg editorial assembly",
+            "aspect_ratio": "9:16", "fps": 24, "duration_seconds": round(actual_duration, 3),
+            "frames": round(actual_duration * 24), "width": 1080, "height": 1920,
+            "bytes": final_path.stat().st_size, "has_audio": True,
+        }
+        if recipe_id == "cantonese_pilot_v2":
+            product = builder.package_generated_clip_with_cantonese_narration(
+                title, prompt_text, final_path, narration_script=CANTONESE_NARRATION,
+                model_dir=workspace / "data" / "models" / "canto-tts-nano",
+                asr_model_dir=workspace / "models" / "whisper-small-cantonese",
+                background_music_path=audio_path, generation_metadata=generation_metadata,
+                scene_records=scene_records, evolution_cycle_id=cycle_id,
+            )
+        else:
+            product = builder.package_generated_clip(
+                title, prompt_text, final_path, generation_metadata=generation_metadata,
+                scene_records=scene_records, evolution_cycle_id=cycle_id,
+            )
+        verified = builder.verify_path(
+            workspace / "data" / "products", product["initiative_id"], product["version_id"]
+        )
+        product_dir = workspace / product["relative_path"]
+        narration_srt_path = None
+        if recipe_id == "cantonese_pilot_v2":
+            packaged_video = product_dir / "video.mp4"
+            if not packaged_video.is_file() or sha256(packaged_video) != verified.get("mp4_sha256"):
+                raise RuntimeError("Cantonese narration product MP4 failed integrity verification")
+            shutil.copy2(packaged_video, final_path)
+            narration_srt_source = product_dir / "subtitles.srt"
+            if not narration_srt_source.is_file():
+                raise RuntimeError("Cantonese ASR did not produce timestamped subtitles")
+            narration_srt_path = output_dir / "narration-subtitles.srt"
+            shutil.copy2(narration_srt_source, narration_srt_path)
+        if not verified.get("validated") or verified.get("mp4_sha256") != sha256(final_path):
             raise RuntimeError("VideoProductBuilder final integrity verification failed")
 
-        storyboard={"schema_version":1,"title":TITLE,"production_mode":"local_wan21_ai_footage_plus_ffmpeg_edit",
-            "evolution_cycle_id":cycle_id,"duration_seconds":round(actual_duration,3),
-            "aspect_ratio":"9:16","fps":24,"width":1080,"height":1920,
-            "voiceover":"not used; no local Chinese TTS voice was available",
-            "audio":"original synthesized ambient bed; no third-party music",
-            "research":{"source":NIST_TITLE,"published_at":"2024-07-26","doi":NIST_URL,"pdf":NIST_PDF,
-                "scope":"NIST AI 600-1 §2.2 and suggested action MS-2.5-003",
-                "editorial_method":"The three-step checklist is practical editorial advice; counter-evidence is not a direct NIST quotation."},
-            "scenes":[{"order":i,"id":scene["id"],"source_file":scene["file"],
-                "source_sha256":source_facts[i-1]["sha256"],"source_duration_seconds":source_facts[i-1]["duration_seconds"],
-                "caption":scene["caption"],"prompt":shot4_meta["prompt"] if scene["id"]=="shot-04" else None,
-                "prompt_id":scene["prompt_id"],"seed":scene["seed"],
-                "generation_status":"existing_wan21_ai_source"} for i,scene in enumerate(SCENES,start=1)],
-            "source_assets":source_facts}
+        narration_asr = product.get("narration_asr")
+        narration_synthesis = product.get("narration_synthesis")
+        voiceover = ({
+            "status": narration_asr.get("status"),
+            "language": "zh-HK",
+            "engine": narration_synthesis.get("engine"),
+            "model_revision": narration_synthesis.get("model_revision"),
+            "duration_seconds": narration_synthesis.get("duration_seconds"),
+            "cer": (narration_asr.get("comparison") or {}).get("cer"),
+            "max_cer": 0.10,
+            "voice_profile": "neutral default voice; not a mature female voice",
+            "human_listening_review_required": True,
+        } if recipe_id == "cantonese_pilot_v2" and isinstance(narration_asr, dict)
+            and isinstance(narration_synthesis, dict) else None)
+        narration_review_path = None
+        if recipe_id == "cantonese_pilot_v2" and isinstance(narration_asr, dict):
+            subtitle_cues = parse_srt_cues(narration_srt_path.read_text(encoding="utf-8-sig"))
+            review = build_subtitle_review(
+                CANTONESE_NARRATION, narration_asr,
+                subtitle_file="narration-subtitles.srt", subtitle_cues=subtitle_cues,
+            )
+            narration_review_path = output_dir / "subtitle-review.json"
+            narration_review_path.write_text(
+                json.dumps(review, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
+            )
+        storyboard = {
+            "schema_version": 1, "title": title,
+            "production_mode": "local_wan21_ai_footage_plus_ffmpeg_edit",
+            "evolution_cycle_id": cycle_id, "duration_seconds": round(actual_duration, 3),
+            "aspect_ratio": "9:16", "fps": 24, "width": 1080, "height": 1920,
+            "voiceover": ({
+                **voiceover, "script": CANTONESE_NARRATION,
+                "asr_transcript": narration_asr.get("transcript"),
+            } if voiceover else {"status": "not_used"}),
+            "audio": "original synthesized ambient bed; voice-aware ducking enabled for Cantonese pilot",
+            "research": {"source": NIST_TITLE, "published_at": "2024-07-26", "doi": NIST_URL, "pdf": NIST_PDF,
+                "scope": "NIST AI 600-1 §2.2 and suggested action MS-2.5-003",
+                "editorial_method": "The three-step checklist is practical editorial advice; counter-evidence is not a direct NIST quotation."},
+            "scenes": [{"order": i, "id": scene["id"], "source_file": scene["file"],
+                "source_sha256": source_facts[i-1]["sha256"], "source_duration_seconds": source_facts[i-1]["duration_seconds"],
+                "caption": scene["caption"], "prompt": shot4_meta["prompt"] if scene["id"] == "shot-04" else None,
+                "prompt_id": scene["prompt_id"], "seed": scene["seed"],
+                "generation_status": "existing_wan21_ai_source"} for i, scene in enumerate(SCENES, start=1)],
+            "source_assets": source_facts,
+        }
         storyboard_path=output_dir/"storyboard.json"
         storyboard_path.write_text(json.dumps(storyboard,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
         source_notes={"title":NIST_TITLE,"publisher":"National Institute of Standards and Technology",
@@ -261,44 +333,68 @@ def build(workspace: Path, output_dir: Path) -> dict[str, Any]:
             "editorial_boundary":"NIST guidance does not supply a universal hallucination rate or certify this checklist. Counter-evidence is editorial advice."}
         notes_path=output_dir/"source-notes.json"
         notes_path.write_text(json.dumps(source_notes,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
-        readme=(f"# {TITLE}\n\n一条面向普通用户的 AI 信息核验短片：拆开可核验主张、打开原始来源、主动寻找反证。\n\n"
+        narration_readme = (
+            f"- 旁白：本地粤语 zh-HK 合成；ASR CER={voiceover['cer']:.4f}（门槛 0.10）；"
+            "中性默认音色，必须人工听审，不代表成熟女声。\n"
+            if voiceover else "- 旁白：此配方未启用粤语旁白。\n"
+        )
+        readme = (
+            f"# {title}\n\n一条面向普通用户的 AI 信息核验短片：拆开可核验主张、打开原始来源、主动寻找反证。\n\n"
             f"- 时长：{actual_duration:.3f} 秒；竖屏 1080×1920；24 FPS；H.264 + AAC stereo。\n"
             "- 画面：复用六段此前已实机生成并验证的本地 Wan 2.1 T2V 1.3B 镜头；本轮没有重新启动 ComfyUI 或消耗 GPU 生成时间。\n"
             "- 后期：FFmpeg 画幅统一、字幕烧录、淡入淡出、原创合成氛围音轨。\n"
-            "- 旁白：未使用；Runner 检查未发现可用的本地中文 TTS 语音/模型，没有伪称真人旁白。\n"
-            f"- 研究依据：NIST AI 600-1（2024-07-26），§2.2 与 MS-2.5-003；详见 source-notes.json。\n"
-            "- 内容边界：三步查证法是实用编辑建议，不是 NIST 原文逐字结论。\n"
-            "- 产品状态：testing；正式发布前仍需人工审片。未上传或自动发布到社交平台。\n")
+            + narration_readme
+            + f"- 研究依据：NIST AI 600-1（2024-07-26），§2.2 与 MS-2.5-003；详见 source-notes.json。\n"
+            + "- 内容边界：三步查证法是实用编辑建议，不是 NIST 原文逐字结论。\n"
+            + "- 产品状态：testing；正式发布前仍需人工审片。未上传或自动发布到社交平台。\n"
+        )
         readme_path=output_dir/"README.md"
         readme_path.write_text(readme,encoding="utf-8")
         product_dir=workspace/product["relative_path"]
         bundle=output_dir/"delivery-bundle.zip"
-        bundle_files=[(final_path,"video-9x16.mp4"),(srt_path,"subtitles.srt"),(cover,"cover.jpg"),
-            (storyboard_path,"storyboard.json"),(notes_path,"source-notes.json"),(audio_path,"ambient-original.wav"),
-            (readme_path,"README.md"),(product_dir/"product.zip","muse-product.zip"),
-            (product_dir/"manifest.json","muse-product-manifest.json")]
+        bundle_files = [
+            (final_path, "video-9x16.mp4"), (srt_path, "subtitles.srt"), (cover, "cover.jpg"),
+            (storyboard_path, "storyboard.json"), (notes_path, "source-notes.json"),
+            (audio_path, "ambient-original.wav"), (readme_path, "README.md"),
+            (product_dir / "product.zip", "muse-product.zip"),
+            (product_dir / "manifest.json", "muse-product-manifest.json"),
+        ]
+        if narration_srt_path is not None:
+            bundle_files.append((narration_srt_path, "narration-subtitles.srt"))
+        if narration_review_path is not None:
+            bundle_files.append((narration_review_path, "subtitle-review.json"))
         with zipfile.ZipFile(bundle,"w",compression=zipfile.ZIP_DEFLATED) as archive:
             for source,name in bundle_files: archive.write(source,name)
         with zipfile.ZipFile(bundle) as archive:
             if archive.testzip() is not None or len(archive.namelist())!=len(bundle_files):
                 raise RuntimeError("delivery bundle ZIP validation failed")
-        result={"status":"completed","title":TITLE,"evolution_cycle_id":cycle_id,
-            "mp4":{"path":str(final_path.relative_to(workspace)).replace("\\","/"),
-                "bytes":final_path.stat().st_size,"sha256":sha256(final_path),
-                "duration_seconds":round(actual_duration,3),"width":1080,"height":1920,"fps":24,
-                "codec":"h264","audio_codec":"aac","audio_sample_rate":48000,"encoder":encoder,"full_decode":"passed"},
-            "cover":{"path":str(cover.relative_to(workspace)).replace("\\","/"),"sha256":sha256(cover)},
-            "product":product,"product_validation":verified,
-            "research_nodes":{"source_node_id":source_node["id"],"claim_node_id":claim_node["id"],
-                "idea_node_id":idea_node["id"],"knowledge_linkage":product.get("knowledge_linkage")},
-            "bundle":{"path":str(bundle.relative_to(workspace)).replace("\\","/"),
-                "bytes":bundle.stat().st_size,"sha256":sha256(bundle),"entries":len(bundle_files),"crc_valid":True},
-            "voiceover":"not used; no local Chinese TTS voice available",
-            "status_note":"testing; human editorial review required before publication",
-            "completed_at":datetime.now(timezone.utc).isoformat()}
+        result = {
+            "status": "completed", "title": title, "evolution_cycle_id": cycle_id,
+            "mp4": {"path": str(final_path.relative_to(workspace)).replace("\\", "/"),
+                "bytes": final_path.stat().st_size, "sha256": sha256(final_path),
+                "duration_seconds": round(actual_duration, 3), "width": 1080, "height": 1920,
+                "fps": 24, "codec": "h264", "audio_codec": "aac",
+                "audio_sample_rate": 48000, "encoder": encoder, "full_decode": "passed"},
+            "cover": {"path": str(cover.relative_to(workspace)).replace("\\", "/"), "sha256": sha256(cover)},
+            "product": product, "product_validation": verified,
+            "research_nodes": {"source_node_id": source_node["id"], "claim_node_id": claim_node["id"],
+                "idea_node_id": idea_node["id"], "knowledge_linkage": product.get("knowledge_linkage")},
+            "bundle": {"path": str(bundle.relative_to(workspace)).replace("\\", "/"),
+                "bytes": bundle.stat().st_size, "sha256": sha256(bundle),
+                "entries": len(bundle_files), "crc_valid": True},
+            "voiceover": voiceover or {"status": "not_used"},
+            "narration_asr": narration_asr,
+            "subtitle_review": ({"path": str(narration_review_path.relative_to(workspace)).replace("\\", "/"),
+                "status": "pending_human_review", "human_approved": False}
+                if narration_review_path is not None else None),
+            "status_note": "testing; human listening and editorial review required before publication",
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+        }
         (output_dir/"generation.json").write_text(json.dumps(result,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
-        record_evolution_cycle_event(progress_db,cycle_id,"completed",
-            summary="Research-backed 9:16 short rendered, fully decoded, packaged and linked to Creator Initiative/Research Wiki.")
+        record_evolution_cycle_event(progress_db, cycle_id, "completed",
+            summary=("Research-backed Cantonese-narrated 9:16 short rendered, ASR checked, packaged and linked to Creator Initiative/Research Wiki."
+                     if recipe_id == "cantonese_pilot_v2" else
+                     "Research-backed 9:16 short rendered, fully decoded, packaged and linked to Creator Initiative/Research Wiki."))
         return result
     except Exception:
         record_evolution_cycle_event(progress_db,cycle_id,"failed",summary="High-value short production failed.",
@@ -306,15 +402,19 @@ def build(workspace: Path, output_dir: Path) -> dict[str, Any]:
         raise
 
 def main() -> int:
-    workspace=Path(__file__).resolve().parents[1]
-    output_dir=workspace/"data"/"prometheus"/"high-value-short-v2"
+    workspace = Path(__file__).resolve().parents[1]
+    output_dir = Path(os.environ.get(
+        "MUSE_PIPELINE_OUTPUT_DIR",
+        str(workspace / "data" / "prometheus" / "high-value-short-v2"),
+    )).resolve()
+    title = os.environ.get("MUSE_PIPELINE_TITLE", TITLE)
+    recipe_id = os.environ.get("MUSE_PIPELINE_RECIPE_ID", "high_value_short_v2")
     try:
-        print(json.dumps(build(workspace,output_dir),ensure_ascii=False,indent=2))
+        print(json.dumps(build(workspace, output_dir, title, recipe_id), ensure_ascii=False, indent=2))
         return 0
     except Exception as exc:
-        print(json.dumps({"status":"failed","error_type":type(exc).__name__,"message":str(exc)[:1200]},
-            ensure_ascii=False,indent=2))
+        print(json.dumps({"status": "failed", "error_type": type(exc).__name__, "message": str(exc)[:1200]},
+            ensure_ascii=False, indent=2))
         return 2
-
 if __name__=="__main__":
     raise SystemExit(main())

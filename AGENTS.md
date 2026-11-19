@@ -21,6 +21,13 @@ Before **every** WebCodex/MCP operation:
 7. Keep the WebCodex runtime tool manifest separate from the ChatGPT host MCP schema. `read_tool_manifest` discovers runtime tools; a Runner plugin-provider reload does not prove that ChatGPT refreshed its host `tools/list` schema. Never claim host schema refresh without observable host-side evidence.
 8. Report only observed outcomes. A plan, accepted request, queued Job, or internal reload is not proof that a file changed, a test passed, or a host schema refreshed.
 
+## Windows command execution (mandatory for Muse project work)
+
+- On the Windows workstation, route project command payloads through `scripts/webcodex_psmux_exec.py` by default. Use a short typed PowerShell `run_script` bootstrap to pipe the JSON request to `py -3.11 scripts/webcodex_psmux_exec.py`; the requested PowerShell, Python, Bash, or batch payload must execute in a detached `psmux new-window -d` job. Requests may contain inline `script` text or a project-relative `script_path`; existing `.ps1`, `.py`, `.sh`, `.bat`, and `.cmd` files are confined to the Project root and infer their language from the extension unless `language` is explicit.
+- Use `language="powershell"` by default; use `python`/`py`, `bash`/`sh`, or `batch`/`bat`/`cmd` for the matching script payload. Bash prefers Git Bash and falls back to the configured WSL default distribution. Preserve captured output and the real exit code.
+- Direct WebCodex `run_shell`, `run_process`, and `run_script` calls are not globally intercepted. Use them directly only for the short adapter bootstrap or a justified diagnostic that explicitly does not need psmux; never claim that psmux has globally replaced the Runner execution path.
+- Keep WebCodex Runner outside psmux. Its current launcher is already a no-console `pythonw.exe` process; psmux owns command sessions, not Runner lifecycle/restart supervision. Do not wrap or reconfigure the Runner merely to hide command windows.
+- Background psmux session startup is managed by the existing `\Muse\Muse-pSmux-Background` logon task. This recreates a session after login; it does not restore child-process state across reboot/logoff. Do not claim zero-flash behavior without visual verification.
 ## Change discipline
 
 - Preserve unrelated work and existing project conventions.

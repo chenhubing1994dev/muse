@@ -47,6 +47,38 @@ class FakeDesktop:
         self.snapshot_calls += 1
         return DesktopResult("snapshot", {"app": app or "desktop", "tree": {}}, "")
 
+class FakeMemPalace:
+    def __init__(self, error=None):
+        self.calls = []
+        self.error = error
+        self.checkpoint_calls = []
+
+    def search(self, query, *, limit=5, wing=None):
+        self.calls.append((query, limit, wing))
+        if self.error is not None:
+            raise self.error
+        payload = {
+            "total_before_filter": 1,
+            "results": [{
+                "drawer_id": "drawer-test-1",
+                "text": "An unverified candidate with source provenance.",
+                "source_file": "decision-notes.md",
+                "wing": wing or "Muse",
+                "room": "decisions",
+                "filed_at": "2026-11-19T00:00:00+00:00",
+                "similarity": 0.91,
+                "distance": 0.09,
+            }],
+        }
+        return {"content": [{"type": "text", "text": json.dumps(payload)}]}
+
+    def checkpoint(self, items, *, approved=False, dedup_threshold=0.9):
+        self.checkpoint_calls.append({"items": items, "approved": approved, "dedup_threshold": dedup_threshold})
+        return {"structuredContent": {"added": [
+            {"drawer_id": "synthetic-drawer", "content": item.get("content")}
+            for item in items
+        ], "duplicates": [], "errors": []}}
+
 class UnifiedRuntimeTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -621,6 +653,87 @@ class UnifiedRuntimeTests(unittest.TestCase):
         result = self.runtime.search_memories("anything", include_ruflo=False)
         self.assertFalse(result["ruflo"]["available"])
         self.assertEqual(self.runtime.ruflo.calls, [])
+
+    def test_federated_memory_search_keeps_mempalace_as_unverified_candidates(self):
+        self.runtime.mempalace = FakeMemPalace()
+        result = self.runtime.search_memories("architecture decision", project="muse", include_ruflo=False)
+        self.assertTrue(result["mempalace"]["available"])
+        self.assertEqual(result["mempalace"]["results"][0]["source_system"], "MemPalace")
+        self.assertEqual(result["mempalace"]["results"][0]["authority"], "unverified_retrieval_candidate")
+        self.assertEqual(result["mempalace"]["results"][0]["trust_boundary"], "untrusted_external_memory")
+        self.assertFalse(result["mempalace"]["results"][0]["instruction_authority"])
+        self.assertTrue(result["mempalace"]["results"][0]["requires_source_verification"])
+        self.assertEqual(result["mempalace"]["results"][0]["source_file"], "decision-notes.md")
+        self.assertEqual(result["canonical_store"], "Muse MemoryStore")
+        self.assertFalse(result["write_performed"])
+        self.assertEqual(self.runtime.mempalace.calls, [("architecture decision", 20, None)])
+
+    def test_invalid_optional_mempalace_config_does_not_block_muse_runtime(self):
+        config_dir = Path(self.tmp.name) / "config"
+        config_dir.mkdir()
+        (config_dir / "muse.toml").write_text("[mempalace]\nenabled = true\n", encoding="utf-8")
+        runtime = MuseRuntime(
+            Path(self.tmp.name) / "separate.sqlite3",
+            workspace=self.tmp.name,
+            memory_database=Path(self.tmp.name) / "fallback-memory.sqlite3",
+            ruflo=FakeRuflo(),
+            desktop=FakeDesktop(),
+        )
+        result = runtime.search_memories("local memory fallback", include_ruflo=False)
+        self.assertFalse(result["mempalace"]["available"])
+        self.assertEqual(result["mempalace"]["reason"], "ValueError")
+        self.assertEqual(result["local"]["count"], 0)
+        self.assertFalse(result["write_performed"])
+
+    def test_runtime_projection_outbox_requires_two_explicit_approvals(self):
+        from muse.memory import MemoryStore
+        memory_database = Path(self.tmp.name) / "projection-memory.sqlite3"
+        with MemoryStore(memory_database) as store:
+            saved = store.add(
+                "A reviewed agent lesson about stable project memory boundaries.",
+                project="muse",
+                source="unit-test",
+                confidence=0.95,
+                kind="skill",
+                track="agent",
+            )
+        self.runtime.memory_database = memory_database
+        self.runtime.mempalace = FakeMemPalace()
+        with self.assertRaises(PermissionError):
+            self.runtime.queue_mempalace_projection(saved["id"])
+        queued = self.runtime.queue_mempalace_projection(
+            saved["id"], approved=True, approved_by="reviewer",
+        )
+        self.assertEqual(queued["status"], "pending")
+        with self.assertRaises(TypeError):
+            self.runtime.deliver_mempalace_projection(queued["outbox_id"])
+        ticket = self.runtime.request_mempalace_projection_approval(queued["outbox_id"])
+        with self.assertRaises(PermissionError):
+            self.runtime.deliver_mempalace_projection(
+                queued["outbox_id"], approval_task_id=ticket["id"],
+            )
+        with TaskQueue(self.runtime.database) as tasks:
+            tasks.approve(ticket["id"], approved_by="human-publisher")
+        delivered = self.runtime.deliver_mempalace_projection(
+            queued["outbox_id"], approval_task_id=ticket["id"],
+        )
+        self.assertEqual(delivered["status"], "delivered")
+        self.assertEqual(delivered["delivered_by"], "human-publisher")
+        self.assertEqual(self.runtime.mempalace.checkpoint_calls[0]["approved"], True)
+        self.assertEqual(len(self.runtime.mempalace.checkpoint_calls), 1)
+    def test_mempalace_failure_does_not_break_canonical_or_ruflo_search(self):
+        self.runtime.mempalace = FakeMemPalace(RuntimeError("local MCP unavailable"))
+        result = self.runtime.search_memories("architecture decision", include_ruflo=False)
+        self.assertFalse(result["mempalace"]["available"])
+        self.assertEqual(result["mempalace"]["reason"], "RuntimeError")
+        self.assertEqual(result["local"]["count"], 0)
+        self.assertFalse(result["write_performed"])
+
+    def test_mempalace_can_be_skipped_per_search(self):
+        self.runtime.mempalace = FakeMemPalace()
+        result = self.runtime.search_memories("architecture decision", include_ruflo=False, include_mempalace=False)
+        self.assertEqual(result["mempalace"]["reason"], "disabled_for_request")
+        self.assertEqual(self.runtime.mempalace.calls, [])
 
     def test_task_scoped_desktop_snapshot_rejects_unknown_ticket_before_observation(self):
         with self.assertRaises(KeyError):

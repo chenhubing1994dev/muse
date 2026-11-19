@@ -3,7 +3,8 @@ from __future__ import annotations
 import unittest
 
 from muse.source_identity import (
-    build_source_identity_candidates,
+    build_source_identity_candidates,    find_exact_content_matches,
+
     extract_html_source_metadata,
     normalize_source_url,
 )
@@ -117,6 +118,23 @@ class SourceIdentityTests(unittest.TestCase):
 
         self.assertTrue(all(item["evidence"]["candidate_only"] for item in candidates))
         self.assertTrue(all(item["evidence"]["identity_is_not_ownership_proof"] for item in candidates))
+        self.assertEqual(
+            by_type["canonical_equivalent"]["evidence"]["matched_values"]["normalized_canonical_url"],
+            "https://original.example/story/9",
+        )
+        self.assertEqual(
+            by_type["same_publisher"]["evidence"]["matched_values"]["normalized_publisher_name"],
+            "example press",
+        )
+        self.assertEqual(
+            by_type["same_author"]["evidence"]["matched_values"]["matched_author_names"],
+            ["ada lovelace"],
+        )
+        self.assertEqual(
+            by_type["cites"]["evidence"]["matched_values"]["matched_reference_urls"],
+            ["https://publisher-b.example/article"],
+        )
+
 
     def test_historical_comparison_is_bounded_and_does_not_compare_old_sources_to_each_other(self):
         current = {
@@ -136,6 +154,31 @@ class SourceIdentityTests(unittest.TestCase):
         self.assertTrue(all(item["source_node_id"] == "new" or item["related_source_node_id"] == "new"
                             for item in candidates))
         self.assertEqual(len({item["related_source_node_id"] for item in candidates}), 500)
+
+    def test_exact_content_matches_include_history_but_exclude_truncated_snapshots(self):
+        digest = "a" * 64
+        matches = find_exact_content_matches(
+            [{"id": "new", "url": "https://new.example/copy", "metadata": {
+                "content_hash": digest, "truncated": False,
+            }}],
+            existing_sources=[
+                {"id": "old", "url": "https://old.example/original", "metadata": {
+                    "content_hash": digest, "truncated": False,
+                }},
+                {"id": "partial", "url": "https://partial.example/copy", "metadata": {
+                    "content_hash": digest, "truncated": True,
+                }},
+                {"id": "bad-hash", "url": "https://bad.example/copy", "metadata": {
+                    "content_hash": "not-a-hash", "truncated": False,
+                }},
+            ],
+        )
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0]["source_node_id"], "new")
+        self.assertEqual(matches[0]["related_source_node_id"], "old")
+        self.assertEqual(matches[0]["match_type"], "exact_fetched_text_hash")
+        self.assertTrue(matches[0]["candidate_only"])
+        self.assertTrue(matches[0]["independence_is_not_assessed"])
 
     def test_different_paths_are_not_merged_without_identity_metadata(self):
         candidates = build_source_identity_candidates([

@@ -69,6 +69,22 @@ Every response explicitly reports `execution: not_started`. Never treat a classi
 
 This is a Runner-mediated bridge, not a dynamically registered ChatGPT MCP tool. ChatGPT must call the currently exposed WebCodex `run_process` tool; `read_tool_manifest` does not register new Host tools. The single Muse Commander and its existing TaskQueue remain the only scheduling/ticket owners.
 
+### Windows development terminal: detached psmux job windows
+
+The Windows workstation uses a detached native psmux session named `muse-dev`, rooted at `D:\AI AGENT\Muse`, started at user logon by Task Scheduler task `\Muse\Muse-pSmux-Background`. The WSL tmux session is a separate fallback and must not be deleted or described as migrated.
+
+For Windows project commands, use `scripts/webcodex_psmux_exec.py` as the default execution adapter. The WebCodex `run_script` PowerShell call is only a short bootstrap: it pipes a JSON request to `py -3.11 scripts/webcodex_psmux_exec.py`. Requests accept inline `script` text or an existing project-relative `script_path`; supported languages are `powershell` (default), `python`/`py`, `bash`/`sh`, and `batch`/`bat`/`cmd`. Existing `.ps1`, `.py`, `.sh`, `.bat`, and `.cmd` files infer their language from the extension unless `language` is explicit, and are confined to the Project root. The payload runs in a detached `psmux new-window -d` job. Python uses the adapter's interpreter and adds the Project plus `src` to `PYTHONPATH`; batch uses `cmd.exe /d /c`; Bash prefers Git Bash and falls back to `wsl.exe --exec bash -lc`, converting drive paths to `/mnt/<drive>/...`. Each job has its own output/result files and returns the actual exit code. Do not type long commands into the main `muse-dev` prompt.
+
+This default applies to top-level project/development commands launched by WebCodex. Do not blindly route every `subprocess` call inside Muse through psmux: synchronous helper processes (for example, a browser CLI returning structured JSON, an isolated TTS helper, or FFmpeg) may require stdin/stdout pipes, precise timeouts, and a caller-owned lifecycle. Keep those as explicitly managed no-console child processes unless a dedicated service supervisor or asynchronous job contract is designed and tested. Long-running services belong to their existing Supervisor, not an interactive development shell.
+
+Example request:
+```json
+{"language":"python","script":"print('hello from psmux')","session":"muse-dev","expected_cwd":"D:\\\\AI AGENT\\\\Muse","timeout_secs":120}
+```
+
+Job scripts, language payloads, output logs, result markers, and the per-session active-job record live under `%LOCALAPPDATA%\Muse\psmux-jobs`. The adapter serializes work per session; an unfinished/unknown job blocks another submission. A completed result includes the actual exit code and captured output. If the adapter returns `outcome_unknown`, retain the job ID and use the recover action; never blindly resubmit the script.
+
+Verified on 2026-11-19: the adapter and ChatGPT bridge regression suites compile and pass (25 tests, Python 3.11). Live detached psmux jobs completed for PowerShell (exit 0, including a 2-second task), Python (exit 9), batch (exit 7), and Bash via WSL (exit 11); each returned its marker output and matching real exit code. A project-relative Python `script_path` also ran the adapter's 20-test module successfully in a detached psmux window. The WSL startup emits a host warning in the captured log, but the Bash payload still ran and its exit code was preserved. Runner config validates at generation 1 with no restart required; process inspection shows `webcodex-runner.exe` hosted by `pythonw.exe` and the desktop launcher by `wscript.exe`, so leave the Runner outside psmux. `run_shell`, `run_script`, and `run_process` remain Runner-owned and are not globally intercepted: project work must explicitly use this adapter to enter psmux. Zero-flash behavior has not been visually verified. The logon task recreates the psmux session after login; it does not restore terminal process state across reboot/logoff.
 
 ## Acceptance checklist
 

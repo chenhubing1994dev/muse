@@ -20,7 +20,7 @@ from muse.research_fetch import PublicSourceReader, ResearchEvidenceStore, Sourc
 from muse.resource_governor import ResourcePolicy, probe_host_resources
 from muse.progress import ProgressEventStore
 from muse.research_knowledge import ResearchKnowledgeStore
-from muse.source_identity import build_source_identity_candidates
+from muse.source_identity import build_source_identity_candidates, find_exact_content_matches
 
 
 
@@ -471,13 +471,18 @@ class ResearchPipeline:
         if stop_event is not None and stop_event.is_set():
             return self._aborted(cleaned, failures, prior_knowledge, progress_count, progress_id)
 
+        exact_content_match_hints: list[dict[str, Any]] = []
         source_identity_candidate_count = 0
         if self.knowledge_store is not None and pages:
             identity_sources = [
                 {
                     "source_node_id": knowledge_source_refs[item["url"]],
                     "url": item["url"],
-                    "metadata": item.get("source_metadata") or {},
+                    "metadata": {
+                        **(item.get("source_metadata") or {}),
+                        "content_hash": item.get("sha256"),
+                        "truncated": bool(item.get("truncated")),
+                    },
                 }
                 for item in pages if item["url"] in knowledge_source_refs
             ]
@@ -492,6 +497,9 @@ class ResearchPipeline:
                     for node in self.knowledge_store.list_nodes(node_type="source", limit=500)
                     if node["id"] not in current_source_ids and node.get("external_ref")
                 ]
+                exact_content_match_hints = find_exact_content_matches(
+                    identity_sources, existing_sources=historical_sources,
+                )
                 for candidate in build_source_identity_candidates(
                     identity_sources, existing_sources=historical_sources,
                 ):
@@ -559,6 +567,8 @@ class ResearchPipeline:
             "independent_domain_count": len(domains),
             "independent_publisher_group_count": len(publisher_groups),
             "source_identity_candidate_count": source_identity_candidate_count,
+            "exact_content_match_hints": exact_content_match_hints,
+
             "exact_duplicate_content_groups": sum(1 for count in content_hash_counts.values() if count > 1),
             "sources": sorted(pages, key=lambda item: item["url"]),
             "failures": failures, "knowledge_node_count": len(knowledge_node_ids),

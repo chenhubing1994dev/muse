@@ -15,13 +15,185 @@ from unittest.mock import patch
 from muse.agent_registry import AgentRegistry
 from muse.capabilities import CapabilityRegistry
 from muse.progress import ProgressEventStore
-from muse.status_api import build_agents, build_capabilities, build_initiative_timeline, build_overview, build_products, build_improvement_detail, create_status_server
+from muse.status_api import _find_product_subtitle_review, build_agents, build_capabilities, build_initiative_timeline, build_mempalace_status, build_overview, build_products, build_improvement_detail, create_status_server
 from muse.improvement import ImprovementStore
 from muse.task_queue import TaskQueue
 from muse.commander_planner import CommanderPlanner
 from muse.workflow_profiles import WorkflowController
 from muse.initiative_engine import InitiativeStore
 from muse.product_builder import LocalProductBuilder
+
+
+class MemPalaceStatusApiTests(unittest.TestCase):
+    def test_status_is_readonly_privacy_minimal_and_reports_outbox_counts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "config").mkdir()
+            (root / "config" / "muse.toml").write_text(
+                '[mempalace]\nenabled = false\n', encoding="utf-8",
+            )
+            memory_db = root / "memory.sqlite3"
+            import sqlite3
+            connection = sqlite3.connect(memory_db)
+            connection.execute(
+                "CREATE TABLE mempalace_projection_outbox (status TEXT, created_at TEXT, delivered_at TEXT, payload_json TEXT)"
+            )
+            connection.executemany(
+                "INSERT INTO mempalace_projection_outbox VALUES (?, ?, ?, ?)",
+                [("pending", "2026-11-19T10:00:00Z", None, "private-secret"),
+                 ("failed", "2026-11-19T11:00:00Z", None, "private-secret"),
+                 ("delivered", "2026-11-19T09:00:00Z", "2026-11-19T09:05:00Z", "private-secret")],
+            )
+            connection.commit()
+            connection.close()
+            before = memory_db.read_bytes()
+            status = build_mempalace_status(root, memory_db)
+            self.assertEqual(status["connection_state"], "disabled")
+            self.assertEqual(status["memory_store_state"], "ready")
+            self.assertEqual(status["projection_outbox"]["pending"], 1)
+            self.assertEqual(status["projection_outbox"]["failed"], 1)
+            self.assertEqual(status["projection_outbox"]["delivered"], 1)
+            self.assertEqual(status["projection_outbox"]["status"], "attention_required")
+            self.assertEqual(status["projection_outbox"]["total"], 3)
+            self.assertEqual(status["projection_outbox"]["oldest_pending_at"], "2026-11-19T10:00:00Z")
+            self.assertEqual(status["projection_outbox"]["latest_delivered_at"], "2026-11-19T09:05:00Z")
+            self.assertFalse(status["projection_outbox"]["content_included"])
+            self.assertFalse(status["remote_process_started"])
+            self.assertFalse(status["private_content_exposed"])
+            self.assertNotIn("private-secret", json.dumps(status))
+            self.assertEqual(memory_db.read_bytes(), before)
+
+    def test_status_marks_missing_configured_palace_without_starting_it(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "config"
+            config.mkdir()
+            missing = root / "not-created-palace"
+            (config / "muse.toml").write_text(
+                f'[mempalace]\nenabled = true\npalace_path = "{missing.as_posix()}"\n', encoding="utf-8",
+            )
+            status = build_mempalace_status(root, root / "missing.sqlite3")
+            self.assertEqual(status["connection_state"], "configured_store_missing")
+            self.assertFalse(missing.exists())
+            self.assertEqual(status["index_freshness"], "not_measured")
+
+    def test_status_http_endpoint_requires_bearer_and_returns_readonly_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "config").mkdir()
+            (root / "config" / "muse.toml").write_text('[mempalace]\nenabled = false\n', encoding="utf-8")
+            memory_db = root / "memory.sqlite3"
+            import sqlite3
+            connection = sqlite3.connect(memory_db)
+            connection.execute("CREATE TABLE mempalace_projection_outbox (status TEXT, created_at TEXT, delivered_at TEXT)")
+            connection.execute("INSERT INTO mempalace_projection_outbox VALUES ('pending', '2026-11-19T12:00:00Z', NULL)")
+            connection.commit()
+            connection.close()
+            server, token = create_status_server(
+                task_db=root / "tasks.sqlite3", progress_db=root / "progress.sqlite3",
+                capability_db=root / "capabilities.sqlite3", memory_db=memory_db,
+            )
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_address[1]}"
+            try:
+                with self.assertRaises(HTTPError) as rejected:
+                    urlopen(base + "/api/v1/mempalace/status", timeout=3)
+                self.assertEqual(rejected.exception.code, 401)
+                rejected.exception.close()
+                request = Request(base + "/api/v1/mempalace/status", headers={"Authorization": f"Bearer {token}"})
+                with urlopen(request, timeout=3) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(payload["projection_outbox"]["pending"], 1)
+                self.assertFalse(payload["remote_process_started"])
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=3)
+
+
+class ClaimDossierApiTests(unittest.TestCase):
+    def test_claim_dossier_builder_returns_reviewed_evidence_and_no_auto_verdict(self) -> None:
+        from muse.status_api import build_claim_dossier
+        from muse.research_knowledge import ResearchKnowledgeStore
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "knowledge.sqlite3"
+            with ResearchKnowledgeStore(database) as store:
+                source = store.upsert_node("source", "Primary source", external_ref="https://example.test/source")
+                claim = store.upsert_node("claim", "Test claim", summary="Claim summary", metadata={"epistemic_status": "hypothesis"})
+                evidence = store.record_claim_evidence(
+                    claim["id"], source["id"], direction="support_search_candidate", evidence_type="primary",
+                    quality="unassessed", independence="unassessed",
+                )
+            dossier = build_claim_dossier(database, claim["id"])
+            self.assertEqual(dossier["claim_id"], claim["id"])
+            self.assertEqual(dossier["epistemic_status"], "hypothesis")
+            self.assertEqual(dossier["evidence"][0]["id"], evidence["id"])
+            self.assertTrue(dossier["retrieval_direction_is_not_evidence_verdict"])
+            self.assertFalse(dossier["confidence"]["automatic_scoring"])
+            self.assertIsNone(build_claim_dossier(database, "f" * 32))
+
+    def test_claim_dossier_builder_rejects_invalid_identifiers_and_limits(self) -> None:
+        from muse.status_api import build_claim_dossier
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "knowledge.sqlite3"
+            with self.assertRaises(ValueError):
+                build_claim_dossier(database, "../claim")
+            with self.assertRaises(ValueError):
+                build_claim_dossier(database, "a" * 32, evidence_limit=0)
+
+
+    def test_claim_dossier_http_endpoint_returns_bounded_readonly_dossier(self) -> None:
+        from muse.research_knowledge import ResearchKnowledgeStore
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            knowledge_db = root / "knowledge.sqlite3"
+            with ResearchKnowledgeStore(knowledge_db) as store:
+                source = store.upsert_node("source", "Reviewed source", external_ref="https://example.test/paper")
+                claim = store.upsert_node(
+                    "claim", "A testable hypothesis", summary="A claim that remains unverified.",
+                    metadata={"epistemic_status": "hypothesis"},
+                )
+                store.record_claim_evidence(
+                    claim["id"], source["id"], direction="support_search_candidate",
+                    evidence_type="primary", quality="unassessed", independence="unassessed",
+                )
+
+            server, token = create_status_server(
+                task_db=root / "tasks.sqlite3", progress_db=root / "progress.sqlite3",
+                capability_db=root / "capabilities.sqlite3", knowledge_db=knowledge_db,
+            )
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_address[1]}"
+            headers = {"Authorization": f"Bearer {token}"}
+            try:
+                request = Request(
+                    f"{base}/api/v1/knowledge/claims/{claim['id']}/dossier?evidence_limit=1",
+                    headers=headers,
+                )
+                with urlopen(request, timeout=3) as response:
+                    self.assertEqual(response.status, 200)
+                    payload = json.loads(response.read().decode("utf-8"))
+                dossier = payload["dossier"]
+                self.assertEqual(dossier["claim_id"], claim["id"])
+                self.assertEqual(len(dossier["evidence"]), 1)
+                self.assertTrue(dossier["retrieval_direction_is_not_evidence_verdict"])
+                self.assertFalse(dossier["confidence"]["automatic_scoring"])
+
+                missing = Request(
+                    f"{base}/api/v1/knowledge/claims/{'f' * 32}/dossier",
+                    headers=headers,
+                )
+                with self.assertRaises(HTTPError) as not_found:
+                    urlopen(missing, timeout=3)
+                self.assertEqual(not_found.exception.code, 404)
+                not_found.exception.close()
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=3)
 
 
 class StatusApiTests(unittest.TestCase):
@@ -50,6 +222,153 @@ class StatusApiTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp.cleanup()
+
+    def test_subtitle_review_lookup_binds_exact_product_audio_script_and_srt(self) -> None:
+        workspace = Path(self.temp.name)
+        run_dir = workspace / "data" / "prometheus" / "runs" / "pilot" / "run-1"
+        run_dir.mkdir(parents=True)
+        srt = b"1\n00:00:00,000 --> 00:00:01,000\nhello\n"
+        (run_dir / "narration-subtitles.srt").write_bytes(srt)
+        initiative_id, version_id = "1" * 32, "2" * 20
+        review = {
+            "schema_version": 1,
+            "review_status": "pending_human_review",
+            "subtitle_cue_count": 1,
+            "human_approved": False,
+            "subtitle_file": "narration-subtitles.srt",
+            "reference_script": "hello",
+            "raw_asr_transcript": "hello",
+            "asr": {
+                "audio_sha256": "a" * 64,
+                "model_repo": "local/cantonese",
+                "model_revision": "b" * 40,
+            },
+            "segments": [{"index": 1, "start_seconds": 0.0, "end_seconds": 1.0, "asr_text": "hello"}],
+        }
+        (run_dir / "subtitle-review.json").write_text(json.dumps(review), encoding="utf-8")
+        (run_dir / "generation.json").write_text(json.dumps({"product": {
+            "initiative_id": initiative_id, "version_id": version_id,
+            "relative_path": f"data\\products\\{initiative_id}\\{version_id}",
+        }}), encoding="utf-8")
+        manifest = {
+            "initiative_id": initiative_id,
+            "version_id": version_id,
+            "narration": {"script": "hello"},
+            "narration_asr": {
+                "audio_sha256": "a" * 64,
+                "model_repo": "local/cantonese",
+                "model_revision": "b" * 40,
+                "transcript": "hello",
+            },
+            "subtitles": {"sha256": hashlib.sha256(srt).hexdigest()},
+        }
+        self.assertEqual(_find_product_subtitle_review(workspace, manifest), review)
+
+        decoy = workspace / "data" / "prometheus" / "runs" / "pilot" / "other-product"
+        decoy.mkdir()
+        (decoy / "narration-subtitles.srt").write_bytes(srt)
+        (decoy / "subtitle-review.json").write_text(json.dumps(review), encoding="utf-8")
+        (decoy / "generation.json").write_text(json.dumps({"product": {
+            "initiative_id": "9" * 32, "version_id": "8" * 20,
+            "relative_path": "data\\products\\" + "9" * 32 + "\\" + "8" * 20,
+        }}), encoding="utf-8")
+        self.assertEqual(_find_product_subtitle_review(workspace, manifest), review)
+
+        duplicate = workspace / "data" / "prometheus" / "runs" / "pilot" / "run-2"
+        duplicate.mkdir()
+        (duplicate / "narration-subtitles.srt").write_bytes(srt)
+        (duplicate / "subtitle-review.json").write_text(json.dumps(review), encoding="utf-8")
+        (duplicate / "generation.json").write_text(json.dumps({"product": {
+            "initiative_id": initiative_id, "version_id": version_id,
+            "relative_path": f"data\\products\\{initiative_id}\\{version_id}",
+        }}), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "multiple subtitle review"):
+            _find_product_subtitle_review(workspace, manifest)
+
+        manifest["narration_asr"]["audio_sha256"] = "c" * 64
+        with self.assertRaises(FileNotFoundError):
+            _find_product_subtitle_review(workspace, manifest)
+
+    def test_subtitle_review_api_requires_explicit_confirmation_and_creates_new_version(self) -> None:
+        root = Path(self.temp.name)
+        products_dir = root / "data" / "products"
+        products_dir.mkdir(parents=True)
+        initiative_id = "1" * 32
+        version_id = "2" * 20
+        review = {
+            "schema_version": 1,
+            "review_status": "pending_human_review",
+            "human_approved": False,
+            "subtitle_cue_count": 1,
+            "reference_script": "hello",
+            "raw_asr_transcript": "hello",
+            "asr": {"audio_sha256": "a" * 64, "model_repo": "local/cantonese", "model_revision": "b" * 40},
+            "segments": [{
+                "index": 1, "start_seconds": 0.0, "end_seconds": 1.0,
+                "asr_text": "hello", "review_status": "pending", "corrected_text": None,
+            }],
+        }
+        manifest = {"product_kind": "video_creator"}
+        result = {
+            "initiative_id": initiative_id, "version_id": "3" * 20,
+            "creator_initiative_id": "4" * 32, "validated": True, "status": "testing",
+            "subtitle_review": {"human_approved": True}, "quality_gate": {"ready_to_publish": False},
+            "relative_path": "data/products/" + initiative_id + "/" + ("3" * 20),
+        }
+        server, token = create_status_server(
+            task_db=self.task_db, progress_db=self.progress_db,
+            capability_db=self.capability_db, products_dir=products_dir,
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        headers = {"Authorization": f"Bearer {token}", "Origin": "tauri://localhost"}
+        endpoint = base + f"/api/v1/products/{initiative_id}/{version_id}/subtitle-review/approve"
+        payload = {
+            "reviewed_segment_indexes": [1], "corrections": [{"segment_index": 1, "corrected_text": "hello world"}],
+            "reviewer": "human-editor", "confirmation": "not-the-confirmation",
+        }
+        try:
+            with (
+                patch("muse.status_api._verified_product_files", return_value=(products_dir, manifest, {})),
+                patch("muse.status_api._find_product_subtitle_review", return_value=review),
+                patch("muse.status_api.VideoProductBuilder.package_approved_subtitle_revision", return_value=result) as build,
+            ):
+                review_request = Request(
+                    base + f"/api/v1/products/{initiative_id}/{version_id}/subtitle-review",
+                    headers=headers,
+                )
+                with urlopen(review_request, timeout=5) as response:
+                    review_body = json.loads(response.read())
+                self.assertEqual(review_body["review"], review)
+                rejected = Request(
+                    endpoint, data=json.dumps(payload).encode("utf-8"),
+                    headers={**headers, "Content-Type": "application/json"}, method="POST",
+                )
+                with self.assertRaises(HTTPError) as error:
+                    urlopen(rejected, timeout=5)
+                self.assertEqual(error.exception.code, 400)
+                error.exception.close()
+                build.assert_not_called()
+
+                payload["confirmation"] = "APPROVE-HUMAN-REVIEW"
+                approved = Request(
+                    endpoint, data=json.dumps(payload).encode("utf-8"),
+                    headers={**headers, "Content-Type": "application/json"}, method="POST",
+                )
+                with urlopen(approved, timeout=5) as response:
+                    body = json.loads(response.read())
+                    self.assertEqual(response.status, 201)
+                self.assertEqual(body["product"]["version_id"], "3" * 20)
+                self.assertFalse(body["product"]["quality_gate"]["ready_to_publish"])
+                approved_document = build.call_args.args[2]
+                self.assertTrue(approved_document["human_approved"])
+                self.assertEqual(approved_document["approved_by"], "human-editor")
+                self.assertEqual(approved_document["segments"][0]["corrected_text"], "hello world")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
 
     def test_overview_never_contains_task_payload(self) -> None:
         result = build_overview(self.task_db, self.progress_db)
@@ -545,7 +864,13 @@ class StatusApiTests(unittest.TestCase):
         product_dir.mkdir(parents=True)
         video = bytes.fromhex("000000186674797069736f6d66697874757265")
         readme = b"# QA fixture"
-        storyboard = json.dumps({"title": "QA fixture"}).encode("utf-8")
+        storyboard = json.dumps({"title": "QA fixture", "scenes": [
+            {"id": "shot-01", "source_asset": "shot-01.mp4", "camera_move": "push_in",
+             "duration_seconds": 2.0, "timeline_start_seconds": 0.0, "timeline_end_seconds": 2.0,
+             "transition_in_seconds": 0.0, "transition_out_seconds": 0.45},
+            {"id": "shot-02", "source_asset": "../private.mp4", "camera_move": "shake",
+             "timeline_start_seconds": -1.0, "timeline_end_seconds": 3.0},
+        ]}).encode("utf-8")
         qa_report = {
             "schema_version": 1, "status": "passed", "path": "video.mp4",
             "artifact_sha256": hashlib.sha256(video).hexdigest(),
@@ -553,6 +878,22 @@ class StatusApiTests(unittest.TestCase):
                 {"code": "sustained_black", "message": "black frames", "start_seconds": 2.5,
                  "duration_seconds": 1.25, "review_threshold_seconds": 0.5,
                  "private_detail": "must-not-leak"},
+                {"code": "audio_loudness_low", "message": "Integrated loudness is below the review target",
+                 "unit": "LUFS", "value": -24.3},
+            ],
+            "storyboard_mapping": [
+                {"code": "sustained_black", "start_seconds": 2.5, "duration_seconds": 1.25,
+                 "mapping_status": "mapped", "storyboard_matches": [
+                     {"scene_id": "shot-02", "source_file": "shot-02.mp4",
+                      "scene_start_seconds": 2.0, "scene_end_seconds": 4.0,
+                      "overlap_start_seconds": 2.5, "overlap_end_seconds": 3.75,
+                      "overlap_seconds": 1.25, "private_detail": "must-not-leak"},
+                     {"scene_id": "shot-03", "source_file": "C:/private/shot-03.mp4",
+                      "scene_start_seconds": 3.5, "scene_end_seconds": 5.0,
+                      "overlap_start_seconds": 3.5, "overlap_end_seconds": 3.75,
+                      "overlap_seconds": 0.25},
+                 ]},
+                {"code": "audio_loudness_low", "mapping_status": "not_time_based", "storyboard_matches": []},
             ],
         }
         qa_bytes = json.dumps(qa_report).encode("utf-8")
@@ -578,23 +919,94 @@ class StatusApiTests(unittest.TestCase):
                                           "private_detail": "must-not-leak"}},
             "quality_gate": {
                 "status": "passed", "passed": True, "ready_to_publish": False,
-                "report": "qa-report.json", "review_warning_count": 1,
-                "review_warning_codes": ["sustained_black"], "warning_review_required": True,
+                "report": "qa-report.json", "review_warning_count": 2,
+                "review_warning_codes": ["sustained_black", "audio_loudness_low"], "warning_review_required": True,
             },
         }
         (product_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
         rows = build_products(products_root)
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["quality_gate"]["review_warning_count"], 1)
+        self.assertEqual(rows[0]["quality_gate"]["review_warning_count"], 2)
         self.assertTrue(rows[0]["quality_gate"]["warning_review_required"])
         self.assertEqual(rows[0]["quality_warnings"][0]["start_seconds"], 2.5)
         self.assertEqual(rows[0]["motion"]["renderer"], "remotion")
         self.assertEqual(rows[0]["motion"]["audio_mode"], "music")
+        self.assertEqual(rows[0]["scene_timeline"], [{
+            "scene_id": "shot-01", "source_asset": "shot-01.mp4", "camera_move": "push_in",
+            "timeline_start_seconds": 0.0, "timeline_end_seconds": 2.0, "duration_seconds": 2.0,
+            "transition_in_seconds": 0.0, "transition_out_seconds": 0.45,
+        }])
         self.assertAlmostEqual(rows[0]["video_metrics"]["duration_seconds"], 4.416667)
         self.assertEqual(rows[0]["video_metrics"]["frames"], 53)
         self.assertNotIn("private_detail", json.dumps(rows))
         self.assertEqual(rows[0]["quality_warnings"][0]["duration_seconds"], 1.25)
-        self.assertNotIn("private_detail", json.dumps(rows))
+        mapped_warning = rows[0]["quality_warnings"][0]
+        self.assertEqual(mapped_warning["mapping_status"], "mapped")
+        self.assertEqual(mapped_warning["storyboard_matches"][0]["scene_id"], "shot-02")
+        self.assertEqual(mapped_warning["storyboard_matches"][0]["source_file"], "shot-02.mp4")
+        self.assertEqual(mapped_warning["storyboard_matches"][0]["overlap_start_seconds"], 2.5)
+        self.assertEqual(len(mapped_warning["storyboard_matches"]), 1)
+        self.assertEqual(len(rows[0]["quality_warnings"]), 2)
+        metric_warning = rows[0]["quality_warnings"][1]
+        self.assertEqual(metric_warning["code"], "audio_loudness_low")
+        self.assertEqual(metric_warning["mapping_status"], "not_time_based")
+        self.assertEqual(metric_warning["storyboard_matches"], [])
+        self.assertNotIn("start_seconds", metric_warning)
+
+
+    def test_build_products_only_exposes_subtitle_review_for_exact_run_product(self) -> None:
+        workspace = Path(self.temp.name)
+        products_root = workspace / "data" / "products"
+        initiative_id, version_id = "a" * 32, "b" * 20
+        product_dir = products_root / initiative_id / version_id
+        product_dir.mkdir(parents=True)
+        files = {}
+        for name, body in (
+            ("README.md", b"fixture"), ("storyboard.json", b"{}"),
+            ("video.mp4", b"fixture-video"), ("product.zip", b"fixture-zip"),
+            ("qa-report.json", b'{"warnings":[]}'),
+        ):
+            path = product_dir / name
+            path.write_bytes(body)
+            files[name] = (path, body if name != "video.mp4" and name != "product.zip" else None)
+        srt = b"1\n00:00:00,000 --> 00:00:01,000\nhello\n"
+        review_dir = workspace / "data" / "prometheus" / "runs" / "pilot" / "run-1"
+        review_dir.mkdir(parents=True)
+        (review_dir / "narration-subtitles.srt").write_bytes(srt)
+        review = {
+            "schema_version": 1, "review_status": "pending_human_review",
+            "human_approved": False, "subtitle_cue_count": 1,
+            "subtitle_file": "narration-subtitles.srt", "reference_script": "hello",
+            "raw_asr_transcript": "hello",
+            "asr": {"audio_sha256": "c" * 64, "model_repo": "local/cantonese", "model_revision": "d" * 40},
+            "segments": [{"index": 1, "start_seconds": 0.0, "end_seconds": 1.0, "asr_text": "hello"}],
+        }
+        (review_dir / "subtitle-review.json").write_text(json.dumps(review), encoding="utf-8")
+        generation = {"product": {
+            "initiative_id": initiative_id, "version_id": version_id,
+            "relative_path": f"data/products/{initiative_id}/{version_id}",
+        }}
+        generation_path = review_dir / "generation.json"
+        generation_path.write_text(json.dumps(generation), encoding="utf-8")
+        manifest = {
+            "product_kind": "video_creator", "initiative_id": initiative_id,
+            "version_id": version_id, "title": "Subtitle provenance fixture", "status": "testing",
+            "subtitles": {"sha256": hashlib.sha256(srt).hexdigest()},
+            "narration": {"script": "hello"},
+            "narration_asr": {
+                "audio_sha256": "c" * 64, "model_repo": "local/cantonese",
+                "model_revision": "d" * 40, "transcript": "hello",
+            },
+        }
+        with patch("muse.status_api._verified_product_files", return_value=(product_dir, manifest, files)):
+            rows = build_products(products_root)
+            self.assertEqual(rows[0]["subtitle_review"]["status"], "pending_human_review")
+            generation["product"]["initiative_id"] = "e" * 32
+            generation["product"]["relative_path"] = "data/products/" + "e" * 32 + "/" + version_id
+            generation_path.write_text(json.dumps(generation), encoding="utf-8")
+            rows = build_products(products_root)
+        self.assertEqual(rows[0]["subtitle_review"]["status"], "unavailable")
+        self.assertFalse(rows[0]["subtitle_review"]["review_available"])
 
     def test_creator_inspiration_inbox_and_research_report_download(self) -> None:
         workspace = Path(self.temp.name)
@@ -861,6 +1273,76 @@ class StatusApiTests(unittest.TestCase):
             server.server_close()
             thread.join(timeout=3)
 
+    def test_initiative_performance_api_records_and_reads_verified_metrics(self):
+        root = Path(self.temp.name)
+        initiatives_db = root / "data" / "initiatives" / "muse.sqlite3"
+        products_dir = root / "data" / "products"
+        products_dir.mkdir(parents=True)
+        with InitiativeStore(initiatives_db) as initiatives:
+            item = initiatives.propose(
+                "Performance API target", kind="creative_output", creator_value="measurable output",
+                concept="track real results", first_step="publish", expected_output="metrics",
+            )
+        server, token = create_status_server(
+            task_db=self.task_db, progress_db=self.progress_db,
+            capability_db=self.capability_db, products_dir=products_dir,
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        endpoint = f"http://127.0.0.1:{server.server_address[1]}/api/v1/initiatives/{item['id']}/performance"
+        body = {
+            "idempotency_key": "manual-youtube-20261117-1", "platform": "youtube",
+            "source": "official_analytics", "currency": "SGD",
+            "published_at": "2026-11-16T12:00:00+08:00",
+            "source_reference": "studio-export-001",
+            "metrics": {"views": 2400, "three_second_retention_pct": 68.5,
+                        "completion_rate_pct": 27.0, "orders": 2,
+                        "reported_revenue_minor": 12000, "settled_revenue_minor": 6000,
+                        "production_cost_minor": 1800},
+            "content_profile": {"topic": "AI 创作", "hook_style": "反常识提问", "voice_language": "粤语（香港）"},
+        }
+        try:
+            request = Request(endpoint, data=json.dumps(body).encode("utf-8"), headers={
+                "Authorization": "Bearer " + token, "Origin": "tauri://localhost",
+                "Content-Type": "application/json",
+            }, method="POST")
+            with urlopen(request, timeout=3) as response:
+                created = json.loads(response.read())
+            self.assertEqual(response.status, 201)
+            self.assertEqual(created["snapshot"]["views"], 2400)
+            self.assertEqual(created["snapshot"]["content_profile"]["voice_language"], "粤语（香港）")
+            replay = Request(endpoint, data=json.dumps(body).encode("utf-8"), headers={
+                "Authorization": "Bearer " + token, "Origin": "tauri://localhost",
+                "Content-Type": "application/json",
+            }, method="POST")
+            with urlopen(replay, timeout=3) as response:
+                replayed = json.loads(response.read())
+            self.assertEqual(replayed["snapshot"]["id"], created["snapshot"]["id"])
+            read = Request(endpoint, headers={"Authorization": "Bearer " + token})
+            with urlopen(read, timeout=3) as response:
+                result = json.loads(response.read())
+            self.assertEqual(response.status, 200)
+            self.assertEqual(result["snapshots"][0]["views"], 2400)
+            self.assertEqual(result["snapshots"][0]["content_profile"]["topic"], "AI 创作")
+            self.assertEqual(result["summary_by_currency"][0]["settled_revenue_minor"], 6000)
+            self.assertEqual(result["summary_by_currency"][0]["currency"], "SGD")
+            self.assertEqual(result["analysis"]["status"], "ready")
+            self.assertEqual(result["analysis"]["cohorts"][0]["sample_count"], 1)
+            self.assertEqual(result["analysis"]["cohorts"][0]["status"], "insufficient_sample")
+            self.assertEqual(result["analysis"]["cohorts"][0]["item_comparisons"]["three_second_retention_pct"]["status"], "insufficient_item_samples")
+            invalid_body = dict(body, metrics={"completion_rate_pct": 150})
+            invalid = Request(endpoint, data=json.dumps(invalid_body).encode("utf-8"), headers={
+                "Authorization": "Bearer " + token, "Origin": "tauri://localhost",
+                "Content-Type": "application/json",
+            }, method="POST")
+            with self.assertRaises(HTTPError) as error:
+                urlopen(invalid, timeout=3)
+            self.assertEqual(error.exception.code, 400)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
     def test_failed_video_job_is_saved_as_redacted_initiative_failure(self):
         import time
 
@@ -1051,6 +1533,49 @@ class StatusApiTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)
+
+    def test_pipeline_submit_api_enqueues_commander_ticket_and_marks_cantonese_unavailable(self):
+        root = Path(self.temp.name)
+        script = root / "scripts" / "muse-high-value-short.py"
+        script.parent.mkdir(parents=True, exist_ok=True)
+        script.write_text("print(\\\"{}\\\")", encoding="utf-8")
+        server, token = create_status_server(
+            task_db=self.task_db, progress_db=self.progress_db,
+            capability_db=self.capability_db,
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        headers = {"Authorization": "Bearer " + token, "Content-Type": "application/json"}
+        try:
+            request = Request(base + "/api/v1/pipelines/submit",
+                data=json.dumps({"recipe_id": "high_value_short_v2", "title": "API pipeline test"}).encode(),
+                headers=headers, method="POST")
+            with urlopen(request, timeout=3) as response:
+                self.assertEqual(response.status, 202)
+                job = json.loads(response.read())["job"]
+            with TaskQueue(self.task_db) as queue:
+                ticket = queue.get(job["job_id"])
+            self.assertEqual(ticket["payload"]["kind"], "video_pipeline")
+            self.assertEqual(ticket["payload"]["title"], "API pipeline test")
+            self.assertEqual(job["output_dir"], ticket["payload"]["output_dir"])
+            self.assertTrue(job["output_dir"].startswith("data/prometheus/runs/high_value_short_v2/"))
+            recipes_request = Request(base + "/api/v1/pipelines/recipes", headers=headers)
+            with urlopen(recipes_request, timeout=3) as response:
+                recipes = json.loads(response.read())["recipes"]
+            cantonese = next(item for item in recipes if item["id"] == "cantonese_pilot_v2")
+            self.assertFalse(cantonese["available"])
+            rejected = Request(base + "/api/v1/pipelines/submit",
+                data=json.dumps({"recipe_id": "cantonese_pilot_v2"}).encode(),
+                headers=headers, method="POST")
+            with self.assertRaises(HTTPError) as error:
+                urlopen(rejected, timeout=3)
+            self.assertEqual(error.exception.code, 409)
+            error.exception.close()
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
 
 if __name__ == "__main__":
     unittest.main()

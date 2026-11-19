@@ -25,18 +25,27 @@
 - Python 3.14 定向回归：`tests.test_cantonese_asr` + `tests.test_cantonese_tts` + `tests.test_video_product_builder`，**31/31 通过**。
 - 该 31 项包含真实文件系统/ZIP/哈希与编排结构测试；ASR 模型加载通过 mock 隔离，因此不是实际模型推理验收。
 
-## 模型下载现状
+## 模型下载与真实推理
 
-- 本地 Python 3.14 项目隔离依赖可导入：`faster-whisper 1.2.1`、`huggingface_hub 2.4.0`、`onnxruntime 1.32.0`、`soundfile 0.13.1`。
-- 固定模型 `cts/model.bin` 预期 967,072,097 bytes，SHA-256：`d343caa7ef827ddb60bc2c1c8c741b29d2bd99d5387aa5c6f96cbd26f6804b34`。
-- 下载 Job `wc_job_BFvgB6jBoFejfsaG` 最终 timeout（3600 秒）；日志显示 peer closed connection、TLS handshake failure，累计下载仅有中断的 partial 文件；最终 `cts/model.bin` 未生成。未关闭 TLS 校验，也未将 partial 文件当成可用模型。
+- 固定模型 `alvanlii/whisper-small-cantonese` revision `b03a4e5d482f06858ce10ebbabebabec9f447a0d` 已下载到本地；`cts/model.bin` 精确大小 967,072,097 bytes，SHA-256 为 `d343caa7ef827ddb60bc2c1c8c741b29d2bd99d5387aa5c6f96cbd26f6804b34`。下载采用严格 TLS 校验，没有关闭证书验证。
+- 已用真实本地 TTS WAV 执行 Whisper 推理，不再是 mock-only：三条评测样本均产生了识别文本与时间戳。样本 1 将专有名词 Muse 识别为“WS”；样本 2 有替换/插入错误（一次评估 CER 为 0.125）；样本 3 与脚本完全匹配（CER 0.00）。
+- 解码参数经实测调整为 `vad_filter=False`、`condition_on_previous_text=True`、`temperature=0.0`、`compression_ratio_threshold=2.4`、`log_prob_threshold=-1.0`、`no_speech_threshold=0.6`。默认 CER review threshold 收紧到 0.10；机器分数不替代人工听审。
+- 三条样本及早期评估记录位于 `data/narration/`；较严格 0.10 门槛的评估重跑曾提交为 Job `wc_job_ri0G3ZtO7np9NJL1`，其最终结果尚待恢复观察，不把旧阈值 JSON 冒充新门槛结果。
+
+## TDD 与验证补充
+
+- 定向回归覆盖 `tests.test_cantonese_asr`、`tests.test_cantonese_tts`、`tests.test_video_product_builder`、`tests.test_video_qa`：**43/43 通过**；`python -m compileall -q src tests` 通过。
+- 真实本地 TTS → Whisper ASR → 时间戳 SRT → BGM sidechain mix → MP4/ZIP 产品封装流程已用临时合成测试视频实际运行；`verify_path`、ZIP CRC、旁白/BGM/SRT 文件成员与 provenance 校验通过。临时测试目录已清理。
+- 上述 E2E 使用 FFmpeg 合成测试画面，不是 Wan AI 生成素材；其音频响度偏低并出现黑帧/静音类 QA 提醒，产品门仍为 `ready_to_publish=false`。这只证明管线接通，不代表成片可发布。
+
 ## 未完成验收
 
-1. 完成模型下载并校验精确大小与 SHA-256。
-2. 对真实 `canto-eval-1/2/3.wav` 运行本地 ASR，保存原文、识别结果、CER、逐段时间戳与 SRT。
-3. 完成人工试听；核对粤语口语、专有名词、数字、英文夹杂和同音字。
-4. 将真实旁白与 SRT 封装到真实 Wan 生成片段，验证音画时长、字幕同步、MP4 全片解码与 ZIP CRC。
-5. B-138 音频响度/真峰值/峰值电平/RMS 质检与 B-139 旁白感知 BGM sidechain 已实现；仍需人工试听与真实 Wan 成片验收。详见 B-138/B-139 进度文档。
+1. 恢复并检查 0.10 CER 严格门槛评估 Job，核对每条样本最终状态与 SRT。
+2. 人工试听三条粤语旁白，特别核对 Muse 专有名词、口语助词、数字、英文夹杂及同音字。
+3. 将通过人工审核的旁白/SRT 接入真实 Wan 生成片段，验证画面全片解码、音画时长、字幕同步、音量/真峰值与 ZIP 完整性。
+4. 运行全项目回归；本轮仅确认 43 项定向测试通过，不能据此宣称全量回归通过。
+5. 评估不同授权的自然粤语声线；当前 TTS 是中性默认音色，不应宣传为成熟女声。
+
 ## 诚实状态
 
-**代码接通：ASR/SRT 结构完成；全项目回归：1,229 项通过、1 项跳过；真实 Whisper 模型：下载超时；真实 ASR/CER：未验收；人工听感：未验收；B-138 音频 QA 与 B-139 BGM ducking：代码和合成素材实机验证通过；自动旁白默认启用：不允许；发布就绪：否。**
+**代码接通：ASR/SRT 与产品封装完成；模型下载/哈希：真实通过；本地真实 ASR 推理：通过；三条样本机器对稿：一条精确、一条专有名词错误、一条需复核；人工听感：未验收；定向回归：43/43 通过；全项目回归：待执行；真实 Wan 成片：未验收；自动旁白默认启用：否；发布就绪：否。**

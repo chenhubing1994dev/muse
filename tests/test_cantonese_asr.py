@@ -12,6 +12,7 @@ from unittest.mock import patch
 from muse.cantonese_asr import (
     MODEL_REVISION,
     CantoneseASRError,
+    _write_srt,
     compare_cantonese_transcript,
     transcribe_cantonese,
 )
@@ -83,6 +84,61 @@ class CantoneseASRTests(unittest.TestCase):
         self.assertEqual(observed["transcribe_kwargs"]["temperature"], 0.0)
         self.assertIn("00:00:00,125 --> 00:00:01,250", srt.read_text(encoding="utf-8"))
         self.assertIn("00:00:01,500 --> 00:00:02,875", srt.read_text(encoding="utf-8"))
+
+    def test_word_level_srt_uses_timestamped_readable_chunks(self):
+        srt = self.root / "word-captions.srt"
+        result = _write_srt(srt, [{
+            "start": 0.0, "end": 3.2, "text": "大家好。今日開始。",
+            "words": [
+                {"start": 0.0, "end": 0.55, "text": "大家"},
+                {"start": 0.55, "end": 0.55, "text": "好"},
+                {"start": 0.55, "end": 1.0, "text": "。"},
+                {"start": 1.2, "end": 2.0, "text": "今日"},
+                {"start": 2.0, "end": 3.2, "text": "開始。"},
+            ],
+        }])
+        content = srt.read_text(encoding="utf-8-sig")
+        self.assertEqual(result["cue_count"], 2)
+        self.assertEqual(result["timing_mode"], "word")
+        self.assertIn("00:00:00,000 --> 00:00:01,000", content)
+        self.assertIn("00:00:01,200 --> 00:00:03,200", content)
+        self.assertIn("大家好。", content)
+        self.assertIn("今日開始。", content)
+
+    def test_zero_duration_word_at_next_onset_is_merged_without_fabricated_timing(self):
+        srt = self.root / "zero-duration-captions.srt"
+        result = _write_srt(srt, [{
+            "start": 0.0, "end": 2.0, "text": "第三主動查證。",
+            "words": [
+                {"start": 0.0, "end": 0.0, "text": "第三"},
+                {"start": 0.0, "end": 0.5, "text": "主動"},
+                {"start": 0.5, "end": 1.0, "text": "查證。"},
+            ],
+        }])
+        content = srt.read_text(encoding="utf-8-sig")
+        self.assertEqual(result["timing_mode"], "word")
+        self.assertIn("第三主動", content)
+        self.assertIn("00:00:00,000 --> 00:00:01,000", content)
+
+    def test_word_level_srt_falls_back_to_real_segment_bounds_for_bad_word_alignment(self):
+        srt = self.root / "fallback-captions.srt"
+        result = _write_srt(srt, [{
+            "start": 0.25, "end": 2.5, "text": "完整保留片段文字。",
+            "words": [{"start": None, "end": 0.5, "text": "完整"}],
+        }])
+        content = srt.read_text(encoding="utf-8-sig")
+        self.assertEqual(result["timing_mode"], "segment")
+        self.assertEqual(result["segment_fallback_count"], 1)
+        self.assertIn("00:00:00,250 --> 00:00:02,500", content)
+        self.assertIn("完整保留片段文字。", content)
+
+    def test_segment_srt_rejects_invalid_segment_timestamps(self):
+        srt = self.root / "bad-segment-captions.srt"
+        with self.assertRaisesRegex(CantoneseASRError, "segment has invalid"):
+            _write_srt(srt, [{
+                "start": 1.0, "end": 0.5, "text": "測試",
+                "words": [{"start": None, "end": None, "text": "測試"}],
+            }])
 
     def test_decoder_options_must_be_booleans(self):
         model_file = self._pinned_model()

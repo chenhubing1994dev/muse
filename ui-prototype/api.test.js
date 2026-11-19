@@ -97,6 +97,30 @@ test("initiative timeline validates its id and bounds before authenticated GET",
   assert.throws(() => client.initiativeTimeline("a".repeat(32), 201), RangeError);
 });
 
+test("initiative performance client authenticates GET and append-only POST with validated identifiers", async () => {
+  const calls = [];
+  const client = createApiClient({
+    baseUrl: "http://127.0.0.1:8765", token,
+    fetchImpl: async (url, options) => {
+      calls.push({ url: String(url), options });
+      return { ok: true, json: async () => ({ api_version: 1, snapshots: [], summary_by_currency: [], snapshot: { id: "b".repeat(32) } }) };
+    },
+  });
+  const id = "a".repeat(32);
+  await client.initiativePerformance(id);
+  await client.recordInitiativePerformance(id, {
+    idempotency_key: "manual-snapshot-0001", platform: "youtube", source: "manual_entry",
+    currency: "USD", metrics: { views: 12, settled_revenue_minor: 250 },
+  });
+  assert.equal(calls[0].url, "http://127.0.0.1:8765/api/v1/initiatives/" + id + "/performance");
+  assert.equal(calls[1].options.method, "POST");
+  assert.equal(calls[1].options.headers.Authorization, "Bearer " + token);
+  assert.equal(JSON.parse(calls[1].options.body).metrics.settled_revenue_minor, 250);
+  assert.equal(calls[1].options.cache, "no-store");
+  assert.throws(() => client.initiativePerformance("../bad"), /编号无效/);
+  assert.throws(() => client.recordInitiativePerformance(id, { idempotency_key: "x", platform: "youtube", source: "manual_entry", metrics: {} }), /幂等键无效/);
+});
+
 test("SSE client sends bearer and cursor, parses redacted events, and returns the new cursor", async () => {
   const calls = [];
   const seen = [];
@@ -136,6 +160,23 @@ test("knowledge node detail validates the node id and uses the authenticated API
   assert.equal(result.node.node_type, "decision");
   assert.equal(calls[0].url, "http://127.0.0.1:8765/api/v1/knowledge/nodes/" + "d".repeat(32));
   assert.equal(calls[0].options.headers.Authorization, "Bearer " + token);
+  assert.equal(calls[0].options.cache, "no-store");
+});
+test("claim dossier validates id and evidence limit and uses authenticated read-only API", async () => {
+  const calls = [];
+  const client = createApiClient({
+    baseUrl: "http://127.0.0.1:8765", token,
+    fetchImpl: async (url, options) => {
+      calls.push({ url: String(url), options });
+      return { ok: true, json: async () => ({ api_version: 1, dossier: { claim_id: "e".repeat(32), evidence: [] } }) };
+    },
+  });
+  await assert.rejects(async () => client.knowledgeClaimDossier("../secret"), /Claim 编号无效/);
+  await assert.rejects(async () => client.knowledgeClaimDossier("e".repeat(32), 0), /证据条数/);
+  const result = await client.knowledgeClaimDossier("e".repeat(32), 24);
+  assert.equal(result.dossier.claim_id, "e".repeat(32));
+  assert.equal(calls[0].url, "http://127.0.0.1:8765/api/v1/knowledge/claims/" + "e".repeat(32) + "/dossier?evidence_limit=24");
+  assert.equal(calls[0].options.method, "GET");  assert.equal(calls[0].options.headers.Authorization, "Bearer " + token);
   assert.equal(calls[0].options.cache, "no-store");
 });
 
@@ -387,7 +428,68 @@ test("video product jobs and MP4 downloads use authenticated local endpoints", a
   assert.throws(() => client.videoJob("../bad"), /任务编号无效/);
 });
 
+test("subtitle review workbench loads cue data and requires authenticated explicit approval POST", async () => {
+  const calls = [];
+  const identity = "0123456789abcdef0123456789abcdef";
+  const version = "0123456789abcdef0123";
+  const review = {
+    schema_version: 1, review_status: "pending_human_review", human_approved: false,
+    segments: [{ index: 1, start_seconds: 0, end_seconds: 1, asr_text: "原文", review_status: "pending", corrected_text: null }],
+  };
+  const client = createApiClient({
+    baseUrl: "http://127.0.0.1:8765", token,
+    fetchImpl: async (url, options) => {
+      calls.push({ url: String(url), options });
+      return { ok: true, json: async () => String(url).endsWith("/approve")
+        ? { api_version: 1, product: { initiative_id: identity, version_id: version, validated: true, status: "testing" } }
+        : { api_version: 1, review } };
+    },
+  });
+  const loaded = await client.subtitleReview(identity, version);
+  assert.deepEqual(loaded.review, review);
+  const payload = {
+    reviewed_segment_indexes: [1],
+    corrections: [{ segment_index: 1, corrected_text: "修订文案" }],
+    reviewer: "creator",
+    confirmation: "APPROVE-HUMAN-REVIEW",
+  };
+  const result = await client.approveSubtitleReview(identity, version, payload);
+  assert.equal(result.product.status, "testing");
+  assert.equal(calls[0].url, "http://127.0.0.1:8765/api/v1/products/" + identity + "/" + version + "/subtitle-review");
+  assert.equal(calls[0].options.headers.Authorization, "Bearer " + token);
+  assert.equal(calls[1].url, "http://127.0.0.1:8765/api/v1/products/" + identity + "/" + version + "/subtitle-review/approve");
+  assert.equal(calls[1].options.method, "POST");
+  assert.deepEqual(JSON.parse(calls[1].options.body), payload);
+  assert.throws(() => client.subtitleReview("../bad", version), /产品编号无效/);
+});
+
+test("MemPalace status uses an authenticated read-only local endpoint", async () => {
+  const calls = [];
+  const expected = {
+    api_version: 1, config_state: "configured", enabled: true,
+    connection_state: "local_store_present", palace_directory_present: true,
+    vector_index_present: true, index_freshness: "not_measured",
+    embedding_model: "embeddinggemma", embedding_device: "cpu",
+    memory_store_state: "ready",
+    projection_outbox: { initialized: true, status: "attention_required", total: 7, pending: 2, failed: 1, delivered: 4, oldest_pending_at: "2026-11-19T10:00:00Z", latest_delivered_at: "2026-11-19T12:00:00Z", latest_created_at: "2026-11-19T12:00:00Z", content_included: false },
+    remote_process_started: false, private_content_exposed: false,
+  };
+  const client = createApiClient({
+    baseUrl: "http://127.0.0.1:8765", token,
+    fetchImpl: async (url, options) => {
+      calls.push({ url: String(url), options });
+      return { ok: true, json: async () => expected };
+    },
+  });
+  assert.deepEqual(await client.mempalaceStatus(), expected);
+  assert.equal(calls[0].url, "http://127.0.0.1:8765/api/v1/mempalace/status");
+  assert.equal(calls[0].options.method, "GET");
+  assert.equal(calls[0].options.headers.Authorization, "Bearer " + token);
+  assert.equal(calls[0].options.cache, "no-store");
+});
+
 test("overview preserves the safe queue and worker status payload", async () => {
+
   const expected = {
     api_version: 1,
     queue: {
@@ -402,4 +504,92 @@ test("overview preserves the safe queue and worker status payload", async () => 
     fetchImpl: async () => ({ ok: true, json: async () => expected }),
   });
   assert.deepEqual(await client.overview(), expected);
+});
+
+test("daemon status and lifecycle control use authenticated GET/POST", async () => {
+  const calls = [];
+  const client = createApiClient({
+    baseUrl: "http://127.0.0.1:8765", token,
+    fetchImpl: async (url, options) => {
+      calls.push({ url: String(url), options });
+      return { ok: true, json: async () => ({ api_version: 1, result: { changed: true }, state: "running" }) };
+    },
+  });
+  await client.daemonStatus();
+  assert.equal(calls[0].url, "http://127.0.0.1:8765/api/v1/daemon/status");
+  assert.equal(calls[0].options.method, "GET");
+  await client.daemonControl("pause");
+  assert.equal(calls[1].url, "http://127.0.0.1:8765/api/v1/daemon/pause");
+  assert.equal(calls[1].options.method, "POST");
+  assert.equal(calls[1].options.headers.Authorization, "Bearer " + token);
+  assert.throws(() => client.daemonControl("rm-rf"), /控制动作无效/);
+});
+
+test("pipeline submit/recipe/job endpoints validate input and use POST", async () => {
+  const calls = [];
+  const client = createApiClient({
+    baseUrl: "http://127.0.0.1:8765", token,
+    fetchImpl: async (url, options) => {
+      calls.push({ url: String(url), options });
+      return { ok: true, json: async () => ({ api_version: 1, job: { job_id: "a".repeat(32) } }) };
+    },
+  });
+  await client.pipelineRecipes();
+  assert.equal(calls[0].url, "http://127.0.0.1:8765/api/v1/pipelines/recipes");
+  await client.pipelineJobs(5);
+  assert.equal(calls[1].url, "http://127.0.0.1:8765/api/v1/pipelines/jobs?limit=5");
+  await client.submitPipeline({ recipe_id: "high_value_short_v2" });
+  assert.equal(calls[2].url, "http://127.0.0.1:8765/api/v1/pipelines/submit");
+  assert.equal(calls[2].options.method, "POST");
+  assert.equal(JSON.parse(calls[2].options.body).recipe_id, "high_value_short_v2");
+  assert.throws(() => client.pipelineJob("../bad"), /编号无效/);
+  assert.throws(() => client.submitPipeline({}), /配方编号/);
+  assert.throws(() => client.pipelineJobs(0), RangeError);
+});
+
+test("cyber cosmos endpoints validate inputs and send authenticated requests", async () => {
+  const calls = [];
+  const client = createApiClient({
+    baseUrl: "http://127.0.0.1:8765",
+    token,
+    fetchImpl: async (url, options) => {
+      calls.push({ url: String(url), options });
+      return { ok: true, json: async () => ({ api_version: 1, ok: true }) };
+    },
+  });
+  await client.prometheusCore();
+  await client.knowledgeGraph({ limit: 80, nodeType: "claim", q: "muse" });
+  await client.galaxy();
+  await client.previewRoute("研究系统架构");
+  await client.celestialCatalog();
+  await client.castYijing({ mode: "seeded_cast", seed: "ember" });
+  assert.equal(calls[0].url, "http://127.0.0.1:8765/api/v1/prometheus/core");
+  assert.equal(calls[1].url, "http://127.0.0.1:8765/api/v1/knowledge/graph?limit=80&node_type=claim&q=muse");
+  assert.equal(calls[2].url, "http://127.0.0.1:8765/api/v1/galaxy");
+  assert.equal(calls[3].url, "http://127.0.0.1:8765/api/v1/galaxy/route-preview");
+  assert.equal(calls[3].options.method, "POST");
+  assert.equal(calls[4].url, "http://127.0.0.1:8765/api/v1/metaphysics/celestial");
+  assert.equal(calls[5].url, "http://127.0.0.1:8765/api/v1/metaphysics/yijing");
+  assert.equal(calls[5].options.method, "POST");
+  assert.throws(() => client.knowledgeGraph({ limit: 999 }), RangeError);
+  assert.throws(() => client.knowledgeGraph({ nodeType: "invalid" }), /类型无效/);
+  assert.throws(() => client.previewRoute("   "), /目标/);
+  assert.throws(() => client.castYijing({ mode: "bad" }), /模式无效/);
+});
+
+test("evolveInspiration validates id and sends POST /api/v1/inspirations/evolve", async () => {
+  const calls = [];
+  const client = createApiClient({
+    baseUrl: "http://127.0.0.1:8765",
+    token,
+    fetchImpl: async (url, options) => {
+      calls.push({ url: String(url), options });
+      return { ok: true, json: async () => ({ api_version: 1, evolution: { status: "completed" } }) };
+    },
+  });
+  await client.evolveInspiration({ inspiration_id: "a".repeat(32), enqueue_video: true, aspect_ratios: ["9:16", "16:9"] });
+  assert.equal(calls[0].url, "http://127.0.0.1:8765/api/v1/inspirations/evolve");
+  assert.equal(calls[0].options.method, "POST");
+  assert.equal(JSON.parse(calls[0].options.body).enqueue_video, true);
+  assert.throws(() => client.evolveInspiration({ inspiration_id: "bad-id" }), /编号无效/);
 });

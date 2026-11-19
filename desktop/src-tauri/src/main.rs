@@ -88,8 +88,13 @@ fn parse_bootstrap(line: &str) -> Result<ApiConnection, String> {
 
 fn start_status_api(root: &Path) -> Result<RunningApi, String> {
     let python_override = env::var_os("MUSE_PYTHON");
+    let venv_python = root.join(".venv").join("Scripts").join("python.exe");
     let mut command = if let Some(python) = python_override {
         let mut cmd = Command::new(python);
+        cmd.arg("-u");
+        cmd
+    } else if venv_python.is_file() {
+        let mut cmd = Command::new(venv_python);
         cmd.arg("-u");
         cmd
     } else {
@@ -105,13 +110,21 @@ fn start_status_api(root: &Path) -> Result<RunningApi, String> {
             "--task-db",
             "data/tasks/muse.sqlite3",
             "--progress-db",
-            "data/progress/muse.sqlite3",
+            "data/tasks/muse.sqlite3",
             "--capability-db",
             "data/capabilities/muse.sqlite3",
             "--agent-db",
             "data/agents/muse.sqlite3",
             "--improvement-db",
             "data/improvements/muse.sqlite3",
+            "--knowledge-db",
+            "data/research/knowledge.sqlite3",
+            "--report-dir",
+            "data/research/reports",
+            "--products-dir",
+            "data/products",
+            "--gpu-resource-db",
+            "data/gpu-resources.sqlite3",
             "--port",
             "0",
         ])

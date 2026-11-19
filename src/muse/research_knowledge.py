@@ -163,6 +163,29 @@ class ResearchKnowledgeStore:
                 BEFORE DELETE ON claim_evidence_reviews BEGIN
                     SELECT RAISE(ABORT, 'claim evidence reviews are append-only');
                 END;
+            CREATE TABLE IF NOT EXISTS claim_evidence_review_citations (
+                id TEXT PRIMARY KEY,
+                review_id TEXT NOT NULL REFERENCES claim_evidence_reviews(id),
+                source_url TEXT NOT NULL,
+                source_sha256 TEXT NOT NULL CHECK(length(source_sha256)=64),
+                excerpt TEXT NOT NULL,
+                start_char INTEGER NOT NULL CHECK(start_char >= 0),
+                end_char INTEGER NOT NULL CHECK(end_char > start_char),
+                excerpt_sha256 TEXT NOT NULL CHECK(length(excerpt_sha256)=64),
+                fetched_at TEXT NOT NULL,
+                content_type TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_review_citations_review
+                ON claim_evidence_review_citations(review_id);
+            CREATE TRIGGER IF NOT EXISTS claim_evidence_review_citations_no_update
+                BEFORE UPDATE ON claim_evidence_review_citations BEGIN
+                    SELECT RAISE(ABORT, 'review citations are append-only');
+                END;
+            CREATE TRIGGER IF NOT EXISTS claim_evidence_review_citations_no_delete
+                BEFORE DELETE ON claim_evidence_review_citations BEGIN
+                    SELECT RAISE(ABORT, 'review citations are append-only');
+                END;
             CREATE TABLE IF NOT EXISTS source_identity_candidates (
                 id TEXT PRIMARY KEY,
                 source_node_id TEXT NOT NULL REFERENCES knowledge_nodes(id),
@@ -698,29 +721,51 @@ class ResearchKnowledgeStore:
         self, evidence_id: str, *, reviewer_id: str, verdict: str,
         rationale: str, quality: str = "unassessed",
         independence: str = "unassessed",
+        citation_anchor: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Append a source-content assessment; never rewrite retrieval intent or claim status."""
+        """Append a review and its verified citation anchor atomically."""
         evidence_id = self._text(evidence_id, "evidence_id", 128)
         reviewer_id = self._text(reviewer_id, "reviewer_id", 120)
         rationale = self._text(rationale, "rationale", 1600)
         if verdict not in EVIDENCE_REVIEW_VERDICTS:
             raise ValueError("unsupported evidence review verdict")
         if quality not in EVIDENCE_QUALITY_LEVELS:
-            raise ValueError("unsupported evidence quality")
+            raise ValueError("unsupported evidence review quality")
         if independence not in SOURCE_INDEPENDENCE_LEVELS:
-            raise ValueError("unsupported source independence")
+            raise ValueError("unsupported evidence review independence")
+        if citation_anchor is not None:
+            required = {
+                "verified", "source_url", "source_sha256", "excerpt",
+                "start_char", "end_char", "excerpt_sha256", "fetched_at", "content_type",
+            }
+            if not required.issubset(citation_anchor) or citation_anchor.get("verified") is not True:
+                raise ValueError("citation_anchor must be a verified citation result")
+            for field in ("source_sha256", "excerpt_sha256"):
+                if not re.fullmatch(r"[a-f0-9]{64}", str(citation_anchor[field])):
+                    raise ValueError(f"citation {field} is invalid")
+            start_char, end_char = citation_anchor["start_char"], citation_anchor["end_char"]
+            if (isinstance(start_char, bool) or not isinstance(start_char, int)
+                    or isinstance(end_char, bool) or not isinstance(end_char, int)
+                    or start_char < 0 or end_char <= start_char
+                    or end_char - start_char != len(str(citation_anchor["excerpt"]))):
+                raise ValueError("citation excerpt offsets are invalid")
         evidence = self.connection.execute(
-            "SELECT id,claim_id,source_node_id FROM claim_evidence WHERE id=?",
-            (evidence_id,),
+            "SELECT e.id,e.claim_id,e.source_node_id,n.external_ref "
+            "FROM claim_evidence e JOIN knowledge_nodes n ON n.id=e.source_node_id "
+            "WHERE e.id=?", (evidence_id,),
         ).fetchone()
         if evidence is None:
             raise ValueError("claim evidence item does not exist")
+        if citation_anchor is not None and citation_anchor["source_url"] != evidence["external_ref"]:
+            raise ValueError("citation URL does not match the evidence source node")
         claim = self.get_node(evidence["claim_id"])
         if claim is None:
             raise ValueError("claim evidence parent claim is unavailable")
         author_id = claim["metadata"].get("author_id")
         if author_id and author_id == reviewer_id:
             raise ValueError("evidence reviewer must be independent from claim author")
+        if verdict in {"supports", "refutes"} and not isinstance(citation_anchor, dict):
+            raise ValueError("supports/refutes reviews require a verified citation anchor")
         review_id = uuid.uuid4().hex
         reviewed_at = self._now()
         review = {
@@ -736,10 +781,87 @@ class ResearchKnowledgeStore:
                 (review_id, evidence_id, reviewer_id, verdict, quality,
                  independence, rationale, reviewed_at),
             )
+            if citation_anchor is not None:
+                self.connection.execute(
+                    "INSERT INTO claim_evidence_review_citations("
+                    "id,review_id,source_url,source_sha256,excerpt,start_char,end_char,"
+                    "excerpt_sha256,fetched_at,content_type,created_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                    (uuid.uuid4().hex, review_id, citation_anchor["source_url"],
+                     citation_anchor["source_sha256"], citation_anchor["excerpt"],
+                     citation_anchor["start_char"], citation_anchor["end_char"],
+                     citation_anchor["excerpt_sha256"], citation_anchor["fetched_at"],
+                     citation_anchor["content_type"], reviewed_at),
+                )
             self._event("node", evidence["claim_id"], "claim_evidence_review_recorded", {
                 **review, "source_node_id": evidence["source_node_id"],
+                "citation_attached": citation_anchor is not None,
             })
-        return review
+        return {**review, "citation_attached": citation_anchor is not None}
+
+    def record_citation_freshness_check(
+        self, evidence_id: str, citation_id: str, *, outcome: str,
+        source_current: bool | None, final_url: str | None = None,
+        http_status: int | None = None, fetched_at: str | None = None,
+        content_sha256: str | None = None, excerpt_sha256: str | None = None,
+        etag: str | None = None,
+        last_modified: str | None = None, detail_code: str | None = None,
+    ) -> dict[str, Any]:
+        """Append a live source revalidation result for one exact reviewed citation."""
+        evidence_id = self._text(evidence_id, "evidence_id", 128)
+        citation_id = self._text(citation_id, "citation_id", 128)
+        allowed = {"unchanged", "content_changed", "anchor_mismatch", "redirect_changed",
+                   "incomplete_snapshot", "fetch_failed"}
+        if outcome not in allowed:
+            raise ValueError("unsupported citation freshness outcome")
+        if source_current is not True and source_current is not False and source_current is not None:
+            raise ValueError("source_current must be True, False or None")
+        expected_freshness = {
+            "unchanged": True,
+            "content_changed": False,
+            "anchor_mismatch": False,
+            "redirect_changed": False,
+            "incomplete_snapshot": None,
+            "fetch_failed": None,
+        }[outcome]
+        if source_current is not expected_freshness:
+            raise ValueError("citation outcome and source_current must have matching fail-closed states")
+        citation = self.connection.execute(
+            "SELECT c.id FROM claim_evidence_review_citations c "
+            "JOIN claim_evidence_reviews r ON r.id=c.review_id "
+            "WHERE c.id=? AND r.claim_evidence_id=?",
+            (citation_id, evidence_id),
+        ).fetchone()
+        if citation is None:
+            raise ValueError("citation_id must belong to the specified evidence review")
+        for field, value in (("content_sha256", content_sha256), ("excerpt_sha256", excerpt_sha256)):
+            if value is not None and not re.fullmatch(r"[a-f0-9]{64}", value):
+                raise ValueError(f"{field} must be a lowercase SHA-256 digest")
+        if http_status is not None and (
+            isinstance(http_status, bool) or not isinstance(http_status, int) or not 100 <= http_status <= 599
+        ):
+            raise ValueError("http_status must be an HTTP status code")
+        if fetched_at is not None:
+            try:
+                fetched_stamp = datetime.fromisoformat(self._text(fetched_at, "fetched_at", 80).replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise ValueError("fetched_at must be a valid ISO-8601 timestamp") from exc
+            if fetched_stamp.tzinfo is None or fetched_stamp.utcoffset() is None:
+                raise ValueError("fetched_at must include a timezone")
+            fetched_at = fetched_stamp.astimezone(timezone.utc).isoformat()
+        payload = {
+            "citation_id": citation_id, "outcome": outcome, "source_current": source_current,
+            "final_url": self._text(final_url, "final_url", 4096, optional=True) or None,
+            "http_status": http_status, "fetched_at": fetched_at,
+            "content_sha256": content_sha256,
+            "excerpt_sha256": excerpt_sha256,
+            "etag": self._text(etag, "etag", 256, optional=True) or None,
+            "last_modified": self._text(last_modified, "last_modified", 256, optional=True) or None,
+            "detail_code": self._text(detail_code, "detail_code", 80, optional=True) or None,
+        }
+        with self.connection:
+            self._event("task", evidence_id, "citation_freshness_checked", payload)
+        return payload
 
     def record_source_relationship(
         self, source_ref: str, related_source_ref: str, *, relationship: str,
@@ -1098,6 +1220,26 @@ class ResearchKnowledgeStore:
                     "ORDER BY reviewed_at,id", (item["id"],),
                 )
             ]
+            for review in item["reviews"]:
+                review["citations"] = [
+                    dict(citation) for citation in self.connection.execute(
+                        "SELECT id,review_id,source_url,source_sha256,excerpt,start_char,end_char,"
+                        "excerpt_sha256,fetched_at,content_type FROM claim_evidence_review_citations "
+                        "WHERE review_id=? ORDER BY created_at,id", (review["id"],)
+                    )
+                ]
+                for citation in review["citations"]:
+                    freshness_rows = self.connection.execute(
+                        "SELECT payload_json,created_at FROM knowledge_events "
+                        "WHERE entity_type='task' AND entity_id=? AND event_type='citation_freshness_checked' "
+                        "ORDER BY sequence DESC LIMIT 100", (item["id"],)
+                    ).fetchall()
+                    citation["freshness"] = None
+                    for freshness_row in freshness_rows:
+                        freshness = json.loads(freshness_row["payload_json"])
+                        if freshness.get("citation_id") == citation["id"]:
+                            citation["freshness"] = {**freshness, "recorded_at": freshness_row["created_at"]}
+                            break
             latest_review = item["reviews"][-1] if item["reviews"] else None
             item["latest_review"] = latest_review
             item["latest_verdict"] = latest_review["verdict"] if latest_review else None
@@ -1154,6 +1296,8 @@ class ResearchKnowledgeStore:
         reviewer_ids: set[str] = set()
         reviewed_count = 0
         review_conflict_count = 0
+        reviewed_support_sources: set[str] = set()
+        reviewed_refute_sources: set[str] = set()
         source_rows: dict[str, dict[str, Any]] = {}
         for row in rows:
             direction_counts[row["direction"]] = direction_counts.get(row["direction"], 0) + 1
@@ -1164,6 +1308,19 @@ class ResearchKnowledgeStore:
             if row["reviewed_verdict"]:
                 reviewed_count += 1
                 verdict_counts[row["reviewed_verdict"]] = verdict_counts.get(row["reviewed_verdict"], 0) + 1
+                if row["reviewed_verdict"] == "supports":
+                    reviewed_support_sources.add(row["source_node_id"])
+                elif row["reviewed_verdict"] == "refutes":
+                    reviewed_refute_sources.add(row["source_node_id"])
+            if row["reviewer_id"]:
+                reviewer_ids.add(row["reviewer_id"])
+            if int(row["verdict_variants"] or 0) > 1:
+                review_conflict_count += 1
+            if row["source_node_id"] not in source_rows:
+                source_rows[row["source_node_id"]] = {
+                    "source_ref": row["external_ref"] or row["source_node_id"],
+                    "metadata": json.loads(row["metadata_json"] or "{}"),
+                }
             if row["reviewer_id"]:
                 reviewer_ids.add(row["reviewer_id"])
             if int(row["verdict_variants"] or 0) > 1:
@@ -1214,6 +1371,24 @@ class ResearchKnowledgeStore:
 
         source_refs = [item["source_ref"] for item in list(source_rows.values())[:source_limit]]
         lineage = self.source_lineage_snapshot(source_refs) if source_refs else self.source_lineage_snapshot(())
+        if reviewed_support_sources and reviewed_refute_sources:
+            evidence_conflict_state = "contested"
+        elif reviewed_support_sources:
+            evidence_conflict_state = "support_only"
+        elif reviewed_refute_sources:
+            evidence_conflict_state = "refute_only"
+        else:
+            evidence_conflict_state = "no_directional_reviews"
+        explicit_independent_pairs = {
+            tuple(sorted((item["source_node_id"], item["related_source_node_id"])))
+            for item in lineage.get("reviewed_relationships", [])
+            if item["relationship"] == "independent_of"
+        }
+        independent_cross_verdict_pair_count = sum(
+            1 for support_id in reviewed_support_sources
+            for refute_id in reviewed_refute_sources
+            if tuple(sorted((support_id, refute_id))) in explicit_independent_pairs
+        )
         evidence_count = len(rows)
         support_count = direction_counts.get("support_search_candidate", 0)
         counter_count = direction_counts.get("counter_search_candidate", 0)
@@ -1247,6 +1422,10 @@ class ResearchKnowledgeStore:
             "review_verdict_counts": verdict_counts,
             "reviewer_count": len(reviewer_ids),
             "review_conflict_count": review_conflict_count,
+            "evidence_conflict_state": evidence_conflict_state,            "reviewed_support_source_count": len(reviewed_support_sources),
+            "reviewed_refute_source_count": len(reviewed_refute_sources),
+            "explicit_independent_cross_verdict_pair_count": independent_cross_verdict_pair_count,
+            "conflict_requires_human_resolution": evidence_conflict_state == "contested",
             "review_coverage_state": review_state,
             "quality_counts": quality_counts,
             "quality_assessment_state": quality_state,

@@ -36,6 +36,28 @@ class AutonomousRuntimeTests(unittest.TestCase):
             workspace=root,
         )
 
+    def test_local_supervisor_claims_only_registered_review_research_handoff(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            supervisor = self.make_supervisor(root)
+            payload = {
+                "kind": "review_followup_research",
+                "task_scope": "read_only_research",
+                "review_id": "review-001",
+                "review_node_id": "decision-001",
+                "review_artifact_id": "artifact-001",
+                "proposal_id": "proposal-001",
+                "feedback_id": "feedback-001",
+                "plan_node_id": "plan-001",
+                "review_findings": [],
+                "reviewer_output_is_untrusted_data": True,
+                "not_claim_evidence": True,
+                "requires_separate_code_change_approval": True,
+            }
+            with TaskQueue(root / "tasks.sqlite3") as queue:
+                task = queue.enqueue("Review follow-up", payload)
+            self.assertEqual(supervisor._next_local_workflow_id(), task["id"])
+
     def test_commander_video_worker_is_disabled_by_default(self):
         with tempfile.TemporaryDirectory() as directory:
             supervisor = self.make_supervisor(Path(directory))

@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import Any
 
 from muse.desktop_adapter import AgentDesktopAdapter
+from muse.mempalace_adapter import MemPalaceAdapter, load_mempalace_adapter
+from muse.mempalace_projection import MemPalaceProjectionOutbox
 from muse.ruflo_adapter import RufloMCPAdapter, RufloError, load_muse_model_config, resolve_lmstudio_ruflo_config
 from muse.task_queue import TaskQueue
 from muse.commander_planner import CommanderPlanner, CommanderPlanConsensus
@@ -23,8 +25,7 @@ from muse.local_planner import LocalModelCommanderPlanner
 from muse.orchestration import AgentRoleRegistry, AgentSpec, MultiAgentOrchestrator, OrchestrationStore
 from muse.memory import MemoryStore
 from muse.research_knowledge import ResearchKnowledgeStore
-from muse.workflow_profiles import WorkflowController, WorkflowProfile
-
+from muse.workflow_profiles import WorkflowContract, WorkflowController, WorkflowProfile
 
 class RuntimeBlocked(RuntimeError):
     """The requested execution cannot safely proceed with current providers/policy."""
@@ -35,7 +36,8 @@ class MuseRuntime:
                  memory_database: str | Path = "data/memory/muse.sqlite3",
                  research_knowledge_database: str | Path | None = None,
                  ruflo: RufloMCPAdapter | None = None,
-                 desktop: AgentDesktopAdapter | None = None) -> None:
+                 desktop: AgentDesktopAdapter | None = None,
+                 mempalace: MemPalaceAdapter | None = None) -> None:
         self.database = Path(database)
         self.memory_database = Path(memory_database)
         data_root = self.database.parent.parent if self.database.parent.name.casefold() == "tasks" else self.database.parent
@@ -44,6 +46,15 @@ class MuseRuntime:
         )
         self.database.parent.mkdir(parents=True, exist_ok=True)
         self.workspace = Path(workspace).resolve()
+        self.mempalace_error: str | None = None
+        if mempalace is not None:
+            self.mempalace = mempalace
+        else:
+            try:
+                self.mempalace = load_mempalace_adapter(self.workspace)
+            except Exception as exc:
+                self.mempalace = None
+                self.mempalace_error = type(exc).__name__
         self.ruflo = ruflo or RufloMCPAdapter.from_installed(
             workspace=self.workspace,
             enabled_tools=("swarm_init", "agent_spawn", "agent_execute", "memory_store"),
@@ -612,15 +623,24 @@ class MuseRuntime:
                         "critic_ids": [item.critic_id for item in consensus.critiques],
                     },
                 )
+                workflow_contract = WorkflowContract.from_plan(plan)
                 workflow.bind_plan_to_ticket(
                     plan, task_id, worker_id=worker_id, profile=WorkflowProfile.team(),
+                    contract=workflow_contract,
                 )
                 workflow_bound = True
                 workflow.record_stage(
-                    task_id, worker_id=worker_id, stage="plan", attempt=task["attempts"],
+                    task_id, worker_id=worker_id, stage="plan_ready", attempt=task["attempts"],
                     expected_revision=queue.workflow_revision(task_id),
-                    checkpoint={"plan_id": plan.plan_id, "step_ids": [step.step_id for step in plan.steps]},
-                    evidence_refs=(f"commander-plan:{plan.plan_id}",), next_action="execute",
+                    checkpoint={
+                        "plan_id": plan.plan_id,
+                        "goal": workflow_contract.goal[:300],
+                        "desired_outcome": workflow_contract.desired_outcome[:300],
+                        "acceptance_criteria": [item[:160] for item in workflow_contract.acceptance_criteria],
+                        "plan_critic_approved": True,
+                    },
+                    evidence_refs=(f"commander-plan:{plan.plan_id}", "workflow-contract:v1"),
+                    next_action="execute",
                 )
                 role_to_type = {
                     "researcher": "researcher", "architect": "architect",
@@ -945,10 +965,24 @@ class MuseRuntime:
                         expected_revision=queue.workflow_revision(task_id),
                         evidence_refs=(f"orchestration-run:{execution.run_id}", "step:independent_review"),
                     )
+                    outcome_evidence_refs = tuple(dict.fromkeys(
+                        [f"orchestration-run:{execution.run_id}"]
+                        + [f"step:{step.step_id}" for step in plan.steps]
+                        + ["step:independent_review"]
+                    ))
                     workflow.complete(
                         task_id, worker_id=worker_id,
                         expected_revision=queue.workflow_revision(task_id),
-                        evidence_refs=(f"orchestration-run:{execution.run_id}", "step:independent_review"),
+                        evidence_refs=outcome_evidence_refs,
+                        outcome_verified=True,
+                        criteria_evidence={
+                            criterion: (
+                                f"orchestration-run:{execution.run_id}",
+                                f"step:{criterion.split(':', 1)[0]}",
+                                "step:independent_review",
+                            )
+                            for criterion in workflow_contract.acceptance_criteria
+                        },
                     )
                 else:
                     stop_reason = (
@@ -997,9 +1031,16 @@ class MuseRuntime:
                     )
                 raise
 
-    def search_memories(self, query: str, *, project: str | None = None,
-                        limit: int = 20, include_ruflo: bool = True) -> dict[str, Any]:
-        """Federated read-only search; Muse memory remains canonical and private by default."""
+    def search_memories(
+        self,
+        query: str,
+        *,
+        project: str | None = None,
+        limit: int = 20,
+        include_ruflo: bool = True,
+        include_mempalace: bool = True,
+    ) -> dict[str, Any]:
+        """Federated read-only recall; Muse MemoryStore remains the canonical authority."""
         if not isinstance(query, str) or not query.strip() or len(query) > 2000:
             raise ValueError("query must be non-empty text of at most 2000 characters")
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
@@ -1012,15 +1053,137 @@ class MuseRuntime:
                 result = self.ruflo.call_tool("memory_search", {"query": query.strip()}).result
                 if isinstance(result, dict):
                     rows = result.get("results", [])
-                    remote = {"available": self._ok(result), "results": rows[:limit] if isinstance(rows, list) else [],
-                              "total": result.get("total")}
+                    remote = {
+                        "available": self._ok(result),
+                        "results": rows[:limit] if isinstance(rows, list) else [],
+                        "total": result.get("total"),
+                    }
                 else:
                     remote = {"available": False, "results": [], "reason": "unexpected_response"}
             except Exception as exc:
                 remote = {"available": False, "results": [], "reason": type(exc).__name__}
-        return {"query": query.strip(), "local": {"count": len(local), "results": local},
-                "ruflo": remote, "canonical_store": "Muse MemoryStore",
-                "write_performed": False}
+
+        mempalace_remote: dict[str, Any] = {
+            "available": False, "results": [], "reason": self.mempalace_error or "not_configured",
+        }
+        if not include_mempalace:
+            mempalace_remote["reason"] = "disabled_for_request"
+        elif self.mempalace is not None:
+            try:
+                response = self.mempalace.search(
+                    query.strip(), limit=min(limit, 50),
+                )
+                payload: dict[str, Any] | None = None
+                structured = response.get("structuredContent") if isinstance(response, dict) else None
+                if isinstance(structured, dict) and isinstance(structured.get("results"), list):
+                    payload = structured
+                elif isinstance(response, dict):
+                    for item in response.get("content", []):
+                        if isinstance(item, dict) and item.get("type") == "text" and isinstance(item.get("text"), str):
+                            decoded = json.loads(item["text"])
+                            if isinstance(decoded, dict):
+                                payload = decoded
+                                break
+                if payload is None:
+                    raise ValueError("MemPalace returned no structured search result")
+                rows = payload.get("results", [])
+                if not isinstance(rows, list):
+                    raise ValueError("MemPalace search results must be a list")
+                candidates = []
+                for row in rows[:limit]:
+                    if not isinstance(row, dict) or not isinstance(row.get("text"), str):
+                        continue
+                    candidates.append({
+                        "source_system": "MemPalace",
+                        "authority": "unverified_retrieval_candidate",
+                        "trust_boundary": "untrusted_external_memory",
+                        "instruction_authority": False,                        "requires_source_verification": True,
+                        "drawer_id": row.get("drawer_id"),
+                        "text": row["text"][:16000],
+                        "source_file": row.get("source_file"),
+                        "wing": row.get("wing"),
+                        "room": row.get("room"),
+                        "filed_at": row.get("filed_at"),
+                        "content_date": row.get("content_date"),
+                        "similarity": row.get("similarity"),
+                        "distance": row.get("distance"),
+                    })
+                mempalace_remote = {
+                    "available": True,
+                    "results": candidates,
+                    "total": payload.get("total_before_filter", len(candidates)),
+                    "read_only": True,
+                }
+            except Exception as exc:
+                mempalace_remote = {
+                    "available": False, "results": [], "reason": type(exc).__name__,
+                }
+        return {
+            "query": query.strip(),
+            "local": {"count": len(local), "results": local},
+            "ruflo": remote,
+            "mempalace": mempalace_remote,
+            "canonical_store": "Muse MemoryStore",
+            "write_performed": False,
+        }
+
+    def queue_mempalace_projection(
+        self,
+        memory_id: int,
+        *,
+        approved: bool = False,
+        approved_by: str | None = None,
+    ) -> dict[str, Any]:
+        """Stage one Agent Track revision; this does not contact MemPalace."""
+        with MemPalaceProjectionOutbox(self.memory_database) as outbox:
+            return outbox.queue(memory_id, approved=approved, approved_by=approved_by)
+
+    def request_mempalace_projection_approval(self, outbox_id: str) -> dict[str, Any]:
+        """Create a Commander Ticket bound to one exact staged projection."""
+        with MemPalaceProjectionOutbox(self.memory_database) as outbox:
+            record = outbox.get(outbox_id)
+        if record is None:
+            raise KeyError(outbox_id)
+        with TaskQueue(self.database) as queue:
+            return queue.enqueue(
+                "Approve one MemPalace Agent Track projection",
+                {
+                    "kind": "mempalace_projection_approval",
+                    "outbox_id": record["outbox_id"],
+                    "idempotency_key": record["idempotency_key"],
+                    "memory_id": record["memory_id"],
+                    "revision": record["revision"],
+                    "content_sha256": record["content_sha256"],
+                },
+                require_approval=True,
+                recovery_policy="manual",
+                workload_class="operations",
+                idempotency_key=f"mempalace-projection-approval:{record['idempotency_key']}",
+            )
+
+    def list_mempalace_projection_outbox(
+        self, *, limit: int = 50, include_failed: bool = False,
+    ) -> list[dict[str, Any]]:
+        with MemPalaceProjectionOutbox(self.memory_database) as outbox:
+            return outbox.list_pending(limit=limit, include_failed=include_failed)
+
+    def deliver_mempalace_projection(
+        self,
+        outbox_id: str,
+        *,
+        approval_task_id: str,
+    ) -> dict[str, Any]:
+        """Deliver one projection only with a persisted, matching Commander decision."""
+        if self.mempalace is None:
+            raise RuntimeBlocked("MemPalace is disabled or unavailable")
+        with MemPalaceProjectionOutbox(self.memory_database) as outbox:
+            return outbox.deliver_with_approval_ticket(
+                outbox_id,
+                self.mempalace,
+                task_database=self.database,
+                approval_task_id=approval_task_id,
+            )
+
 
     def desktop_snapshot(self, *, app: str | None = None, task_id: str | None = None) -> dict[str, Any]:
         """Capture a read-only desktop snapshot; optionally attach a privacy-minimal event to a ticket."""

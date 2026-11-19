@@ -9,6 +9,7 @@ import json
 import sqlite3
 import uuid
 import re
+import math
 import time
 
 from datetime import datetime, timezone
@@ -16,6 +17,7 @@ from pathlib import Path
 
 STATUSES = {"proposed", "prioritized", "building", "testing", "shipped", "parked", "rejected"}
 KINDS = {"feature", "tool", "product", "research", "workflow", "creative_output"}
+CONTENT_PROFILE_FIELDS = frozenset({"topic", "hook_style", "narrative_structure", "editing_pace", "visual_style", "voice_language", "cta_style", "format"})
 
 
 class InitiativeStore:
@@ -168,13 +170,59 @@ class InitiativeStore:
                 BEGIN SELECT RAISE(ABORT,'video attempt events are append-only'); END;
         """)
 
+
+        self.connection.executescript("""
+            CREATE TABLE IF NOT EXISTS initiative_performance_snapshots(
+                id TEXT PRIMARY KEY,
+                initiative_id TEXT NOT NULL REFERENCES creator_initiatives(id) ON DELETE RESTRICT,
+                idempotency_key TEXT NOT NULL,
+                platform TEXT NOT NULL CHECK(platform IN ('youtube','tiktok','douyin','instagram','facebook','bilibili','other')),
+                source TEXT NOT NULL CHECK(source IN ('official_analytics','manual_entry')),
+                currency TEXT NOT NULL CHECK(length(currency)=3),
+                published_at TEXT,
+                captured_at TEXT NOT NULL,
+                source_reference TEXT NOT NULL DEFAULT '',
+                notes TEXT NOT NULL DEFAULT '',
+                views INTEGER NOT NULL DEFAULT 0 CHECK(views>=0),
+                likes INTEGER NOT NULL DEFAULT 0 CHECK(likes>=0),
+                comments INTEGER NOT NULL DEFAULT 0 CHECK(comments>=0),
+                saves INTEGER NOT NULL DEFAULT 0 CHECK(saves>=0),
+                shares INTEGER NOT NULL DEFAULT 0 CHECK(shares>=0),
+                cta_clicks INTEGER NOT NULL DEFAULT 0 CHECK(cta_clicks>=0),
+                qualified_leads INTEGER NOT NULL DEFAULT 0 CHECK(qualified_leads>=0),
+                orders INTEGER NOT NULL DEFAULT 0 CHECK(orders>=0),
+                reported_revenue_minor INTEGER NOT NULL DEFAULT 0 CHECK(reported_revenue_minor>=0),
+                settled_revenue_minor INTEGER NOT NULL DEFAULT 0 CHECK(settled_revenue_minor>=0),
+                production_cost_minor INTEGER NOT NULL DEFAULT 0 CHECK(production_cost_minor>=0),
+                three_second_retention_pct REAL CHECK(three_second_retention_pct IS NULL OR (three_second_retention_pct>=0 AND three_second_retention_pct<=100)),
+                completion_rate_pct REAL CHECK(completion_rate_pct IS NULL OR (completion_rate_pct>=0 AND completion_rate_pct<=100)),
+                avg_watch_seconds REAL CHECK(avg_watch_seconds IS NULL OR avg_watch_seconds>=0),
+                UNIQUE(initiative_id,idempotency_key)
+            );
+            CREATE INDEX IF NOT EXISTS idx_initiative_performance_timeline
+                ON initiative_performance_snapshots(initiative_id,captured_at,id);
+            CREATE TRIGGER IF NOT EXISTS initiative_performance_no_update
+                BEFORE UPDATE ON initiative_performance_snapshots
+                BEGIN SELECT RAISE(ABORT,'initiative performance snapshots are append-only'); END;
+            CREATE TRIGGER IF NOT EXISTS initiative_performance_no_delete
+                BEFORE DELETE ON initiative_performance_snapshots
+                BEGIN SELECT RAISE(ABORT,'initiative performance snapshots are append-only'); END;
+        """)
+
         attempt_columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(initiative_video_attempts)")}
+        performance_columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(initiative_performance_snapshots)")}
+        if "content_profile_json" not in performance_columns:
+            self.connection.execute("ALTER TABLE initiative_performance_snapshots ADD COLUMN content_profile_json TEXT NOT NULL DEFAULT '{}'")
+        self.connection.commit()
+
+
         if "evolution_cycle_id" not in attempt_columns:
             self.connection.execute("ALTER TABLE initiative_video_attempts ADD COLUMN evolution_cycle_id TEXT NOT NULL DEFAULT ''")
         for column, declaration in (
             ("worker_id", "TEXT"), ("lease_expires_at", "REAL"),
             ("attempt_count", "INTEGER NOT NULL DEFAULT 0"),
             ("cancel_requested", "INTEGER NOT NULL DEFAULT 0"),
+            ("approval_task_id", "TEXT"),
         ):
             if column not in attempt_columns:
                 self.connection.execute(f"ALTER TABLE initiative_video_attempts ADD COLUMN {column} {declaration}")
@@ -233,6 +281,14 @@ class InitiativeStore:
         item["interest_signals"] = json.loads(item.pop("interest_signals_json"))
         item["inspiration_refs"] = json.loads(item.pop("inspiration_refs_json"))
         return item
+
+    def get_by_id(self, item_id):
+        if not isinstance(item_id, str) or not re.fullmatch(r"[0-9a-f]{32}", item_id):
+            raise ValueError("initiative ID must be a 32-character lowercase UUID hex string")
+        row = self.connection.execute(
+            "SELECT * FROM creator_initiatives WHERE id=?", (item_id,)
+        ).fetchone()
+        return self._decode(row) if row is not None else None
 
     def list(self, *, status=None, limit=50):
         if status is not None and status not in STATUSES:
@@ -354,6 +410,303 @@ class InitiativeStore:
             ).fetchall()
         return [self._decode_feedback(row) for row in rows]
 
+    @staticmethod
+    def _decode_performance_snapshot(row):
+        item = dict(row)
+        item["content_profile"] = json.loads(item.pop("content_profile_json", "{}") or "{}")
+        return item
+
+    def record_performance(
+        self, initiative_id, *, idempotency_key, platform, source, currency="SGD",
+        metrics, published_at=None, source_reference="", notes="", content_profile=None,
+    ):
+        """Append one validated platform-performance snapshot; identical replays are idempotent."""
+        if not isinstance(initiative_id, str) or not re.fullmatch(r"[0-9a-f]{32}", initiative_id):
+            raise ValueError("initiative_id must be a 32-character lowercase UUID hex string")
+        if not isinstance(idempotency_key, str) or not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", idempotency_key):
+            raise ValueError("idempotency_key must contain 1-128 safe characters")
+        if not isinstance(platform, str) or platform not in {"youtube", "tiktok", "douyin", "instagram", "facebook", "bilibili", "other"}:
+            raise ValueError("unsupported platform")
+        if not isinstance(source, str) or source not in {"official_analytics", "manual_entry"}:
+            raise ValueError("source must be official_analytics or manual_entry")
+        if not isinstance(currency, str) or not re.fullmatch(r"[A-Z]{3}", currency):
+            raise ValueError("currency must be a three-letter uppercase ISO currency code")
+        if published_at is not None:
+            if not isinstance(published_at, str) or len(published_at) > 64:
+                raise ValueError("published_at must be an ISO-8601 timestamp")
+            try:
+                parsed_published = datetime.fromisoformat(published_at.replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise ValueError("published_at must be an ISO-8601 timestamp") from exc
+            if parsed_published.tzinfo is None or parsed_published.utcoffset() is None:
+                raise ValueError("published_at must include a timezone")
+            published_at = parsed_published.isoformat()
+        for value, field, maximum in (
+            (source_reference, "source_reference", 500), (notes, "notes", 1000),
+        ):
+            if not isinstance(value, str) or len(value) > maximum:
+                raise ValueError(f"{field} must be a string of at most {maximum} characters")
+        if not isinstance(metrics, dict) or not metrics:
+            raise ValueError("metrics must be a non-empty object")
+        if content_profile is None:
+            content_profile = {}
+        if not isinstance(content_profile, dict) or set(content_profile) - CONTENT_PROFILE_FIELDS:
+            raise ValueError("content_profile must contain only documented creative dimensions")
+        normalized_profile = {}
+        for field, value in content_profile.items():
+            if not isinstance(value, str) or not value.strip() or len(value) > 80 or any(ord(char) < 32 for char in value):
+                raise ValueError(f"content_profile.{field} must be non-empty text of at most 80 characters")
+            normalized_profile[field] = value.strip()
+        content_profile_json = json.dumps(normalized_profile, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        count_fields = {
+            "views", "likes", "comments", "saves", "shares", "cta_clicks",
+            "qualified_leads", "orders", "reported_revenue_minor",
+            "settled_revenue_minor", "production_cost_minor",
+        }
+        rate_fields = {"three_second_retention_pct", "completion_rate_pct", "avg_watch_seconds"}
+        if set(metrics) - count_fields - rate_fields:
+            raise ValueError("metrics contains unsupported fields")
+        normalized = {}
+        for field in sorted(count_fields):
+            value = metrics.get(field, 0)
+            if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 2**63 - 1:
+                raise ValueError(f"{field} must be a non-negative integer")
+            normalized[field] = value
+        for field in sorted(rate_fields):
+            if field not in metrics:
+                normalized[field] = None
+                continue
+            value = metrics[field]
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"{field} must be a finite non-negative number")
+            value = float(value)
+            if not math.isfinite(value) or value < 0 or (field != "avg_watch_seconds" and value > 100):
+                raise ValueError(f"{field} is outside its allowed range")
+            normalized[field] = value
+        exists = self.connection.execute(
+            "SELECT 1 FROM creator_initiatives WHERE id=?", (initiative_id,)
+        ).fetchone()
+        if exists is None:
+            raise KeyError(initiative_id)
+        columns = [
+            "views", "likes", "comments", "saves", "shares", "cta_clicks",
+            "qualified_leads", "orders", "reported_revenue_minor", "settled_revenue_minor",
+            "production_cost_minor", "three_second_retention_pct", "completion_rate_pct", "avg_watch_seconds",
+        ]
+        values = [normalized[field] for field in columns]
+        def same_snapshot(row):
+            return (
+                json.loads(row["content_profile_json"] or "{}") == normalized_profile
+                and row["platform"] == platform and row["source"] == source
+                and row["currency"] == currency and row["published_at"] == published_at
+                and row["source_reference"] == source_reference and row["notes"] == notes
+                and all(row[field] == value for field, value in zip(columns, values))
+            )
+        existing = self.connection.execute(
+            "SELECT * FROM initiative_performance_snapshots WHERE initiative_id=? AND idempotency_key=?",
+            (initiative_id, idempotency_key),
+        ).fetchone()
+        if existing is not None:
+            if not same_snapshot(existing):
+                raise ValueError("idempotency_key was already used with different performance data")
+            return self._decode_performance_snapshot(existing)
+        snapshot_id = uuid.uuid4().hex
+        captured_at = self._now()
+        insert_columns = [
+            "id", "initiative_id", "idempotency_key", "platform", "source", "currency",
+            "published_at", "captured_at", "source_reference", "notes", *columns, "content_profile_json",
+        ]
+        cursor = self.connection.execute(
+            f"INSERT OR IGNORE INTO initiative_performance_snapshots({','.join(insert_columns)}) VALUES({','.join('?' for _ in insert_columns)})",
+            [snapshot_id, initiative_id, idempotency_key, platform, source, currency,
+             published_at, captured_at, source_reference, notes, *values, content_profile_json],
+        )
+        if cursor.rowcount == 0:
+            existing = self.connection.execute(
+                "SELECT * FROM initiative_performance_snapshots WHERE initiative_id=? AND idempotency_key=?",
+                (initiative_id, idempotency_key),
+            ).fetchone()
+            if existing is None or not same_snapshot(existing):
+                raise ValueError("idempotency_key was already used with different performance data")
+            return self._decode_performance_snapshot(existing)
+        self.connection.commit()
+        return self._decode_performance_snapshot(self.connection.execute(
+            "SELECT * FROM initiative_performance_snapshots WHERE id=?", (snapshot_id,)
+        ).fetchone())
+
+    def list_performance(self, *, initiative_id, limit=50):
+        if not isinstance(initiative_id, str) or not re.fullmatch(r"[0-9a-f]{32}", initiative_id):
+            raise ValueError("initiative_id must be a 32-character lowercase UUID hex string")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 200:
+            raise ValueError("limit must be between 1 and 200")
+        exists = self.connection.execute(
+            "SELECT 1 FROM creator_initiatives WHERE id=?", (initiative_id,)
+        ).fetchone()
+        if exists is None:
+            raise KeyError(initiative_id)
+        rows = self.connection.execute(
+            "SELECT * FROM initiative_performance_snapshots WHERE initiative_id=? ORDER BY captured_at DESC,id DESC LIMIT ?",
+            (initiative_id, limit),
+        ).fetchall()
+        return [self._decode_performance_snapshot(row) for row in rows]
+    def aggregate_performance(self, *, initiative_id):
+        if not isinstance(initiative_id, str) or not re.fullmatch(r"[0-9a-f]{32}", initiative_id):
+            raise ValueError("initiative_id must be a 32-character lowercase UUID hex string")
+        rows = self.connection.execute(
+            """SELECT currency,COUNT(*) AS snapshots,
+            SUM(views) AS views,SUM(likes) AS likes,SUM(comments) AS comments,
+            SUM(saves) AS saves,SUM(shares) AS shares,SUM(cta_clicks) AS cta_clicks,
+            SUM(qualified_leads) AS qualified_leads,SUM(orders) AS orders,
+            SUM(reported_revenue_minor) AS reported_revenue_minor,
+            SUM(settled_revenue_minor) AS settled_revenue_minor,
+            SUM(production_cost_minor) AS production_cost_minor,
+            AVG(three_second_retention_pct) AS avg_three_second_retention_pct,
+            AVG(completion_rate_pct) AS avg_completion_rate_pct,
+            AVG(avg_watch_seconds) AS avg_watch_seconds
+            FROM initiative_performance_snapshots WHERE initiative_id=? GROUP BY currency ORDER BY currency""",
+            (initiative_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def analyze_performance(self, *, initiative_id, min_sample_count=3, min_views=1000):
+        """Return cautious per-platform cohorts using only each identified item's latest snapshot.
+
+        Snapshots are repeated measurements, not additive events. Empty source references
+        cannot identify a content item and are excluded from comparisons.
+        """
+        if not isinstance(initiative_id, str) or not re.fullmatch(r"[0-9a-f]{32}", initiative_id):
+            raise ValueError("initiative_id must be a 32-character lowercase UUID hex string")
+        if isinstance(min_sample_count, bool) or not isinstance(min_sample_count, int) or not 2 <= min_sample_count <= 100:
+            raise ValueError("min_sample_count must be between 2 and 100")
+        if isinstance(min_views, bool) or not isinstance(min_views, int) or not 0 <= min_views <= 2**63 - 1:
+            raise ValueError("min_views must be a non-negative integer")
+        if self.connection.execute("SELECT 1 FROM creator_initiatives WHERE id=?", (initiative_id,)).fetchone() is None:
+            raise KeyError(initiative_id)
+
+        rows = self.connection.execute(
+            "SELECT * FROM initiative_performance_snapshots WHERE initiative_id=? ORDER BY captured_at,id",
+            (initiative_id,),
+        ).fetchall()
+        latest = {}
+        unidentified = 0
+        for row in rows:
+            reference = row["source_reference"].strip()
+            if not reference:
+                unidentified += 1
+                continue
+            key = (row["platform"], row["source"], row["currency"], reference)
+            previous = latest.get(key)
+            if previous is None or (row["captured_at"], row["id"]) > (previous["captured_at"], previous["id"]):
+                latest[key] = dict(row)
+
+        cohorts = {}
+        count_fields = (
+            "likes", "comments", "saves", "shares", "cta_clicks",
+            "qualified_leads", "orders", "reported_revenue_minor",
+            "settled_revenue_minor", "production_cost_minor",
+        )
+        for (platform, source, currency, _reference), snapshot in latest.items():
+            key = (platform, source, currency)
+            cohort = cohorts.setdefault(key, {
+                "platform": platform, "source": source, "currency": currency,
+                "sample_count": 0, "total_views": 0,
+                **{field: 0 for field in count_fields},
+                "_retention_sum": 0.0, "_retention_views": 0,
+                "_completion_sum": 0.0, "_completion_views": 0,
+                "_watch_sum": 0.0, "_watch_views": 0,
+                "_items": [],
+            })
+            cohort["sample_count"] += 1
+            views = int(snapshot["views"] or 0)
+            item_rates = {
+                "engagement_per_view_pct": 100.0 * sum(int(snapshot[field] or 0) for field in ("likes", "comments", "saves", "shares")) / views if views else None,
+                "cta_clicks_per_view_pct": 100.0 * int(snapshot["cta_clicks"] or 0) / views if views else None,
+                "qualified_leads_per_view_pct": 100.0 * int(snapshot["qualified_leads"] or 0) / views if views else None,
+                "orders_per_view_pct": 100.0 * int(snapshot["orders"] or 0) / views if views else None,
+                "three_second_retention_pct": snapshot["three_second_retention_pct"],
+                "completion_rate_pct": snapshot["completion_rate_pct"],
+                "avg_watch_seconds": snapshot["avg_watch_seconds"],
+            }
+            cohort["_items"].append({
+                "source_reference": _reference, "views": views, "rates": item_rates,
+                "content_profile": json.loads(snapshot["content_profile_json"] or "{}"),
+                "revenue_minor": {
+                    "reported": int(snapshot["reported_revenue_minor"] or 0),
+                    "settled": int(snapshot["settled_revenue_minor"] or 0),
+                    "production_cost": int(snapshot["production_cost_minor"] or 0),
+                },
+            })
+            cohort["total_views"] += views
+            for field in count_fields:
+                cohort[field] += int(snapshot[field] or 0)
+            if views:
+                for field, total_key, weight_key in (
+                    ("three_second_retention_pct", "_retention_sum", "_retention_views"),
+                    ("completion_rate_pct", "_completion_sum", "_completion_views"),
+                    ("avg_watch_seconds", "_watch_sum", "_watch_views"),
+                ):
+                    value = snapshot[field]
+                    if value is not None:
+                        cohort[total_key] += float(value) * views
+                        cohort[weight_key] += views
+
+        results = []
+        for cohort in cohorts.values():
+            views = cohort["total_views"]
+            enough_samples = cohort["sample_count"] >= min_sample_count
+            enough_views = views >= min_views
+            warnings = []
+            if not enough_samples:
+                warnings.append("insufficient_content_samples")
+            if not enough_views:
+                warnings.append("insufficient_views")
+            if unidentified:
+                warnings.append("unidentified_snapshots_excluded")
+            rates = {
+                "engagement_per_view_pct": 100.0 * sum(cohort[f] for f in ("likes", "comments", "saves", "shares")) / views if views else None,
+                "cta_clicks_per_view_pct": 100.0 * cohort["cta_clicks"] / views if views else None,
+                "qualified_leads_per_view_pct": 100.0 * cohort["qualified_leads"] / views if views else None,
+                "orders_per_view_pct": 100.0 * cohort["orders"] / views if views else None,
+                "three_second_retention_pct": cohort["_retention_sum"] / cohort["_retention_views"] if cohort["_retention_views"] else None,
+                "completion_rate_pct": cohort["_completion_sum"] / cohort["_completion_views"] if cohort["_completion_views"] else None,
+                "avg_watch_seconds": cohort["_watch_sum"] / cohort["_watch_views"] if cohort["_watch_views"] else None,
+            }
+            ranked_metrics = {}
+            for metric in ("three_second_retention_pct", "completion_rate_pct", "cta_clicks_per_view_pct", "orders_per_view_pct"):
+                eligible = [item for item in cohort["_items"] if item["views"] >= 100 and item["rates"][metric] is not None]
+                eligible.sort(key=lambda item: (float(item["rates"][metric]), item["source_reference"]))
+                comparable = enough_samples and enough_views and len(eligible) >= 3
+                ranked_metrics[metric] = {
+                    "status": "descriptive_comparison" if comparable else "insufficient_item_samples",
+                    "eligible_item_count": len(eligible),
+                    "top": (eligible[-3:][::-1] if len(eligible) >= 6 else ([eligible[-1]] if comparable else [])),
+                    "bottom": (eligible[:3] if len(eligible) >= 6 else ([eligible[0]] if comparable else [])),
+                }
+            results.append({
+                "platform": cohort["platform"], "source": cohort["source"], "currency": cohort["currency"],
+                "sample_count": cohort["sample_count"], "min_sample_count": min_sample_count,
+                "total_views": views, "min_views": min_views,
+                "status": "ready_for_review" if enough_samples and enough_views else "insufficient_sample",
+                "rates": rates,
+                "item_comparisons": ranked_metrics,
+                "item_comparison_min_views": 100,
+                "comparison_note": "Metric-specific descriptive ranking only; not an overall success score or causal evidence.",
+                "counts": {field: cohort[field] for field in count_fields[:7]},
+                "revenue_minor": {
+                    "reported": cohort["reported_revenue_minor"],
+                    "settled": cohort["settled_revenue_minor"],
+                    "production_cost": cohort["production_cost_minor"],
+                },
+                "warnings": warnings,
+                "interpretation": "descriptive_observation_not_causal_evidence",
+            })
+        results.sort(key=lambda item: (item["platform"], item["source"], item["currency"]))
+        return {
+            "initiative_id": initiative_id, "status": "ready" if results else "insufficient_data",
+            "cohorts": results, "unidentified_snapshots_excluded": unidentified,
+            "deduplication": "latest_snapshot_per_platform_source_currency_source_reference",
+        }
+
     def record_product_failure(
         self, initiative_id, *, failure_code="video.product_job_failed",
         error_type="RuntimeError", evolution_cycle_id=None,
@@ -426,8 +779,12 @@ class InitiativeStore:
         if not isinstance(attempt_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", attempt_id):
             raise ValueError("attempt_id must be 1-64 safe identifier characters")
 
-    def start_video_attempt(self, attempt_id, *, mode, initiative_id=None, evolution_cycle_id=None):
+    def start_video_attempt(self, attempt_id, *, mode, initiative_id=None, evolution_cycle_id=None, approval_task_id=None):
         self._validate_video_attempt_id(attempt_id)
+        if approval_task_id is not None and (
+            not isinstance(approval_task_id, str) or not approval_task_id.strip() or len(approval_task_id) > 128
+        ):
+            raise ValueError("approval_task_id must be non-empty bounded text")
         if mode not in {"prompt_to_video", "local_assets"}:
             raise ValueError("unsupported video attempt mode")
         if initiative_id is not None:
@@ -444,9 +801,9 @@ class InitiativeStore:
         try:
             self.connection.execute(
                 """INSERT INTO initiative_video_attempts
-                (attempt_id,mode,status,initiative_id,evolution_cycle_id,created_at)
-                VALUES(?,?,'queued',?,?,?)""",
-                (attempt_id, mode, initiative_id, evolution_cycle_id or "", now),
+                (attempt_id,mode,status,initiative_id,evolution_cycle_id,approval_task_id,created_at)
+                VALUES(?,?,'queued',?,?,?,?)""",
+                (attempt_id, mode, initiative_id, evolution_cycle_id or "", approval_task_id, now),
             )
             self.connection.execute(
                 "INSERT INTO initiative_video_attempt_events(attempt_id,event_type,created_at) VALUES(?,?,?)",
@@ -576,12 +933,14 @@ class InitiativeStore:
             "SELECT * FROM initiative_video_attempts WHERE attempt_id=?", (attempt_id,)
         ).fetchone())
 
-    def claim_next_video_attempt(self, worker_id, *, lease_seconds=3600, now=None):
+    def claim_next_video_attempt(self, worker_id, *, lease_seconds=3600, now=None, attempt_id=None):
         """Atomically claim one queued attempt; recover only expired worker leases."""
         if not isinstance(worker_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", worker_id):
             raise ValueError("worker_id must be 1-64 safe identifier characters")
         if isinstance(lease_seconds, bool) or not isinstance(lease_seconds, int) or not 15 <= lease_seconds <= 3600:
             raise ValueError("lease_seconds must be between 15 and 3600")
+        if attempt_id is not None:
+            self._validate_video_attempt_id(attempt_id)
         current = time.time() if now is None else float(now)
         if current < 0:
             raise ValueError("now must be non-negative")
@@ -600,9 +959,15 @@ class InitiativeStore:
                     "INSERT INTO initiative_video_attempt_events(attempt_id,event_type,details_json,created_at) VALUES(?,?,?,?)",
                     (item["attempt_id"], "queued", json.dumps({"reason": "expired_worker_lease_recovered"}), self._now()),
                 )
-            row = self.connection.execute(
-                "SELECT * FROM initiative_video_attempts WHERE status='queued' AND cancel_requested=0 ORDER BY created_at,attempt_id LIMIT 1"
-            ).fetchone()
+            if attempt_id is None:
+                row = self.connection.execute(
+                    "SELECT * FROM initiative_video_attempts WHERE status='queued' AND cancel_requested=0 ORDER BY created_at,attempt_id LIMIT 1"
+                ).fetchone()
+            else:
+                row = self.connection.execute(
+                    "SELECT * FROM initiative_video_attempts WHERE attempt_id=? AND status='queued' AND cancel_requested=0 AND approval_task_id IS NOT NULL",
+                    (attempt_id,),
+                ).fetchone()
             if row is None:
                 self.connection.commit()
                 return None
@@ -723,6 +1088,16 @@ class InitiativeStore:
             "SELECT * FROM initiative_video_attempts WHERE attempt_id=?", (attempt_id,)
         ).fetchone()
         return dict(row) if row is not None else None
+
+    def list_queued_approval_video_attempts(self, *, limit=200):
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 200:
+            raise ValueError("limit must be between 1 and 200")
+        rows = self.connection.execute(
+            "SELECT * FROM initiative_video_attempts WHERE status='queued' AND cancel_requested=0 "
+            "AND approval_task_id IS NOT NULL ORDER BY created_at,attempt_id LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     def list_video_attempts(self, *, limit=100):
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 200:

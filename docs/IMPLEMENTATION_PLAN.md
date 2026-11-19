@@ -143,3 +143,13 @@
 - 新增 docs/SELF_IMPROVEMENT_RESEARCH.md，整理 LangGraph 持久 checkpoint/HITL、OpenHands 自动化与 Agent Server 分层、递归自我改进中独立评估器的设计启发。
 - 6 项新增测试通过；全量 unittest 40 项通过。TOML、compileall 与 CLI help 验证通过。研究只读取公开网页/文档，没有 clone、安装或执行第三方仓库。
 - 下一步：把任務失敗/重複修正轉成 capability backlog；加入獨立審稿與可重複基準；擴充 progress events；完成 ProviderAdapter 及安全 MCP 橋接研究；再評估 Windows 常駐服務。
+
+## MUSE 品牌图文宣传册（2026-11-17）
+- 新增 `docs/MUSE_BRAND_BROCHURE_PLAN.md`，正式纳入可下载、可转发的品牌宣传册制作任务。
+- 交付目标：A4 高清 PDF、独立高清封面图、可编辑宣传文案，以及可选手机分享版长图/分页图片。
+- 内容涵盖品牌定位、核心架构、经证实的现有能力、视频创作生产链、未完成事项与未来路线图。
+- 视觉方向：深空宇宙、金色神经核心、星环、东方神龙/凤凰与未来科技融合。
+- 宣传按已验证/待验收/开发中/规划中分层；不得夸大能力、虚构商业数据，或将“意识体”愿景修辞表述为已证明的机器主观意识。
+- 已创建可编辑文案初稿 `artifacts/brand/source/MUSE_BRAND_BROCHURE_COPY_ZH.md` 与事实核验表 `artifacts/brand/source/MUSE_BRAND_BROCHURE_FACT_CHECK.md`，初稿明确标注视频试产、旁白、发布和收益的真实边界。
+- 验收包含中文字体与排版、PDF 可读可打印、图片清晰、事实逐项可追溯、文件完整性与 SHA-256 记录。
+- 当前状态：**in_progress**；本轮完成文案与事实核验初稿，PDF、封面导出及分享图片尚未生成。

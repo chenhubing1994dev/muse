@@ -182,5 +182,62 @@ class MemoryStoreTests(unittest.TestCase):
                 self.assertEqual(exported[0]["project"], "Muse")
 
 
+    def test_evidence_is_linked_to_canonical_memory_and_starts_unverified(self) -> None:
+        import hashlib
+        with tempfile.TemporaryDirectory() as directory:
+            with MemoryStore(Path(directory) / "memory.sqlite3") as memory:
+                saved = memory.add("Claim: local-first execution", project="Muse", source="approved-note", track="agent")
+                evidence = memory.add_evidence(
+                    saved["id"], relation="supports", source_title="Architecture note",
+                    source_url="https://example.invalid/architecture", excerpt="Local execution is the default.",
+                    created_by="researcher",
+                )
+                self.assertEqual(evidence["memory_id"], saved["id"])
+                self.assertEqual(evidence["relation"], "supports")
+                self.assertEqual(evidence["verification_status"], "unverified")
+                self.assertEqual(evidence["source_hash"], hashlib.sha256(b"Local execution is the default.").hexdigest())
+                self.assertEqual(memory.list_evidence(saved["id"]), [evidence])
+
+    def test_evidence_can_record_counterevidence_without_promoting_claim(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with MemoryStore(Path(directory) / "memory.sqlite3") as memory:
+                saved = memory.add("Claim under review", project="Muse", source="test")
+                evidence = memory.add_evidence(
+                    saved["id"], relation="refutes", source_title="Counter source",
+                    excerpt="The counterexample contradicts the claim.", created_by="reviewer",
+                )
+                self.assertEqual(evidence["relation"], "refutes")
+                self.assertEqual(memory.get(saved["id"])["content"], "Claim under review")
+                self.assertEqual(evidence["verification_status"], "unverified")
+
+    def test_evidence_verification_requires_explicit_reviewer_and_status(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with MemoryStore(Path(directory) / "memory.sqlite3") as memory:
+                saved = memory.add("A claim", project="Muse", source="test")
+                evidence = memory.add_evidence(
+                    saved["id"], relation="qualifies", source_title="Nuance",
+                    excerpt="The claim only holds under a narrow condition.", created_by="researcher",
+                )
+                verified = memory.verify_evidence(
+                    evidence["id"], status="verified", verified_by="independent-reviewer",
+                    note="Source and context checked.",
+                )
+                self.assertEqual(verified["verification_status"], "verified")
+                self.assertEqual(verified["verified_by"], "independent-reviewer")
+                self.assertTrue(verified["verified_at"])
+                with self.assertRaises(ValueError):
+                    memory.verify_evidence(evidence["id"], status="approved", verified_by="reviewer")
+
+    def test_evidence_rejects_invalid_relations_missing_memory_and_oversized_excerpt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with MemoryStore(Path(directory) / "memory.sqlite3") as memory:
+                saved = memory.add("A claim", project="Muse", source="test")
+                with self.assertRaises(ValueError):
+                    memory.add_evidence(saved["id"], relation="proves", source_title="Bad", excerpt="x", created_by="tester")
+                with self.assertRaises(ValueError):
+                    memory.add_evidence(9999, relation="supports", source_title="Missing", excerpt="x", created_by="tester")
+                with self.assertRaises(ValueError):
+                    memory.add_evidence(saved["id"], relation="supports", source_title="Large", excerpt="x" * 4001, created_by="tester")
+
 if __name__ == "__main__":
     unittest.main()

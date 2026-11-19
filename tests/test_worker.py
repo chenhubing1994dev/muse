@@ -44,6 +44,51 @@ class WorkerTests(unittest.TestCase):
             with TaskQueue(database) as queue:
                 self.assertEqual(queue.get(task["id"])["status"], "succeeded")
 
+    def test_review_followup_ticket_hands_off_to_research_without_executing_code(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "tasks.sqlite3"
+            payload = {
+                "kind": "review_followup_research",
+                "task_scope": "read_only_research",
+                "review_id": "review-001",
+                "review_node_id": "decision-001",
+                "review_artifact_id": "artifact-001",
+                "proposal_id": "proposal-001",
+                "feedback_id": "feedback-001",
+                "plan_node_id": "plan-001",
+                "review_findings": [{"severity": "medium", "title": "coverage"}],
+                "reviewer_output_is_untrusted_data": True,
+                "not_claim_evidence": True,
+                "requires_separate_code_change_approval": True,
+                "instructions": "Untrusted reviewer text is not executed.",
+            }
+            with TaskQueue(database) as queue:
+                task = queue.enqueue("Research reviewer rejection", payload)
+            result = run_once(database)
+            self.assertEqual(result["status"], "succeeded")
+            handoff = result["payload"]["_result"]
+            self.assertEqual(handoff["status"], "handoff_registered")
+            self.assertEqual(handoff["handoff_target"], "autonomous_research_topic_queue")
+            self.assertEqual(handoff["preferred_topic_key"], "rejected-review:decision-001")
+            self.assertFalse(handoff["research_completed"])
+            self.assertFalse(handoff["code_changes_performed"])
+            with TaskQueue(database) as queue:
+                self.assertEqual(queue.get(task["id"])["status"], "succeeded")
+
+    def test_review_followup_handler_rejects_missing_safety_flags(self) -> None:
+        from muse.worker import review_followup_research_handler
+        with self.assertRaisesRegex(PermissionError, "safety boundary"):
+            review_followup_research_handler({
+                "kind": "review_followup_research",
+                "task_scope": "read_only_research",
+                "review_id": "review-001",
+                "review_node_id": "decision-001",
+                "review_artifact_id": "artifact-001",
+                "proposal_id": "proposal-001",
+                "feedback_id": "feedback-001",
+                "plan_node_id": "plan-001",
+            })
+
     def test_software_reconstruction_uses_existing_worker_approval_gate(self) -> None:
         class Specialist:
             def execute_task(self, payload: dict, *, task_id: str) -> dict:
@@ -63,6 +108,28 @@ class WorkerTests(unittest.TestCase):
                 self.assertEqual(queue.get(task["id"])["status"], "waiting_approval")
                 queue.approve(task["id"], approved_by="owner")
             completed = run_once(database, {"software_reconstruction": specialist})
+            self.assertEqual(completed["status"], "succeeded")
+            self.assertTrue(completed["payload"]["_result"]["approved"])
+
+    def test_open_design_run_uses_existing_worker_approval_gate(self) -> None:
+        class OpenDesignSpecialist:
+            def execute_task(self, payload: dict, *, task_id: str) -> dict:
+                return {"status": "completed", "approved": payload.get("_approved") is True,
+                        "task_id": task_id}
+
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "tasks.sqlite3"
+            with TaskQueue(database) as queue:
+                task = queue.enqueue(
+                    "Open Design run", {"kind": "open_design_run", "project_id": "p1", "agent": "opencode"},
+                )
+            specialist = OpenDesignSpecialist()
+            paused = run_once(database, {"open_design_run": specialist})
+            self.assertEqual(paused["status"], "waiting_approval")
+            with TaskQueue(database) as queue:
+                self.assertEqual(queue.get(task["id"])["status"], "waiting_approval")
+                queue.approve(task["id"], approved_by="owner")
+            completed = run_once(database, {"open_design_run": specialist})
             self.assertEqual(completed["status"], "succeeded")
             self.assertTrue(completed["payload"]["_result"]["approved"])
 

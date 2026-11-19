@@ -64,6 +64,29 @@ class IndependentReviewGateTests(unittest.TestCase):
         ]}))
         self.assertFalse(result.approved)
 
+    def test_timeout_fails_closed_without_persisting_review(self):
+        from unittest.mock import Mock
+        gate = IndependentReviewGate(
+            self.store, reviewer_id="reviewer-2",
+            call=Mock(side_effect=TimeoutError("reviewer timed out")),
+        )
+        with self.assertRaises(TimeoutError):
+            self.request(gate)
+        self.assertEqual(self.store.list_for_artifact("artifact-1"), [])
+
+    def test_string_findings_are_rejected_instead_of_coerced(self):
+        payload = {
+            "approved": True,
+            "summary": "Looks good",
+            "findings": ["No broad test coverage was supplied"],
+        }
+        gate = IndependentReviewGate(
+            self.store, reviewer_id="reviewer-2", call=lambda _: json.dumps(payload),
+        )
+        with self.assertRaisesRegex(ValueError, "each finding must be an object"):
+            self.request(gate)
+        self.assertEqual(self.store.list_for_artifact("artifact-1"), [])
+
     def test_invalid_or_unstructured_reviewer_output_fails_closed(self):
         gate = IndependentReviewGate(self.store, reviewer_id="reviewer-2", call=lambda _: "approved")
         with self.assertRaises(ValueError):

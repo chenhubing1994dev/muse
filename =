@@ -1,0 +1,11 @@
+OS:
+PRETTY_NAME="Ubuntu 22.04.1 LTS"
+NAME="Ubuntu"
+VERSION_ID="22.04"
+VERSION="22.04.1 LTS (Jammy Jellyfish)"
+VERSION_CODENAME=jammy
+TMUX:
+tmux 3.2a
+DEFAULT_USER:
+root
+USERS:

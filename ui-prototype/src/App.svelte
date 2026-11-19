@@ -3,17 +3,34 @@
   import { filterCommands, isCommandPaletteShortcut } from "../command-palette.js";
   import { USER_GUIDE_STEPS, getGuideProgress, getGuideStep } from "../user-guide.js";
   import { filterQueueTasks } from "../queue-filter.js";
-  import "./workflow.css";  import {
+  import { scoreIdea, toInspirationBrief } from "../value-studio.js";
+  import "./workflow.css";
+  import "./value-studio.css";
+  import "./cyberpunk.css";
+  import "./creative-studio.css";
+  import CreativeStudio from "./lib/CreativeStudio.svelte";
+  import AstrolabeHero from "./lib/AstrolabeHero.svelte";
+  import CelestialBaguaLab from "./lib/CelestialBaguaLab.svelte";
+  import KnowledgeStarMap from "./lib/KnowledgeStarMap.svelte";
+  import AgentGalaxyPanel from "./lib/AgentGalaxyPanel.svelte";
+  import PrometheusCorePanel from "./lib/PrometheusCorePanel.svelte";
+  import InitiativePerformancePanel from "./lib/InitiativePerformancePanel.svelte";
+  import MemPalacePanel from "./lib/MemPalacePanel.svelte";
+  import {
     createApiClient,
     resolveDesktopConnection,
     type AgentRecord,
-    type AgentStatus,
     type ApiClient,
+    type CelestialCatalogResponse,
     type FeedbackRecord,
+    type GalaxyResponse,
     type ImprovementProposal,
     type ImprovementDetail,
+    type KnowledgeGraphResponse,
     type MuseEvent,
     type ProductRecord,
+    type PrometheusCoreResponse,
+    type SubtitleReviewDocument,
     type InitiativeTimeline,
     type InitiativeTimelineEvent,
     type VideoAttemptSummary,
@@ -23,14 +40,9 @@
     type WorkerRecord,
     type WorkflowRunRecord,
     type SelfImprovementStatus,
+    type MemPalaceStatusResponse,
   } from "./lib/api";
   const POLL_INTERVAL_MS = 5000;
-  const statusLabels: Record<AgentStatus, string> = {
-    online: "在线",
-    busy: "执行中",
-    offline: "离线",
-    disabled: "已停用",
-  };
 
   interface Snapshot {
     agents: AgentRecord[];
@@ -62,6 +74,7 @@
   let feedbackRows: FeedbackRecord[] = [];
   let proposals: ImprovementProposal[] = [];
   let selfImprovementStatus: SelfImprovementStatus | null = null;
+  let mempalaceStatus: MemPalaceStatusResponse | null = null;
   let selectedProposal: ImprovementDetail | null = null;
   let proposalBusy = false;
   let feedbackCategory = "usability";
@@ -76,10 +89,20 @@
   let inspirationDomains = "";
   let allowExternalResearch = false;
   let inspirationBusy = false;
+  let evolvingInspirationId = "";
   let inspirationMessage = "";
   let inspirations: import("./lib/api").InspirationRecord[] = [];
   let artifacts: import("./lib/api").ArtifactRecord[] = [];
   let products: ProductRecord[] = [];
+  let selectedSubtitleReviewProductId: string | null = null;
+  let subtitleReviewDocument: SubtitleReviewDocument | null = null;
+  let subtitleReviewReviewedIndexes: number[] = [];
+  let subtitleReviewCorrections: Record<number, string> = {};
+  let subtitleReviewReviewer = "";
+  let subtitleReviewConfirmation = "";
+  let subtitleReviewBusy = false;
+  let subtitleReviewSubmitting = false;
+  let subtitleReviewMessage = "";
   let selectedTimelineId: string | null = null;
   let initiativeTimeline: InitiativeTimeline | null = null;
   let timelineBusy = false;
@@ -108,6 +131,198 @@
   let videoMessage = "";
   let downloadMessage = "";
   let lanUrls: string[] = [];
+
+  // ── 价值创作台：灵感 → 评分 → 研究 → 视频 → 审片反馈闭环 ──
+  let studioIdea = "";
+  let studioAudience = "";
+  let studioGoal = "";
+  let studioResult: ReturnType<typeof scoreIdea> | null = null;
+  let studioScoredSource = "";
+  let studioBusy = false;
+  let studioMessage = "";
+  let studioStage = 0; // 0=灵感 1=评分 2=研究 3=视频 4=回流
+
+  // ── 自主运行时（长驻守护进程） ──
+  let daemonStatus: import("./lib/api").DaemonStatus | null = null;
+  let daemonBusy = "";
+  let daemonMessage = "";
+  // ── 一键创作流水线 ──
+  let pipelineRecipes: import("./lib/api").PipelineRecipe[] = [];
+  let pipelineJobs: import("./lib/api").PipelineJob[] = [];
+  let pipelineBusy = false;
+  let pipelineMessage = "";
+  let selectedRecipe = "high_value_short_v2";
+  let pipelinePollHandle: ReturnType<typeof setInterval> | null = null;
+
+  // ── 赛博玄枢 · 星环 / 八卦星宿 / 知识星图 / Agent星系 / 普罗米修斯核心 ──
+  let celestialCatalog: CelestialCatalogResponse | null = null;
+  let prometheusCore: PrometheusCoreResponse | null = null;
+  let knowledgeGraph: KnowledgeGraphResponse | null = null;
+  let galaxySnapshot: GalaxyResponse | null = null;
+  let graphNodeTypeFilter: string | null = null;
+  let graphSearchQuery = "";
+  let presetLowerBits = "";
+  let reducedFx = false;
+  let activeSector: "all" | "astrolabe" | "starmap" | "galaxy" | "prometheus" | "studio" = "all";
+
+  async function queryKnowledgeGraph(opts: { nodeType: string | null; q: string }): Promise<void> {
+    graphNodeTypeFilter = opts.nodeType;
+    graphSearchQuery = opts.q;
+    if (!client) return;
+    try {
+      knowledgeGraph = await client.knowledgeGraph({
+        limit: 160,
+        nodeType: graphNodeTypeFilter,
+        q: graphSearchQuery,
+      });
+    } catch {
+      // keep previous graph snapshot on transient error
+    }
+  }
+
+  function handleInspectBagua(bits: string): void {
+    presetLowerBits = bits;
+    jumpToAnchor("#celestial-lab");
+  }
+
+  async function saveHypothesisInspiration(payload: { title: string; content: string; tags: string[]; domains: string[] }): Promise<void> {
+    if (!client) return;
+    await client.submitInspiration({
+      title: payload.title,
+      content: payload.content,
+      tags: payload.tags,
+      research_domains: payload.domains,
+      allow_external_research: false,
+      source: "muse_local_dashboard",
+    });
+    await refresh();
+  }
+
+  function jumpToAnchor(selector: string): void {
+    activeSector = "all";
+    window.setTimeout(() => {
+      document.querySelector(selector)?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 20);
+  }
+  $: studioDirty = studioResult === null || studioScoredSource !== studioCompose();
+  function studioCompose(): string {
+    return [studioIdea.trim(), studioAudience.trim() ? `受众：${studioAudience.trim()}` : "", studioGoal.trim() ? `目标：${studioGoal.trim()}` : ""].filter(Boolean).join("\n");
+  }
+  function evaluateStudioIdea(): void {
+    studioMessage = "";
+    const text = studioCompose();
+    if (!text.trim()) {
+      studioResult = null;
+      studioMessage = "先写下你想创作的题目，Muse 才会做启发式评估。";
+      return;
+    }
+    studioResult = scoreIdea(text);
+    studioScoredSource = text;
+    studioStage = Math.max(studioStage, 1);
+    studioMessage = studioResult.empty ? "题目为空。" : `评估完成：${studioResult.tier} 级 / ${studioResult.total} 分。评分只是排序启发，不预测收益。`;
+  }
+  function useStudioAsVideo(): void {
+    if (!studioResult || !studioCompose().trim()) return;
+    videoMode = "prompt_to_video";
+    videoTitle = studioIdea.trim().slice(0, 80) || studioAudience.trim().slice(0, 80) || "Muse 创作短片";
+    videoPrompt = studioCompose().slice(0, 2000);
+    studioStage = Math.max(studioStage, 3);
+    studioMessage = "已带入视频创作表单；确认本地 ComfyUI 就绪后即可生成镜头。";
+    document.getElementById("products")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+  async function sendStudioToInbox(): Promise<void> {
+    if (!studioResult || !client || studioBusy) return;
+    const text = studioCompose();
+    if (!text.trim()) return;
+    studioBusy = true;
+    studioMessage = "";
+    try {
+      const brief = toInspirationBrief(studioResult, text);
+      const tags = [...studioResult.potentialTags, ...studioResult.scores.filter((item) => item.matched.length).map((item) => item.label)].slice(0, 12);
+      await client.submitInspiration({
+        content: brief.slice(0, 2000),
+        allow_external_research: false,
+        tags,
+        research_domains: studioResult.suggestedPlatforms.slice(0, 6),
+        source: "muse_local_dashboard",
+      });
+      studioStage = Math.max(studioStage, 2);
+      studioMessage = "已写入灵感工坊候选池（默认仅本地，不联网）。研究后可再用「生成视频」提交。";
+      await refresh();
+    } catch (error) {
+      studioMessage = error instanceof Error ? error.message : "写入灵感候选池失败";
+    } finally {
+      studioBusy = false;
+    }
+  }
+
+  async function controlDaemon(action: "start" | "pause" | "resume" | "stop" | "once"): Promise<void> {
+    if (!client || daemonBusy) return;
+    daemonBusy = action;
+    daemonMessage = "";
+    try {
+      const result = await client.daemonControl(action);
+      const labels: Record<string, string> = {
+        start: "已请求启动常驻运行时",
+        pause: "已暂停（保留心跳与租约）",
+        resume: "已恢复运行",
+        stop: "已请求停止，等待当前工作完成",
+        once: "单轮维护已执行完成",
+      };
+      daemonMessage = `${labels[action]}。当前状态：${result.result?.state ?? "未知"}。`;
+      if (action === "once" && result.result?.task) {
+        daemonMessage += " 本轮处理了一个任务。";
+      }
+      await refresh();
+    } catch (error) {
+      daemonMessage = error instanceof Error ? error.message : "运行时控制失败";
+    } finally {
+      daemonBusy = "";
+    }
+  }
+
+  async function submitPipeline(): Promise<void> {
+    if (!client || pipelineBusy || !selectedRecipe) return;
+    pipelineBusy = true;
+    pipelineMessage = "";
+    try {
+      const result = await client.submitPipeline({ recipe_id: selectedRecipe });
+      pipelineMessage = `已提交「${result.job.recipe_label}」；${result.job.exists_before_run ? "注意：目标输出目录已存在，脚本可能拒绝覆盖。" : "任务已排队，正在本地渲染。"}`;
+      await refresh();
+      // Poll this job until it reaches a terminal state.
+      const jobId = result.job.job_id as string;
+      if (pipelinePollHandle) clearInterval(pipelinePollHandle);
+      pipelinePollHandle = window.setInterval(async () => {
+        try {
+          const response = await client?.pipelineJob(jobId);
+          const job = response?.job;
+          if (!job) return;
+          pipelineJobs = [job, ...pipelineJobs.filter((item) => item.job_id !== jobId)];
+          if (job.status === "succeeded" || job.status === "failed") {
+            if (pipelinePollHandle) clearInterval(pipelinePollHandle);
+            pipelinePollHandle = null;
+            pipelineMessage = job.status === "succeeded"
+              ? "流水线已完成，交付包已生成；请在产品库查看并人工审片。"
+              : `流水线失败：${job.error ?? "未知错误"}`;
+            await refresh();
+          }
+        } catch {
+          // transient; keep polling
+        }
+      }, 3000);
+    } catch (error) {
+      pipelineMessage = error instanceof Error ? error.message : "流水线提交失败";
+    } finally {
+      pipelineBusy = false;
+    }
+  }
+
+  function daemonAgeLabel(age: number | null | undefined): string {
+    if (age === null || age === undefined) return "—";
+    if (age < 60) return `${age}s`;
+    return `${Math.floor(age / 60)}m`;
+  }
+
   let commandPaletteOpen = false;
   let commandQuery = "";
   let commandInput: HTMLInputElement;
@@ -130,14 +345,23 @@
   }
 
   function visitGuideTarget(): void {
-    const target = document.querySelector(guideStep.target);
+    const targetSelector = guideStep.target;
     closeGuide();
-    target?.scrollIntoView({ behavior: "smooth", block: "start" });
+    jumpToAnchor(targetSelector);
   }
-  const quickCommands = [    { id: "overview", label: "意识中枢", description: "查看系统总览与连接状态", keywords: ["总览", "状态", "主页"], target: "#overview" },
+  const quickCommands = [
+    { id: "overview", label: "赛博星环浑天仪", description: "查看三重星环、实时状态与算力护栏", keywords: ["总览", "星环", "状态", "主页"], target: "#overview" },
+    { id: "celestial", label: "八卦与星宿工坊", description: "易经六十四卦推演、二十八星宿与四体系提问", keywords: ["八卦", "易经", "星宿", "玄学", "假设"], target: "#celestial-lab" },
+    { id: "starmap", label: "知识星图", description: "交互式漫游 Research Wiki 星体与治理审计", keywords: ["知识", "星图", "wiki", "图谱", "节点"], target: "#knowledge-starmap" },
+    { id: "agents", label: "AI Agent 星系", description: "唯一 Commander、专家行星与路由沙盒预演", keywords: ["agent", "智能体", "星系", "commander", "路由"], target: "#agents" },
+    { id: "prometheus", label: "普罗米修斯核心", description: "五阶火种账本、演化原则与现实/愿景矩阵", keywords: ["普罗米修斯", "愿景", "能力", "核心", "哲学"], target: "#prometheus-core" },
+    { id: "creative-studio", label: "视频创作工作室", description: "选港风/像素/宇宙风格，生成粤语解说并一键成片", keywords: ["视频", "工作室", "港风", "像素", "宇宙", "粤语", "解说", "风格"], target: "#creative-studio" },
+    { id: "studio", label: "价值创作台", description: "评估灵感价值并串起研究、视频与变现假设", keywords: ["价值", "选题", "变现", "创作台", "评分"], target: "#value-studio" },
+    { id: "daemon", label: "自主运行时", description: "启动/暂停/恢复 24 小时常驻运行时", keywords: ["运行时", "常驻", "守护", "24小时", "daemon"], target: "#daemon-runtime" },
+    { id: "pipeline", label: "创作流水线", description: "一键运行研究型高价值短片配方", keywords: ["流水线", "一键", "短片", "pipeline", "配方"], target: "#pipeline" },
     { id: "inspiration", label: "灵感工坊", description: "提交想法，启动本地记录或研究", keywords: ["灵感", "想法", "研究"], target: "#inspirations" },
-    { id: "video", label: "视频创作", description: "Wan 2.1 文生视频或 FFmpeg 素材剪辑", keywords: ["视频", "wan", "mp4", "剪辑"], target: "#products" },    { id: "products", label: "成果产品库", description: "预览、下载 MP4 与工程 ZIP", keywords: ["成果", "产品", "下载", "成片"], target: "#products" },
-    { id: "agents", label: "智能体舰队", description: "查看 Agent 能力、心跳与效果", keywords: ["agent", "智能体", "舰队"], target: "#agents" },
+    { id: "video", label: "视频创作", description: "Wan 2.1 文生视频或 FFmpeg 素材剪辑", keywords: ["视频", "wan", "mp4", "剪辑"], target: "#products" },
+    { id: "products", label: "成果产品库", description: "预览、下载 MP4 与工程 ZIP", keywords: ["成果", "产品", "下载", "成片"], target: "#products" },
     { id: "queue", label: "任务队列", description: "查看排队、运行、审批与失败任务", keywords: ["任务", "队列", "commander"], target: "#queue" },
     { id: "feedback", label: "进化实验室", description: "记录反馈并扫描改进机会", keywords: ["反馈", "进化", "提案"], target: "#feedback" },
     { id: "events", label: "星轨日志", description: "查看最近系统事件", keywords: ["事件", "日志", "历史"], target: "#events" },
@@ -185,11 +409,10 @@
   $: filteredQueueTasks = filterQueueTasks(queueSnapshot?.active ?? [], queueQuery, queueStatusFilter);
   $: successRate = aggregateRate(agents, "succeeded", "completed");
   $: reviewRate = aggregateRate(agents, "review_approved", "reviewed");
-  $: connectionClass = connected && !stale ? "is-online" : stale ? "is-stale" : "is-offline";
+  $: connectionStatusKey = connected && !stale ? "online" : stale ? "stale" : "offline";
   $: connectionLabel = connected ? "本地核心 · 在线" : stale ? "连接中断 · 数据已过期" : "本地核心 · 未连接";
   $: connectionBadge = connected ? "LIVE" : stale ? "STALE" : "OFFLINE";
   $: updatedLabel = updatedAt ? `更新于 ${new Date(updatedAt).toLocaleTimeString()}` : "尚无实时数据";
-  $: agentCountLabel = registryConfigured ? `${agents.length} 个已登记` : "Registry 未配置";
   $: videoEngineSummary = videoEngineStatus
     ? `FFmpeg ${videoEngineStatus.ffmpeg_available ? "就绪" : "缺失"} · ${videoEngineStatus.hardware_encoders.includes("h264_amf") ? "AMD AMF 可用" : "硬件编码器未检测到"} · ComfyUI ${videoEngineStatus.comfyui.status === "ready" ? "已连接" : "未连接"} · Velorn ${videoEngineStatus.velorn.status === "ready" ? "已连接" : "未连接"}`
     : "正在检测本地视频引擎…";
@@ -267,7 +490,7 @@
           if (!client) {
             client = createApiClient(await resolveDesktopConnection());
           }
-          const [health, agentResponse, overview, feedbackResponse, improvementResponse, selfImprovementResponse, inspirationResponse, artifactResponse, productResponse, engineResponse, videoAttemptResponse, gpuResourceResponse] = await Promise.all([
+          const [health, agentResponse, overview, feedbackResponse, improvementResponse, selfImprovementResponse, inspirationResponse, artifactResponse, productResponse, engineResponse, videoAttemptResponse, gpuResourceResponse, daemonResponse, recipesResponse, jobsResponse, celestialResponse, prometheusResponse, graphResponse, galaxyResponse, mempalaceResponse] = await Promise.all([
             client.health(),
             client.agents(),
             client.overview(),
@@ -280,6 +503,14 @@
             client.videoEngines(),
             client.videoAttempts().catch(() => null),
             client.gpuResources().catch(() => null),
+            client.daemonStatus().catch(() => null),
+            client.pipelineRecipes().catch(() => null),
+            client.pipelineJobs(30).catch(() => null),
+            client.celestialCatalog().catch(() => null),
+            client.prometheusCore().catch(() => null),
+            client.knowledgeGraph({ limit: 160, nodeType: graphNodeTypeFilter, q: graphSearchQuery }).catch(() => null),
+            client.galaxy().catch(() => null),
+            client.mempalaceStatus().catch(() => null),
           ]);
           lastSnapshot = {
             agents: Array.isArray(agentResponse.agents) ? agentResponse.agents : [],
@@ -294,12 +525,25 @@
           feedbackRows = Array.isArray(feedbackResponse.feedback) ? feedbackResponse.feedback : [];
           proposals = Array.isArray(improvementResponse.proposals) ? improvementResponse.proposals : [];
           selfImprovementStatus = selfImprovementResponse;
+          if (mempalaceResponse) mempalaceStatus = mempalaceResponse;
           inspirations = Array.isArray(inspirationResponse.inspirations) ? inspirationResponse.inspirations : [];
           artifacts = Array.isArray(artifactResponse.artifacts) ? artifactResponse.artifacts : [];
           products = Array.isArray(productResponse.products) ? productResponse.products : [];
           videoAttemptSummary = videoAttemptResponse;
           videoEngineStatus = engineResponse;
           gpuResourceStatus = gpuResourceResponse;
+          daemonStatus = daemonResponse;
+          if (celestialResponse) celestialCatalog = celestialResponse;
+          if (prometheusResponse) prometheusCore = prometheusResponse;
+          if (graphResponse) knowledgeGraph = graphResponse;
+          if (galaxyResponse) galaxySnapshot = galaxyResponse;
+          if (recipesResponse?.recipes) {
+            pipelineRecipes = recipesResponse.recipes;
+            if (!pipelineRecipes.some((item) => item.id === selectedRecipe) && pipelineRecipes.length) {
+              selectedRecipe = pipelineRecipes[0].id;
+            }
+          }
+          if (jobsResponse?.jobs) pipelineJobs = jobsResponse.jobs;
           setConnection(
             true,
             false,
@@ -357,6 +601,28 @@
       inspirationMessage = error instanceof Error ? error.message : "灵感保存失败";
     } finally {
       inspirationBusy = false;
+    }
+  }
+
+  async function evolveSingleInspiration(inspirationId: string, enqueueVideo: boolean): Promise<void> {
+    if (!client || evolvingInspirationId) return;
+    evolvingInspirationId = inspirationId;
+    inspirationMessage = "";
+    try {
+      const response = await client.evolveInspiration({
+        inspiration_id: inspirationId,
+        enqueue_video: enqueueVideo,
+        aspect_ratios: ["9:16", "16:9"],
+      });
+      const evo = response.evolution;
+      const proposalCount = evo.improvement_proposal_ids?.length ?? 0;
+      const queuedCount = evo.queued_video_jobs?.length ?? 0;
+      inspirationMessage = `已完成「${evo.inspiration_title}」闭环演化：生成 ${proposalCount} 项自我改进提案（待人工审核，不自动改码），分镜蓝图 ${evo.blueprint_path}${queuedCount ? `，并已向 Commander 入队 ${queuedCount} 条 9:16 + 16:9 成片流水线任务` : ""}。`;
+      await refresh();
+    } catch (error) {
+      inspirationMessage = error instanceof Error ? error.message : "灵感深研进化失败";
+    } finally {
+      evolvingInspirationId = "";
     }
   }
 
@@ -495,8 +761,16 @@
       sustained_black: "持续黑帧 / 暗场",
       frozen_frames: "疑似画面冻结",
       sustained_silence: "持续静音",
+      audio_loudness_low: "音频响度偏低",
     };
     return labels[code] ?? code;
+  }
+  function cameraMoveLabel(move?: string): string {
+    const labels: Record<string, string> = {
+      push_in: "缓慢推进", drift_left: "向左漂移", pull_out: "缓慢拉远",
+      rise: "向上升起", drift_right: "向右漂移",
+    };
+    return move ? labels[move] ?? "未指定运镜" : "静态 / 未指定";
   }
   async function downloadVideo(product: ProductRecord): Promise<void> {
     if (!client || !product.video_path) return;
@@ -513,6 +787,85 @@
       window.setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch (error) {
       downloadMessage = error instanceof Error ? error.message : "MP4 下载失败";
+    }
+  }
+
+  function subtitleCueTime(seconds: number): string {
+    const safe = Math.max(0, seconds);
+    const minutes = Math.floor(safe / 60);
+    const remainder = (safe - minutes * 60).toFixed(2).padStart(5, "0");
+    return minutes + ":" + remainder;
+  }
+
+  function markSubtitleCueReviewed(index: number, checked: boolean): void {
+    subtitleReviewReviewedIndexes = checked
+      ? [...new Set([...subtitleReviewReviewedIndexes, index])].sort((a, b) => a - b)
+      : subtitleReviewReviewedIndexes.filter((value) => value !== index);
+  }
+
+  async function toggleSubtitleReview(product: ProductRecord): Promise<void> {
+    if (!client || subtitleReviewBusy || subtitleReviewSubmitting) return;
+    if (selectedSubtitleReviewProductId === product.id) {
+      selectedSubtitleReviewProductId = null;
+      subtitleReviewDocument = null;
+      subtitleReviewMessage = "";
+      return;
+    }
+    selectedSubtitleReviewProductId = product.id;
+    subtitleReviewDocument = null;
+    subtitleReviewReviewedIndexes = [];
+    subtitleReviewCorrections = {};
+    subtitleReviewConfirmation = "";
+    subtitleReviewMessage = "";
+    subtitleReviewBusy = true;
+    try {
+      const response = await client.subtitleReview(product.initiative_id, product.version_id);
+      subtitleReviewDocument = response.review;
+      subtitleReviewCorrections = Object.fromEntries(
+        response.review.segments.map((segment) => [segment.index, segment.asr_text]),
+      );
+    } catch (error) {
+      subtitleReviewMessage = error instanceof Error ? error.message : "字幕审核资料读取失败";
+    } finally {
+      subtitleReviewBusy = false;
+    }
+  }
+
+  async function approveSubtitleReview(product: ProductRecord): Promise<void> {
+    if (!client || !subtitleReviewDocument || subtitleReviewSubmitting) return;
+    if (subtitleReviewReviewedIndexes.length !== subtitleReviewDocument.segments.length) {
+      subtitleReviewMessage = "请先逐条听审并勾选全部字幕。";
+      return;
+    }
+    if (subtitleReviewConfirmation !== "APPROVE-HUMAN-REVIEW") {
+      subtitleReviewMessage = "请明确输入批准口令，避免误触发布审核。";
+      return;
+    }
+    const corrections = subtitleReviewDocument.segments.flatMap((segment) => {
+      const value = (subtitleReviewCorrections[segment.index] ?? segment.asr_text).trim();
+      return value && value !== segment.asr_text
+        ? [{ segment_index: segment.index, corrected_text: value }]
+        : [];
+    });
+    subtitleReviewSubmitting = true;
+    subtitleReviewMessage = "正在验证人工审核记录并生成独立字幕版本…";
+    try {
+      const result = await client.approveSubtitleReview(product.initiative_id, product.version_id, {
+        reviewed_segment_indexes: subtitleReviewReviewedIndexes,
+        corrections,
+        reviewer: subtitleReviewReviewer.trim(),
+        confirmation: subtitleReviewConfirmation,
+      });
+      subtitleReviewMessage = result.product.validated
+        ? "已生成新版本 " + result.product.version_id + "；原版本保持不变，作品仍处于 " + result.product.status + "，不会自动发布。"
+        : "字幕修订已提交，但新版本尚未通过完整验证。";
+      selectedSubtitleReviewProductId = null;
+      subtitleReviewDocument = null;
+      await refresh();
+    } catch (error) {
+      subtitleReviewMessage = error instanceof Error ? error.message : "字幕审核封装失败";
+    } finally {
+      subtitleReviewSubmitting = false;
     }
   }
 
@@ -703,40 +1056,52 @@
     return () => {
       window.removeEventListener("keydown", handleGlobalKeydown);
       stopPolling();
+      if (pipelinePollHandle) clearInterval(pipelinePollHandle);
       eventStreamController?.abort();
       eventStreamController = null;
     };
   });
 </script>
 <svelte:head>
-  <title>MUSE · 灵枢调度中心</title>
-  <meta name="description" content="Muse 本地优先的 Super Agent 调度中枢" />
+  <title>MUSE · 赛博玄枢 · 普罗米修斯星舰中枢</title>
+  <meta name="description" content="Muse 赛博玄枢：星环、八卦星宿、知识星图、AI Agent 星系与普罗米修斯核心" />
 </svelte:head>
 
+<div class="cyber-shell" class:is-reduced-fx={reducedFx}>
+<div class="cyber-grid-bg" aria-hidden="true"></div>
 <div class="scanlines" aria-hidden="true"></div>
 <header class="topbar">
   <div class="brand">
-    <span class="sigil" aria-hidden="true">✧</span>
-    <div><strong>MUSE <i>宇宙意识中枢</i></strong><small>LOCAL INTELLIGENCE · COMMAND & CREATION</small></div>
+    <span class="sigil" aria-hidden="true">🜂</span>
+    <div><strong>MUSE <i>赛博玄枢中枢</i></strong><small>CYBER ASTROLABE · PROMETHEUS STARSHIP OS</small></div>
   </div>
   <div class="top-actions">
+    <span class={`top-pill-status ${connectionStatusKey}`}>
+      <i class="status-beacon" aria-hidden="true"></i>
+      {connectionBadge} · {connectionLabel}
+    </span>
     <span>{updatedLabel}</span>
+    <button class="fx-toggle" class:active={reducedFx} type="button" onclick={() => (reducedFx = !reducedFx)}>
+      {reducedFx ? "静态护眼" : "全息超频"}
+    </button>
     <button class="refresh" type="button" onclick={refresh} disabled={refreshBusy}>
       {refreshBusy ? "正在刷新…" : "刷新状态"}
     </button>
     <button class="command-trigger" type="button" onclick={openGuide}>使用指南</button>
-    <button class="command-trigger" type="button" onclick={openCommandPalette} aria-keyshortcuts="Control+K Meta+K">快速跳转 <kbd>Ctrl K</kbd></button>  </div>
-
+    <button class="command-trigger" type="button" onclick={openCommandPalette} aria-keyshortcuts="Control+K Meta+K">快速跳转 <kbd>Ctrl K</kbd></button>
+  </div>
 </header>
 
 {#if guideOpen}
   <div class="guide-backdrop" role="presentation" onclick={(event) => { if (event.target === event.currentTarget) closeGuide(); }}>
     <dialog open class="guide-dialog" aria-labelledby="guide-title" aria-describedby="guide-purpose">
       <header class="guide-header">
-        <div><small>MUSE FIELD MANUAL / 操作手册</small><h2 id="guide-title">一步一步认识 Muse</h2><p>每一页都告诉你这个模块做什么、怎么操作，以及当前真实能力边界。</p></div>
+        <div><small>MUSE FIELD MANUAL / 操作手册</small><h2 id="guide-title">一步一步认识 Muse 赛博玄枢</h2><p>每一页都告诉你这个模块做什么、怎么操作，以及当前真实能力边界。</p></div>
         <button type="button" class="command-close" onclick={closeGuide} aria-label="关闭使用指南">关闭</button>
       </header>
-      <div class="guide-progress" aria-label="指南进度"><span style={`width:${guideProgress.percent}%`}></span></div>
+      <svg class="svg-bar-guide" viewBox="0 0 100 5" preserveAspectRatio="none" aria-label="指南进度">
+        <rect class="svg-bar-guide-fill" x="0" y="0" width={guideProgress.percent} height="5" />
+      </svg>
       <div class="guide-step-count">第 {guideProgress.current} / {guideProgress.total} 步 <span>{guideStep.availability}</span></div>
       <div class="guide-visual" aria-hidden="true">
         <div class="guide-orbit"><span>✧</span></div>
@@ -768,16 +1133,22 @@
       <div class="command-title-row">        <div><small>MUSE COMMAND / 快速操作</small><h2 id="command-title">你现在要去哪里？</h2></div>
         <button type="button" class="command-close" onclick={closeCommandPalette} aria-label="关闭快速跳转">Esc</button>
       </div>
-      <input bind:this={commandInput} bind:value={commandQuery} class="command-search" type="search" placeholder="搜索灵感、视频、Agent、任务、成果…" aria-label="搜索功能" />
+      <input bind:this={commandInput} bind:value={commandQuery} class="command-search" type="search" placeholder="搜索星环、八卦、星图、Agent、普罗米修斯、视频、任务…" aria-label="搜索功能" />
       <div class="command-results" role="listbox" aria-label="可跳转功能">
         {#each filteredCommands as command (command.id)}
-          <a class="command-result" href={command.target} role="option" aria-selected="false" onclick={closeCommandPalette}>
+          <a
+            class="command-result"
+            href={command.target}
+            role="option"
+            aria-selected="false"
+            onclick={(e) => { e.preventDefault(); closeCommandPalette(); jumpToAnchor(command.target); }}
+          >
             <span class="command-result-glyph">◇</span>
             <span><b>{command.label}</b><small>{command.description}</small></span>
             <kbd>↵</kbd>
           </a>
         {:else}
-          <p class="command-empty">没有找到匹配功能。试试「灵感」「视频」或「任务」。</p>
+          <p class="command-empty">没有找到匹配功能。试试「星环」「八卦」「星图」「视频」或「任务」。</p>
         {/each}
       </div>
       <footer><span><kbd>Ctrl K</kbd> 或 <kbd>/</kbd> 打开</span><span><kbd>Esc</kbd> 关闭</span></footer>
@@ -786,59 +1157,248 @@
 
 <main class="layout">
   <aside class="rail" aria-label="主导航">
-    <div class="rail-mark">天</div>
-    <a class="active" href="#overview">◈<span>总览</span></a>
-    <a href="#agents">◇<span>智能体</span></a>
-    <a href="#inspirations">✧<span>灵感工坊</span></a>
-    <a href="#products">◇<span>产品库</span></a>
-    <a href="#feedback">✧<span>反馈</span></a>
-    <a href="#events">≋<span>事件</span></a>
-    <div class="rail-bottom">v0.1<br />LOCAL</div>
+    <div class="rail-mark">玄</div>
+    <a class="active" href="#overview" onclick={(e) => { e.preventDefault(); jumpToAnchor("#overview"); }}>◈<span>星环</span></a>
+    <a href="#celestial-lab" onclick={(e) => { e.preventDefault(); jumpToAnchor("#celestial-lab"); }}>☰<span>八卦宿</span></a>
+    <a href="#knowledge-starmap" onclick={(e) => { e.preventDefault(); jumpToAnchor("#knowledge-starmap"); }}>✦<span>知识星图</span></a>
+    <a href="#agents" onclick={(e) => { e.preventDefault(); jumpToAnchor("#agents"); }}>◎<span>Agent星系</span></a>
+    <a href="#prometheus-core" onclick={(e) => { e.preventDefault(); jumpToAnchor("#prometheus-core"); }}>🜂<span>火种核心</span></a>
+    <a href="#value-studio" onclick={(e) => { e.preventDefault(); jumpToAnchor("#value-studio"); }}>✦<span>创作台</span></a>
+    <a href="#daemon-runtime" onclick={(e) => { e.preventDefault(); jumpToAnchor("#daemon-runtime"); }}>▷<span>运行时</span></a>
+    <a href="#inspirations" onclick={(e) => { e.preventDefault(); jumpToAnchor("#inspirations"); }}>✧<span>灵感工坊</span></a>
+    <a href="#products" onclick={(e) => { e.preventDefault(); jumpToAnchor("#products"); }}>◇<span>产品库</span></a>
+    <a href="#queue" onclick={(e) => { e.preventDefault(); jumpToAnchor("#queue"); }}>⊞<span>任务</span></a>
+    <a href="#feedback" onclick={(e) => { e.preventDefault(); jumpToAnchor("#feedback"); }}>✧<span>进化</span></a>
+    <div class="rail-bottom">v0.2<br />CYBER</div>
   </aside>
 
   <section class="content" id="overview">
-    <div class="eyebrow">THE CELESTIAL ENGINE / 玄枢主控台</div>
+    <div class="eyebrow">MUSE NEO-CYBER CELESTIAL COMMAND / 赛博玄枢 · 普罗米修斯星舰</div>
     <div class="heading">
       <div>
-        <h1>灵枢调度中心</h1>
-        <p>让每一个智能体，都在你的秩序之中运行。</p>
+        <h1>赛博玄枢调度中心</h1>
+        <p>星环 · 八卦 · 二十八星宿 · 知识星图 · AI Agent 星系 · 普罗米修斯核心</p>
       </div>
       <div class="clock">
         <small>运行模式</small>
         <strong>LOCAL FIRST</strong>
-        <small>真实数据 · 本地创作与调度</small>
+        <small>真实数据 · 本地创作与受控调度</small>
       </div>
     </div>
-    <section class="cosmos-command" aria-label="Muse 意识中枢">
-      <div class="cosmos-copy">
-        <div class="cosmos-kicker"><span class="orbit-dot"></span> MUSE / THE LIVING COSMOS</div>
-        <h2>让认知，<em>不断生长。</em></h2>
-        <p>一个持续感知、研究、记忆、创造与自我校准的智能文明操作系统。</p>
-        <div class="cosmos-actions">
-          <a href="#inspirations" class="primary-link">注入一个灵感</a>
-          <a href="#agents" class="quiet-link">查看智能体舰队</a>
-        </div>
-        <div class="cosmos-footnote">意识体是产品愿景；下方只呈现可观测的真实系统状态。</div>
-      </div>
-      <div class="cosmos-orbit" aria-hidden="true">
-        <div class="orbit orbit-one"></div><div class="orbit orbit-two"></div><div class="orbit orbit-three"></div>
-        <div class="orbit-core"><span>玄</span><small>MUSE CORE</small></div>
-        <i class="satellite satellite-a"></i><i class="satellite satellite-b"></i><i class="satellite satellite-c"></i>
-        <span class="orbit-label label-a">感知</span><span class="orbit-label label-b">记忆</span><span class="orbit-label label-c">进化</span>
-      </div>
-      <div class="cosmos-status">
-        <div><small>核心连接</small><b class:good={connected} class:warn={!connected && stale}>{connectionLabel}</b></div>
-        <div><small>智能体活动</small><b>{activeCount} / {agents.length}</b></div>
-        <div><small>研究与创作记录</small><b>{inspirations.length + products.length} 项</b></div>
-        <div><small>GPU 独占资源</small><b class:good={gpuResourceStatus?.status === "idle"} class:warn={gpuResourceStatus?.status !== "idle"}>{gpuResourceStatus?.status === "reserved" ? `占用中 · ${gpuResourceStatus.lease?.owner_kind === "video_generation" ? "视频生成" : "模型推理"}` : gpuResourceStatus?.status === "idle" ? "空闲" : "状态未知"}</b></div>
-        <div><small>模型服务协调</small><b>{gpuResourceStatus?.model_supervisor.action === "external_model_active" ? "外部模型服务占用 GPU" : gpuResourceStatus?.model_supervisor.action === "gpu_memory_insufficient" ? "可用显存不足 · 等待释放" : gpuResourceStatus?.model_supervisor.restore_pending ? "等待资源释放后恢复" : gpuResourceStatus?.model_supervisor.status === "online" ? "Supervisor 在线" : "Supervisor 未运行 / 未观测"}</b></div>
-        <div><small>ComfyUI 显存释放</small><b>{gpuResourceStatus?.comfyui_memory_release.status === "released" ? `已确认 · ${Math.round((gpuResourceStatus.comfyui_memory_release.vram_free_ratio ?? 0) * 100)}% 空闲` : gpuResourceStatus?.comfyui_memory_release.status === "deferred_queue_busy" ? "队列繁忙 · 延后释放" : gpuResourceStatus?.comfyui_memory_release.status === "unconfirmed" ? "等待显存回收确认" : gpuResourceStatus?.comfyui_memory_release.status === "unavailable" ? "释放服务不可用" : "尚无释放记录"}</b></div>
-      </div>
-    </section>
+
+    <nav class="sector-tabs" aria-label="星舰舱段聚焦切换">
+      <button type="button" class="sector-tab" class:active={activeSector === "all"} onclick={() => (activeSector = "all")}>◈ 全景星舰</button>
+      <button type="button" class="sector-tab" class:active={activeSector === "astrolabe"} onclick={() => (activeSector = "astrolabe")}>☰ 星环与八卦星宿</button>
+      <button type="button" class="sector-tab" class:active={activeSector === "starmap"} onclick={() => (activeSector = "starmap")}>✦ Research Wiki 星图</button>
+      <button type="button" class="sector-tab" class:active={activeSector === "galaxy"} onclick={() => (activeSector = "galaxy")}>◎ Agent 星系与队列</button>
+      <button type="button" class="sector-tab" class:active={activeSector === "prometheus"} onclick={() => (activeSector = "prometheus")}>🜂 普罗米修斯与愿景</button>
+      <button type="button" class="sector-tab" class:active={activeSector === "studio"} onclick={() => (activeSector = "studio")}>▷ 创作与影像工坊</button>
+    </nav>
 
     {#if message}
       <div class="connection-message" role="status">{message}</div>
     {/if}
+
+    <MemPalacePanel status={mempalaceStatus} {connected} />
+
+    {#if activeSector === "all" || activeSector === "astrolabe"}
+      <AstrolabeHero
+        {connected}
+        {stale}
+        {connectionLabel}
+        {activeCount}
+        totalAgents={agents.length}
+        celestial={celestialCatalog}
+        prometheus={prometheusCore}
+        {gpuResourceStatus}
+        onInspectBagua={handleInspectBagua}
+      />
+
+      <CelestialBaguaLab
+        {client}
+        {connected}
+        celestial={celestialCatalog}
+        {presetLowerBits}
+        onSaveHypothesisInspiration={saveHypothesisInspiration}
+      />
+    {/if}
+
+    {#if activeSector === "all" || activeSector === "starmap"}
+      <KnowledgeStarMap
+        {client}
+        {connected}
+        graph={knowledgeGraph}
+        onQueryGraph={queryKnowledgeGraph}
+      />
+    {/if}
+
+    {#if activeSector === "all" || activeSector === "studio"}
+    <!-- ───────────────── Muse 视频创作工作室 ───────────────── -->
+    <CreativeStudio {client} {connected} />
+
+    <!-- ───────────────── 价值创作台 ───────────────── -->
+    <section class="value-studio" id="value-studio" aria-label="价值创作台">
+      <div class="vs-head">
+        <div class="vs-title">
+          <span class="vs-glyph" aria-hidden="true">✦</span>
+          <div>
+            <div class="vs-kicker">IDEA → RESEARCH → FILM → FEEDBACK</div>
+            <h2>价值创作台</h2>
+            <p>把一闪而过的念头，变成可验证、可制作、可复盘的创作路径。</p>
+          </div>
+        </div>
+        <div class="vs-engine" title="纯本地启发式评分，不联网、不预测收益">
+          <span class="vs-engine-dot"></span>
+          LOCAL HEURISTIC · V1
+        </div>
+      </div>
+
+      <ol class="vs-flow" aria-label="创作闭环阶段">
+        <li class:done={studioStage >= 1}><b>01</b><span>注入灵感</span></li>
+        <li class:done={studioStage >= 2}><b>02</b><span>价值评估</span></li>
+        <li class:done={studioStage >= 3}><b>03</b><span>研究入池</span></li>
+        <li class:done={studioStage >= 4}><b>04</b><span>生成影片</span></li>
+        <li class:done={studioStage >= 5}><b>05</b><span>审片回流</span></li>
+      </ol>
+
+      <div class="vs-grid">
+        <div class="vs-input-card">
+          <label for="studio-idea">创作题目 / 灵感</label>
+          <textarea id="studio-idea" bind:value={studioIdea} rows="4" maxlength="2000"
+            placeholder="例如：用 3 分钟数据动画拆解「新手做短视频最常见的 5 个误区」，附实测对比…"></textarea>
+          <div class="vs-two-col">
+            <label for="studio-audience">目标受众
+              <input id="studio-audience" type="text" bind:value={studioAudience} maxlength="120" placeholder="例如：想做自媒体的新手" />
+            </label>
+            <label for="studio-goal">看完后能做什么
+              <input id="studio-goal" type="text" bind:value={studioGoal} maxlength="120" placeholder="例如：避开 5 个坑并做出第一条片子" />
+            </label>
+          </div>
+          <div class="vs-actions">
+            <button type="button" class="vs-btn primary" onclick={evaluateStudioIdea}>
+              {studioDirty && studioResult ? "重新评估" : "评估选题价值"}
+            </button>
+            <button type="button" class="vs-btn" onclick={sendStudioToInbox}
+              disabled={!studioResult || studioDirty || studioBusy || !connected}>{studioBusy ? "写入中…" : "存入灵感池"}</button>
+            <button type="button" class="vs-btn" onclick={useStudioAsVideo} disabled={!studioResult}>生成视频</button>
+          </div>
+          {#if studioMessage}<p class="vs-message" role="status">{studioMessage}</p>{/if}
+          <p class="vs-disclaimer">评分维度来自项目宪章：需求 25% · 证据 20% · 原创 20% · 可视化 15% · 长尾 10% · 成本 10%。这是排序启发，不是流量或收益预测。</p>
+        </div>
+
+        <div class="vs-result-card">
+          {#if studioResult && !studioDirty}
+            <div class="vs-score-top">
+              <div class="vs-tier tier-{studioResult.tier.toLowerCase()}">
+                <strong>{studioResult.tier}</strong>
+                <small>选题级别</small>
+              </div>
+              <div class="vs-score-num">
+                <strong>{studioResult.total}</strong><span>/ 100</span>
+                <small>启发式价值分 · {studioResult.label}</small>
+              </div>
+            </div>
+            <div class="vs-bars" aria-label="维度评分">
+              {#each studioResult.scores as dim}
+                <div class="vs-bar-row" title={dim.hint}>
+                  <span class="vs-bar-label">{dim.label}<small>{Math.round(dim.weight * 100)}%</small></span>
+                  <span class="vs-bar-track">
+                    <svg class="svg-bar" viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true">
+                      <rect class="svg-bar-fill" x="0" y="0" width={Math.max(0, Math.min(100, (dim.score / 5) * 100))} height="6" />
+                    </svg>
+                  </span>
+                  <b>{dim.score}</b>
+                </div>
+              {/each}
+            </div>
+            {#if studioResult.riskFlags.length}
+              <div class="vs-risks">
+                待核实：{#each studioResult.riskFlags as flag}<span>{flag.label}</span>{/each}
+              </div>
+            {/if}
+            <div class="vs-reco">
+              <div><small>建议制作路径</small><b>{studioResult.suggestedPath}</b></div>
+              <div><small>候选标签</small><b>{studioResult.potentialTags.join(" · ")}</b></div>
+              <div><small>适配平台假设</small><b>{studioResult.suggestedPlatforms.join(" · ")}</b></div>
+              <p>{studioResult.monetizationNote}</p>
+            </div>
+          {:else}
+            <div class="vs-empty">
+              <span>◇</span>
+              <b>等待你的第一个题目</b>
+              <p>写下选题，Muse 会从六个维度给出结构化评估与制作建议。所有评分只在本机计算。</p>
+            </div>
+          {/if}
+        </div>
+      </div>
+    </section>
+
+    <!-- ───────────────── 自主运行时 ───────────────── -->
+    <section class="ops-grid" id="daemon-runtime" aria-label="自主运行时">
+      <section class="panel daemon-panel">
+        <div class="panel-head">
+          <div><small>AUTONOMOUS RUNTIME / 常驻引擎</small><h2>自主运行时</h2></div>
+          <span class="tag" class:tag-live={daemonStatus?.running}>{daemonStatus?.running ? "运行中" : daemonStatus?.state === "paused" ? "已暂停" : "未运行"}</span>
+        </div>
+        <p class="panel-intro">本地常驻监督循环：定时检查健康、知识完整性、能力雷达、队列，并可在我空闲时做有来源的自主研究与视频派发。受本机 SQLite 单例租约约束，可随时暂停或停止。</p>
+        <div class="daemon-status">
+          <div><small>当前状态</small><strong>{daemonStatus?.state ?? "未知"}</strong></div>
+          <div><small>心跳</small><strong>{daemonAgeLabel(daemonStatus?.heartbeat_age_seconds)} 前</strong></div>
+          <div><small>托管进程</small><strong>{daemonStatus?.managed_pid ?? "—"}</strong></div>
+          <div><small>最近错误</small><strong>{daemonStatus?.last_error ?? "无"}</strong></div>
+        </div>
+        <div class="daemon-actions">
+          <button type="button" class="vs-btn primary" onclick={() => controlDaemon("start")} disabled={!connected || !!daemonBusy || daemonStatus?.running}>{daemonBusy === "start" ? "启动中…" : "启动 24h 运行时"}</button>
+          <button type="button" class="vs-btn" onclick={() => controlDaemon("pause")} disabled={!connected || !!daemonBusy || !daemonStatus?.running}>{daemonBusy === "pause" ? "…" : "暂停"}</button>
+          <button type="button" class="vs-btn" onclick={() => controlDaemon("resume")} disabled={!connected || !!daemonBusy || daemonStatus?.state !== "paused"}>{daemonBusy === "resume" ? "…" : "恢复"}</button>
+          <button type="button" class="vs-btn" onclick={() => controlDaemon("stop")} disabled={!connected || !!daemonBusy || daemonStatus?.state === "stopped"}>{daemonBusy === "stop" ? "…" : "停止"}</button>
+          <button type="button" class="vs-btn" onclick={() => controlDaemon("once")} disabled={!connected || !!daemonBusy || daemonStatus?.running}>{daemonBusy === "once" ? "执行中…" : "只跑一轮"}</button>
+        </div>
+        {#if daemonMessage}<p class="feedback-message" role="status">{daemonMessage}</p>{/if}
+        <p class="vs-disclaimer">默认不开启 GPU 派发；模型推理需本地已配置。运行时使用确定性 allowlist 例行任务，不自动批准代码、不自动发布。所有生命周期操作写入 data/autonomy/control-log.jsonl 可审计。</p>
+      </section>
+
+      <section class="panel pipeline-panel" id="pipeline">
+        <div class="panel-head">
+          <div><small>ONE-CLICK PIPELINE / 创作流水线</small><h2>一键创作流水线</h2></div>
+          <span class="tag">可复现配方</span>
+        </div>
+        <p class="panel-intro">选择一个经过验证的本地配方，Muse 会在后台运行并生成可下载交付包；进度实时刷新，产物仍需人工审片。</p>
+        <div class="pipeline-form">
+          <label for="pipeline-recipe">创作配方</label>
+          <select id="pipeline-recipe" bind:value={selectedRecipe}>
+            {#each pipelineRecipes as recipe (recipe.id)}
+              <option value={recipe.id} disabled={!recipe.available}>{recipe.label}{recipe.available ? "" : "（暂不可用）"}</option>
+            {:else}
+              <option value="">加载中或不可用</option>
+            {/each}
+          </select>
+          {#if pipelineRecipes.find((item) => item.id === selectedRecipe)}
+            <small>{pipelineRecipes.find((item) => item.id === selectedRecipe)?.description ?? pipelineRecipes.find((item) => item.id === selectedRecipe)?.reason}</small>
+          {/if}
+          <div class="inspiration-actions">
+            <small>单任务最长 30 分钟 · 输出位于 data/prometheus</small>
+            <button type="button" class="vs-btn primary" onclick={submitPipeline} disabled={!connected || pipelineBusy || !selectedRecipe || pipelineRecipes.find((item) => item.id === selectedRecipe)?.available === false}>{pipelineBusy ? "提交中…" : "运行配方"}</button>          </div>
+        </div>
+        {#if pipelineMessage}<p class="feedback-message" role="status">{pipelineMessage}</p>{/if}
+        <div class="worker-heading"><b>流水线任务</b><span>{pipelineJobs.length} 条</span></div>
+        {#if pipelineJobs.length}
+          <div class="feedback-list">
+            {#each pipelineJobs.slice(0, 8) as job (job.job_id)}
+              <div class="pipeline-job">
+                <span class="job-status job-{job.status}">{job.status === "succeeded" ? "已交付" : job.status === "failed" ? "失败" : job.status === "running" ? "运行中" : "排队"}</span>
+                <span><b>{job.recipe_label}</b><small>{job.progress} · {relativeTime(job.created_at)}</small>
+                  {#if job.error}<small class="job-error">{job.error}</small>{/if}
+                  {#if job.status === "succeeded" && job.result?.bundle}<small>交付包：{String((job.result.bundle as { path?: string })?.path ?? "已生成")}</small>{/if}
+                </span>
+              </div>
+            {/each}
+          </div>
+        {:else}
+          <div class="empty-state compact">尚无流水线任务。选择一个配方开始。</div>
+        {/if}
+      </section>
+    </section>
 
     <section class="panel inspiration-panel" id="inspirations">
       <div class="panel-head">
@@ -881,7 +1441,18 @@
                   <p>{item.content}</p>
                   {#if item.tags?.length}<small>标签：{item.tags.join(" · ")}</small>{/if}
                   {#if item.research_domains?.length}<small>研究领域：{item.research_domains.join(" · ")}</small>{/if}
-                  <small>{relativeTime(item.created_at)} · {item.allow_external_research ? "已允许联网研究" : "仅本地保存"} · {item.status === "not_researched" ? "待研究" : item.status}</small>
+                  <small>{relativeTime(item.created_at)} · {item.allow_external_research ? "已允许联网研究" : "仅本地保存"} · {item.status === "not_researched" ? "待研究" : item.status}{#if item.evolution_stage && item.evolution_stage !== "not_evolved"} · 闭环：{item.evolution_stage}{/if}{#if item.improvement_proposal_ids?.length} · 自我改进提案：{item.improvement_proposal_ids.length} 项{/if}</small>
+                  {#if item.blueprint_path}
+                    <small>分镜蓝图：{item.blueprint_path}</small>
+                  {/if}
+                  <div class="inspiration-row-actions">
+                    <button type="button" class="vs-btn" onclick={() => evolveSingleInspiration(item.id, false)} disabled={!connected || Boolean(evolvingInspirationId)}>
+                      {evolvingInspirationId === item.id ? "演化中…" : "自主深研 + 自我改进提案"}
+                    </button>
+                    <button type="button" class="vs-btn primary" onclick={() => evolveSingleInspiration(item.id, true)} disabled={!connected || Boolean(evolvingInspirationId)}>
+                      {evolvingInspirationId === item.id ? "排队中…" : "进化并生成双画幅视频 (YouTube/抖音/视频号)"}
+                    </button>
+                  </div>
                 </article>
               {/each}
             </div>
@@ -1014,6 +1585,21 @@
                         片头 {Number(product.motion.intro_seconds ?? 0).toFixed(1)}s / 片尾 {Number(product.motion.outro_seconds ?? 0).toFixed(1)}s
                       </small>
                     {/if}
+                    {#if product.scene_timeline?.length}
+                      <div class="quality-scene-matches" aria-label="分镜运镜与时间轴">
+                        {#each product.scene_timeline as scene (scene.scene_id)}
+                          <div class="quality-scene-match">
+                            <span>
+                              <b>{scene.scene_id} · {cameraMoveLabel(scene.camera_move)}</b>
+                              <small>{scene.source_asset}{#if typeof scene.timeline_start_seconds === "number" && typeof scene.timeline_end_seconds === "number"} · {subtitleCueTime(scene.timeline_start_seconds)}–{subtitleCueTime(scene.timeline_end_seconds)} · {Number(scene.duration_seconds ?? (scene.timeline_end_seconds - scene.timeline_start_seconds)).toFixed(2)}s{/if}{#if typeof scene.transition_in_seconds === "number" && scene.transition_in_seconds > 0} · 入场转场 {scene.transition_in_seconds.toFixed(2)}s{/if}{#if typeof scene.transition_out_seconds === "number" && scene.transition_out_seconds > 0} · 出场转场 {scene.transition_out_seconds.toFixed(2)}s{/if}</small>
+                            </span>
+                            {#if typeof scene.timeline_start_seconds === "number"}
+                              <button type="button" class="radar-scan" onclick={() => previewProduct(product, scene.timeline_start_seconds)}>预览此镜头</button>
+                            {/if}
+                          </div>
+                        {/each}
+                      </div>
+                    {/if}
                     {#if product.quality_gate}
                       <small class="quality-gate-line">
                         技术 QA：{product.quality_gate.status === "passed" ? "通过" : product.quality_gate.status === "failed" ? "未通过" : product.quality_gate.status === "blocked" ? "受阻" : "未知"}
@@ -1028,9 +1614,24 @@
                       <div class="quality-warning-list" aria-label="视频质量复核告警">
                         {#each product.quality_warnings as warning}
                           <div class="quality-warning-row">
-                            <span><b>{qualityWarningLabel(warning.code)}</b><small>{warning.start_seconds.toFixed(2)}s 起 · 持续 {warning.duration_seconds.toFixed(2)}s</small></span>
+                            <span><b>{qualityWarningLabel(warning.code)}</b><small>{#if typeof warning.start_seconds === "number" && typeof warning.duration_seconds === "number"}{warning.start_seconds.toFixed(2)}s 起 · 持续 {warning.duration_seconds.toFixed(2)}s{:else}{warning.message || "整段指标需要复核"}{#if typeof warning.value === "number"} · {warning.value.toFixed(1)} {warning.unit ?? ""}{/if}{/if}</small></span>
                             <button type="button" class="radar-scan" onclick={() => previewProduct(product, warning.start_seconds)}>定位复核</button>
                           </div>
+                          {#if warning.storyboard_matches?.length}
+                            <div class="quality-scene-matches" aria-label="关联分镜与源素材">
+                              {#each warning.storyboard_matches as match (match.scene_id)}
+                                <div class="quality-scene-match">
+                                  <span>
+                                    <b>{match.scene_id}</b>
+                                    <small>{match.source_file} · 镜头 {subtitleCueTime(match.scene_start_seconds)}–{subtitleCueTime(match.scene_end_seconds)} · 告警重叠 {match.overlap_seconds.toFixed(2)}s</small>
+                                  </span>
+                                  <button type="button" class="radar-scan" onclick={() => previewProduct(product, match.overlap_start_seconds)}>定位此镜头</button>
+                                </div>
+                              {/each}
+                            </div>
+                          {:else if warning.mapping_status === "outside_storyboard"}
+                            <small class="quality-mapping-note">此告警时间不在已记录的分镜区间内，保留原片时间定位。</small>
+                          {/if}
                         {/each}
                         <small>这些是黑帧、静帧或静音的启发式提示；有意的暗场、定格与留白不自动判为缺陷，也不会单独阻断技术 QA。</small>
                       </div>
@@ -1038,12 +1639,66 @@
                   </span>                <div class="product-actions">
                   <button type="button" class="radar-scan" onclick={() => toggleInitiativeTimeline(product)} disabled={timelineBusy} aria-expanded={selectedTimelineId === timelineInitiativeId(product)}>{selectedTimelineId === timelineInitiativeId(product) ? "收起时间线" : "创作时间线"}</button>
                   <button type="button" class="radar-scan" onclick={() => previewProduct(product)}>预览</button>
+                  {#if product.kind === "video_creator" && product.subtitle_review?.status === "pending_human_review"}
+                    <button type="button" class="radar-scan" onclick={() => toggleSubtitleReview(product)} aria-expanded={selectedSubtitleReviewProductId === product.id}>逐条字幕审校</button>
+                  {:else if product.kind === "video_creator" && product.subtitle_review?.status === "unavailable"}
+                    <small class="quality-gate-line">字幕审校资料未能与此作品版本匹配，暂不可审校</small>
+                  {:else if product.kind === "video_creator" && product.subtitle_review?.status === "ambiguous"}
+                    <small class="quality-gate-line">字幕审校来源不唯一，需先核对来源记录</small>
+                  {/if}
                   {#if product.kind === "video_creator" && product.video_path}
                     <button type="button" class="radar-scan" onclick={() => downloadVideo(product)}>下载 MP4</button>
                   {/if}
                   <button type="button" class="radar-scan" onclick={() => downloadProduct(product)}>下载工程 ZIP</button>
                 </div>
               </div>
+              {#if client}
+                <InitiativePerformancePanel client={client} initiativeId={timelineInitiativeId(product)} />
+              {/if}
+              {#if selectedSubtitleReviewProductId === product.id}
+                <section class="product-review-form subtitle-review-workbench" aria-label="粤语字幕逐条人工审校">
+                  <b>粤语旁白 · 逐条字幕审校</b>
+                  <small>请先打开原片并听完每条旁白。机器识别结果和 CER 只作参考，不能代替人工听审。</small>
+                  <div class="product-actions">
+                    <button type="button" class="radar-scan" onclick={() => previewProduct(product)}>打开原片听审</button>
+                    <span>{subtitleReviewReviewedIndexes.length} / {subtitleReviewDocument?.segments.length ?? 0} 条已确认</span>
+                  </div>
+                  {#if subtitleReviewBusy}
+                    <small>正在读取与本产品音频哈希绑定的字幕审核资料…</small>
+                  {:else if subtitleReviewDocument}
+                    {#each subtitleReviewDocument.segments as segment (segment.index)}
+                      <div class="quality-warning-row subtitle-cue-row">
+                        <label class="subtitle-cue-confirm">
+                          <input
+                            type="checkbox"
+                            checked={subtitleReviewReviewedIndexes.includes(segment.index)}
+                            onchange={(event) => markSubtitleCueReviewed(segment.index, (event.currentTarget as HTMLInputElement).checked)}
+                          />
+                          <span>已听审 #{segment.index} · {subtitleCueTime(segment.start_seconds)}–{subtitleCueTime(segment.end_seconds)}</span>
+                        </label>
+                        <small>ASR 原文：{segment.asr_text}</small>
+                        <label>最终字幕（修改会另存为人工修订）
+                          <textarea rows="2" maxlength="500" bind:value={subtitleReviewCorrections[segment.index]}></textarea>
+                        </label>
+                      </div>
+                    {/each}
+                    <label>审核人
+                      <input maxlength="120" placeholder="填写实际审核人" bind:value={subtitleReviewReviewer} />
+                    </label>
+                    <label>明确批准口令
+                      <input maxlength="40" placeholder="输入 APPROVE-HUMAN-REVIEW" bind:value={subtitleReviewConfirmation} />
+                    </label>
+                    <button type="button" class="feedback-submit" onclick={() => approveSubtitleReview(product)}
+                      disabled={subtitleReviewSubmitting || subtitleReviewReviewedIndexes.length !== subtitleReviewDocument.segments.length || subtitleReviewConfirmation !== "APPROVE-HUMAN-REVIEW" || !subtitleReviewReviewer.trim()}>
+                      {subtitleReviewSubmitting ? "正在生成新版本…" : "确认人工审校并生成新版本"}
+                    </button>
+                    <small>批准只会生成新的不可覆盖版本；不会自动把 Creator 标记为已发布。静帧告警、技术 QA 和其他发布门槛仍独立生效。</small>
+                  {:else if subtitleReviewMessage}
+                    <small role="status">{subtitleReviewMessage}</small>
+                  {/if}
+                  {#if subtitleReviewMessage}<small role="status">{subtitleReviewMessage}</small>{/if}
+                </section>
+              {/if}
               {#if selectedTimelineId === timelineInitiativeId(product)}
                 <div class="initiative-timeline">
                   {#if timelineBusy}
@@ -1113,6 +1768,20 @@
         <small class="artifact-note">产品原件保存在 data/products；视频素材放在 data/video_sources。视频工程 ZIP 包含 MP4、素材顺序清单和说明。所有产品初始为 testing，须人工验收后才能发布。</small>
       </section>
     </section>
+    {/if}
+
+    {#if activeSector === "all" || activeSector === "prometheus"}
+      <PrometheusCorePanel prometheus={prometheusCore} />
+    {/if}
+
+    {#if activeSector === "all" || activeSector === "galaxy"}
+    <AgentGalaxyPanel
+      {client}
+      {connected}
+      {agents}
+      {registryConfigured}
+      galaxy={galaxySnapshot}
+    />
 
     <section class="metrics" aria-label="实时指标">
       <article>
@@ -1138,51 +1807,6 @@
     </section>
 
     <div class="main-grid">
-      <section class="panel agents-panel" id="agents">
-        <div class="panel-head">
-          <div><small>01 / SWARM TOPOLOGY</small><h2>天枢 · 智能体阵列</h2></div>
-          <span class="tag">{agentCountLabel}</span>
-        </div>
-
-        {#if !registryConfigured}
-          <div class="empty-state">Agent Registry 尚未接入。请先启动 Muse 后端并配置 --agent-db。</div>
-        {:else if agents.length === 0}
-          <div class="empty-state">Registry 已连接，但还没有登记任何 Agent。连接真实 Agent 后，它们会出现在这里。</div>
-        {:else}
-          <div class="agent-grid" aria-live="polite">
-            {#each agents as agent (agent.agent_id)}
-              {@const status: AgentStatus = statusLabels[agent.status] ? agent.status : "offline"}
-              {@const stats = agent.effectiveness ?? {}}
-              <article class="agent-card">
-                <div class="agent-card-head">
-                  <span class="agent-glyph">{(agent.display_name || agent.agent_id || "?").slice(0, 1)}</span>
-                  <span class="status-pill status-{status}">{statusLabels[status]}</span>
-                </div>
-                <h3>{agent.display_name || agent.agent_id}</h3>
-                <p class="agent-role">{agent.role || "未分类角色"} · {agent.source || "来源未知"}</p>
-                <div class="capabilities">
-                  {#if agent.capabilities?.length}
-                    {#each agent.capabilities as capability}
-                      <span class="capability">{capability}</span>
-                    {/each}
-                  {:else}
-                    <span class="capability muted">未声明能力</span>
-                  {/if}
-                </div>
-                <div class="agent-stats">
-                  <span>任务成功 <b>{percent(stats.success_rate)}</b></span>
-                  <span>审查通过 <b>{percent(stats.review_pass_rate)}</b></span>
-                </div>
-                <div class="agent-foot">
-                  <span>心跳：{relativeTime(agent.last_seen_at)}</span>
-                  <span>完成 {Number(stats.completed ?? 0)}</span>
-                </div>
-              </article>
-            {/each}
-          </div>
-        {/if}
-      </section>
-
       <section class="panel queue-panel" id="queue">
         <div class="panel-head">
           <div><small>02 / TASK FLOW & WORKERS</small><h2>任务队列 · 执行节点</h2></div>
@@ -1410,13 +2034,25 @@
         </ul>
       </section>
     </div>
+    {/if}
 
     <footer>
-      ✧ MUSE · PERSONAL SUPER AGENT OS
-      <span>所有状态来自本地 API；无数据时明确显示空态或连接错误。</span>
+      ✧ MUSE · NEO-CYBER CELESTIAL SUPER AGENT OS
+      <span>所有状态来自本地 API；玄学推演仅作启发假设，绝不冒充事实证据。</span>
     </footer>
   </section>
 </main>
+
+<nav class="cyber-dock" aria-label="赛博星舰快捷指令坞">
+  <button type="button" class="dock-item" onclick={() => jumpToAnchor("#overview")}>◈ 星环</button>
+  <button type="button" class="dock-item" onclick={() => jumpToAnchor("#celestial-lab")}>☰ 八卦星宿</button>
+  <button type="button" class="dock-item" onclick={() => jumpToAnchor("#knowledge-starmap")}>✦ 知识星图</button>
+  <button type="button" class="dock-item core" onclick={() => jumpToAnchor("#prometheus-core")}>🜂 普罗米修斯核心</button>
+  <button type="button" class="dock-item" onclick={() => jumpToAnchor("#agents")}>◎ Agent 星系</button>
+  <button type="button" class="dock-item" onclick={() => jumpToAnchor("#value-studio")}>▷ 创作工坊</button>
+  <button type="button" class="dock-item" onclick={openCommandPalette}>⌘ 指令面板</button>
+</nav>
+</div>
 <style>
   .panel-intro{color:var(--muted);font-size:11px;margin:0 0 14px}
   .feedback-form{display:grid;grid-template-columns:repeat(3,minmax(0,1fr)) auto;gap:10px;align-items:end}
@@ -1506,9 +2142,9 @@
   .guide-backdrop{position:fixed;inset:0;z-index:1100;display:grid;place-items:center;padding:18px;background:rgba(2,7,14,.84);backdrop-filter:blur(12px)}
   .guide-dialog{position:relative;margin:0;max-width:none;width:min(760px,100%);max-height:88vh;overflow:auto;border:1px solid #54758a;background:radial-gradient(ellipse at 50% 0%,#17334a 0%,#0c1727 48%,#08111d 100%);box-shadow:0 30px 110px rgba(0,0,0,.62);padding:clamp(16px,3vw,28px);color:#e3f0ee}
   .guide-header{display:flex;justify-content:space-between;gap:18px;align-items:start}.guide-header small{color:#8ed0c8;font-size:9px;letter-spacing:.14em}.guide-header h2{font-size:clamp(20px,3vw,28px);margin:7px 0}.guide-header p{color:#a8bbc4;font-size:11px;line-height:1.6;margin:0;max-width:520px}
-  .guide-progress{height:4px;background:#23364b;margin:20px 0 10px}.guide-progress span{display:block;height:100%;background:linear-gradient(90deg,#58b9b3,#d2b16b);transition:width .2s ease}.guide-step-count{display:flex;justify-content:space-between;gap:12px;color:#9cb2be;font-size:10px}.guide-step-count span{color:#d7c18b}
+  .guide-step-count{display:flex;justify-content:space-between;gap:12px;color:#9cb2be;font-size:10px}.guide-step-count span{color:#d7c18b}
   .guide-visual{display:flex;align-items:center;justify-content:center;gap:24px;min-height:100px;margin:14px 0;padding:12px;border:1px solid #263d53;background:rgba(4,12,22,.55)}.guide-orbit{width:62px;height:62px;display:grid;place-items:center;border:1px solid #6ba7a5;border-radius:50%;box-shadow:0 0 24px rgba(95,191,182,.18);color:#c6f2e8;font-size:28px}.guide-flow{display:flex;align-items:center;gap:9px;color:#c4d6d9;font-size:10px}.guide-flow b{padding:8px 10px;border:1px solid #3b6172;background:#10283a}.guide-flow i{width:20px;height:1px;background:#6ca6a3}
   .guide-copy h3{font-size:18px;margin:12px 0;color:#e8f6f1}.guide-copy>p,.guide-copy div p,.guide-copy aside p{font-size:12px;line-height:1.75;color:#b8c9cf;margin:6px 0 0}.guide-copy>div{padding:12px 0;border-top:1px solid #263a4e}.guide-copy>div>b{font-size:11px;color:#8ed0c8}.guide-copy aside{margin-top:12px;padding:12px;border-left:2px solid #b89556;background:rgba(103,77,35,.13)}.guide-copy aside b{font-size:11px;color:#e0c487}.guide-actions{display:flex;justify-content:space-between;gap:9px;margin-top:20px;padding-top:14px;border-top:1px solid #293d50}.guide-actions button{font-size:11px}
   @media(max-width:600px){.guide-backdrop{padding:8px}.guide-dialog{max-height:94vh;padding:14px}.guide-visual{min-height:76px;gap:12px}.guide-orbit{width:48px;height:48px}.guide-flow{gap:5px}.guide-flow b{padding:7px 6px}.guide-flow i{width:10px}.guide-actions{flex-wrap:wrap}.guide-actions button{flex:1;min-width:90px}}
-  @media(prefers-reduced-motion:reduce){.guide-backdrop{backdrop-filter:none}.guide-progress span{transition:none}}
+  @media(prefers-reduced-motion:reduce){.guide-backdrop{backdrop-filter:none}}
 </style>

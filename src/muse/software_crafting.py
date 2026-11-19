@@ -69,9 +69,16 @@ class SoftwareCraftingError(RuntimeError):
     """A bounded external software-analysis operation failed."""
 
 
-def _child_environment() -> dict[str, str]:
-    """Do not forward ambient cloud credentials into local inspection engines."""
+def _child_environment(overrides: dict[str, str] | None = None) -> dict[str, str]:
+    """Build a bounded child environment without forwarding ambient credentials."""
     env = os.environ.copy()
+    if overrides is not None:
+        if not isinstance(overrides, dict) or any(
+            not isinstance(name, str) or not name or not isinstance(value, str)
+            for name, value in overrides.items()
+        ):
+            raise ValueError("MCP child environment overrides must be string pairs")
+        env.update(overrides)
     secret_markers = ("_API_KEY", "_TOKEN", "_SECRET", "_PASSWORD", "_PASSWD")
     for name in tuple(env):
         upper = name.upper()
@@ -90,6 +97,7 @@ class MCPStdioClient:
         workspace: str | Path,
         allowed_tools: set[str] | frozenset[str],
         timeout_seconds: float = 120.0,
+        environment: dict[str, str] | None = None,
     ) -> None:
         if not command or any(not isinstance(part, str) or not part.strip() for part in command):
             raise ValueError("MCP command must contain a fixed executable and arguments")
@@ -102,6 +110,14 @@ class MCPStdioClient:
         if not allowed_tools or any(not isinstance(name, str) or not name for name in allowed_tools):
             raise ValueError("MCP tool allowlist must contain exact tool names")
         self.allowed_tools = frozenset(allowed_tools)
+        if environment is not None and (
+            not isinstance(environment, dict) or any(
+                not isinstance(name, str) or not name or not isinstance(value, str)
+                for name, value in environment.items()
+            )
+        ):
+            raise ValueError("MCP child environment overrides must be string pairs")
+        self.environment = dict(environment or {})
         self.timeout_seconds = float(timeout_seconds)
 
     def _exchange(
@@ -143,7 +159,7 @@ class MCPStdioClient:
             completed = subprocess.run(
                 list(self.command), input=payload, capture_output=True, text=True,
                 encoding="utf-8", errors="replace", timeout=effective_timeout,
-                cwd=str(self.workspace), env=_child_environment(), shell=False, check=False,
+                cwd=str(self.workspace), env=_child_environment(self.environment), shell=False, check=False,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise SoftwareCraftingError("MCP server process failed: " + type(exc).__name__) from exc
@@ -228,7 +244,7 @@ class MCPStdioClient:
             process = subprocess.Popen(
                 list(self.command), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
-                bufsize=1, cwd=str(self.workspace), env=_child_environment(), shell=False,
+                bufsize=1, cwd=str(self.workspace), env=_child_environment(self.environment), shell=False,
             )
         except OSError as exc:
             raise SoftwareCraftingError("MCP server process failed: " + type(exc).__name__) from exc

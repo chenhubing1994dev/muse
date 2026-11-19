@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import io
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from unittest.mock import patch
 from pathlib import Path
 from types import SimpleNamespace
 
-from muse.video_qa import inspect_video_file
+from muse.video_qa import inspect_video_file, map_warnings_to_storyboard_scenes
 
 
 class VideoQATests(unittest.TestCase):
@@ -155,6 +158,165 @@ class VideoQATests(unittest.TestCase):
         self.assertEqual(result["audio_quality"]["status"], "unavailable")
         self.assertEqual(result["audio_quality"]["missing_metrics"],
                          ["integrated_lufs", "true_peak_dbfs", "peak_level_dbfs"])
+
+
+    def test_maps_qa_warning_intervals_to_overlapping_storyboard_scenes(self):
+        warnings = [
+            {"code": "frozen_frames", "start_seconds": 3.5, "duration_seconds": 1.0},
+            {"code": "frozen_frames", "start_seconds": 4.9, "duration_seconds": 0.5},
+            {"code": "frozen_frames", "start_seconds": 5.0, "duration_seconds": 0.25},
+        ]
+        storyboard = {
+            "scenes": [
+                {"id": "shot-01", "source_file": "shot-01.mp4", "source_duration_seconds": 2.0},
+                {"id": "shot-02", "source_file": "shot-02.mp4", "source_duration_seconds": 3.0},
+            ]
+        }
+
+        mapped = map_warnings_to_storyboard_scenes(
+            warnings, storyboard, timeline_offset_seconds=3.0,
+        )
+
+        self.assertEqual([item["scene_id"] for item in mapped[0]["storyboard_matches"]], ["shot-01"])
+        self.assertEqual([item["scene_id"] for item in mapped[1]["storyboard_matches"]], ["shot-01", "shot-02"])
+        self.assertEqual([item["scene_id"] for item in mapped[2]["storyboard_matches"]], ["shot-02"])
+        self.assertAlmostEqual(mapped[1]["storyboard_matches"][0]["overlap_seconds"], 0.1)
+        self.assertAlmostEqual(mapped[1]["storyboard_matches"][1]["overlap_seconds"], 0.4)
+        self.assertEqual(warnings[0]["start_seconds"], 3.5)
+
+    def test_storyboard_mapping_keeps_unmatched_intro_and_outro_warnings_explicit(self):
+        warnings = [
+            {"code": "frozen_frames", "start_seconds": 0.5, "duration_seconds": 1.0},
+            {"code": "frozen_frames", "start_seconds": 9.5, "duration_seconds": 1.0},
+        ]
+        storyboard = {
+            "scenes": [
+                {"id": "shot-01", "source_file": "shot-01.mp4", "duration_seconds": 2.0},
+            ]
+        }
+
+        mapped = map_warnings_to_storyboard_scenes(
+            warnings, storyboard, timeline_offset_seconds=3.0,
+        )
+
+        self.assertEqual(mapped[0]["storyboard_matches"], [])
+        self.assertEqual(mapped[1]["storyboard_matches"], [])
+        self.assertEqual(mapped[0]["mapping_status"], "outside_storyboard")
+        self.assertEqual(mapped[1]["mapping_status"], "outside_storyboard")
+
+    def test_storyboard_mapping_rejects_invalid_scene_duration_and_warning_timing(self):
+        with self.assertRaisesRegex(ValueError, "scene duration"):
+            map_warnings_to_storyboard_scenes(
+                [], {"scenes": [{"id": "shot-01", "source_duration_seconds": 0}]},
+            )
+        with self.assertRaisesRegex(ValueError, "warning interval"):
+            map_warnings_to_storyboard_scenes(
+                [{"code": "frozen_frames", "start_seconds": -1, "duration_seconds": 1}],
+                {"scenes": []},
+            )
+
+
+    def test_cli_attaches_storyboard_mapping_when_requested(self):
+        import io
+        from contextlib import redirect_stdout
+        from unittest.mock import patch
+        from muse.video_qa import main
+
+        storyboard_path = Path(self.temp.name) / "storyboard.json"
+        storyboard_path.write_text(json.dumps({
+            "scenes": [
+                {"id": "shot-01", "source_file": "shot-01.mp4", "duration_seconds": 2.0},
+            ]
+        }), encoding="utf-8")
+        qa_report = {
+            "status": "passed",
+            "warnings": [{"code": "frozen_frames", "start_seconds": 3.5, "duration_seconds": 0.5}],
+        }
+        output = io.StringIO()
+        with patch("muse.video_qa.discover_media_tools", return_value=SimpleNamespace(tools=[])), \
+             patch("muse.video_qa.inspect_video_file", return_value=qa_report), \
+             redirect_stdout(output):
+            exit_code = main([
+                str(self.video), "--storyboard", str(storyboard_path),
+                "--storyboard-offset-seconds", "3",
+            ])
+
+        self.assertEqual(exit_code, 0)
+        document = json.loads(output.getvalue())
+        match = document["storyboard_mapping"][0]["storyboard_matches"][0]
+        self.assertEqual(match["scene_id"], "shot-01")
+        self.assertEqual(match["source_file"], "shot-01.mp4")
+        self.assertEqual(document["storyboard_mapping"][0]["mapping_status"], "mapped")
+
+
+    def test_storyboard_mapping_ignores_sub_frame_boundary_noise(self):
+        mapped = map_warnings_to_storyboard_scenes(
+            [{"code": "frozen_frames", "start_seconds": 0.0, "duration_seconds": 1.000001}],
+            {"scenes": [
+                {"id": "shot-01", "duration_seconds": 1.0},
+                {"id": "shot-02", "duration_seconds": 1.0},
+            ]},
+        )
+        self.assertEqual(
+            [item["scene_id"] for item in mapped[0]["storyboard_matches"]],
+            ["shot-01"],
+        )
+
+
+    def test_storyboard_mapping_leaves_non_temporal_audio_warnings_unmapped(self):
+        mapped = map_warnings_to_storyboard_scenes(
+            [{"code": "audio_loudness_high", "value": -12.5, "unit": "LUFS"}],
+            {"scenes": [{"id": "shot-01", "duration_seconds": 2.0}]},
+        )
+        self.assertEqual(mapped[0]["mapping_status"], "not_time_based")
+        self.assertEqual(mapped[0]["storyboard_matches"], [])
+
+
+    def test_maps_using_explicit_overlapping_scene_timeline_intervals(self):
+        warnings = [{"code": "frozen_frames", "start_seconds": 3.8, "duration_seconds": 0.4}]
+        storyboard = {"scenes": [
+            {"id": "shot-01", "timeline_start_seconds": 0.0, "timeline_end_seconds": 4.0},
+            {"id": "shot-02", "timeline_start_seconds": 3.6, "timeline_end_seconds": 6.6},
+        ]}
+        mapped = map_warnings_to_storyboard_scenes(warnings, storyboard)
+        matches = mapped[0]["storyboard_matches"]
+        self.assertEqual([item["scene_id"] for item in matches], ["shot-01", "shot-02"])
+        self.assertAlmostEqual(matches[0]["overlap_seconds"], 0.2)
+        self.assertAlmostEqual(matches[1]["overlap_seconds"], 0.4)
+
+    def test_rejects_offset_when_explicit_scene_timeline_is_provided(self):
+        with self.assertRaisesRegex(ValueError, "must be zero when explicit scene timeline"):
+            map_warnings_to_storyboard_scenes(
+                [],
+                {"scenes": [{"id": "shot-01", "timeline_start_seconds": 3.0,
+                             "timeline_end_seconds": 5.0}]},
+                timeline_offset_seconds=3.0,
+            )
+
+    def test_rejects_partial_explicit_scene_timeline(self):
+        with self.assertRaisesRegex(ValueError, "both timeline_start_seconds and timeline_end_seconds"):
+            map_warnings_to_storyboard_scenes(
+                [], {"scenes": [{"id": "shot-01", "timeline_start_seconds": 1.0, "duration_seconds": 2.0}]},
+            )
+
+    def test_cli_adds_advisory_motion_report_without_changing_qa_verdict(self):
+        from muse.video_qa import main
+
+        qa_report = {"status": "passed", "warnings": []}
+        motion_report = {"status": "observed", "sampled_frames": 12,
+                         "summary": {"median_mean_flow_px": 0.3}}
+        output = io.StringIO()
+        with patch("muse.video_qa.discover_media_tools", return_value=SimpleNamespace(tools=[])), \
+             patch("muse.video_qa.inspect_video_file", return_value=qa_report), \
+             patch("muse.video_motion_diagnostics.inspect_video_motion", return_value=motion_report) as motion, \
+             redirect_stdout(output):
+            exit_code = main([str(self.video), "--motion-diagnostics", "--motion-max-frames", "24"])
+
+        self.assertEqual(exit_code, 0)
+        motion.assert_called_once_with(str(self.video), max_frames=24)
+        document = json.loads(output.getvalue())
+        self.assertEqual(document["status"], "passed")
+        self.assertEqual(document["motion_diagnostics"], motion_report)
 
 
 if __name__ == "__main__":

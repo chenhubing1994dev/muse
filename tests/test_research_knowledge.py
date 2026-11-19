@@ -541,16 +541,30 @@ class ResearchKnowledgeStoreTests(unittest.TestCase):
                 evidence_b = store.record_claim_evidence(
                     claim["id"], source_b["id"], direction="counter_search_candidate",
                 )
-                store.record_claim_evidence(
+                evidence_c = store.record_claim_evidence(
                     claim["id"], source_c["id"], direction="context_candidate",
                 )
+                anchor_a = {"verified": True, "source_url": "https://journal.example.com/paper",
+                            "source_sha256": "a" * 64, "excerpt": "claim text",
+                            "start_char": 10, "end_char": 20, "excerpt_sha256": "b" * 64,
+                            "fetched_at": "2026-11-18T00:00:00+00:00", "content_type": "text/html"}
+                anchor_b = {**anchor_a, "source_url": "https://mirror.example.com/report"}
                 store.record_claim_evidence_review(
                     evidence_a["id"], reviewer_id="reviewer-a", verdict="supports",
                     quality="high", independence="independent", rationale="Primary methods and data are traceable.",
+                    citation_anchor=anchor_a,
                 )
                 store.record_claim_evidence_review(
                     evidence_b["id"], reviewer_id="reviewer-b", verdict="refutes",
                     quality="low", independence="dependent", rationale="This is a derivative copy of the primary paper.",
+                    citation_anchor=anchor_b,
+                )
+                anchor_c = {**anchor_a, "source_url": "http://agency.gov/data"}
+                store.record_claim_evidence_review(
+                    evidence_c["id"], reviewer_id="reviewer-c", verdict="refutes",
+                    quality="moderate", independence="independent",
+                    rationale="The independent official dataset contradicts the claim.",
+                    citation_anchor=anchor_c,
                 )
                 store.record_source_relationship(
                     source_b["id"], source_a["id"], relationship="syndicated_from",
@@ -568,18 +582,19 @@ class ResearchKnowledgeStoreTests(unittest.TestCase):
                 self.assertEqual(coverage["direction_counts"]["support_search_candidate"], 1)
                 self.assertEqual(coverage["direction_counts"]["counter_search_candidate"], 1)
                 self.assertTrue(coverage["both_support_and_counter_present"])
-                self.assertEqual(coverage["reviewed_evidence_count"], 2)
-                self.assertEqual(coverage["unreviewed_evidence_count"], 1)
+                self.assertEqual(coverage["reviewed_evidence_count"], 3)
+                self.assertEqual(coverage["unreviewed_evidence_count"], 0)
                 self.assertEqual(coverage["quality_counts"]["high"], 1)
                 self.assertEqual(coverage["quality_counts"]["low"], 1)
+                self.assertEqual(coverage["quality_counts"]["moderate"], 1)
                 effective_by_source = {item["source_ref"]: item for item in dossier["evidence"]}
                 self.assertEqual(effective_by_source["https://journal.example.com/paper"]["effective_quality"], "high")
                 self.assertEqual(effective_by_source["https://journal.example.com/paper"]["latest_verdict"], "supports")
                 self.assertEqual(effective_by_source["https://mirror.example.com/report"]["effective_independence"], "dependent")
-                self.assertEqual(coverage["quality_counts"]["unassessed"], 1)
-                self.assertEqual(coverage["independence_counts"]["independent"], 1)
+                self.assertEqual(coverage["quality_counts"]["unassessed"], 0)
+                self.assertEqual(coverage["independence_counts"]["independent"], 2)
                 self.assertEqual(coverage["independence_counts"]["dependent"], 1)
-                self.assertEqual(coverage["independence_counts"]["unassessed"], 1)
+                self.assertEqual(coverage["independence_counts"]["unassessed"], 0)
                 self.assertEqual(coverage["source_integrity_signals"]["content_hash_present_count"], 2)
                 self.assertEqual(coverage["source_integrity_signals"]["https_count"], 2)
                 self.assertEqual(coverage["distinct_host_count"], 3)
@@ -587,6 +602,12 @@ class ResearchKnowledgeStoreTests(unittest.TestCase):
                 self.assertFalse(coverage["domain_grouping_is_ownership_proof"])
                 self.assertEqual(coverage["source_lineage"]["dependency_relation_count"], 1)
                 self.assertEqual(coverage["source_lineage"]["explicit_independence_pair_count"], 1)
+                self.assertEqual(coverage["evidence_conflict_state"], "contested")
+                self.assertTrue(coverage["conflict_requires_human_resolution"])
+                self.assertEqual(coverage["reviewed_support_source_count"], 1)
+                self.assertEqual(coverage["reviewed_refute_source_count"], 2)
+                self.assertEqual(coverage["explicit_independent_cross_verdict_pair_count"], 1)
+                self.assertEqual(coverage["independence_assessment"], "partially_assessed")
                 lineage_sources = {item["url"]: item for item in coverage["source_lineage"]["sources"]}
                 self.assertEqual(lineage_sources["https://journal.example.com/paper"]["registrable_domain"], "example.com")
                 self.assertFalse(lineage_sources["https://journal.example.com/paper"]["grouping_is_ownership_proof"])

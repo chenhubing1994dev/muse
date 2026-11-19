@@ -15,11 +15,28 @@ from muse.video_product_builder import VideoProductBuilder, VideoProductError
 
 
 DEFAULT_PLATFORMS = ("youtube_shorts", "tiktok", "instagram_reels", "bilibili")
+VIRAL_MONETIZATION_PLATFORMS_9X16 = ("douyin", "wechat_channels", "youtube_shorts", "tiktok", "bilibili")
+VIRAL_MONETIZATION_PLATFORMS_16X9 = ("youtube", "wechat_channels", "bilibili")
 _PLATFORM_COPY: dict[str, dict[str, Any]] = {
     "youtube_shorts": {
         "display_name": "YouTube Shorts",
         "hashtags": ["#AI", "#事实核验", "#人工智能", "#知识科普"],
         "tags": ["AI", "事实核验", "生成式人工智能", "信息素养"],
+    },
+    "youtube": {
+        "display_name": "YouTube (16:9 横屏主频道)",
+        "hashtags": ["#AIWorkflow", "#FactChecking", "#AutonomousAgents", "#Productivity"],
+        "tags": ["AI workflow", "autonomous research", "counter evidence", "content creation"],
+    },
+    "douyin": {
+        "display_name": "抖音 (Douyin)",
+        "hashtags": ["#人工智能", "#AI进化", "#认知升级", "#内容创作", "#思维模型"],
+        "tags": ["人工智能", "AI工具", "自我进化", "内容创作", "思维升级"],
+    },
+    "wechat_channels": {
+        "display_name": "微信视频号",
+        "hashtags": ["#AI进化", "#知识管理", "#认知升级", "#自媒体干货", "#生产力"],
+        "tags": ["AI工具", "知识管理", "自我提升", "视频创作"],
     },
     "tiktok": {
         "display_name": "TikTok",
@@ -122,30 +139,58 @@ def _platform_draft(
     metadata: dict[str, Any],
     voiceover: str,
     audio_description: str,
+    master_aspect_ratio: str = "9:16",
+    storyboard: dict[str, Any] | None = None,
+    visual_provenance: str | None = None,
 ) -> dict[str, Any]:
     profile = _PLATFORM_COPY[platform]
+    custom_copy = (
+        (storyboard.get("platform_copy") or {}).get(platform)
+        if isinstance(storyboard, dict) and isinstance(storyboard.get("platform_copy"), dict)
+        else None
+    )
     doi, pdf = source_notes.get("doi"), source_notes.get("pdf")
     sections = source_notes.get("relevant_sections", {})
     source_title = str(source_notes.get("title") or "Source details in source-notes.json")
     publisher = str(source_notes.get("publisher") or "Not recorded")
     published_at = str(source_notes.get("published_at") or "Not recorded")
     section_labels = list(sections.keys()) if isinstance(sections, dict) else []
-    hook = "AI 说得很自信，不代表它一定正确。记住三步：拆开主张、查原始来源、主动寻找反证。"
+    hook = (
+        str(custom_copy["caption"])
+        if isinstance(custom_copy, dict) and custom_copy.get("caption")
+        else "AI 说得很自信，不代表它一定正确。记住三步：拆开主张、查原始来源、主动寻找反证。"
+    )
     description = (
-        f"{hook}\n\n"
-        f"资料来源：{source_title}；{publisher}；发布日期：{published_at}。\n"
-        f"参考章节/行动：{', '.join(section_labels) if section_labels else '详见随包 source-notes.json'}。\n"
-        f"原始资料：{doi or '请查看随包 source-notes.json'}\n"
-        f"PDF：{pdf or '请查看随包 source-notes.json'}\n\n"
-        f"内容边界：{source_notes.get('editorial_boundary', '本片的编辑建议不应被误认为来源机构的认证或逐字结论')}\n"
-        "本片为知识分享，不构成对所有 AI 系统准确率的统计结论。"
+        str(custom_copy["description"])
+        if isinstance(custom_copy, dict) and custom_copy.get("description")
+        else (
+            f"{hook}\n\n"
+            f"资料来源：{source_title}；{publisher}；发布日期：{published_at}。\n"
+            f"参考章节/行动：{', '.join(section_labels) if section_labels else '详见随包 source-notes.json'}。\n"
+            f"原始资料：{doi or '请查看随包 source-notes.json'}\n"
+            f"PDF：{pdf or '请查看随包 source-notes.json'}\n\n"
+            f"内容边界：{source_notes.get('editorial_boundary', '本片的编辑建议不应被误认为来源机构的认证或逐字结论')}\n"
+            "本片为知识分享，不构成对所有 AI 系统准确率的统计结论。"
+        )
     )
     pinned_comment = (
-        "资料来源与章节见简介及随包 source-notes.json。三步查证法是本片的实用编辑建议；"
-        "主动寻找反证不是来源文件的逐字引用，也不代表来源机构认证了本片。"
+        str(custom_copy["pinned_comment"])
+        if isinstance(custom_copy, dict) and custom_copy.get("pinned_comment")
+        else (
+            "资料来源与章节见简介及随包 source-notes.json。三步查证法是本片的实用编辑建议；"
+            "主动寻找反证不是来源文件的逐字引用，也不代表来源机构认证了本片。"
+        )
     )
+    hashtags = list(custom_copy["hashtags"]) if isinstance(custom_copy, dict) and isinstance(custom_copy.get("hashtags"), list) else profile["hashtags"]
+    tags = list(custom_copy["tags"]) if isinstance(custom_copy, dict) and isinstance(custom_copy.get("tags"), list) else profile["tags"]
+    title_variants = list(custom_copy["title_variants"]) if isinstance(custom_copy, dict) and isinstance(custom_copy.get("title_variants"), list) else [title]
+    raw_citations = source_notes.get("citations")
+    if isinstance(raw_citations, list) and raw_citations:
+        citations = raw_citations[:8]
+    else:
+        citations = [{"title": source_title, "publisher": publisher, "doi": doi, "pdf": pdf}]
     technical = {
-        "master_aspect_ratio": "9:16",
+        "master_aspect_ratio": master_aspect_ratio,
         "width": metadata.get("width"),
         "height": metadata.get("height"),
         "fps": metadata.get("fps"),
@@ -153,7 +198,7 @@ def _platform_draft(
         "video_codec": metadata.get("codec"),
         "audio_codec": metadata.get("audio_codec"),
         "audio_sample_rate": metadata.get("audio_sample_rate"),
-        "profile_version": 1,
+        "profile_version": 2 if master_aspect_ratio == "16:9" or platform in {"youtube", "douyin", "wechat_channels"} else 1,
         "technical_profile_status": "manual_uploader_and_account_specific_check_required",
         "note": "This is a metadata handoff profile, not a certification of current platform upload limits or account eligibility.",
     }
@@ -164,23 +209,24 @@ def _platform_draft(
         "platform_name": profile["display_name"],
         "release_state": "draft_only",
         "title": title,
+        "title_variants": title_variants,
         "caption": hook,
         "description": description,
-        "hashtags": profile["hashtags"],
-        "tags": profile["tags"],
+        "hashtags": hashtags,
+        "tags": tags,
         "suggested_pinned_comment": pinned_comment,
-        "source_citations": [{"title": source_title, "publisher": publisher, "doi": doi, "pdf": pdf}],
+        "source_citations": citations,
         "assets": {"video": "video.mp4", "cover": "cover.jpg", "subtitles": "subtitles.srt"},
         "technical_profile": technical,
         "production_provenance": {
-            "visual_source": "Local Wan 2.1 generated footage, re-edited with FFmpeg",
+            "visual_source": visual_provenance or "Local Wan 2.1 generated footage, re-edited with FFmpeg",
             "voiceover": voiceover,
             "audio": audio_description,
         },
         "compliance_review": {
             "ai_generated_visuals_and_platform_label": {
                 "status": "review_required",
-                "note": "AI-generated Wan footage is present; select the applicable current platform label after checking that platform's rules.",
+                "note": "Synthetic voiceover or programmatic/AI media is present; select the applicable platform AI-content disclosure label before publishing.",
             },
             "factual_claims_and_context": {"status": "editorial_review_required"},
             "visual_and_model_rights": {"status": "review_required"},
@@ -246,8 +292,12 @@ def build_publish_package(
         fps = float(mp4_info["fps"])
     except (KeyError, TypeError, ValueError) as exc:
         raise VideoPublishPackageError("master MP4 dimensions or frame rate are missing") from exc
-    if height <= width or abs((width / height) - (9 / 16)) > 0.02:
-        raise VideoPublishPackageError("publish-pack profile v1 currently accepts portrait 9:16 masters only")
+    if height > width and abs((width / height) - (9 / 16)) <= 0.02:
+        master_aspect_ratio = "9:16"
+    elif width > height and abs((width / height) - (16 / 9)) <= 0.02:
+        master_aspect_ratio = "16:9"
+    else:
+        raise VideoPublishPackageError("publish-pack profile currently accepts portrait 9:16 or landscape 16:9 masters only")
     if mp4_info.get("full_decode") != "passed":
         raise VideoPublishPackageError("master MP4 has no successful full-decode evidence")
 
@@ -273,17 +323,20 @@ def build_publish_package(
     qa_warning_codes = sorted({item["code"] for item in qa_warnings if isinstance(item.get("code"), str)})
 
     profile = product_info.get("video_metadata", {})
-    if isinstance(profile, dict) and profile.get("aspect_ratio") not in (None, "9:16"):
-        raise VideoPublishPackageError("publish-pack profile v1 requires a 9:16 product manifest")
+    if isinstance(profile, dict) and profile.get("aspect_ratio") not in (None, master_aspect_ratio):
+        raise VideoPublishPackageError(f"publish-pack profile requires a {master_aspect_ratio} product manifest")
     title = str(generation.get("title") or storyboard.get("title") or product_info.get("title") or "").strip()
     if not title:
         raise VideoPublishPackageError("video title is missing")
     voiceover = str(storyboard.get("voiceover") or "not recorded")
     audio_description = str(storyboard.get("audio") or "audio provenance not recorded")
+    visual_provenance = str(generation.get("visual_provenance") or storyboard.get("production_mode") or "") or None
     drafts = {
         platform: _platform_draft(
             platform, title=title, source_notes=source_notes, metadata=mp4_info,
             voiceover=voiceover, audio_description=audio_description,
+            master_aspect_ratio=master_aspect_ratio, storyboard=storyboard,
+            visual_provenance=visual_provenance,
         )
         for platform in selected
     }
@@ -343,9 +396,10 @@ def build_publish_package(
         readme_text = (
             f"# {title}\n\n"
             "此目录是平台发布准备包，不是自动发布凭据。所有平台草稿都必须经人工核对。\n\n"
-            f"- 技术 QA：passed；Muse 产品状态：testing。\n"
+            f"- 画幅与技术指标：{master_aspect_ratio}（{width}×{height}, {fps:g} FPS）；技术 QA：passed；Muse 产品状态：testing。\n"
             f"- 目标平台草稿：{', '.join(selected)}。\n"
             "- 视频、封面、字幕、分镜、来源说明和 Muse 产品 ZIP 均随包提供。\n"
+            "- 各平台可直接复制的标题备选、标签、置顶评论与简介，见 `platform-drafts/<platform>.json`。\n"
             "- 发布前必须复核事实、来源、视觉/模型权利、隐私、AI 合成披露、商业关系披露及平台上传规格。\n"
             "- 未登录平台账号，未调用发布 API，未生成平台视频 ID 或发布链接。\n"
         )

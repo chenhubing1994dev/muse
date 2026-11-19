@@ -412,6 +412,22 @@ class TaskQueue:
             "SELECT * FROM tasks WHERE id = ?", (task_id,)
         ).fetchone()
         return self._decode(row)
+    def list_tasks(self, *, kind: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        """List recent durable tickets, optionally filtered by payload kind."""
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 200:
+            raise ValueError("limit must be between 1 and 200")
+        if kind is not None and (not isinstance(kind, str) or not kind.strip()):
+            raise ValueError("kind must be non-empty text")
+        if kind is None:
+            rows = self._connection.execute(
+                "SELECT * FROM tasks ORDER BY created_at DESC, id DESC LIMIT ?", (limit,)
+            ).fetchall()
+        else:
+            rows = self._connection.execute(
+                "SELECT * FROM tasks WHERE json_extract(payload_json, '$.kind') = ? "
+                "ORDER BY created_at DESC, id DESC LIMIT ?", (kind, limit)
+            ).fetchall()
+        return [task for row in rows if (task := self._decode(row)) is not None]
     def runtime_estimate_seconds(
         self, *, workload_class: str = "general", default_estimate_seconds: int = 900,
         min_samples: int = 3, max_events: int = 4000,

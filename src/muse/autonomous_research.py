@@ -10,6 +10,7 @@ import ipaddress
 import json
 import os
 import re
+import socket
 import sqlite3
 from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
@@ -18,6 +19,22 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from muse.model_client import LMStudioClient, ModelError
+
+_DEFAULT_LM_STUDIO_CLIENT = LMStudioClient
+
+
+def _probe_loopback_endpoint(base_url: str, timeout: float = 1.5) -> None:
+    """Fail fast when a real loopback LLM server is not listening."""
+    if LMStudioClient is not _DEFAULT_LM_STUDIO_CLIENT:
+        return
+    parsed = urlsplit(base_url)
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        conn = socket.create_connection((host, port), timeout=timeout)
+        conn.close()
+    except OSError as exc:
+        raise ModelError(f"Local model endpoint {host}:{port} is unreachable: {exc}") from exc
 from muse.ruflo_adapter import load_muse_model_config
 from muse.inspiration import (InspirationEngine, SYMBOLIC_LENSES, build_cross_system_inspiration, build_symbolic_inspiration_pack)
 from muse.memory import MemoryStore
@@ -142,6 +159,7 @@ class AutonomousResearchEngine:
                  max_sources: int = 4, max_workers: int = 4,
                  resource_aware: bool = True, report_dir: str | Path | None = None,
                  workspace: str | Path | None = None, improvement_db: str | Path | None = None,
+                 philosophy_db: str | Path | None = None,
                  synthesizer: Any | None = None, claim_reviewer: Any | None = None,
                  use_local_synthesis: bool | None = None,
                  memory_db: str | Path | None = None,
@@ -166,6 +184,7 @@ class AutonomousResearchEngine:
             raise TypeError("auto_build_products must be a boolean")
         self.auto_build_products = auto_build_products
         self.improvement_db = Path(improvement_db) if improvement_db is not None else None
+        self.philosophy_db = Path(philosophy_db) if philosophy_db is not None else self.workspace / "data/philosophy/muse.sqlite3"
         self.memory_db = Path(memory_db) if memory_db is not None else self.workspace / "data/memory/muse.sqlite3"
         self.conversation_db = Path(conversation_db) if conversation_db is not None else self.workspace / "data/conversations/muse.sqlite3"
         if feedback_experiment_runner is not None and not callable(feedback_experiment_runner):
@@ -364,10 +383,17 @@ class AutonomousResearchEngine:
             signals = knowledge.aggregate_improvement_signals(
                 since=datetime.now(timezone.utc) - timedelta(days=30)
             )
+            recent_research_runs = [
+                node for node in knowledge.list_nodes(node_type="experiment", limit=500)
+                if node.get("external_ref", "").startswith("research-run:")
+                and node.get("metadata", {}).get("status") in {"failed", "partial"}
+            ]
         dynamic_topics = []
         for decision in rejected_review_decisions:
             metadata = decision.get("metadata", {})
-            if (metadata.get("decision_kind") != "improvement_validation_review"
+            if (metadata.get("decision_kind") not in {
+                        "improvement_validation_review", "independent_engineering_experiment_review",
+                    }
                     or metadata.get("approved") is not False
                     or not metadata.get("improvement_proposal_id")):
                 continue
@@ -451,6 +477,7 @@ class AutonomousResearchEngine:
         for candidate in creator_candidates:
             hypothesis = candidate.get("summary", "")[:500]
             metadata = candidate.get("metadata", {})
+            is_inbox = metadata.get("origin") == "creator_inspiration_inbox"
             question_match = re.search(
                 r"(?:研究问题|research question)\s*[:：]\s*(.+?)(?=(?:验证方法|反证条件|证伪条件|test|falsifier)\s*[:：]|$)",
                 hypothesis, flags=re.IGNORECASE | re.DOTALL,
@@ -464,7 +491,10 @@ class AutonomousResearchEngine:
                     ("延迟记忆", "delayed retention"),
                     ("任务完成率", "task completion"),
                     ("文字摘要", "text summary"),
-                ) if source_phrase in question_seed
+                    ("自我改进", "self-improving agent"),
+                    ("反证", "counterevidence verification"),
+                    ("视频", "video creation automation"),
+                ) if source_phrase in question_seed or source_phrase in hypothesis
             ]
             raw_domains = metadata.get("research_domains", [])
             domain_map = {
@@ -472,10 +502,12 @@ class AutonomousResearchEngine:
                 "学习科学": ("learning science", "cognitive load"),
                 "知识图谱": ("knowledge graph", "evidence provenance"),
                 "自主研究": ("autonomous research",),
+                "创意 AI": ("generative AI workflow", "verification"),
+                "视频生成": ("video storytelling", "audience retention"),
             }
             domain_terms = []
             if isinstance(raw_domains, list):
-                for domain in ("多模态创作", "学习科学", "知识图谱", "自主研究"):
+                for domain in ("多模态创作", "学习科学", "知识图谱", "自主研究", "创意 AI", "视频生成"):
                     if domain in raw_domains:
                         domain_terms.extend(domain_map[domain])
                 domain_terms.extend(
@@ -494,7 +526,7 @@ class AutonomousResearchEngine:
             else:
                 support_query = f"independent evidence experiment {query_seed}"
                 counter_query = f"counterevidence limitations alternative explanations cognitive load {query_seed}"
-            dynamic_topics.append({
+            entry = {
                 "key": "creator-hypothesis-review:" + candidate["id"],
                 "title": candidate["title"][:120],
                 "question": hypothesis or candidate["title"],
@@ -503,9 +535,15 @@ class AutonomousResearchEngine:
                 "symbolic_lens": "iching",
                 "hypothesis": hypothesis,
                 "topic_origin": "creator_inspired_hypothesis_backlog",
+                "is_creator_inbox": is_inbox,
                 "trigger_count": 1,
                 "creator_inspired_hypothesis_node_id": candidate["id"],
-            })
+            }
+            if is_inbox:
+                entry["creator_inspiration_node_id"] = candidate["id"]
+                entry["creator_tags"] = list(metadata.get("tags", []))[:12]
+                entry["creator_research_domains"] = list(raw_domains)[:12] if isinstance(raw_domains, list) else []
+            dynamic_topics.append(entry)
         for candidate in symbolic_candidates:
             metadata = candidate.get("metadata", {})
             framework_id = metadata.get("symbolic_framework_id", "tarot")
@@ -530,6 +568,106 @@ class AutonomousResearchEngine:
                 "trigger_count": 1,
                 "symbolic_hypothesis_node_id": candidate["id"],
             })
+        with ResearchKnowledgeStore(self.knowledge_db) as evidence_knowledge:
+            for claim in claims:
+                coverage = evidence_knowledge.claim_evidence_coverage(claim["id"])
+                gap_state = coverage.get("coverage_state")
+                conflict_state = coverage.get("evidence_conflict_state")
+                if conflict_state == "contested":
+                    gap_kind = "contested-claim"
+                    title = "争议主张的独立证据与分歧根因复核"
+                    question = "哪些原始数据、定义差异、样本边界或方法学因素能够解释该主张的支持与反驳证据冲突？"
+                    support_query = "independent replication original data methods " + claim["title"][:100]
+                    counter_query = "contradictory findings limitations alternative explanations " + claim["title"][:100]
+                elif gap_state in {"counter_search_missing", "both_search_directions_missing"}:
+                    gap_kind = "missing-counter-evidence"
+                    title = "为待验证主张补齐反面证据与替代解释"
+                    question = "针对该待验证主张，哪些反例、失败条件、零结果或替代解释尚未被检索和审查？"
+                    support_query = "independent evidence replication " + claim["title"][:100]
+                    counter_query = "counterexamples null results limitations falsification alternative explanations " + claim["title"][:100]
+                else:
+                    continue
+                evidence_rows = evidence_knowledge.list_claim_evidence(claim["id"], limit=32)
+                source_ids = list(dict.fromkeys(item["source_node_id"] for item in evidence_rows))
+                dynamic_topics.append({
+                    "key": "research-gap:" + gap_kind + ":" + claim["id"],
+                    "title": title,
+                    "question": question,
+                    "support_query": support_query[:500],
+                    "counter_query": counter_query[:500],
+                    "symbolic_lens": "iching",
+                    "hypothesis": "证据覆盖缺口值得进一步研究；缺口状态本身不支持或反驳主张。",
+                    "topic_origin": "research_wiki_evidence_gap",
+                    "trigger_count": len(source_ids) or 1,
+                    "source_claim_id": claim["id"],
+                    "source_node_ids": source_ids,
+                    "evidence_gap_kind": gap_kind,
+                    "evidence_coverage_state": gap_state,
+                    "evidence_conflict_state": conflict_state,
+                    "reviewed_support_source_count": coverage.get("reviewed_support_source_count", 0),
+                    "reviewed_refute_source_count": coverage.get("reviewed_refute_source_count", 0),
+                    "conflict_requires_human_resolution": bool(coverage.get("conflict_requires_human_resolution")),
+                    "candidate_only": True,
+                    "claim_status_unchanged": True,
+                })
+        # Failed or partial public-research retrieval runs return to the topic queue.
+        # Their query text and failure details stay local; only stable IDs/status are used.
+        for experiment in recent_research_runs:
+            metadata = experiment.get("metadata", {})
+            run_id = str(experiment.get("external_ref", "")).removeprefix("research-run:")
+            run_status = metadata.get("status")
+            dynamic_topics.append({
+                "key": "research-run-followup:" + run_id,
+                "title": "补齐未完成研究检索并寻找可核验来源",
+                "question": "此前研究检索未完整成功；哪些公开来源、独立复现与反面证据仍需补齐？",
+                "support_query": "independent research sources replication primary evidence retrieval methodology",
+                "counter_query": "research retrieval limitations missing evidence null results counterexamples alternative explanations",
+                "symbolic_lens": "iching",
+                "hypothesis": "检索失败或部分完成仅说明资料收集不完整，不支持任何事实主张。",
+                "topic_origin": "research_run_followup",
+                "trigger_count": 1,
+                "source_experiment_id": experiment["id"],
+                "source_run_id": run_id,
+                "research_run_status": run_status,
+                "source_count": metadata.get("source_count", 0),
+                "candidate_only": True,
+                "research_record_unchanged": True,
+            })
+        # Reuse completed philosophy experiments as research signals. Read-only: do not
+        # initialize the store, alter outcomes, or update principle confidence here.
+        if self.philosophy_db.is_file():
+            uri = self.philosophy_db.resolve().as_uri() + "?mode=ro"
+            experiment_connection = sqlite3.connect(uri, uri=True, timeout=5)
+            try:
+                experiment_connection.row_factory = sqlite3.Row
+                experiment_rows = experiment_connection.execute(
+                    "SELECT e.id,e.hypothesis,e.metric,e.result,e.outcome,p.principle_key,p.title AS principle_title "
+                    "FROM philosophy_experiments e JOIN philosophy_principles p ON p.id=e.principle_id "
+                    "WHERE e.outcome IN ('refuted','inconclusive') "
+                    "ORDER BY COALESCE(e.completed_at,e.created_at) DESC,e.id LIMIT 50"
+                ).fetchall()
+            finally:
+                experiment_connection.close()
+            for experiment in experiment_rows:
+                item = dict(experiment)
+                dynamic_topics.append({
+                    "key": "philosophy-experiment-followup:" + item["id"],
+                    "title": "复核失败或未决实验并寻找替代路径",
+                    "question": "实验“" + item["hypothesis"][:220] + "”得到“" + item["outcome"] + "”结果；哪些边界条件、测量误差、替代解释或新实验设计值得进一步检验？",
+                    "support_query": "replication methodology measurement validity alternative experimental design " + item["principle_key"],
+                    "counter_query": "failed replication null results limitations confounders alternative explanations " + item["principle_key"],
+                    "symbolic_lens": "iching",
+                    "hypothesis": "一次 refuted 或 inconclusive 实验提供后续研究线索，不代表原则已被普遍证伪或证实。",
+                    "topic_origin": "philosophy_experiment_followup",
+                    "trigger_count": 1,
+                    "source_experiment_id": item["id"],
+                    "source_principle_key": item["principle_key"],
+                    "experiment_outcome": item["outcome"],
+                    "experiment_metric": item["metric"],
+                    "experiment_result_summary": item["result"][:500],
+                    "candidate_only": True,
+                    "experiment_record_unchanged": True,
+                })
         for template in DYNAMIC_RESEARCH_GAPS:
             if template["key"] == "research-gap:symbolic-hypothesis-validation" and (symbolic_candidates or creator_candidates):
                 continue
@@ -545,6 +683,15 @@ class AutonomousResearchEngine:
             for topic in RESEARCH_TOPICS
         ] + dynamic_topics
         last_researched = {topic["key"]: "" for topic in topics}
+        researched_query_pairs: set[tuple[str, str]] = set()
+        for node in known:
+            prior_queries = node.get("metadata", {}).get("research_queries", [])
+            if isinstance(prior_queries, list) and len(prior_queries) == 2 and all(isinstance(item, str) for item in prior_queries):
+                pair = tuple(" ".join(item.casefold().split()) for item in prior_queries)
+                researched_query_pairs.add(pair)
+        for topic in topics:
+            pair = tuple(" ".join(str(topic.get(field, "")).casefold().split()) for field in ("support_query", "counter_query"))
+            topic["research_query_pair_seen"] = pair in researched_query_pairs
         for node in known:
             metadata = node.get("metadata", {})
             key = metadata.get("autonomous_topic_key")
@@ -560,11 +707,13 @@ class AutonomousResearchEngine:
         return min(
             topics,
             key=lambda item: (
-                0 if item["topic_origin"] == "rejected_review_followup" else
+                0 if item["topic_origin"] == "rejected_review_followup" and not item.get("research_query_pair_seen") else
                 1 if item["topic_origin"] == "feedback_driven_improvement" and item.get("proposal_status") == "researching" else
-                2 if item["topic_origin"] == "feedback_driven_improvement" else 3,
+                2 if item["topic_origin"] == "feedback_driven_improvement" else
+                3 if item.get("is_creator_inbox") else
+                4 if item["topic_origin"] != "curated_seed" else 5,
                 last_researched[item["key"]],
-                0 if item["topic_origin"] == "creator_chrome_bookmarks" else 1 if item["topic_origin"] in {"symbolic_hypothesis_backlog", "creator_inspired_hypothesis_backlog"} else 2 if item["topic_origin"] == "knowledge_gap_signal" else 3,
+                0 if not item.get("research_query_pair_seen") else 1,
                 0 if item["topic_origin"] in {"feedback_driven_improvement", "creator_inspired_hypothesis_backlog"} else 1,
             ),
         )
@@ -832,6 +981,94 @@ class AutonomousResearchEngine:
                 "本轮假设由主题与象征视角组合生成，不代表象征体系具有预测效力；必须由 Muse 的真实运行数据和对照实验检验。"
             ],
         }, source_count)
+
+    @staticmethod
+    def _extractive_source_synthesis(topic: dict[str, Any], sources: list[dict[str, Any]]) -> dict[str, Any]:
+        """Build a strict citation-grounded synthesis when local LLM synthesis is offline."""
+        bounded = sources[:4]
+        source_count = len(bounded)
+        if source_count < 2:
+            return AutonomousResearchEngine._fallback_creator_synthesis(topic, bounded)
+        title = str(topic.get("title") or "Muse 灵感深研")[:90]
+        question = str(topic.get("question") or title)[:160]
+        counter_q = str(topic.get("counter_query") or "")
+        support_indices = [
+            idx for idx, src in enumerate(bounded, 1)
+            if not counter_q or src.get("query") != counter_q
+        ] or [1]
+        counter_indices = [
+            idx for idx, src in enumerate(bounded, 1)
+            if counter_q and src.get("query") == counter_q
+        ] or [source_count]
+        s_primary = support_indices[0]
+        s_counter = counter_indices[0] if counter_indices[0] != s_primary else (2 if s_primary == 1 else 1)
+
+        def clean_title(idx: int) -> str:
+            raw = str(bounded[idx - 1].get("title") or f"来源 {idx}")
+            return " ".join(raw.split())[:68]
+
+        def clean_snippet(idx: int) -> str:
+            raw = str(bounded[idx - 1].get("text") or bounded[idx - 1].get("snippet") or "")
+            cleaned = re.sub(r"\[S\d+\]", "", " ".join(raw.split())).strip()
+            return cleaned[:100]
+
+        all_refs = "".join(f"[S{idx}]" for idx in range(1, source_count + 1))
+        summary = (
+            f"围绕「{title}」已提取并校验 {source_count} 份公开来源（含正向检索「{clean_title(s_primary)}」[S{s_primary}]"
+            f"与反面/边界检索「{clean_title(s_counter)}」[S{s_counter}]）。"
+            f"上述摘要仅整理来源可核验片段，未调用外部云端推理，关键结论仍需逐条核对原文 {all_refs}。"
+        )[:1180]
+        agreements = [
+            (
+                f"两条独立检索通道分别命中「{clean_title(s_primary)}」与「{clean_title(s_counter)}」，"
+                f"说明围绕「{title[:36]}」存在跨角度公开讨论，且必须同时追踪收益边界 [S{s_primary}][S{s_counter}]。"
+            )[:480]
+        ]
+        differences = [
+            (
+                f"正向来源侧重机制与效果线索（摘录：{clean_snippet(s_primary) or clean_title(s_primary)}）[S{s_primary}]；"
+                f"反面检索提示局限、认知负荷或替代解释（摘录：{clean_snippet(s_counter) or clean_title(s_counter)}）[S{s_counter}]。"
+            )[:480]
+        ]
+        counter_items = [
+            (
+                f"反面检索「{clean_title(idx)}」提示不可将单一正面文献外推为普遍结论，需排除认知负荷与样本偏差 [S{idx}]。"
+            )[:480]
+            for idx in counter_indices[:2]
+        ]
+        implications = [
+            (
+                f"为 Muse 增加「双检索反证校验」自我升级能力：基于「{clean_title(s_primary)}」与反证约束「{clean_title(s_counter)}」，"
+                f"在灵感转化与视频脚本生成前强制绑定正反来源哈希与边界声明 [S{s_primary}][S{s_counter}]。"
+            )[:480],
+            (
+                f"改进 Muse 灵感→作品闭环渲染流水线：将来源可信度、认知负荷控制与关键结构卡转译为高清晰度动态视觉分镜，"
+                f"并用隔离回归测试对比改进前后产出质量 {all_refs}。"
+            )[:480],
+        ]
+        experiments = [
+            (
+                f"对照组 vs 候选组（基线单视角脚本 vs 本提案双检索反证+视觉结构卡脚本），测量来源可追溯率与核心观点复述准确度 [S{s_primary}][S{s_counter}]。"
+            )[:480]
+        ]
+        fallback_hyp = AutonomousResearchEngine._fallback_creator_synthesis(topic, bounded)["creator_inspired_hypotheses"]
+        uncertainties = [
+            "当前综合由确定性来源摘录通道生成（本机 LLM 服务未运行）；跨来源比较与设计启发需经人工原文复核。",
+            f"研究问题「{question[:120]}」尚无随机对照实验数据前，不构成一般性因果定论。",
+        ]
+        return AutonomousResearchEngine._validate_synthesis(
+            {
+                "executive_summary": summary,
+                "cross_source_agreements": agreements,
+                "differences": differences,
+                "counter_evidence": counter_items,
+                "design_implications_for_muse": implications,
+                "creator_inspired_hypotheses": fallback_hyp,
+                "testable_experiments": experiments,
+                "uncertainties": uncertainties,
+            },
+            source_count,
+        )
 
     @staticmethod
     def _build_fact_citation_matrix(
@@ -1148,6 +1385,7 @@ class AutonomousResearchEngine:
                 if (parsed.scheme != "http" or not loopback or parsed.username or parsed.password
                         or parsed.query or parsed.fragment):
                     return None, "local_model_endpoint_rejected"
+                _probe_loopback_endpoint(config["base_url"], timeout=1.5)
                 client = LMStudioClient(
                     config["base_url"], model=config.get("model") or None, timeout=240.0,
                     chat_template_kwargs=(
@@ -1274,6 +1512,7 @@ class AutonomousResearchEngine:
                     loopback = host.casefold() == "localhost"
                 if parsed.scheme != "http" or not loopback or parsed.username or parsed.password or parsed.query or parsed.fragment:
                     return None, "local_model_endpoint_rejected"
+                _probe_loopback_endpoint(config["base_url"], timeout=1.5)
                 client = LMStudioClient(
                     config["base_url"], model=config.get("model") or None, timeout=240.0,
                     chat_template_kwargs=(
@@ -1752,7 +1991,9 @@ class AutonomousResearchEngine:
         """Turn cited high-value research implications into unapproved proposals."""
         if self.improvement_db is None or not report.get("high_value"):
             return []
-        if report.get("synthesis_status") not in {"completed", "completed_after_bounded_retry"}:
+        if report.get("synthesis_status") not in {
+            "completed", "completed_after_bounded_retry", "completed_extractive_fallback",
+        }:
             return []
         synthesis = report.get("synthesis")
         sources = report.get("sources", [])
@@ -1803,6 +2044,14 @@ class AutonomousResearchEngine:
                         "source_urls": urls, "source_citation_refs": [f"S{refs_item}" for refs_item in refs],
                         "requires_human_source_review": True, "requires_human_approval": True,
                         "automatic_origin": "autonomous_research",
+                        "confidence": 0.68 if verdict == "supported" else 0.52 if verdict == "contested" else 0.42,
+                        "impact": "提升灵感深研、来源核验与作品生成闭环的可复现性与交付质量",
+                        "acceptance_criteria": [
+                            "提供隔离基线测试与候选实验对比运行记录，且回归测试全部通过。",
+                            "所引用公开来源完成许可证与安全性人工审查，未将未证实启发直接晋升为事实。",
+                            "经独立审阅者（非提案者）复核并通过 Commander 人工批准。",
+                        ],
+                        "rollback_plan": "保留改造前快照基线；如指标回退或新测试失败，通过 git 还原补丁并将提案状态切换为 rolled_back。",
                     },
                 )
                 for source in cited_sources:
@@ -2011,18 +2260,19 @@ class AutonomousResearchEngine:
                 return cycle_id, topic_by_cycle.get(cycle_id)
         return None, None
 
-    def run_once(self, *, stop_event: Any | None = None) -> dict[str, Any]:
+    def run_once(self, *, stop_event: Any | None = None, preferred_topic_key: str | None = None) -> dict[str, Any]:
         cycle_id, resume_topic_key = self._interrupted_cycle_checkpoint()
         resumed = cycle_id is not None
         if cycle_id is None:
             cycle_id = new_evolution_cycle_id()
+        target_topic_key = preferred_topic_key or resume_topic_key
         record_evolution_cycle_event(
             self.progress_db, cycle_id, "progress" if resumed else "started",
             summary="Resuming interrupted autonomous research cycle" if resumed else "Autonomous research cycle started",
         )
         try:
             result = self._run_once_with_cycle(
-                cycle_id=cycle_id, stop_event=stop_event, resume_topic_key=resume_topic_key,
+                cycle_id=cycle_id, stop_event=stop_event, resume_topic_key=target_topic_key,
             )
         except Exception as exc:
             record_evolution_cycle_event(
@@ -2237,7 +2487,7 @@ class AutonomousResearchEngine:
                     })
                     research_run_link_status = "linked"
 
-            if not topic.get("symbolic_hypothesis_node_id") and not topic.get("creator_inspired_hypothesis_node_id"):
+            if not topic.get("symbolic_hypothesis_node_id") and not topic.get("creator_inspired_hypothesis_node_id") and not topic.get("creator_inspiration_node_id"):
                 for lens in symbolic_pack:
                     symbolic_claim = knowledge.upsert_node(
                         "claim",
@@ -2469,10 +2719,30 @@ class AutonomousResearchEngine:
         report["model_failure_ids"] = model_failure_ids
         if (synthesis is None and synthesis_status.startswith("failed:")
                 and self.use_local_synthesis and self.synthesizer is None):
-            synthesis = self._fallback_creator_synthesis(topic, research_sources)
-            report["synthesis"] = synthesis
-            report["synthesis_status"] = "fallback_after_" + synthesis_status
-            report["synthesis_fallback"] = "deterministic_creator_hypotheses_after_model_failure"
+            if source_snapshot_integrity["status"] == "verified" and len(research_sources) >= 2:
+                synthesis = self._extractive_source_synthesis(topic, research_sources)
+                synthesis_status = "completed_extractive_fallback"
+                report["synthesis"] = synthesis
+                report["synthesis_status"] = synthesis_status
+                report["synthesis_fallback"] = "verified_source_extractive_synthesis_after_local_model_unavailable"
+                report["fact_citation_matrix"] = self._build_fact_citation_matrix(
+                    synthesis, research_sources,
+                )
+                report["cross_source_discrepancy_candidates"] = self._build_cross_source_discrepancy_candidates(
+                    synthesis, research_sources,
+                )
+                report["counter_evidence_candidates"] = self._build_counter_evidence_candidates(
+                    synthesis, research_sources,
+                )
+                report["cross_source_discrepancy_persistence"] = self._persist_cross_source_discrepancy_candidates(
+                    report["cross_source_discrepancy_candidates"], claim_id=claim["id"], topic_key=topic["key"],
+                    counter_evidence_candidates=report["counter_evidence_candidates"],
+                )
+            else:
+                synthesis = self._fallback_creator_synthesis(topic, research_sources)
+                report["synthesis"] = synthesis
+                report["synthesis_status"] = "fallback_after_" + synthesis_status
+                report["synthesis_fallback"] = "deterministic_creator_hypotheses_after_model_failure"
 
         if review is not None:
             evidence_refs = [research_sources[int(ref[1:]) - 1]["url"] for ref in review["source_refs"]]
@@ -2498,7 +2768,7 @@ class AutonomousResearchEngine:
         try:            report_path = self._persist_report(topic["key"], report, fetched_at)
         except OSError as exc:
             report["report_persist_error"] = type(exc).__name__
-        if not topic.get("symbolic_hypothesis_node_id") and not topic.get("creator_inspired_hypothesis_node_id"):
+        if not topic.get("symbolic_hypothesis_node_id") and not topic.get("creator_inspired_hypothesis_node_id") and not topic.get("creator_inspiration_node_id"):
             try:
                 self._persist_creator_inspired_hypotheses(
                     topic, report, idea_id=idea["id"], report_path=report_path,
@@ -2514,7 +2784,7 @@ class AutonomousResearchEngine:
         except OSError as exc:
             report["creator_inspired_hypothesis_report_persist_error"] = type(exc).__name__
         symbolic_target_id = topic.get("symbolic_hypothesis_node_id")
-        creator_target_id = topic.get("creator_inspired_hypothesis_node_id")
+        creator_target_id = topic.get("creator_inspired_hypothesis_node_id") or topic.get("creator_inspiration_node_id")
         review_target_id = symbolic_target_id or creator_target_id
         if review_target_id and readable > 0:
             with ResearchKnowledgeStore(self.knowledge_db) as knowledge:

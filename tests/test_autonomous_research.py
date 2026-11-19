@@ -1064,6 +1064,89 @@ class AutonomousResearchTests(unittest.TestCase):
                     for item in proposals
                 ))
 
+    def test_dynamic_topic_targets_claims_missing_counter_search_and_preserves_provenance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with ResearchKnowledgeStore(root / "knowledge.sqlite3") as knowledge:
+                claim = knowledge.upsert_node(
+                    "claim", "A testable claim", summary="A claim with support search only.",
+                    external_ref="test-claim:missing-counter", status="proposed",
+                )
+                source = knowledge.upsert_node(
+                    "source", "Support source", external_ref="https://example.org/support",
+                )
+                knowledge.record_claim_evidence(
+                    claim["id"], source["id"], direction="support_search_candidate",
+                    evidence_type="research_article", search_query="support only",
+                )
+            engine = AutonomousResearchEngine(
+                evidence_db=root / "evidence.sqlite3", knowledge_db=root / "knowledge.sqlite3",
+                progress_db=root / "tasks.sqlite3", reminder_db=root / "reminders.sqlite3",
+                search=FakeSearch(), reader=FakeReader(), resource_aware=False,
+            )
+            topic = engine._next_topic(preferred_key="research-gap:missing-counter-evidence:" + claim["id"])
+            self.assertEqual(topic["topic_origin"], "research_wiki_evidence_gap")
+            self.assertEqual(topic["evidence_gap_kind"], "missing-counter-evidence")
+            self.assertEqual(topic["source_claim_id"], claim["id"])
+            self.assertEqual(topic["source_node_ids"], [source["id"]])
+            self.assertIn("counterexamples", topic["counter_query"])
+            self.assertTrue(topic["candidate_only"])
+            self.assertTrue(topic["claim_status_unchanged"])
+            with ResearchKnowledgeStore(root / "knowledge.sqlite3") as knowledge:
+                self.assertEqual(knowledge.get_node(claim["id"])["status"], "proposed")
+
+    def test_next_topic_prefers_a_new_support_counter_query_pair(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            engine = AutonomousResearchEngine(
+                evidence_db=root / "evidence.sqlite3", knowledge_db=root / "knowledge.sqlite3",
+                progress_db=root / "tasks.sqlite3", reminder_db=root / "reminders.sqlite3",
+                search=FakeSearch(), reader=FakeReader(), resource_aware=False,
+            )
+            first = engine._next_topic()
+            with ResearchKnowledgeStore(root / "knowledge.sqlite3") as knowledge:
+                knowledge.upsert_node(
+                    "idea", "Previously researched topic", summary="Prior run",
+                    external_ref="test-prior-query-pair",
+                    metadata={"research_queries": [first["support_query"], first["counter_query"]]},
+                )
+            second = engine._next_topic()
+            self.assertNotEqual(
+                (second["support_query"], second["counter_query"]),
+                (first["support_query"], first["counter_query"]),
+            )
+            self.assertFalse(second["research_query_pair_seen"])
+
+    def test_failed_philosophy_experiment_generates_read_only_followup_topic(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            philosophy_db = root / "philosophy.sqlite3"
+            with PhilosophyStore(philosophy_db) as philosophy:
+                experiment = philosophy.propose_experiment(
+                    "reversible_progress", "Small reversible changes reduce regression risk",
+                    metric="regression count", baseline="baseline suite", target="no increase",
+                    stop_condition="any data loss",
+                )
+                philosophy.complete_experiment(
+                    experiment["id"], outcome="refuted", result="Observed regression count increased in this trial.",
+                )
+                before = philosophy.get_experiment(experiment["id"])
+            engine = AutonomousResearchEngine(
+                evidence_db=root / "evidence.sqlite3", knowledge_db=root / "knowledge.sqlite3",
+                progress_db=root / "tasks.sqlite3", reminder_db=root / "reminders.sqlite3",
+                philosophy_db=philosophy_db, search=FakeSearch(), reader=FakeReader(), resource_aware=False,
+            )
+            topic = engine._next_topic(preferred_key="philosophy-experiment-followup:" + experiment["id"])
+            self.assertEqual(topic["topic_origin"], "philosophy_experiment_followup")
+            self.assertEqual(topic["source_experiment_id"], experiment["id"])
+            self.assertEqual(topic["experiment_outcome"], "refuted")
+            self.assertTrue(topic["candidate_only"])
+            self.assertTrue(topic["experiment_record_unchanged"])
+            with PhilosophyStore(philosophy_db) as philosophy:
+                after = philosophy.get_experiment(experiment["id"])
+                self.assertEqual(after["outcome"], before["outcome"])
+                self.assertEqual(after["result"], before["result"])
+
     def test_dynamic_topic_is_discovered_from_unreviewed_claim_backlog(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1418,12 +1501,41 @@ class AutonomousResearchTests(unittest.TestCase):
             self.assertEqual(review_calls, [])
             self.assertEqual(report["cross_source_discrepancy_candidates"], [])
 
+    def test_failed_research_run_returns_to_topic_queue_without_leaking_query_or_failure_details(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            knowledge_db = root / "knowledge.sqlite3"
+            private_query = "PRIVATE_RESEARCH_QUERY_42"
+            private_error = "PRIVATE_NETWORK_EXCEPTION_42"
+            with ResearchKnowledgeStore(knowledge_db) as knowledge:
+                record = knowledge.record_research_run(
+                    private_query, run_id="failed-run-001", source_refs=[], status="failed",
+                    failures=[{"stage": "search", "error": private_error}],
+                )
+            engine = AutonomousResearchEngine(
+                evidence_db=root / "evidence.sqlite3", knowledge_db=knowledge_db,
+                progress_db=root / "tasks.sqlite3", reminder_db=root / "reminders.sqlite3",
+                workspace=root, search=FakeSearch(), reader=FakeReader(), resource_aware=False,
+            )
+            topic = engine._next_topic()
+            self.assertEqual(topic["topic_origin"], "research_run_followup")
+            self.assertEqual(topic["key"], "research-run-followup:failed-run-001")
+            self.assertEqual(topic["source_experiment_id"], record["experiment_id"])
+            self.assertEqual(topic["source_run_id"], "failed-run-001")
+            self.assertEqual(topic["research_run_status"], "failed")
+            self.assertTrue(topic["candidate_only"])
+            self.assertNotIn(private_query, json.dumps(topic, ensure_ascii=False))
+            self.assertNotIn(private_error, json.dumps(topic, ensure_ascii=False))
+            with ResearchKnowledgeStore(knowledge_db) as knowledge:
+                original = knowledge.get_node(record["experiment_id"])
+            self.assertEqual(original["metadata"]["status"], "failed")
+
     def test_rejected_independent_review_decision_returns_to_research_topic_queue_without_leaking_findings(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             private_finding = "PRIVATE_REVIEW_FINDING_9f2a"
             with ResearchKnowledgeStore(root / "knowledge.sqlite3") as knowledge:
-                decision = knowledge.upsert_node(
+                prior_decision = knowledge.upsert_node(
                     "decision", "Rejected candidate with private finding",
                     summary="An independent engineering review rejected the candidate.",
                     external_ref="improvement-review:review-private-001",
@@ -1437,20 +1549,49 @@ class AutonomousResearchTests(unittest.TestCase):
                     },
                     status="rejected",
                 )
+                independent_decision = knowledge.upsert_node(
+                    "decision", "Rejected independent engineering experiment review",
+                    summary="A distinct engineering experiment review rejected the candidate.",
+                    external_ref="feedback-research-review:review-independent-private-002",
+                    metadata={
+                        "decision_kind": "independent_engineering_experiment_review",
+                        "improvement_proposal_id": "proposal-independent-002",
+                        "source_feedback_id": "feedback-independent-002",
+                        "review_id": "review-independent-private-002", "approved": False,
+                        "findings": [{"severity": "medium", "title": private_finding}],
+                        "epistemic_status": "engineering_review_rejected_not_external_evidence",
+                    },
+                    status="rejected",
+                )
             engine = AutonomousResearchEngine(
                 evidence_db=root / "evidence.sqlite3", knowledge_db=root / "knowledge.sqlite3",
                 progress_db=root / "tasks.sqlite3", reminder_db=root / "reminders.sqlite3",
                 workspace=root, search=FakeSearch(), reader=FakeReader(), resource_aware=False,
             )
-            topic = engine._next_topic()
+            topic = engine._next_topic(preferred_key="rejected-review:" + independent_decision["id"])
             self.assertEqual(topic["topic_origin"], "rejected_review_followup")
-            self.assertEqual(topic["rejected_review_node_id"], decision["id"])
-            self.assertEqual(topic["improvement_proposal_id"], "proposal-private-001")
+            self.assertEqual(topic["rejected_review_node_id"], independent_decision["id"])
+            self.assertEqual(topic["improvement_proposal_id"], "proposal-independent-002")
             self.assertEqual(topic["epistemic_status"], "engineering_review_rejected_not_external_evidence")
             self.assertNotIn(private_finding, json.dumps(topic, ensure_ascii=False))
-            self.assertNotIn("feedback-private-001", topic["support_query"])
+            self.assertNotIn("feedback-independent-002", topic["support_query"])
             self.assertIn("independent engineering code review", topic["support_query"])
             self.assertIn("counterexamples", topic["counter_query"])
+            prior_topic = engine._next_topic(preferred_key="rejected-review:" + prior_decision["id"])
+            self.assertEqual(prior_topic["improvement_proposal_id"], "proposal-private-001")
+            with ResearchKnowledgeStore(root / "knowledge.sqlite3") as knowledge:
+                knowledge.upsert_node(
+                    "idea", "Completed rejected review follow-up", summary="A research cycle already covered this query pair.",
+                    external_ref="autonomous-idea:" + topic["key"],
+                    metadata={
+                        "autonomous_topic_key": topic["key"],
+                        "research_queries": [topic["support_query"], topic["counter_query"]],
+                        "last_researched_at": "2026-11-19T14:00:00+08:00",
+                        "topic_origin": "rejected_review_followup",
+                    },
+                )
+            next_topic = engine._next_topic()
+            self.assertNotEqual(next_topic["key"], topic["key"])
 
     def test_interrupted_evolution_cycle_resumes_same_cycle_and_topic_checkpoint(self):
         from muse.progress import ProgressEventStore

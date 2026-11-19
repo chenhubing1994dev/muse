@@ -26,6 +26,10 @@ from muse.source_identity import extract_html_source_metadata
 class SourceReadError(RuntimeError):
     """Raised when a source cannot be fetched or safely extracted."""
 
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
 
 def _loopback_proxy_configured() -> bool:
     for value in getproxies().values():
@@ -160,6 +164,9 @@ class PublicSourceReader:
         try:
             with self.opener(request, timeout=self.timeout) as response:
                 content_type = str(response.headers.get("Content-Type", "")).casefold()
+                status_code = response.getcode() if callable(getattr(response, "getcode", None)) else getattr(response, "status", 200)
+                etag = response.headers.get("ETag")
+                last_modified = response.headers.get("Last-Modified")
                 if not any(kind in content_type for kind in ("text/html", "application/xhtml+xml", "text/plain")):
                     raise SourceReadError("source is not a readable text or HTML document")
                 raw = response.read(max_bytes + 1)
@@ -167,7 +174,11 @@ class PublicSourceReader:
                 _validate_public_url(final_url, self.resolver)
         except SourceReadError:
             raise
-        except (HTTPError, URLError, TimeoutError, OSError) as exc:
+        except HTTPError as exc:
+            raise SourceReadError(
+                "source request failed: HTTPError", status_code=exc.code,
+            ) from exc
+        except (URLError, TimeoutError, OSError) as exc:
             raise SourceReadError("source request failed: " + type(exc).__name__) from exc
         if len(raw) > max_bytes:
             raise SourceReadError("source exceeded the configured byte limit")
@@ -190,6 +201,9 @@ class PublicSourceReader:
             "bytes_read": len(raw),
             "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
             "fetched_at": datetime.now(timezone.utc).isoformat(),
+            "status_code": status_code,
+            "etag": str(etag)[:256] if etag is not None else None,
+            "last_modified": str(last_modified)[:256] if last_modified is not None else None,
         }
 
 class ResearchEvidenceStore:

@@ -162,6 +162,26 @@ export interface InspirationRecord {
   id: string; title: string; content: string; created_at: string; updated_at: string;
   status: string; allow_external_research: boolean;
   tags?: string[]; research_domains?: string[]; source?: string;
+  evolution_stage?: string; blueprint_path?: string;
+  research_report_path?: string; improvement_proposal_ids?: string[];
+}
+export interface InspirationEvolutionResult {
+  status: string;
+  inspiration_id: string;
+  inspiration_title: string;
+  allow_external_research: boolean;
+  external_network_called: boolean;
+  evolution_cycle_id: string;
+  research_report_path: string | null;
+  synthesis_status: string | null;
+  evidence_coverage_score: number;
+  improvement_proposals: Array<{ proposal_id: string; title: string; status: string; dossier_path: string }>;
+  improvement_proposal_ids: string[];
+  approval_required: true;
+  automatic_code_changes: false;
+  blueprint_path: string;
+  blueprint_title: string;
+  queued_video_jobs: PipelineJob[];
 }
 export interface ArtifactRecord {
   id: string; name: string; kind: string; size_bytes: number; modified_at: string;
@@ -173,9 +193,21 @@ export interface ProductQualityGate {
   review_warning_codes: string[];
   warning_review_required: boolean;
 }
+export interface ProductStoryboardMatch {
+  scene_id: string; source_file: string;
+  scene_start_seconds: number; scene_end_seconds: number;
+  overlap_start_seconds: number; overlap_end_seconds: number; overlap_seconds: number;
+}
 export interface ProductQualityWarning {
-  code: string; message?: string; start_seconds: number; duration_seconds: number;
-  review_threshold_seconds?: number;
+  code: string; message?: string; start_seconds?: number; duration_seconds?: number;
+  review_threshold_seconds?: number; value?: number; unit?: string;
+  mapping_status?: "mapped" | "outside_storyboard" | "not_time_based";
+  storyboard_matches?: ProductStoryboardMatch[];
+}
+export interface ProductSceneTimeline {
+  scene_id: string; source_asset: string; camera_move?: "push_in" | "drift_left" | "pull_out" | "rise" | "drift_right";
+  timeline_start_seconds?: number; timeline_end_seconds?: number; duration_seconds?: number;
+  transition_in_seconds?: number; transition_out_seconds?: number;
 }
 export interface ProductMotionMetadata {
   profile: string;
@@ -190,13 +222,24 @@ export interface ProductMotionMetadata {
   outro_seconds?: number;
   audio_mode?: "music" | "narration";
 }
+export interface SubtitleReviewSegment {
+  index: number; start_seconds: number; end_seconds: number; asr_text: string;
+  review_status: string; corrected_text: string | null;
+}
+export interface SubtitleReviewDocument {
+  schema_version: number; review_status: string; human_approved: boolean;
+  reference_script: string; raw_asr_transcript: string;
+  segments: SubtitleReviewSegment[]; subtitle_cue_count: number;
+}
 export interface ProductRecord {
   id: string; initiative_id: string; creator_initiative_id?: string | null; creator_feedback_enabled?: boolean; version_id: string; name: string;
   kind: string; status: string; version: string; size_bytes: number;
   modified_at: string; download_path: string; preview_path: string; video_path?: string;
   video_bytes?: number; video_metrics?: Record<string, string | number>; video_mp4_sha256?: string; video_package_sha256?: string;
   quality_gate?: ProductQualityGate; quality_warnings?: ProductQualityWarning[]; motion?: ProductMotionMetadata;
-}export interface InitiativeTimelineEvent {
+  scene_timeline?: ProductSceneTimeline[];
+  subtitle_review?: { status: "approved" | "pending_human_review" | "unavailable" | "ambiguous"; human_approved: boolean; review_available?: boolean; approved_by?: string; revision_version_id?: string };}
+export interface InitiativeTimelineEvent {
   id: string;
   event_type: "created" | "status_changed" | "feedback_recorded" | "product_built" | "product_failed" | "knowledge_linked";
   from_status: string | null;
@@ -214,10 +257,286 @@ export interface InitiativeTimeline {
   events: InitiativeTimelineEvent[];
   history_complete: boolean;
 }
+export interface KnowledgeNodeNeighbor {
+  id: string;
+  node_type: string;
+  title: string;
+  status: string;
+  direction: "outgoing" | "incoming";
+  edge_type: string;
+}
 export interface KnowledgeNodeRecord {
   id: string; node_type: string; title: string; summary: string; status: string;
   provenance: string[]; created_at: string; updated_at: string;
   metadata: Record<string, string | number | boolean | null>;
+}
+export interface KnowledgeNodeDetailResponse {
+  api_version: number;
+  node: KnowledgeNodeRecord;
+  neighbors?: KnowledgeNodeNeighbor[];
+  evidence_summary?: { total: number; by_direction: Record<string, number>; reviewed_count: number };
+}
+export interface ClaimDossierEvidence {
+  id: number;
+  direction: string;
+  evidence_type: string;
+  quality: string;
+  independence: string;
+  source_node_id: string;
+  source_title: string;
+  source_ref: string | null;
+  reviews: Array<{ verdict: string; reviewer_id: string; rationale: string; reviewed_at: string }>;
+}
+export interface ClaimDossier {
+  claim_id: string;
+  title: string;
+  original_claim: string;
+  original_source: string | null;
+  claim_status: string;
+  epistemic_status: string;
+  evidence: ClaimDossierEvidence[];
+  evidence_counts: Record<string, number>;
+  evidence_coverage: { coverage_state: string; review_coverage_state: string; reviewed_evidence_count: number; unreviewed_evidence_count: number; evidence_conflict_state: string; retrieval_direction_is_not_evidence_verdict: boolean };
+  confidence: { level: string; reviewer_id: string | null; basis: string; automatic_scoring: false };
+  confidence_history: Array<{ sequence: number; created_at: string; reviewer_id: string; verdict: string; rationale: string; confidence_level: string; confidence_basis: string }>;
+  retrieval_direction_is_not_evidence_verdict: true;
+}
+export interface KnowledgeGraphNode {
+  id: string;
+  node_type: "source" | "idea" | "experiment" | "claim" | "decision" | "failure";
+  title: string;
+  summary: string;
+  status: string;
+  updated_at: string;
+  degree: number;
+  epistemic_status: string;
+  review_state: string;
+  origin: string;
+}export interface KnowledgeGraphEdge {
+  id: string;
+  source_id: string;
+  target_id: string;
+  edge_type: string;
+}
+export interface KnowledgeGraphResponse {
+  api_version: number;
+  configured: boolean;
+  totals: {
+    active_nodes: number;
+    active_edges: number;
+    by_type: Record<string, number>;
+    by_status: Record<string, number>;
+    by_edge_type: Record<string, number>;
+    claim_evidence_total: number;
+  };
+  governance: {
+    active_nodes: number;
+    active_edges: number;
+    lint_scope_isolated_nodes: number;
+    claims_without_evidence: number;
+    evidence_items_unreviewed: number;
+    source_relationships: number;
+    pending_source_identity_candidates: number;
+    advanced_claims: number;
+  } | null;
+  nodes: KnowledgeGraphNode[];
+  edges: KnowledgeGraphEdge[];
+}
+export interface PrometheusPrinciple {
+  principle_key: string;
+  title: string;
+  description: string;
+  practice: string;
+  confidence: number;
+  experience_count: number;
+  experiment_count: number;
+}
+export interface ResourceGovernorSnapshot {
+  recommended_workers: number;
+  maximum_workers: number;
+  cpu_cap: number;
+  memory_cap: number;
+  status: string;
+  logical_cpu_count: number | null;
+  available_memory_bytes: number | null;
+  total_memory_bytes: number | null;
+  gpu_available_memory_bytes: number | null;
+  reasons: string[];
+}
+export interface CapabilityMatrixItem {
+  id: string;
+  title: string;
+  pillar: string;
+  status: "implemented" | "partial" | "backend_only" | "vision";
+  status_label: string;
+  summary: string;
+  evidence: string;
+  entry: string;
+  boundary: string;
+}
+export interface PrometheusCoreResponse {
+  api_version: number;
+  mission: string;
+  stages: {
+    ignition: { label: string; inspirations_count: number; initiatives_count: number; reminders_count: number };
+    discovery: { label: string; knowledge_nodes_total: number; nodes_by_type: Record<string, number>; claim_evidence_count: number; research_evidence_count: number; research_sites_count: number };
+    synthesis: { label: string; knowledge_edges_total: number; edges_by_type: Record<string, number>; philosophy_principles_count: number; philosophy_experiences_count: number; philosophy_links_count: number; philosophy_proposals_count: number };
+    creation: { label: string; products_count: number; artifacts_count: number; orchestration_runs_count: number; agent_runs_count: number; video_attempts_total: number; video_attempts_succeeded: number };
+    transmission: { label: string; user_track_memories_count: number; agent_track_memories_count: number; progress_events_count: number; watchdog_checks_count: number; capabilities_count: number; improvement_proposals_count: number };
+  };
+  principles: PrometheusPrinciple[];
+  resource_governor: ResourceGovernorSnapshot;
+  capability_matrix: CapabilityMatrixItem[];
+  memory_privacy_guard: { user_track_text_exposed: boolean; auto_writeback_enabled: boolean };
+}
+export interface SpecialistProfileItem {
+  specialist_id: string;
+  role: string;
+  domains: string[];
+  keywords: string[];
+  capabilities: string[];
+  description: string;
+  trust_tier: string;
+  live_adapter_connected: boolean;
+  layer: "specialist_template_metadata";
+  historical_runs: { runs_total: number; runs_succeeded: number; runs_failed: number };
+}
+export interface RolePolicyItem {
+  role: string;
+  allowed_capabilities: string[];
+  trust_tier: string;
+  description: string;
+  updated_at: string;
+}
+export interface GalaxyResponse {
+  api_version: number;
+  commander: {
+    id: string;
+    title: string;
+    sole_authority: boolean;
+    competing_schedulers: number;
+    max_workers_cap: number;
+    queue_counts: QueueSnapshot["counts"];
+  };
+  registry_configured: boolean;
+  live_agents: Array<AgentRecord & { layer?: string }>;
+  role_policies: RolePolicyItem[];
+  specialist_profiles: SpecialistProfileItem[];
+  orchestration_summary: {
+    total_runs: number;
+    by_status: Record<string, number>;
+    recent_runs: Array<{ run_id: string; status: string; created_at: string; updated_at: string; agent_count: number; roles: string[] }>;
+  };
+  capabilities: Array<{ capability_id: string; domain: string; name: string; description: string; capabilities: string[]; requirements: string[]; trust: string; license: string; status: string; version?: string | null }>;
+  resource_governor: ResourceGovernorSnapshot;
+}
+export interface RoutePreviewCandidate {
+  specialist_id: string;
+  role: string;
+  description: string;
+  score: number;
+  matched_domains: string[];
+  matched_keywords: string[];
+  trust_tier: string;
+  live_adapter_connected: boolean;
+  layer: string;
+}
+export interface RoutePreviewResponse {
+  api_version: number;
+  goal: string;
+  readonly_preview: true;
+  dispatched: false;
+  live_ready_count: number;
+  selected: RoutePreviewCandidate[];
+  considered: RoutePreviewCandidate[];
+}
+export interface BaguaTrigramItem {
+  bits_bottom_to_top: string;
+  name: string;
+  symbol: string;
+  nature: string;
+  direction: string;
+  element: string;
+  system_lens: string;
+  inquiry_prompt: string;
+}
+export interface StarMansionItem {
+  index: string;
+  name: string;
+  full_name: string;
+  quadrant: "azure_dragon" | "black_tortoise" | "white_tiger" | "vermilion_bird";
+  element: string;
+  theme: string;
+  inquiry: string;
+}
+export interface CelestialCatalogResponse {
+  api_version: number;
+  epistemic_status: string;
+  is_evidence: false;
+  is_prediction: false;
+  calendar_reference: {
+    local_iso: string;
+    year_ganzhi_civil: string;
+    day_ganzhi: string;
+    hour_branch: string;
+    hour_ganzhi: string;
+    basis_note: string;
+    reference_sources: string[];
+  };
+  bagua_trigrams: BaguaTrigramItem[];
+  star_mansion_quadrants: Record<string, { name: string; season: string; color_token: string }>;
+  star_mansions: StarMansionItem[];
+  symbolic_lenses: Array<{ id: string; name: string; tradition: string; lens: string; questions: string[] }>;
+  core_traditions: Array<{ id: string; name: string; knowledge_scope: string; interpretive_layers: string[]; school_variance_warning: string }>;
+  optional_engines: Record<string, { label: string; status: string; reason: string }>;
+}
+export interface HexagramStructure {
+  bits_bottom_to_top: string;
+  king_wen_number: number;
+  king_wen_name: string;
+  unicode_symbol: string;
+  lower_trigram: { bits_bottom_to_top: string; name: string };
+  upper_trigram: { bits_bottom_to_top: string; name: string };
+}
+export interface YijingInquiryResponse {
+  api_version: number;
+  mode: "seeded_cast" | "manual_lines" | "trigram_pair";
+  reading: {
+    calculation_method: string;
+    input_origin: string;
+    line_order: string;
+    lines: Array<{ position: number; value: number; label: string; yin_yang: "yin" | "yang"; changing: boolean; relating_yin_yang: "yin" | "yang" }>;
+    line_values: number[];
+    moving_lines: number[];
+    primary: HexagramStructure;
+    relating: HexagramStructure;
+    structural_relations: { nuclear: HexagramStructure; opposite: HexagramStructure; inverse: HexagramStructure };
+    king_wen_number: number;
+    king_wen_name: string;
+    unicode_symbol: string;
+    epistemic_status: string;
+    is_physical_cast: boolean;
+    is_evidence: boolean;
+    is_prediction: boolean;
+    source_refs: string[];
+    seed?: string;
+    seed_sha256?: string;
+  };
+  cross_system: {
+    goal: string;
+    framework_ids: string[];
+    comparison_axes: Array<{ axis_id: string; label: string; perspectives: Record<string, string> }>;
+    shared_inquiry_questions: string[];
+    divergence_prompts: string[];
+    synthesis_candidates: Array<{ id: string; hypothesis: string; test_question: string; falsification_rule: string; alternative_explanations: string[]; uncertainty: string; epistemic_status: string }>;
+  } | null;
+  lens_seeds: Array<{ id: string; name: string; application_question?: string; hypothesis_seed?: string; falsification_rule?: string; validation_plan?: string }> | null;
+  epistemic_status: string;
+  is_evidence: false;
+  is_prediction: false;
+  automatic_memory_write: false;
+  automatic_task_approval: false;
+  notice: string;
 }
 export interface VideoJobRecord {
   id: string; status: "queued" | "running" | "succeeded" | "failed" | "cancelled";
@@ -255,10 +574,205 @@ export interface GpuResourceStatus {
   policy: string;
 }
 
+export interface DaemonStatus {
+  state: string;
+  running: boolean;
+  heartbeat_age_seconds: number | null;
+  stale: boolean;
+  last_error: string | null;
+  started_at: string | null;
+  owner_id: string | null;
+  managed_pid: number | null;
+  control_log: string;
+}
+
+// ── Muse 视频创作工作室 ──
+export interface StylePreset {
+  id: "hk-retro" | "pixel" | "cosmic" | "mix";
+  label: string;
+  sub_label: string;
+  palette: string[];
+  description: string;
+  vfx: string;
+  camera_moves: string[];
+}
+export interface NarrationStyleOption {
+  id: "yujie_canto" | "cute_canto" | "news_canto" | "none";
+  label: string;
+  voice_style: string;
+}
+export interface StudioStylesResponse {
+  api_version: number;
+  styles: StylePreset[];
+  narration_styles: NarrationStyleOption[];
+  capabilities: Record<string, string>;
+}
+export interface NarrationSegment {
+  index: number;
+  text: string;
+  estimated_duration_seconds: number;
+}
+export interface StudioJob {
+  id: string;
+  title: string;
+  style: string;
+  narration_style: string;
+  status: string;
+  progress: number;
+  stage: string;
+  result: Record<string, unknown>;
+  error: string;
+  created_at: string;
+  updated_at: string;
+}
+export interface MediaAssetResult {
+  url: string;
+  title: string;
+  license: string;
+  source_ref: string;
+}
+export interface StudioRenderRequest {
+  topic: string;
+  research_text?: string;
+  inspiration?: string;
+  style?: "hk-retro" | "pixel" | "cosmic" | "mix";
+  narration_style?: "yujie_canto" | "cute_canto" | "news_canto" | "none";
+  query?: string;
+  aspect_ratio?: "9:16" | "16:9" | "1:1";
+  fps?: number;
+}
+
+export interface PipelineRecipe {
+  id: string;
+  label: string;
+  available: boolean;
+  script?: string;
+  output?: string;
+  description?: string;
+  reason?: string;
+}
+export interface PipelineJob {
+  job_id: string;
+  recipe_id: string;
+  recipe_label: string;
+  title: string;
+  status: "queued" | "running" | "succeeded" | "failed";
+  created_at: string;
+  updated_at: string;
+  output_dir: string;
+  exists_before_run: boolean;
+  progress: string;
+  error: string | null;
+  result: Record<string, unknown> | null;
+}
+
+
+export type InitiativeContentProfile = Partial<Record<"topic" | "hook_style" | "narrative_structure" | "editing_pace" | "visual_style" | "voice_language" | "cta_style" | "format", string>>;
+export interface InitiativePerformanceSnapshot {
+  id: string;
+  initiative_id: string;
+  platform: string;
+  source: "official_analytics" | "manual_entry";
+  currency: string;
+  captured_at: string;
+  published_at: string | null;
+  views: number;
+  likes: number;
+  comments: number;
+  saves: number;
+  shares: number;
+  cta_clicks: number;
+  qualified_leads: number;
+  orders: number;
+  reported_revenue_minor: number;
+  settled_revenue_minor: number;
+  production_cost_minor: number;
+  three_second_retention_pct: number | null;
+  completion_rate_pct: number | null;
+  avg_watch_seconds: number | null;
+  content_profile: InitiativeContentProfile;
+}
+export interface InitiativePerformanceSummary {
+  currency: string;
+  views: number;
+  likes: number;
+  comments: number;
+  saves: number;
+  shares: number;
+  cta_clicks: number;
+  qualified_leads: number;
+  orders: number;
+  reported_revenue_minor: number;
+  settled_revenue_minor: number;
+  production_cost_minor: number;
+}
+export interface InitiativePerformanceRankedItem {
+  source_reference: string;
+  views: number;
+  rates: Record<string, number | null>;
+  content_profile: InitiativeContentProfile;
+}
+export interface InitiativePerformanceCohort {
+  platform: string;
+  source: string;
+  currency: string;
+  sample_count: number;
+  min_sample_count: number;
+  total_views: number;
+  min_views: number;
+  status: "ready_for_review" | "insufficient_sample";
+  rates: Record<string, number | null>;
+  item_comparisons: Record<string, {
+    status: "descriptive_comparison" | "insufficient_item_samples";
+    eligible_item_count: number;
+    top: InitiativePerformanceRankedItem[];
+    bottom: InitiativePerformanceRankedItem[];
+  }>;
+  item_comparison_min_views: number;
+  comparison_note: string;
+  counts: Record<string, number>;
+  revenue_minor: { reported: number; settled: number; production_cost: number };
+  warnings: string[];
+  interpretation: string;
+}
+export interface InitiativePerformanceAnalysis {
+  status: "ready" | "insufficient_data";
+  cohorts: InitiativePerformanceCohort[];
+  unidentified_snapshots_excluded: number;
+  deduplication: string;
+}
+export interface InitiativePerformanceInput {
+  idempotency_key: string;
+  platform: "youtube" | "tiktok" | "douyin" | "instagram" | "facebook" | "bilibili" | "other";
+  source: "manual_entry" | "official_analytics";
+  currency?: string;
+  published_at?: string;
+  source_reference?: string;
+  notes?: string;
+  metrics: Record<string, number>;
+  content_profile?: InitiativeContentProfile;
+}
+export interface MemPalaceStatusResponse {
+  api_version: number;
+  config_state: string;
+  enabled: boolean;
+  connection_state: string;
+  palace_directory_present: boolean;
+  vector_index_present: boolean;
+  index_freshness: string;
+  embedding_model: string;
+  embedding_device: string;
+  memory_store_state: string;
+  projection_outbox: { initialized: boolean; status: string; total: number; pending: number; failed: number; delivered: number; oldest_pending_at: string | null; latest_delivered_at: string | null; latest_created_at: string | null; content_included: false };
+  remote_process_started: false;
+  private_content_exposed: false;
+}
+
 export interface ApiClient {
   health(): Promise<HealthResponse>;
   agents(): Promise<AgentsResponse>;
   overview(): Promise<OverviewResponse>;
+  mempalaceStatus(): Promise<MemPalaceStatusResponse>;
   feedback(limit?: number): Promise<{ api_version: number; count: number; feedback: FeedbackRecord[] }>;
   improvements(): Promise<{ api_version: number; count: number; proposals: ImprovementProposal[] }>;
   selfImprovement(): Promise<{ api_version: number } & SelfImprovementStatus>;
@@ -266,15 +780,39 @@ export interface ApiClient {
   artifacts(limit?: number): Promise<{ api_version: number; count: number; artifacts: ArtifactRecord[] }>;
   products(limit?: number): Promise<{ api_version: number; count: number; products: ProductRecord[] }>;
   initiativeTimeline(initiativeId: string, limit?: number): Promise<{ api_version: number } & InitiativeTimeline>;
-  knowledgeNode(nodeId: string): Promise<{ api_version: number; node: KnowledgeNodeRecord }>;
+  initiativePerformance(initiativeId: string): Promise<{ api_version: number; snapshots: InitiativePerformanceSnapshot[]; summary_by_currency: InitiativePerformanceSummary[]; analysis: InitiativePerformanceAnalysis }>;  recordInitiativePerformance(initiativeId: string, payload: InitiativePerformanceInput): Promise<{ api_version: number; snapshot: InitiativePerformanceSnapshot }>;
+  knowledgeNode(nodeId: string): Promise<KnowledgeNodeDetailResponse>;
+  knowledgeClaimDossier(claimId: string, evidenceLimit?: number): Promise<{ api_version: number; dossier: ClaimDossier }>;
+  knowledgeGraph(options?: { limit?: number; nodeType?: string | null; q?: string }): Promise<KnowledgeGraphResponse>;
+  prometheusCore(): Promise<PrometheusCoreResponse>;
+  galaxy(): Promise<GalaxyResponse>;
+  previewRoute(goal: string): Promise<RoutePreviewResponse>;
+  celestialCatalog(): Promise<CelestialCatalogResponse>;
+  castYijing(payload: { mode?: "seeded_cast" | "manual_lines" | "trigram_pair"; seed?: string; line_values?: number[]; lower_bits?: string; upper_bits?: string; goal?: string; frameworks?: string[] }): Promise<YijingInquiryResponse>;
   videoAttempts(): Promise<VideoAttemptSummary>;
   videoEngines(): Promise<{ api_version: number } & VideoEngineStatus>;
   gpuResources(): Promise<GpuResourceStatus>;
+  daemonStatus(): Promise<DaemonStatus | null>;
+  daemonControl(action: "start" | "pause" | "resume" | "stop" | "once"): Promise<{ api_version: number; result: Record<string, unknown> }>;
+  pipelineRecipes(): Promise<{ api_version: number; recipes: PipelineRecipe[] } | null>;
+  pipelineJobs(limit?: number): Promise<{ api_version: number; jobs: PipelineJob[] } | null>;
+  pipelineJob(id: string): Promise<{ api_version: number; job: PipelineJob } | null>;
+  studioStyles(): Promise<StudioStylesResponse>;
+  studioJobs(limit?: number): Promise<{ api_version: number; jobs: StudioJob[] }>;
+  studioJob(id: string): Promise<{ api_version: number; job: StudioJob }>;
+  studioSearchMedia(payload: StudioRenderRequest): Promise<{ api_version: number; status: string; assets: MediaAssetResult[]; reason?: string }>;
+  studioGenerateScript(payload: StudioRenderRequest): Promise<{ api_version: number; status: string; segments: NarrationSegment[]; reason?: string }>;
+  studioPhilosophyInject(payload: StudioRenderRequest): Promise<{ api_version: number; status: string; principles?: unknown[]; note?: string; muse_note?: string; reason?: string }>;
+  studioRender(payload: StudioRenderRequest): Promise<{ api_version: number; job: StudioJob; plan: Record<string, unknown> }>;
+  submitPipeline(payload: { recipe_id: string; title?: string }): Promise<{ api_version: number; job: PipelineJob }>;
   downloadProduct(initiativeId: string, versionId: string): Promise<Blob>;
   previewProduct(initiativeId: string, versionId: string): Promise<Blob>;
   downloadVideo(initiativeId: string, versionId: string): Promise<Blob>;
+  subtitleReview(initiativeId: string, versionId: string): Promise<{ api_version: number; review: SubtitleReviewDocument }>;
+  approveSubtitleReview(initiativeId: string, versionId: string, payload: { reviewed_segment_indexes: number[]; corrections: Array<{ segment_index: number; corrected_text: string }>; reviewer: string; confirmation: string }): Promise<{ api_version: number; product: { initiative_id: string; version_id: string; validated: boolean; status: string; quality_gate?: ProductQualityGate } }>;
   createVideoProduct(payload: { mode?: "local_assets" | "prompt_to_video"; source?: string; title: string; prompt?: string; negative_prompt?: string; duration_seconds?: number; steps?: number; seed?: number; creator_initiative_id?: string; evolution_cycle_id?: string; audio?: string; audio_mode?: "music" | "narration"; aspect_ratio?: "16:9" | "9:16" | "1:1"; fps?: number; image_seconds?: number; encoder?: "auto" | "amf" | "software"; motion_profile?: "none" | "brand_intro_outro" | "brand_scene_transitions" }): Promise<{ api_version: number; job: { id: string; status: string } }>;  videoJob(id: string): Promise<{ api_version: number; job: VideoJobRecord }>;
-  submitInspiration(value: { content: string; allow_external_research: boolean; title?: string; tags?: string[]; research_domains?: string[]; source?: "chatgpt_daily_inspiration" | "muse_local_dashboard" | "user_manual" }): Promise<{ api_version: number; inspiration: InspirationRecord }>; 
+  submitInspiration(value: { content: string; allow_external_research: boolean; title?: string; tags?: string[]; research_domains?: string[]; source?: "chatgpt_daily_inspiration" | "muse_local_dashboard" | "user_manual" }): Promise<{ api_version: number; inspiration: InspirationRecord }>;
+  evolveInspiration(payload?: { inspiration_id?: string; enqueue_video?: boolean; aspect_ratios?: Array<"9:16" | "16:9"> }): Promise<{ api_version: number; evolution: InspirationEvolutionResult }>; 
   downloadArtifact(name: string): Promise<Blob>;
   improvementDetail(id: string): Promise<{ api_version: number; proposal: ImprovementDetail }>;
   submitFeedback(feedback: { category: string; tag: string; severity: number }): Promise<{ api_version: number; feedback: FeedbackRecord }>;

@@ -307,6 +307,40 @@ class CapabilityRadarTests(unittest.TestCase):
             self.assertEqual(result["signals_seen"], [])
             self.assertEqual(result["created"], [])
 
+    def test_failed_research_experiment_becomes_candidate_only_followup_not_engineering_proposal(self) -> None:
+        from datetime import datetime, timezone
+        from muse.research_knowledge import ResearchKnowledgeStore
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            task_db = root / "tasks.sqlite3"
+            knowledge_db = root / "knowledge.sqlite3"
+            improvement_db = root / "improvements.sqlite3"
+            now = datetime.now(timezone.utc)
+            with TaskQueue(task_db):
+                pass
+            with ResearchKnowledgeStore(knowledge_db) as knowledge:
+                experiment = knowledge.upsert_node(
+                    "experiment", "Counter-search experiment", external_ref="experiment:counter-search-001",
+                    metadata={"outcome": "refutes", "run_id": "run-counter-001",
+                              "hypothesis_id": "hypothesis-001"},
+                )
+                before = knowledge.get_node(experiment["id"])
+            result = scan_capabilities(
+                task_db, improvement_db, now=now, lookback_hours=24,
+                research_knowledge_database=knowledge_db,
+            )
+            self.assertEqual(result["created"], [])
+            self.assertEqual(len(result["research_followups"]), 1)
+            followup = result["research_followups"][0]
+            self.assertEqual(followup["source_experiment_id"], experiment["id"])
+            self.assertEqual(followup["source_run_id"], "run-counter-001")
+            self.assertTrue(followup["candidate_only"])
+            self.assertFalse(followup["engineering_proposal_created"])
+            with ResearchKnowledgeStore(knowledge_db) as knowledge:
+                after = knowledge.get_node(experiment["id"])
+            self.assertEqual(after["metadata"], before["metadata"])
+
     def test_research_knowledge_signals_create_approval_gated_meta_optimize_proposals(self) -> None:
         from muse.research_knowledge import ResearchKnowledgeStore
         with tempfile.TemporaryDirectory() as directory:

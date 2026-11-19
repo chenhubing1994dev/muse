@@ -44,10 +44,17 @@ def _require_gpu_headroom(client: ComfyUIClient) -> dict[str, int | float]:
         raise WanVideoError("Wan generation blocked: GPU memory telemetry is incomplete")
     if ratio < MINIMUM_FREE_VRAM_RATIO or free < int(total * MINIMUM_FREE_VRAM_RATIO):
         raise WanVideoError("Wan generation blocked: measured free GPU memory is below the 70% safety threshold")
+    # ROCm may expose a tiny PyTorch allocator pool after ComfyUI unloads
+    # models (for example, 64 MiB on a 12 GiB device). Such a pool is not a
+    # measure of device headroom; the device-level counters above remain the
+    # authoritative hard gate. Apply the allocator check only when its pool
+    # represents at least half of the physical device.
     torch_total = memory.get("torch_vram_total_bytes")
     torch_free = memory.get("torch_vram_free_bytes")
-    if isinstance(torch_total, int) and not isinstance(torch_total, bool) and torch_total > 0:
+    if (isinstance(torch_total, int) and not isinstance(torch_total, bool)
+            and torch_total >= int(total * 0.5)):
         if (isinstance(torch_free, bool) or not isinstance(torch_free, int)
+                or not 0 <= torch_free <= torch_total
                 or torch_free < int(torch_total * MINIMUM_FREE_VRAM_RATIO)):
             raise WanVideoError("Wan generation blocked: measured PyTorch GPU memory is below the 70% safety threshold")
     return memory
@@ -207,8 +214,21 @@ def _generate_wan21_t2v_unleased(
         prompt_id = submitted["prompt_id"]
         deadline = time.monotonic() + timeout_seconds
         entry = None
+        last_poll_error = None
         while time.monotonic() < deadline:
-            history = client.history(prompt_id)
+            try:
+                history = client.history(prompt_id)
+                last_poll_error = None
+            except RuntimeError as exc:
+                # ComfyUI can temporarily stop answering HTTP while ROCm is
+                # compiling kernels or decoding a Wan clip. Keep the submitted
+                # prompt alive and retry only transport-unavailable failures;
+                # malformed responses and explicit HTTP errors remain fatal.
+                if str(exc) != "local video engine is unavailable":
+                    raise
+                last_poll_error = str(exc)
+                time.sleep(2)
+                continue
             candidate = history.get(prompt_id)
             if isinstance(candidate, dict):
                 entry = candidate
@@ -237,6 +257,8 @@ def _generate_wan21_t2v_unleased(
             status = entry.get("status", {})
             if isinstance(status, dict) and status.get("status_str") == "error":
                 raise WanVideoError("Wan generation failed")
+        if last_poll_error:
+            raise TimeoutError("ComfyUI remained temporarily unavailable while the submitted Wan job was running")
         raise TimeoutError("Wan generation exceeded the configured time limit")
     except (RuntimeError, ValueError, OSError) as exc:
         if isinstance(exc, WanVideoError):

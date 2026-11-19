@@ -143,6 +143,48 @@ def _validate_shot_directives(
     return normalized
 
 
+def _scene_timing_records(
+    clips: list[dict[str, Any]], *, transition_frames: int, fps: int,
+) -> list[dict[str, Any]]:
+    """Return authoritative scene intervals on a timeline with overlapping transitions."""
+    if not isinstance(clips, list) or not clips:
+        raise ValueError("clips must be a non-empty list")
+    if isinstance(fps, bool) or not isinstance(fps, int) or fps <= 0:
+        raise ValueError("fps must be a positive integer")
+    if (isinstance(transition_frames, bool) or not isinstance(transition_frames, int)
+            or transition_frames < 0):
+        raise ValueError("transition_frames must be a non-negative integer")
+    frame_counts = []
+    for index, clip in enumerate(clips, start=1):
+        frames = clip.get("durationInFrames") if isinstance(clip, dict) else None
+        if isinstance(frames, bool) or not isinstance(frames, int) or frames <= 0:
+            raise ValueError(f"scene frame duration must be a positive integer (scene {index})")
+        frame_counts.append(frames)
+    if len(frame_counts) > 1 and transition_frames > min(frame_counts):
+        raise ValueError("transition_frames cannot exceed the shortest scene")
+
+    cursor = 0
+    records: list[dict[str, Any]] = []
+    for index, frames in enumerate(frame_counts):
+        start_frame = cursor
+        end_frame = start_frame + frames
+        transition_in = transition_frames if index > 0 else 0
+        transition_out = transition_frames if index < len(frame_counts) - 1 else 0
+        records.append({
+            "scene_index": index + 1,
+            "start_frame": start_frame,
+            "end_frame": end_frame,
+            "duration_frames": frames,
+            "timeline_start_seconds": round(start_frame / fps, 6),
+            "timeline_end_seconds": round(end_frame / fps, 6),
+            "duration_seconds": round(frames / fps, 6),
+            "transition_in_seconds": round(transition_in / fps, 6),
+            "transition_out_seconds": round(transition_out / fps, 6),
+        })
+        cursor = end_frame - transition_out
+    return records
+
+
 def render_scene_timeline(
     workspace: str | Path,
     scene_paths: list[str | Path],
@@ -261,6 +303,7 @@ def render_scene_timeline(
             min_frames = min(item["durationInFrames"] for item in clips)
             transition_frames = min(max(1, round(transition_seconds * fps)), max(1, min_frames // 3))
             total_frames = sum(item["durationInFrames"] for item in clips) - transition_frames * (len(clips) - 1)
+            scene_timings = _scene_timing_records(clips, transition_frames=transition_frames, fps=fps)
             props = {"scenes": clips, "width": width, "height": height, "fps": fps,
                      "transitionDurationInFrames": transition_frames}
             props_path = work / "timeline.json"
@@ -312,6 +355,7 @@ def render_scene_timeline(
             "composition_id": "MuseSceneTimeline", "scene_count": len(sources),
             "transition": "alternating_crossfade_wipe", "transition_seconds": round(transition_frames / fps, 3),
             "scene_duration_seconds": round(total_frames / fps, 3),
+            "scene_timings": scene_timings, "shot_directives": directives,
             "audio_preserved": final_info["has_audio"], "width": width, "height": height, "fps": fps,
             "bytes": output.stat().st_size,
         }

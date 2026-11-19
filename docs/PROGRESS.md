@@ -1894,8 +1894,436 @@
 1893 | - 固定模型 	ypangaa/canto-tts-nano@fe17418a293d9be85685ddf750b0cfef9c88abb4 已下载完成：47 文件、764,005,540 bytes。
 1894 | - 首次真实 TTS 暴露 Windows 跨盘符临时 WAV 替换错误（上游 quality helper 在 C: 生成候选，最终输出在 D:）；适配器已将 duration-filter 临时目录限定到输出盘并恢复原设置，真实合成随后成功。
 1895 | - 实际生成 data/narration/cantonese-smoke-test.wav：48 kHz、双声道 PCM、307,244 bytes；另生成多句测试 WAV。尚未完成 ASR 对稿及人工试听，不能宣称语音质量验收通过。
-1896 | - 实际 TTS→视频产品 E2E：FFmpeg 测试画面（明确非 AI 成片）+ 真实粤语旁白，封装并验证产品 ZIP；alidated=true、has_audio=true、旁白 1.36 秒。5 秒测试片因尾段静音产生 review warning，质量门通过但 eady_to_publish=false。
+1896 | - 实际 TTS→视频产品 E2E：FFmpeg 测试画面（明确非 AI 成片）+ 真实粤语旁白，封装并验证产品 ZIP；alidated=true、has_audio=true、旁白 1.36 秒。5 秒测试片因尾段静音产生 review warning，质量门通过但 
+eady_to_publish=false。
 1897 | - E2E 发现 InitiativeStore.update() 在目标 initiative 不在前 200 条列表时抛 StopIteration；改为按主键直接读取更新行，并新增窗口外记录回归测试。
 1898 | - 新增 InitiativeStore 窗口边界测试；全仓库 python -m unittest discover -s tests -v 1220/1220 通过（130.571 秒）。旁白/视频/initiative 专项 39/39 通过。
 1899 | - Cantonese Whisper ASR 已安装，模型 lvanlii/whisper-small-cantonese@b03a4e5d482f06858ce10ebbabebabec9f447a0d 下载仍在进行；ASR、字幕时轴、BGM ducking、响度/削波 QA 与人工试听仍待完成。
 1900 | - 详见 docs/MUSE_VIDEO_NARRATION.md；当前真实合成与封装已打通，语音准确性/听感及真实 AI 镜头验收未完成。
+
+
+## Muse 视频创作工作室全功能开发 · 2026-11-18
+
+依据 `muse-video-studio-plan.md` 完成 Phase 1–5 开发。Muse Commander 为唯一调度权威；玄学/哲学仅作灵感与假设标注，不写回 User Track，不绕过测试或授权。
+
+### 本轮新增文件
+
+**Phase 1 · 视觉风格引擎（Remotion）**
+- `video-motion/src/scenes/PixelOverlay.tsx`：8-bit 像素化擦除转场、像素粒子飘散/聚合、像素标题卡，三套调色板（CGA/EGA/港风霓虹），确定性 hash 伪随机。
+- `video-motion/src/scenes/HKRetroStyle.tsx`：竖排繁体霓虹闪烁、VHS 噪点/扫描线/色偏、黄字白边港片字幕、街景暖色调。
+- `video-motion/src/scenes/CosmicVista.tsx`：星尘粒子、星云渐变、光速隧道转场、全息信息框。
+- `video-motion/src/scenes/CharacterMotion.tsx`：卡通形象、嘴部随 TTS 时间轴开合、四种表情、三套风格。
+- `video-motion/src/scenes/NarrationSubtitle.tsx`：分段字幕逐句高亮，港风/经典/全息三样式。
+- `video-motion/src/root.tsx`：新增 5 个 Composition（总计 9 个）。
+
+**Phase 2 · 粤语御姐解说管线**
+- `src/muse/narration_generator.py`：`NarrationStyle` 三枚举 + 分段粤语口语解说生成（本地确定性模板+启发式，planner 可注入且失败回退），`apply_voice_style()` / `synth_params()` / `synthesize_cantonese_styled()`（不改现有 TTS 签名；御姐参数 speed 0.85 / pitch −2 / 气声）。
+- `src/muse/narration_sync.py`：SQLite 解说账本、时间轴归一化、SRT/ASS（港风黄字白边）、嘴部驱动数据、WAV 时长读取。
+- `tests/test_narration_pipeline.py`：26 项测试。
+
+**Phase 3 · 一键素材搜索与智能剪辑**
+- `src/muse/media_search.py`：SearXNG 可选接入（无 endpoint 时 fail-closed，不伪造结果）、风格打分过滤、URL 白名单与下载大小双限制、下载内容绝不执行。
+- `src/muse/smart_crop.py`：显著性/焦点启发式裁剪（Pillow 可选依赖）、Ken Burns 参数生成。
+- `src/muse/media_compositor.py`：按解说断句对齐场景时间轴、风格滤镜映射、SQLite manifest。
+- `tests/test_media_studio.py`：14 项测试。
+
+**Phase 4 · 桌面创作工作室**
+- `src/muse/creative_studio_api.py`：四种风格预设 + 风格切换、脚本/素材/哲学灵感注入的可注入适配器（缺失即 fail-closed）、渲染任务 SQLite 账本、请求校验。
+- `src/muse/status_api.py`：新增 6 条路由（GET styles/render/render:id；POST search-media/generate-script/render/philosophy-inject），loopback-only + Bearer 鉴权，沿用既有安全边界。
+- `ui-prototype/api.js` + `src/lib/api.ts`：新增 7 个 studio 客户端方法与类型。
+- `ui-prototype/src/lib/CreativeStudio.svelte` + `src/creative-studio.css`：风格卡（港风霓虹/像素/宇宙/混搭）实时预览、解说配置、素材/解说分段/渲染任务面板，零内联样式、CSP 友好、减少动效偏好适配。
+- `ui-prototype/src/App.svelte`：创作工作室挂载到创作扇区 + 快速跳转命令。
+- `tests/test_creative_studio_api.py` + `tests/test_creative_studio_api_routes.py`：15 项测试。
+
+**Phase 5 · Muse 意识体哲学进化引擎**
+- `src/muse/consciousness_engine.py`：创作经验沉淀（metadata 白名单、隐私字段丢弃）、哲学灵感注入（玄学 lens 一律降级为 symbolic_only/hypothesis、不读 Agent Track 为用户事实、不自动写回）、港风金句、意识星图快照、经验阈值触发原则候选（永远 pending_review，人工审核才可成为 active）、CLI。
+- `tests/test_consciousness_engine.py`：8 项测试；`pyproject.toml` 新增 `muse-consciousness` 入口。
+
+### 验收标准对照（计划文档 6 条）
+1. **风格切换**：已实现。桌面端四预设（港风/像素/宇宙/混搭）+ Remotion 组件 + CSS 预览。
+2. **粤语解说**：本地生成与三段风格 TTS 参数、ASS 字幕、嘴部驱动已实现；真实语音合成依赖本地 `canto-tts-nano` 模型，未配置时 fail-closed（非功能缺失）。
+3. **素材搜索**：搜索/打分/裁剪/对齐/时间轴已实现；端到端自动下载入片依赖外部 SearXNG endpoint，未配置时 blocked。
+4. **动画趣味性**：已实现，5 个新动画组件覆盖卡动角色/像素转场/霓虹字幕/宇宙特效。
+5. **哲学注入**：已实现，灵感注入与金句来自真实 PhilosophyStore 经验原则；新原则候选需人工审核，玄学仅假设标注。
+6. **全流程本地**：已实现，无付费 API、无模型下载、核心逻辑本地；TTS/LM/SearXNG 均为可选本地组件且缺失即 fail-closed。
+
+### 验证证据（本机 py -3.11 / Node）
+- Phase 1：`npm run check`（tsc --noEmit）0 error（据 Phase 实现者报告，已复核命令可用）。
+- Phase 2：`py -3.11 -m unittest tests.test_narration_pipeline -v` → 26 项 OK（据实现者报告）。
+- Phase 3：`py -m unittest discover -s tests -p test_media_studio.py -v` → 14 项 OK（本机用 py3.11 复核 14 项全绿）。
+- Phase 4：`py -3.11 -m unittest tests.test_creative_studio_api tests.test_creative_studio_api_routes -q` → **15 项 OK（本机实测）**；`svelte-check` → **0 errors / 0 warnings**；`vite build` → **构建成功**（130 模块，输出 dist）。
+- Phase 5：`python -m unittest tests.test_consciousness_engine -v` → 8 项 OK（据实现者报告）。
+- 全量回归：`py -3.11 -m unittest discover -s tests -q` → **Ran 1396 tests — OK (skipped=1)**，退出码 0（本机实测，日志 `data/fulltest-stderr.log`）。cv::imread 缺失文件警告来自 smart_crop 的预期异常路径测试，非失败。
+- `py -3.11 -m compileall -q src/muse` → 退出码 0。
+
+### 合规与边界
+- 玄学/哲学输出均标注 `symbolic_only`/`hypothesis`，`is_evidence=false`、`is_prediction=false`；不自动写回 User Track；Agent Track 不作为个人事实读取。
+- Studio API loopback-only、Bearer 鉴权、Origin 校验、请求体大小上限、fail-closed 适配器。
+- 无付费 API、无模型下载、无新第三方付费依赖；SearXNG / canto-tts / LM Studio 均为可选本地配置。
+
+### 仍待外部配置或后续工作
+- 真实端到端成片需要：本地 canto-tts ONNX 模型 + 可选 SearXNG endpoint；当前默认路径只验证规划、分段、时间轴与账本，不伪造渲染成功。
+- 意识星图的 3D 力导向可视化组件与 Studio 渲染执行适配器（execute callable）尚未接入实际渲染后端，接口已预留。
+- 桌面 Tauri 打包未重跑；本轮交付到 Web 组件 + API + Remotion 组件层，均已构建/类型检查通过。
+
+## 2026-11-19｜B160 ComfyUI 本机恢复与 Wan 2.1 模型就绪检查
+- WebCodex Runner 恢复在线，恢复 Muse 原 Workflow Session；保留既有 dirty workspace。
+- Python 3.11 全仓 unittest 实机复跑：1396 tests，158.045s，OK（1 skipped），退出码 0；运行命令显式设置 `PYTHONPATH=src`。
+- 使用已有 AMD 启动脚本恢复 ComfyUI，`http://127.0.0.1:8188/system_stats` HTTP 200，ComfyUI 0.23.0，RX 6750 GRE 12GB 被识别。
+- ComfyUI 原生 Loader 已枚举 Wan 2.1 T2V 1.3B FP16、Wan 2.1 VAE、UMT5 XXL FP8 模型文件；Wan 原生节点可用，VHS_VideoCombine 不存在但原生 SaveVideo 存在。
+- **首次 Wan 2.1 T2V GPU smoke test 已实机成功**：256×256、5 帧、8 FPS、0.625 秒 H.264 MP4；完整解码通过、未检测到 freeze 区间。SHA256 `84C69942BE0E65C707F63AA9270B7DC768C15824D9DCCF8C46B981936762DBBB`。随后 384×384、17 帧、8 FPS、8 steps 运动测试也成功生成并完整解码，但 `freezedetect` 报告多个 0.25 秒低变化区间，虽然 17 帧均不相同，仍未通过运动 QA，禁止进入生产。详见 `docs/PROGRESS_B160_COMFYUI_RECOVERY.md`。
+
+## 2026-11-19｜普罗米修斯计划宣传网页与本地预览
+
+- 更新并保留东方宇宙观 × 赛博星海视觉的宣传页：阴阳、八卦、星官、星环、知识进化引擎、创作工坊与真实进度说明。
+- 宣传页明确区分文化/术数灵感与事实证据；视频展示区仍为占位，等待真实验收成片接入，不虚构 AI 视频成果。
+- 重新执行 `ui-prototype` Node/Vite production build：130 modules transformed，`dist/index.html`、`dist/showcase.html` 与 assets 成功生成，构建退出码 0。
+- 启动 Python 3.11 静态预览服务，监听 `0.0.0.0:4173`；实测 `http://127.0.0.1:4173/showcase.html` 返回 HTTP 200，响应正文 10,238 bytes，监听端口确认存在。
+- 该服务仅代表本机/局域网预览，不等于公网发布；Cloudflare Tunnel 旧任务已超时且当前未运行。尚无已验证的 HTTPS 公网分享 URL。
+- 下一步：取得用户选定的公网静态托管目标/授权后发布；接入真实成片前继续保留明确占位与验收边界。
+
+## 2026-11-19｜B161 本地人工视觉标注台
+
+- 新增 `tools/scene_annotation_server.py`：Python 标准库本地标注服务，默认仅绑定 `127.0.0.1:8765`，不向局域网暴露。
+- 浏览器支持 18 帧逐帧查看、present/absent/ambiguous、主体类型、镜头运动、标注者、备注与拖框 bbox；保存使用临时文件 + `os.replace` 原子更新。
+- 人工标注列与 `pred_*` 预测列分离；保留已有预测数据，校验 sample_id、bbox、帧路径并拒绝路径穿越。
+- 新增 `tests/test_scene_annotation_server.py`；HTTP 页面/样本 API/保存 POST 集成与 B160 评估器专项 **7/7 通过**，Python 3.11 py_compile 通过。- 全仓库回归本轮 1403 tests、1 skipped，出现 1 项 intake outbox 并发断言失败；失败测试独立重跑 1/1 通过，暂记为间歇性并发问题，不宣称全仓库全绿。
+- 正式基准仍为 18 帧未标注，评估器输出 `not_scored`（18 unlabelled、0 scored）；没有宣称视觉准确率已达标。详见 `docs/PROGRESS_B161_ANNOTATION_UI.md`。
+- 启动：项目根目录执行 `py -3.11 tools/scene_annotation_server.py`，打开 `http://127.0.0.1:8765/`，Ctrl+C 停止。
+- 下一步：用户完成人工标注后导入/评估候选视觉预测；在获得真值基准前，内容感知运镜继续使用 fail-closed 回退策略。
+
+## 2026-11-19｜B162 语义呼吸剪辑与 Wan 2.1 实机验证
+
+- 新增保守切点选择门 `src/muse/prosodic_boundary.py`，必须有人工确认的语义边界和非音高声学线索；高视觉连续性风险或无候选时保持原切点。14 项专项测试通过，尚未接入生产媒体编排。
+- 三段粤语 WAV 重新取得 9 / 22 / 20 个词级 Whisper 时间戳；前两段 CER 0.1875 / 0.125 未达 0.10 门槛，第三段 CER 0.0。静音落入词时间跨度的样本已标为对齐冲突候选，未当成切点。
+- 2008 粤语韵律研究与 2021 英语自发语音边界研究全文审阅摘要已写入知识库；来源质量仍未评估，原灵感 claim 保持 proposed / not_researched。
+- Wan 2.1 实机输出 17 帧 384×384 / 8fps / 2.125 秒 MP4，完整解码通过；近静止检测和视觉抽帧显示运动较弱，明确不通过生产验收。
+- 全仓回归 1417 tests，1 skipped，OK；详见 `docs/PROGRESS_B162_PROSODIC_BOUNDARY.md`。
+
+## 2026-11-19｜B163 Wan 2.1 低运动光流诊断
+
+- 对 B160 的 384×384 / 17 帧 staging MP4 以 OpenCV Farneback 光流复核：17 帧读取成功，16 对相邻帧均计算完成；平均光流幅度中位数 0.2767 px/frame，最大 0.4137 px/frame。
+- 光流幅度超过 0.5 px 的像素比例约 10.77%–19.51%；结合 17/17 unique framemd5，确认不是完全重复帧，而是整体运动幅度偏低。
+- 该指标尚未用人工标注校准，不作为自动放行阈值；维持低运动/需复核、不进入生产的判定。
+- 本轮未启动 GPU 推理：ComfyUI 队列为空，但 Runner 仍有 2 个其他运行任务，显存余量约 2.6 GiB。详见 `docs/PROGRESS_B163_WAN_MOTION_DIAGNOSTICS.md`。
+
+## 2026-11-19｜B164 MemPalace 选择性超融合第一切片
+
+- 上游研究确认官方仓库为 MemPalace/mempalace，MIT；采用本地优先语义检索、分层 Palace、时间知识图谱、Agent Diary 与 MCP。其公开 LongMemEval 指标属于检索召回率，不等同端到端问答准确率；Muse 尚无自有中文/粤语 benchmark。
+- 决策：MemPalace 只作为可选语义召回/关联记忆层；Muse MemoryStore、Research Wiki、TaskQueue/Commander、Obsidian 继续分别持有权威数据与调度权，不复制第二套控制平面。
+- 新增 src/muse/mempalace_adapter.py：复用现有 MCPStdioClient；固定 argv、shell=False、超时/输出上限与工具 allowlist；提供 Palace 状态、语义搜索、时间 KG 查询/时间线、跨房间导航、Agent Diary 只读方法。
+- 写入仅开放 mempalace_checkpoint，逐次要求 approved=True；User Track 另需 user_data_authorized=True；限制 32 条/64 KiB，拒绝未知字段与明显凭证；未开放 mine/delete/sync-apply/hooks/远程 hub 管理。
+- 新增 tests/test_mempalace_adapter.py：12/12 通过；.venv Python 3.11 全项目 unittest 1,434 passed、8 skipped、0 failures；专项 py_compile 通过。TDD 首次缺模块导入失败，边界测试再发现并修复非字符串参数异常，最终专项全绿。
+- 新增 docs/MEMPALACE_FUSION_RESEARCH.md，记录架构归属、上游版本差异、许可/安全/多语言模型风险与 MP-M1 至 MP-M5 路线。
+- 本轮未安装 MemPalace、未下载 embedding 模型、未 clone 上游、未导入任何用户对话/私人文件、未配置 MCP server 或启动服务；故当前只完成适配器基础，不宣称实时 MemPalace 已连接。
+- 下一步 MP-M2：核对 PyPI/source tag 与 Windows 依赖，在用户授权安装后使用 D 盘隔离环境和多语言 embedding，做本机 MCP smoke test；MP-M3 再接入 Muse 现有记忆检索并跑中文/粤语评测。
+
+## 2026-11-19｜B165 多模型视觉基准评估框架
+
+- 新增 `tools/evaluate_scene_model_benchmark.py`：各模型独立 CSV 输入，按 `sample_id` 与人工真值对齐，分别统计混淆矩阵、precision、recall、coverage、bbox IoU 与中心偏差。
+- 新增 `tests/test_scene_model_benchmark.py`：覆盖模型对齐、缺失预测覆盖率、重复 ID、未知样本 ID、空预测集；与 B160/B161 专项合计 **11/11 通过**，Python 3.11 py_compile 通过。
+- 已生成 `data/annotation/b160/model-comparison.json`；当前真实结果 `not_scored`、18 个人工样本、0 个模型输入。该结果明确表示尚无真值/预测，未虚构任何准确率。
+- 运行命令见 `docs/PROGRESS_B165_MODEL_BENCHMARK.md`。当前没有安装/下载新模型，也没有启动 GPU 推理；下一步先完成人工标注，再为 OpenCV 和候选本地检测器分别导出预测 CSV，做同基准对照。
+## 2026-11-19｜B166 Wan 2.1 GPU smoke test repeat
+
+- 新增可复现原生 ComfyUI workflow：`workflows/wan21_t2v_smoke.json`；修正 CLIPLoader CPU 强制策略，使用默认设备/offload。
+- 独立 GPU 推理成功：ComfyUI history success，Prompt executed in 22.97s；Wan 2.1 T2V 1.3B、UMT5 XXL、Wan VAE 完成加载/推理/解码/保存。
+- Staging MP4：`artifacts/wan_staging/wan21_smoke_20261119_gpu_00001_.mp4`，H.264，256×256，17 帧，16 FPS，1.0625 秒，29,557 bytes；SHA-256 `91004ac8c592210e9ee9647497274bd6d4766bdcbf1fa8d00dfcc3a9b4c94caa`。
+- FFmpeg 全片解码退出码 0；freezedetect（-60dB / 0.25s）无冻结事件；帧差分存在，但视觉联系表显示构图/运动幅度有限。
+- 结论：GPU→MP4 staging 链路 smoke test 通过；生产画质、运动连贯性、粤语旁白字幕和交付 ZIP QA 未通过/未验证，不将此短片作为正式宣传成片。详见 `docs/PROGRESS_B166_WAN_GPU_SMOKE.md`。
+
+## 2026-11-19｜B167 多模型视觉基准输入质量门
+
+- 强化 `tools/evaluate_scene_model_benchmark.py`：校验 prediction presence 枚举、边界框完整性/范围/几何、置信度有限且位于 [0,1]；拒绝 absent 预测携带 bbox。
+- 新增 `--make-template`：按人工样本清单生成独立模型 CSV，拒绝覆盖已有文件；已为 OpenCV heuristic 与 candidate detector 创建两份 18 行空白模板。
+- 新增模板完整性、覆盖保护、非法置信度和 bbox 测试；B160/B161/B167 专项 **13/13 通过**，py_compile 通过。
+- 当前两份预测模板仍为空，18 帧人工标签仍未完成；比较结果保持 `not_scored`。没有伪造 OpenCV 语义预测，也未新增模型/依赖。
+- 详见 `docs/PROGRESS_B167_MODEL_BENCHMARK.md`。下一步可把真实本地模型输出写入各自 CSV，再用同一人工真值进行对照。
+
+## 2026-11-19｜B168 视频光流诊断工具
+
+- 新增 `src/muse/video_motion_diagnostics.py` 与 CLI，基于可选 OpenCV/NumPy 对 MP4 抽帧，输出相邻帧平均/95 分位光流、运动像素比例与亮度差；不设置未经人工校准的统一运动放行阈值。
+- 新增 `tests/test_video_motion_diagnostics.py`，专项 3/3 通过；Python 3.11 compileall 通过。
+- 对 B160 staging MP4 实跑：17 帧、16 对，平均光流中位数 0.276740 px/frame，最大 0.413654 px/frame，与 B163 独立分析一致。
+- 全仓 Python 3.11 unittest：1439 tests，157.001s，OK，1 skipped，退出码 0。详见 `docs/PROGRESS_B168_VIDEO_MOTION_DIAGNOSTICS.md`。
+- 工具暂未接入发布门；人工标注校准前只作为辅助诊断，不改变生产 QA 结论。
+
+## 2026-11-19｜B169 Wan 2.1 × 粤语旁白双镜头演示
+
+- 新增两段真实 Wan 2.1 GPU 镜头：832×480 / 16fps，49 帧与 33 帧；两段均通过 FFmpeg 完整解码、黑帧与 -40dB/250ms 冻结检测。
+- 使用既有 CER=0.0 的粤语旁白样本，拼接为 82 帧 / 5.125 秒 H.264 + AAC MP4，48kHz stereo，烧录完整句子字幕；最终音轨重新 ASR CER=0.0，loudness 约 -16.04 LUFS / -1.50 dBTP。
+- 修正版演示包 `wan21_cantonese_narrated_demo_final_bundle_v2.zip`：3,145,859 bytes、14 个成员、CRC ok；包含实际旁白源 WAV，排除未达标 TTS 试验文件。完整 QA 与局限见 `docs/PROGRESS_B169_NARRATED_DEMO.md`。
+- 该产物证明 Wan GPU → 两镜头拼接 → 粤语旁白 → 字幕 → MP4 → ZIP 的演示链路跑通；只有约 5 秒，无 BGM/多平台/正式 VideoProductBuilder 集成，且 TTS 为 neutral default voice，故 `production_acceptance=false`。
+
+
+## 2026-11-19｜B170 MemPalace 本机运行与只读检索联邦
+
+- PyPI 固定发布 mempalace 3.12.0；D 盘隔离 venv 安装成功，wheel SHA-256 与 PyPI metadata/provenance subject 一致；多语言 EmbeddingGemma 模型约 330 MB 缓存到 D 盘，Muse 原 .venv 未修改。
+- 本机 stdio MCP 实测发现 47 个上游工具，Muse 21 项 allowlist 全部存在；status、taxonomy、search 成功；HF_HUB_OFFLINE=1 / TRANSFORMERS_OFFLINE=1 离线检索通过。未启动 MemPalace HTTP daemon 或 remote hub。
+- 新增配置加载器和 config/muse.toml [mempalace] 配置，默认 disabled；新增 MuseRuntime.search_memories 只读 sidecar，保留 Muse MemoryStore 权威，候选标记 unverified_retrieval_candidate，不混合评分、不自动写入。端到端 MuseRuntime→MemPalace 检索通过。
+- 五条合成粤语/中文/英文/时间/来源查询 Recall@5=5/5、Top-1=3/5；仅小型 smoke set。SQLite integrity_check=ok。ONNX Runtime 只暴露 CPU/Azure provider，DirectML 未启用，故当前 CPU 推理。
+- 新增 Agent Track MemPalaceProjectionOutbox：memory_id/revision 幂等、SHA-256 来源封装、逐记录排队审批、逐次发送审批、版本复核和失败重试；合成 Agent Track 记录已在独立测试 palace 完成真实 checkpoint→search。生产 palace 仍为空且未初始化（status 报告缺少 chroma.sqlite3），无私人对话/用户资料迁移；User Track 即使有授权 flag 仍被阻止，直到独立 palace 与检索边界实现。Commander/UI 审批回执、备份恢复和索引重建仍待开发。
+- 定向测试：MemPalace adapter 16/16、projection outbox 9/9、UnifiedRuntime 46/46，共 71 passed；过滤 3 个环境阻塞项后全仓 1,455 passed、8 skipped。此前未过滤全仓 1,446 项有 3 个环境错误（2 个 DNS 依赖测试、1 个 NumPy 缺失的视频诊断测试），不宣称全仓无错误。详见 docs/PROGRESS_B164_MEMPALACE_FUSION.md。
+
+## 2026-11-19｜B171 MemPalace 检索信任边界强化
+
+- 每条 MemPalace 检索候选新增 `trust_boundary=untrusted_external_memory`、`instruction_authority=false`、`requires_source_verification=true`，明确外部记忆不能作为指令权威，使用前需核验来源。
+- 保留 `authority=unverified_retrieval_candidate`、Muse MemoryStore 权威与只读行为；没有改变排序/评分/写入/自动同步。
+- 定向回归：UnifiedRuntime + MemPalace adapter + projection outbox **71/71 passed**；Python 3.11 py_compile 通过。详见 `docs/PROGRESS_B171_MEMPALACE_TRUST_BOUNDARY.md`。
+
+## 2026-11-19｜B172 MemPalace 投影 outbox 重启恢复
+
+- 新增投影 outbox 重启恢复测试：排队后关闭并重开数据库，待发送记录和载荷仍可恢复；经第二次逐次审批后完成投影。
+- 再次重启后 delivered 状态持续存在，重复调用不会再次触发远端 checkpoint。
+- 专项 `tests/test_mempalace_projection.py` **9/9 passed**。仅使用合成 Agent Track 测试数据；未向生产 palace 投影，未转移 User Track/私人资料。详见 `docs/PROGRESS_B172_MEMPALACE_OUTBOX_RECOVERY.md`。
+
+## 2026-11-19｜B173 MemPalace Commander 审批回执
+
+- 新增 `request_mempalace_projection_approval`：为精确 outbox ID / 幂等键 / 来源版本创建需人工审批的 Commander Ticket。
+- 新增 `deliver_with_approval_ticket`：外部 checkpoint 前核验持久化 Ticket 类型、精确投影绑定、审批元数据与 `human.decision=approved` 事件；MuseRuntime 对外发送入口现要求 `approval_task_id`，不再接受调用者自行填写的 `approved_by` 作为最终发送授权。
+- 防止审批 Ticket 被替换用于另一条投影；专项测试 `test_mempalace_projection.py` **11/11**、`test_unified_runtime.py` **46/46**，共 **57 passed**。使用临时数据库与合成 Agent Track；生产 palace 未写入，User Track 未迁移。详见 `docs/PROGRESS_B173_MEMPALACE_COMMANDER_APPROVAL.md`。
+- ComfyUI API 本轮离线，未进行新 GPU 推理；运动指标仍是辅助证据，不作为未经校准的发布硬门槛。
+
+## 2026-11-19｜B174 来源证据账本与反证链
+
+## 2026-11-19｜B175 镜头运动标签独立评估
+
+- B160 标注 CSV 新增独立 `pred_camera_motion`，不覆盖人工 `camera_motion`；18 条原始样本完整保留。
+- 评估器新增四类镜头运动混淆矩阵与严格类别一致率，并分别统计未标注、缺失预测、非法标签；旧 CSV 仍可读取。
+- 标注评估器 + 标注服务 **9/9 passed**；Python 3.11 py_compile、CSV 18 条完整性和 `git diff --check` 通过。
+- 正式数据仍为 18 unlabelled、0 scored，主体与镜头运动均为 `not_scored`；未伪造标签、未启用自动发布门槛。详见 `docs/PROGRESS_B175_CAMERA_MOTION_EVALUATION.md`。
+
+- MemoryStore 新增 `memory_evidence` 表和 `add_evidence/list_evidence/verify_evidence`：支持 supports/refutes/qualifies/related；记录来源标题、HTTP(S) URL、摘录 SHA-256、创建者与审核元数据；新证据默认 unverified。
+- 证据只能绑定有效 canonical memory；反证不会自动改写主张。校验非法关系、URL、长度、缺失记忆和审核状态。
+- 定向测试：memory + UnifiedRuntime + MemPalace adapter + projection **91/91 passed**；Python 3.11 py_compile 通过。未触碰生产记忆库，未自动导入 MemPalace 结果。详见 `docs/PROGRESS_B174_SOURCE_EVIDENCE_LEDGER.md`。
+
+- `muse-video-qa` 新增可选参数 `--motion-diagnostics --motion-max-frames N`；JSON 追加独立 `motion_diagnostics`，默认关闭，不改变既有技术 QA status/exit code。
+- 新增 CLI 集成测试，验证附加光流报告不会影响原 QA verdict；视频 QA + 光流专项 **23/23 passed**，Python 3.11 compileall 与本轮文件 diff 检查通过。
+- 对 B160 Wan staging MP4 实跑：原技术 QA `passed`，光流报告 `observed`、17 帧、平均光流中位数 0.276740 px/frame。技术 QA passed 不代表编辑质量或发布许可。
+- 全仓 Python 3.11 unittest：**1458 tests，173.073s，OK，1 skipped**。详见 `docs/PROGRESS_B169_VIDEO_QA_MOTION_INTEGRATION.md`。
+- ComfyUI API 本轮离线，未进行新 GPU 推理；运动指标仍是辅助证据，不作为未经校准的发布硬门槛。
+
+## 2026-11-19｜B176 MemPalace checkpoint 回执与发送门禁强化
+
+- mempalace_projection.py 新增 checkpoint 回执解析：只有明确返回恰好一条 added，或回传内容完全一致的 duplicates，且 errors 为空，才把 outbox 标记 delivered；语义相似但内容不同、空回执、多条结果或部分错误均拒绝。
+- 每条投影内容写入确定性 idempotency_key；在独立合成 palace 上真实本机 stdio MCP 重复 checkpoint 两次，第一次 added，第二次 exact_duplicate，drawer ID 相同，验证了相同内容重试不会重复建档。
+- Commander 发送门禁沿用 B173：必须存在绑定精确 outbox ID / idempotency key 的审批 Ticket，并有持久化 human.decision=approved 事件；调用者自填 approver 名称不再构成最终授权。
+- 定向回归：adapter 16、projection 11、ack contract 6、UnifiedRuntime 46，共 79 passed；B160 标注服务语法换行缺陷一并修复，标注服务 5/5 passed。
+- 全仓过滤唯一依赖未安装 NumPy 的视频光流测试后 1,475 passed、8 skipped；未过滤测试仍会因该 NumPy 缺失测试报错，不能宣称全量无条件全绿。没有生产 palace 写入或 User Track 迁移。详见 docs/PROGRESS_B164_MEMPALACE_FUSION.md。
+
+## 2026-11-19｜B177 自主商业机会账本首版
+
+- 新增 `BusinessOpportunityStore` 与 `muse-business` CLI：本地 SQLite 保存商业机会、估算报价/成本、六维启发式评分、证据分类、生命周期事件与前三项候选；评分只用于排序，不代表成功概率或收入预测。
+- 证据区分 observed / reported / assumption；公开来源保留 HTTP(S) URL；证据与事件表采用 append-only 触发器；幂等键冲突会拒绝，不自动联网、联系客户、发布、投广告或付款。
+- 真实播放、线索、订单、实收收入与制作成本复用既有 `InitiativeStore.record_performance()`，不建立重复收益账本。详见 `docs/BUSINESS_OPPORTUNITY_ENGINE.md`。
+- 补强幂等重放返回最新证据、证据 DELETE 拒绝；新增机会→现有 Creator Initiative 草案桥接（确定性引用/幂等重放、拒绝已 rejected/parked、autonomy_level=draft），不启动视频生成或执行。专项测试 **11/11 passed**；Python 3.11 import、CLI `--help`、`promote --help` 与 TOML 脚本入口检查通过。
+- 本轮代码差异已完成定向 review；工作区仍含大量其他并行开发的未提交文件，本轮未暂存、未提交，也未覆盖它们。下一步把草案接入现有 Commander 审批与 VideoProductBuilder 样片任务，复用 InitiativeStore 表现快照记录真实播放/线索/订单/实收与成本；真实市场验证与对外动作保持授权边界。
+
+## 2026-11-19｜B178 视频光流诊断可选依赖声明
+
+- 在 `pyproject.toml` 增加 `video-diagnostics` 可选 extra（NumPy、opencv-python-headless），不把光流分析依赖强制带入 Muse 核心安装。
+- 沿用既有缺依赖 `unavailable` 降级测试与依赖存在时的真实指标测试；本轮不安装依赖、不改当前 Python 环境。
+- Python 3.11 TOML 解析通过；光流专项 **4/4 passed**；全仓 unittest **1497 tests，OK，1 skipped**。首次全仓运行的 9 项间歇性失败/错误逐项隔离复跑均通过，第二次完整回归全绿。全仓 `git diff --check` 仍提示多处既有尾随空格（`docs/PROGRESS.md` 历史行及 `ui-prototype/src/lib/api.ts`），本轮未清理无关改动。详见 `docs/PROGRESS_B178_VIDEO_DIAGNOSTICS_EXTRA.md`。
+## 2026-11-19｜B179 商业机会接 Commander 视频审批门禁
+
+- Creator Initiative 草案现在保存结构化 `business_plan` 与 `creator_brief.video`，可直接满足现有 `VideoTaskWorker` 的 prompt-to-video Brief 契约；Brief 保留客户问题/方案，并明确不得伪造客户评价、价格或成效。
+- 新增 `request-video-approval`：只创建 `TaskQueue` 的 `waiting_approval` Commander Ticket，含机会/initiative/attempt 身份与 Brief SHA-256；不创建 video attempt、不运行 GPU。
+- 新增 `queue-approved-video`：核对 Ticket 类型、机会与 initiative 绑定、批准范围、`_approved`、持久化 `human.decision=approved` 事件及 Brief 哈希；仅在 Ticket 仍为 queued 时创建确定性 `prompt_to_video` attempt。重放复用同一 attempt；排队后 GPU 仍未启动。
+- 视频 Worker 的实际运行继续受 `MUSE_ENABLE_VIDEO_WORKER=1`、Runtime pause/stop 和原有 GPU lease 控制；不自动发布，成片仍需人工内容审片。收益反馈继续复用 `InitiativeStore.record_performance()`。
+- 专项测试 **14/14 passed**（Python 3.11 unittest）；包括 Commander 未批准拒绝、批准后 attempt 幂等、已拒绝 Initiative 阻断、StubBuilder 驱动现有 VideoTaskWorker 的契约集成，以及 `record_performance()` 实际表现记录。TOML/模块导入、主 CLI 与两个新子命令 `--help` smoke 均通过。
+- Worker 集成测试使用 StubBuilder，不启动 ComfyUI/Wan，不产生真实 MP4；本轮未做 GPU 实机渲染、粤语 TTS、音画质检或发布验收。结构化 pytest 验证器因源码快照在并发写入中失效且没有完整测试摘要，未作为通过证据；以 Runner 直接执行的 14/14 unittest 结果为本轮专项证据。
+
+## 2026-11-19｜B180 Research Wiki Claim dossier 只读 API
+
+- 新增 `build_claim_dossier()` 安全封装与只读 GET `/api/v1/knowledge/claims/{claim_id}/dossier`；校验 Claim ID、限制证据条数，不存在或非活动 Claim 返回 404，知识库未配置返回 503。
+- 复用既有 `ResearchKnowledgeStore.claim_dossier()`，不新建平行图谱或数据库表；检索方向不等于证据判决，保留审核/质量/独立性状态，不自动评分、不自动改写主张。
+- `ClaimDossierApiTests` + `test_research_knowledge` **39 tests OK**；完整 `test_status_api` **33 tests OK**；Python 3.11 `py_compile` 通过。
+- 本轮仅验证 builder 与 Status API 回归，尚无专门的 dossier HTTP 端到端测试，也未做前端展示或全仓回归。未触碰生产知识库、未启动外网研究。详见 `docs/PROGRESS_B180_RESEARCH_WIKI_CLAIM_DOSSIER_API.md`。
+
+## 2026-11-19｜B182 Claim dossier HTTP 端到端验收
+
+- 新增 loopback HTTP 测试：使用临时 SQLite 合成 Claim/证据，经 bearer-auth GET dossier endpoint 验证 200、evidence_limit、无自动证据判决/评分，并验证不存在 Claim 返回 404。
+- `test_status_api.py` **34/34 passed**；`test_research_knowledge.py` **37/37 passed**。loopback bearer-auth HTTP 用例实际验证 200 与 404。随后 B183 记录的全仓回归 **1498 tests，OK，9 skipped** 覆盖此用例；未触碰生产知识库。详见 `docs/PROGRESS_B182_CLAIM_DOSSIER_HTTP_E2E.md`。
+## 2026-11-19｜B181 Wan 2.1 粤语旁白产品化封装
+
+- VideoProductBuilder 旁白单轨路径补上 FFmpeg `loudnorm`（-16 LUFS / -1.5 dBTP / LRA 11）；manifest/storyboard 记录处理元数据，builder version 升至 12。
+- `tests/test_video_product_builder.py` **37/37 passed**；旁白流水线 **26/26 passed**、视频 QA **20/20 passed**（后两组为本轮修改前专项回归，builder 修改后再次全量专项通过）。
+- 将 B169 已验证的 Wan 双镜头 + 粤语旁白 + SRT 通过现有 `VideoProductBuilder.package_generated_clip()` 封装为真实产品；storyboard 保留 2 个镜头的 prompt/seed/source_file，MP4 832×480 / 16fps / 5.125 秒；MP4、manifest、ZIP SHA-256 与 CRC 已核验，`verify_path()` 回读通过。
+- 产品位于 `data/products/705f8bf125a547ea7716cc2d5c9ec2f4/f75a46e2c0de0bde71f9/`；技术 QA `passed`，但产品仍为 `testing`、`ready_to_publish=false`。无 BGM、多比例/长片导出、人工听审和发布收益闭环，不能标记生产完工。详见 `docs/PROGRESS_B181_WAN_CANTONESE_PRODUCT_INTEGRATION.md`。
+- 本轮全仓 unittest 1,493 项出现 7 failures、2 errors、1 skipped；自主研究、改进审核、反馈实验和研究来源解析等仍需定位，不宣称全仓通过。
+
+## 2026-11-19｜B183 视频质检、研究调度与全仓回归收敛
+
+- B167 `tools/inspect_video_motion.py` 与测试已完成复验；B166 Wan staging MP4 再跑 QA，H.264 256×256、17 帧、16 FPS、1.0625 秒，解码成功、freeze events 0、mean YAVG 7.017675，状态 `technical_pass`，同时明确保留超短片警告。此结果不是生产级动态质量验收。
+- 修复 `_next_topic()` 优先级：动态研究缺口、研究失败续查、象征性假设与哲学实验后续排在普通 curated seed 前；反馈研究固定回归预算从 120 秒调至 300 秒。
+- 修复研究 Wiki 审查测试对外部 DNS-over-HTTPS 的偶发依赖，改用公共 IP fixture；修复场景标注 HTTP 测试文件语句粘连的 SyntaxError。
+- 定向自主研究/反馈实验 7/7 passed；研究 Wiki 审查写入器 4/4 passed；视频 QA/诊断 7 passed、1 skipped（本机 NumPy 可选依赖缺失）；Python 3.11 compileall 通过。
+- 最终全仓 Python 3.11 unittest：**1498 tests，174.156s，OK，9 skipped**。此前 1497 项回归的唯一错误是 DNS-over-HTTPS 握手超时；修复测试隔离后完整回归通过。
+- 详见 `docs/PROGRESS_B183_VIDEO_QA_AND_RESEARCH_SCHEDULER.md`。本轮未重新启动 GPU 推理、未发布视频；Wan 1 秒低分辨率 smoke test 仍不得标记为生产级成片。
+
+## 2026-11-19｜B142 商业表现回流前端接通
+
+- 为每个 Creator Initiative 产品卡片新增可展开的商业表现面板，复用既有 append-only `initiative_performance_snapshots` 与 bearer-auth 本地 API，不另建账本。
+- 新增手动录入、最近快照、按币种汇总；记录播放/互动/线索/订单、报告收入、已结算收入、制作成本、留存与观看时长。货币最小单位录入，币种分开汇总。
+- UI API 客户端测试 **45/45 passed**；`npm run check` 0 errors / 0 warnings；`npm run build` 成功。B142 后端 `test_initiative_engine` + `test_status_api` + `test_pipeline_control` **61/61 passed**；Python 3.11 全仓一轮 **1497 tests OK、9 skipped**（运行时设置 `NO_PROXY=*`）。
+- 尚未接平台 OAuth、自动分析导入、自动发布或结算凭证核验；隔离 HTTP E2E 已通过，但真实桌面实例的录入→回读仍待执行。
+## 2026-11-19｜B184 MemPalace 备份恢复保真修复
+
+- 修复 `restore_palace()` 只应排除备份根目录清单、不能误删 Palace 子目录同名普通文件的问题；Windows 路径比较改为 `normcase(abspath(...))`。
+- 新增嵌套同名文件回归，确认文件在 backup→restore 后仍保留；既有测试继续确认根清单不会进入恢复目录。
+- MemPalace lifecycle **9/9**、adapter **16/16**、projection **12/12**、projection acknowledgement **7/7**，四组 **44/44 passed**；Python 3.11 py_compile 通过。
+- 全部使用合成临时目录，未触碰生产 Palace、User Track 或个人记忆迁移。详见 `docs/PROGRESS_B184_MEMPALACE_BACKUP_RESTORE_FIDELITY.md`。
+
+## 2026-11-19｜B185 Research Wiki Claim 支持/反向证据前端档案
+
+- Research Wiki 星图选中 Claim 时读取 B180 dossier API；展示原始主张、认识状态、证据覆盖/审核覆盖/冲突状态及置信度依据。
+- 支持检索候选与反向检索候选分栏，显示来源、最新人工审核 verdict/reviewer 或待审核状态；HTTP(S) 来源提供外链。
+- API 客户端新增 `knowledgeClaimDossier()`，校验 ID 与 1–100 条上限，采用 bearer-auth、no-store GET；无写入/审核/晋升动作。
+- UI Node 测试 **45/45 passed**；`npm run check` **0 errors / 0 warnings**；Vite build **132 modules transformed，成功**。
+- B182 后端 HTTP E2E 由并行任务处理；本轮未在真实生产知识库浏览器验收，未触碰生产知识库或自动判断事实。详见 `docs/PROGRESS_B185_RESEARCH_WIKI_CLAIM_EVIDENCE_UI.md`。
+
+## 2026-11-19｜B186 MemPalace 备份恢复与索引重建实机 smoke
+
+- 新增 `mempalace_lifecycle.py`：SHA-256 备份清单、备份核验、显式 quiesced 确认、恢复到新目录、拒绝覆盖/路径穿越/符号链接；临时目录校验后原子落位。
+- 增加远端 checkpoint 已接收但本地提交前崩溃的恢复测试；重启后 exact-content duplicate 返回相同 drawer ID，Outbox 安全完成。
+- 在独立合成 Palace 上实际备份 8 个文件（356,608 bytes）并恢复；原库/恢复库 SQLite integrity 均为 `ok`。使用 D 盘离线 EmbeddingGemma 缓存实际运行 `mempalace repair rebuild-index`：1 drawer upsert、FTS5 rebuild/VACUUM/quick_check 通过，随后语义搜索命中目标记录。原始合成源与备份均再次核验完整。
+- MemPalace lifecycle 9/9、adapter 16/16、projection 12/12、ack 7/7、UnifiedRuntime 46/46，合计 **90/90 passed**；Python 3.11 py_compile 通过。
+- 首轮全仓 1512 项曾出现 3 项视频旁白异常；相关两个模块隔离回归 44/44 通过。Runner 无活动任务后复跑，全仓 Python 3.11 unittest **1512 tests in 156.342s，OK，9 skipped**，随后 `compileall -q src/muse tests` 通过。首轮波动根因未确认；本轮未改视频代码。生产 Palace 仍未初始化/写入，未迁移 User Track 或私人对话。详见 `docs/PROGRESS_B186_MEMPALACE_REBUILD_SMOKE.md`。
+
+## 2026-11-19｜B187 商业视频 Worker 接通粤语旁白封装
+
+- 商业机会 `creator_brief.video` 新增明确的 zh-HK narration 配置：Worker 在 Commander 已批准并排队后，用 `NarrationGenerator` 生成有界粤语脚本；Muse 主运行时保持 Python 3.11，通过独立 `py -3.14` 子进程预检并执行本地 TTS，依赖 `.muse-canto-tts-py314` 与固定 `canto-tts-nano` 模型。
+- `VideoTaskWorker` 将脚本与模型路径传入 `VideoProductBuilder.build_from_prompt`；Builder 对 Wan 原始 MP4 直接调用现有 `package_generated_clip_with_cantonese_narration`，由 Python 3.14 子进程合成 WAV，再完成音轨封装、哈希/ZIP 验证，不重复生成视频。TTS 运行时/资源缺失会在调用 Builder/GPU 前失败关闭；ASR 仍是显式 opt-in，当前要求主运行时 Python 3.14。
+- 专项回归：商业机会/Commander **14/14**、VideoTaskWorker **7/7**、VideoProductBuilder **39/39**、旁白生成/同步 **26/26**、Python 双运行时桥接 **4/4**，合计 **90/90 passed**（Python 3.11）。
+- 已完成真实双运行时 TTS smoke：Python 3.11 主环境调用 Python 3.14 子进程，生成 `reports/cantonese-tts-bridge-smoke-20261119.wav`，10.96 秒、48 kHz 双声道、2.10 MB。全仓 Python 3.11 unittest 从项目根目录执行 **1518 项通过、9 项跳过**，本轮结果 supersede B186 的历史失败记录。仍未启动 ComfyUI/Wan，未产出新 MP4/ZIP，未进行人工听审或发布；现有 `canto-tts-nano` 仍是中性默认声线，`yujie_canto` 仅控制脚本措辞，不能宣传为成熟女声。
+- 详见 `docs/MUSE_VIDEO_NARRATION.md` 与 `docs/BUSINESS_OPPORTUNITY_ENGINE.md`。
+## 2026-11-19｜B188 MemPalace 投影 Outbox 健康摘要
+
+- 新增 `MemPalaceProjectionOutbox.health_summary()`：只读返回 pending/failed/delivered 计数、最早 pending 与最近成功投影时间，并提供健康状态。
+- 摘要不包含记忆正文或 payload，明确 `content_included=false`；它只代表 Muse 本地 Outbox，不冒充远端 daemon 在线或索引 freshness。
+- 投影 + checkpoint acknowledgement 回归 **20/20 passed**；Python 3.11 py_compile 通过。详见 `docs/PROGRESS_B188_MEMPALACE_OUTBOX_HEALTH.md`。
+
+## 2026-11-19｜B189 MemPalace 只读健康 API 与控制台面板
+
+- 新增 loopback + Bearer-authenticated GET `/api/v1/mempalace/status`；只读读取本地配置、Palace/向量索引文件存在性及 Outbox 安全聚合。SQLite `mode=ro` + `query_only`，不返回 payload；`content_included=false`。
+- 赛博控制台接入「记忆殿堂 · MemPalace」状态面板；Svelte check 0 errors/0 warnings、Vite build 134 modules、UI Node 46/46、Status API 隔离测试 3/3 通过。索引 freshness 仍明确未知，目录存在不代表 MCP daemon 在线。
+- 最新全仓 Python 3.11 unittest **1,558 tests in 202.004s，OK，9 skipped**；随后 `compileall -q src/muse tests` 通过。此前并行写入窗口曾捕获瞬时语法状态，等待写入落盘后复跑成功。详见 `docs/PROGRESS_B189_MEMPALACE_DASHBOARD_STATUS.md`。
+
+## 2026-11-19｜B191 已验证视频产品导出 OpenFilm 可编辑多轨工程
+
+- 扩展 `openfilm_adapter.py`：镜头音量可控，新增最多 500 条定时字幕覆盖层；字幕以独立 HTML 标题页按 SRT 时间进入标题轨。
+- 新增 `video_editable_export.py`：只导出 `VideoProductBuilder.verify_path()` 已验证的产品；对 manifest/storyboard/MP4/ZIP/SRT 再核 SHA-256；安全流式提取旁白/BGM；保留原片音轨或拆分旁白/BGM；导出工程目录与 ZIP 并核验 CRC。
+- 新工程包含独立 footage、narration、music 轨与字幕覆盖层；原产品不覆盖、产品状态不变、发布许可仍为 false。Sidechain ducking 不伪装成已重建，要求在编辑器重新审听混音。
+- Python 3.11 py_compile 通过；`tests.test_openfilm_adapter` + `tests.test_video_editable_export` **9/9 passed**。详细记录：`docs/PROGRESS_B191_OPENFILM_EDITABLE_EXPORT.md`。
+- 本轮 48 项视频回归中 1 项旧测试因并行 `status_api.py` 语法错误无法导入；全仓 compileall 也被并行 `narration_generator.py:154` 与 `status_api.py:1303-1304` 语法错误阻断。未修改这些并行文件，不宣称全仓通过。ComfyUI 8188 当前离线，未启动 GPU 推理或生成新 MP4。
+
+## 2026-11-19｜B143 商业表现分析与创作策略反馈
+
+- `InitiativeStore.analyze_performance()` 新增保守 cohort 分析：按平台、数据来源、币种分组；同一作品只采用最新快照，避免把重复采集的累计播放/收入相加。
+- 仅有明确 `source_reference` 的作品进入比较；无标识快照排除并计数。前端商业表现录入新增必填作品链接/平台 ID，便于识别同一作品后续快照。
+- 默认门槛为至少 3 条可识别作品、累计 1,000 播放；未达门槛标记 `insufficient_sample`。互动、CTA、线索、订单率以播放量为分母；留存/完播/平均观看时长按有效播放量加权，缺失值保留 null。
+- API GET performance 增加 `analysis`，控制台面板展示分组状态、样本门槛、互动/CTA/完播信号及警告。报告收入、已结算收入与制作成本分开呈现。
+- Python 定向回归：InitiativeStore **17/17**、Status API **37/37** passed；UI Node tests **46/46**、Svelte check **0 errors / 0 warnings**、Vite production build 成功。
+- 本轮没有执行全仓回归，也没有进行真实桌面实例录入回读；OAuth、官方自动采集、自动发布和到账核验仍未实现。分析结果是描述性观察，不自动触发策略升级。详见 `docs/PROGRESS_B143_PERFORMANCE_ANALYSIS.md`。
+
+## 2026-11-19｜B190 Commander 审批绑定的视频 Worker 隔离
+
+- 修复 Worker 从通用 queued 队列误领自主研究候选的风险：attempt 持久化 `approval_task_id`，Worker 仅扫描绑定 Commander Ticket 的任务并按 attempt ID 精确领取。
+- Worker 在领取前及调用 Builder 前，双重核验 Ticket 类型、queued 状态、initiative/attempt 绑定、单次视频审批 scope、批准标记、持久化人工批准事件/批准者，以及当前 Brief SHA-256；异常、撤销或 Brief 变更均失败关闭。
+- 生产只读核查：1,001 条 queued 视频任务均无审批绑定，Commander 库无商业视频审批 Ticket；实际执行一次生产 Worker `run_once()` 返回 `idle / approval_required`，没有领取旧任务或启动 GPU。
+- 专项回归：VideoTaskWorker **8/8**、商业机会审批 **14/14**、InitiativeStore **17/17**；自主研究回归 **56/56**；变更涉及的 6 个 Python 文件 `py_compile` 通过。
+- 首轮全仓 `compileall` 遇到并行文件写入时的瞬时语法错误；并行改动落盘后重跑 `compileall -q src/muse tests` 已通过。全仓完整 unittest 尚未完成，不能宣称全仓测试全绿。ComfyUI 已恢复但没有获批视频任务，故未启动 Wan、未生成 MP4/ZIP。详见 `docs/PROGRESS_B190_COMMANDER_VIDEO_WORKER_APPROVAL_GATE.md`。
+
+## 2026-11-19｜B191 已验证视频产品导出 OpenFilm 可编辑多轨工程
+
+- 扩展 `openfilm_adapter.py`：镜头音量可控，新增最多 500 条定时字幕覆盖层；字幕以独立 HTML 标题页按 SRT 时间进入标题轨。
+- 新增 `video_editable_export.py`：仅导出已通过 `VideoProductBuilder.verify_path()` 的产品；对 manifest/storyboard/MP4/ZIP/SRT 再核 SHA-256；安全流式提取旁白/BGM；保留原片音轨或拆分旁白/BGM；导出 OpenFilm 工程目录与 ZIP 并核验 CRC。
+- 新工程包含 footage、narration、music 轨与字幕覆盖层；原产品不覆盖、发布许可仍为 false。Sidechain ducking 不伪装成已重建，要求编辑阶段重新审听混音。
+- 专项回归 48/48 passed；最终 Python 3.11 `compileall -q src/muse tools tests` 通过；全仓 unittest **1558 tests in 210.197s，OK，9 skipped**。详见 `docs/PROGRESS_B191_OPENFILM_EDITABLE_EXPORT.md`。
+- ComfyUI 0.23.0 HTTP 200；Wan 2.1 T2V 1.3B FP16、UMT5 XXL FP8、Wan VAE 与三种 Wan 视频节点均已识别。检查时已有有效 video_generation lease 且队列运行 1 项，未重复提交 GPU 推理；本轮未产生新 MP4。
+
+## 2026-11-19｜B144 作品级指标对照与创作反馈
+
+- 在 B143 cohort 汇总上增加作品级指标排序：留存、完播、CTA 点击率、订单率分别对照，不生成单一综合成功分数。
+- 仅在 cohort 达到 B143 门槛、作品至少 100 播放且指标非空时纳入；至少 3 条作品才展示高/低样本，3–5 条各显示 1 条，6 条及以上各显示 3 条。
+- 商业表现面板显示留存相对较高/较低作品标识；说明这是描述性排序，不是统计显著性或因果结论。
+- InitiativeStore **18/18**、Status API **37/37**、UI Node **46/46**；Svelte check 0 errors/0 warnings、Vite build 成功；相关 Python 文件 py_compile 通过。
+- 当前账本仍缺选题/钩子/叙事/节奏/视觉/旁白/CTA 等创作特征标签，故暂不能解释表现差异成因或自动给出风格建议。详见 `docs/PROGRESS_B144_CONTENT_COMPARISON.md`。- B144 变更后全仓 `compileall` 被并行视频文件语法错误阻断（`video_product_builder.py:305`、`test_video_product_builder.py:281`），未修改这些文件；全仓 unittest 未在本轮重跑。此前 1,558 项全仓通过发生在 B144 代码写入之前。
+
+
+## 2026-11-19｜B192 Wan 2.1 粤语旁白预览产品核验
+
+- 并行视频任务回报已验证产品 `data\\products\\2552004058c5385868866d80883e8b31\\4c8a850feaa986bc7163`：Wan 2.1 T2V 1.3B、512×288、12 FPS、约 5.08 秒；本地 Canto TTS ONNX 生成 zh-HK 粤语旁白。
+- MP4 container、SHA-256、ZIP CRC、ZIP members 与 ZIP content hashes 均通过；产品状态仍为 testing，`ready_to_publish=false`，版权披露/编辑/平台/账号审核未完成。详见 `docs/PROGRESS_B192_WAN_CANTONESE_PREVIEW.md`。
+
+## 2026-11-19｜B193 粤语旁白时长对齐硬门槛
+
+- B192 实测视频 5.083 秒、旁白 WAV 6.160 秒；旧 QA 漏检，FFmpeg `-shortest` 会截断较长旁白。
+- VideoProductBuilder v13 增加 FFprobe 双流时长检查，旁白只要长于视频即在 mux 前失败关闭（默认容差 0.00 秒）；通过的对齐证据写入 QA report、storyboard、manifest。
+- 新增/既有定向测试 **3/3 passed**；用 B192 真实产品和 ZIP 旁白复测，成功按预期拒绝截断风险。视频产品 + 视频 QA + OpenFilm 专项 **68/68 passed**。
+- B193 后全仓 `compileall -q src/muse tools tests` 通过；全仓 Python 3.11 unittest **1,565 tests in 156.992s，OK，9 skipped**。详见 `docs/PROGRESS_B193_NARRATION_TIMELINE_HARD_GATE.md`。
+
+## 2026-11-19｜B194 Wan 多镜头顺序生成与可复用源镜头归档
+
+- VideoProductBuilder v14 新增 `build_from_scenes`：2–20 镜头、每镜 1–5 秒、总计划时长最多 60 秒；逐镜独立 Wan 生成与 Seed 记录，尺寸/FPS 一致后才允许 FFmpeg concat 拼接。
+- 每镜 FFprobe 实测时长，拼接后再验证总时长；任一镜失败即拒绝部分交付。ZIP 保存最终 MP4 与全部 `scenes/shot_XX.mp4` 原镜头，manifest/storyboard 记录 prompt_id、Seed、时长、帧数、尺寸、FPS 和哈希；verify_path 检查源镜头与 ZIP 完整性。
+- Creator Worker 的多场景 Creator Brief 分支已接入该方法；粤语旁白继续走 B193 的时长硬门槛。
+- 新增关键测试 **4/4 passed**；视频产品 + 视频 QA + OpenFilm 专项 **68/68 passed**；全仓 `compileall` 通过；全仓 unittest **1,578 tests in 160.182s，OK，9 skipped**。
+- 实机限制：D 盘 FFmpeg/FFprobe 已发现，但本机 ComfyUI `127.0.0.1:8188` 当前无法连接；本轮没有启动服务或声称真实 GPU 多镜头成片已完成。详见 `docs/PROGRESS_B194_WAN_MULTI_SCENE_PIPELINE.md`。
+
+## 2026-11-19｜B195 Lauren Tan 自动化方法论研究吸收
+
+- 已核实并阅读 @poteto 的 X 长文《Automate Anything with Grok Bot》全文（公开可读镜像），并以独立镜像交叉确认文章标题、作者与原始 X 链接。该文属于实践方法论，不是独立性能/安全评测。
+- 核心吸收：自动化必须从目标结果出发，而非把表单/发邮件等中间步骤误当目标；先采集流程、工具、信息来源、检查方式与反馈来源，再让 Agent 复述目标/流程、补齐隐性判断与异常案例，确认计划后才执行。
+- 重点补充：跨系统稳定 ID 与来源优先级；动作回执不等于目标完成，必须验证最终后置条件；从授权反馈/业务数据提出改进建议；以事件或定时 Routine 触发工作。
+- 对照现有 Muse：已具备 Commander/Ticket、持久化 interval Routine、事件准入、研究知识、反馈/表现账本与改进提案基础；尚需统一 Workflow Contract、正式 plan/teach-back 状态、标准化 outcome postcondition evidence，以及事件触发与 Routine 经 Commander 的统一编排。
+- 研究结论：高战略价值，建议按 `docs/POTETO_GROK_BOT_AUTOMATION_RESEARCH.md` 的 P1/P2 顺序做小范围试点；复用方法论，不引入 Grok 专属依赖。当前只完成研究记录与路线建议，未宣称新自动化功能已实现或实测。
+- 安全边界：反馈不得自动改写政策；敏感/对外/不可逆动作仍受 Commander Mandate 与批准约束；第三方服务接入需独立隐私/权限审查；保留反例、来源和独立 Reviewer。
+
+## 2026-11-19｜B196 Workflow Contract 与结果验证门槛
+
+- 新增 `WorkflowContract` schema v1：goal、desired_outcome、1–32 项 acceptance_criteria、scope、exclusions、source_precedence、escalation_conditions、feedback_metrics；严格限制字段类型、长度和数量。
+- Contract 随现有 Commander `workflow.bound` 事件写入 TaskQueue；未显式传入时由已验证的 Commander DAG 生成保守默认契约。未新增数据库、队列或调度器。
+- Team WorkflowProfile 新增 `plan_ready` 阶段；UnifiedRuntime 在执行前持久化目标、期望结果、验收标准摘要及 Plan Critic 已批准标记。
+- `WorkflowController.complete` 要求明确的 outcome_verified=True，并要求每条验收标准都有证据引用；每条标准的证据引用必须同时出现在 workflow-wide evidence_refs 中。`workflow.completed` 事件保存验证时间和 criterion-to-evidence 映射，snapshot 可读取验证结果。
+- 定向回归：`test_workflow_profiles.py` + `test_unified_runtime.py` 共 **67/67 passed**。
+- 全仓回归：Python 3.11 unittest **1,591 tests，OK，1 skipped**；`py -3.11 -m compileall -q src/muse tests` 通过。测试中有 OpenCV 缺失图片与 FFmpeg 无效 MP4 fixture 的非致命日志，不影响通过结果。
+- 证据边界：目前验证证据引用的结构，以及 Commander 全部步骤成功/Reviewer 批准结果；尚未自动打开任意文件或外部系统核验每个引用内容。默认契约的来源优先级、升级条件和反馈指标尚待业务调用方填充；交互式人工 teach-back、反馈进化及统一事件触发仍是后续工作。
+
+## 2026-11-19｜B197 Windows psmux 后台执行适配
+
+- Windows Scoop 已安装于 D:\Scoop；psmux 3.4.0 通过 WinGet 安装。Task Scheduler 任务 \Muse\Muse-pSmux-Background 在用户登录时创建 detached muse-dev 会话，工作目录为 D:\AI AGENT\Muse；原 WSL tmux 保留为独立 fallback。
+- WebCodex Runner 恢复在线。已读取 AGENTS.md 与 docs/WEBCODEX_INTERFACE.md，遵守单一 Commander/TaskQueue 原则，不另建 MCP Server、调度器或队列。
+- 新增 scripts/webcodex_psmux_exec.py：为每个任务创建唯一 detached psmux window，使用 new-window -d 与 direct argv 启动 Windows PowerShell 5.1；记录脚本、输出日志、退出码和 per-session active-job 状态，提供 recover/inspect 操作，防止未知任务被重复提交。
+- 新增 tests/test_webcodex_psmux_exec.py；docs/WEBCODEX_INTERFACE.md 已更新后台窗口执行约定、日志位置、恢复规则与未验证边界。
+- 验证：Python 3.11 compileall/py_compile 定向通过；适配器与 ChatGPT bridge 两组测试合计 12/12 passed；git --no-pager diff --check 返回 0。psmux CLI new-window 已实测创建独立 PowerShell 进程/窗口，并成功写入、回读 marker 文件，且未切换主窗口；测试窗口和 probe 文件已清理，muse-dev 仅保留主窗口，active_job_id=null。
+- 未完成/不夸大：通过 WebCodex run_process 调用适配器 execute 的尝试被 Host safety check 拦截，因此完整 adapter end-to-end、任意任务退出码回读及视觉零闪屏尚未实测；run_shell/run_script 也尚未全局自动重定向。后续先完成获准的 adapter E2E，再考虑默认路由。
+- 重启/重新登录后，AtLogOn 任务会创建新会话，但不会恢复重启前正在运行的终端进程或任务状态；WSL tmux 未迁移、未删除。
+
+## 2026-11-19｜B-063 真实模型拒绝反馈与研究周期验收更新
+
+- 修复后 Python 3.11 全仓 unittest：1,595 tests，163.586s，OK，1 skipped，0 failures / 0 errors；唯一 skip 为可选 celestial-calendar==0.8.0 未安装。测试仍输出一次 FFmpeg moov atom not found 警告，具体媒体文件待定位。
+- 真实 Gemma 正向审查：反馈实验 allowlisted suite 实跑 56 项，审查 reviewed_approved，临时 ReviewStore 持久化；approved 分支没有创建拒绝 Ticket。
+- 真实 Gemma 负向审查：隔离副本追加受控失败用例，57 项中 1 项失败；Gemma 实际返回 reviewed_rejected，ReviewStore 读回成功；TaskQueue 只生成 1 条 review_followup_research，queued / read_only_research，生命周期事件完整。
+- 拒绝研究周期：临时知识库 + 受控 Search/Reader 实际运行 AutonomousResearchEngine.run_once()；周期 completed，support/counter 两个来源分别作为 support_search_candidate / counter_search_candidate 入库，Claim 仍为 hypothesis_only_not_fact，下一轮 query-pair 去重有效。
+- 上述 E2E 全部使用临时数据库与隔离副本，未触碰生产数据。Builder 127.0.0.1:1235/v1 仍不可达，Gemma Reviewer 127.0.0.1:1234/v1 可达；Provider/进程独立性仍未验收。详见 docs/PROGRESS_20261119_B063_REJECTION_FEEDBACK_LOOP.md。
+
+## 2026-11-19｜B198 粤语旁白驱动的 Wan 多镜头时长规划
+
+- VideoProductBuilder 升至 v15。多镜头流程先运行本地 zh-HK TTS 并用 FFprobe 测量 WAV 实际时长，再按 Wan 2.1 12 FPS、4n+1 帧约束扩展各镜头；保留分镜时长比例，单镜上限 61 帧，预览计划总时长仍不超过 60 秒。
+- 旁白覆盖不足、镜头容量不足或超过预览上限时，在任何 Wan GPU 调用前失败关闭。可选 ASR/CER 门禁也前置；TTS 只合成一次，音频直接进入最终封装。最终仍执行 FFprobe 双流时长检查，禁止静默截断。
+- 无旁白多镜头路径保持原行为。新增旁白时长分配、一次 TTS、自动扩镜和 GPU 前拒绝测试；视频产品构建器专项 **51/51 passed**。
+- 全仓 Python 3.11 unittest **1,607 tests，OK，1 skipped**；compileall 对 src/muse、tools、tests 全部通过。
+- 本轮只完成 mock/fixture 验证，没有启动真实 Wan GPU 任务。B194 最近一次实机探测时 ComfyUI 127.0.0.1:8188 不可连接；真实多镜头成片仍待 ComfyUI 在线后验收。产品状态仍为 testing、ready_to_publish=false。
+- 详见 docs/PROGRESS_B198_NARRATION_DRIVEN_MULTI_SCENE.md。下一步：真实两镜头验收、镜头连续性 QA、有限重试与幂等资源账本。
+
+## 2026-11-19｜B199 Commander 工作流验收证据回查
+
+- 加强 `WorkflowController.complete()`：调用方的 `outcome_verified=True` 不再足够；必须回查同一 Ticket 的 Commander 事件账本。
+- 核验同一 Plan 的批准共识、最新成功执行 run、独立 Reviewer 批准，以及每个声明步骤的非空 Ruflo 输出；证据引用必须精确覆盖 run、全部步骤和独立 Reviewer。
+- 每条 acceptance criterion 必须绑定当前 run、Reviewer 批准和对应步骤证据；`workflow.completed` 持久化 `evidence_validation` 摘要。
+- 不新增数据库、队列或调度器；继续使用现有 TaskQueue 事件账本。
+- TDD 新增伪造证据拒绝与 Reviewer 未批准拒绝测试；WorkflowProfileTests **23/23**、UnifiedRuntime + TaskQueue + WorkflowProfile 定向回归 **101/101** 通过。
+- 全项目 Python 3.11 unittest **1,608 tests，OK，1 skipped**；`compileall` 对 `src/muse` 与 `tests` 通过。
+- 边界：这是 Ticket 事件链一致性校验，不是任意文件/外部系统内容核验，也不是防篡改的密码学审计日志。下一步可增加受限本地文件 SHA-256 证据解析器与外部只读验证适配器。详见 `docs/PROGRESS_B199_COMMANDER_EVENT_EVIDENCE.md`。
+

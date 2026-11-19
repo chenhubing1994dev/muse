@@ -14,6 +14,7 @@ muse-task = "muse.task_cli:main"
 muse-worker = "muse.worker:main"
 muse-improve = "muse.improvement_cli:main"
 muse-philosophy = "muse.philosophy:main"
+muse-consciousness = "muse.consciousness_engine:main"
 muse-feedback = "muse.feedback_cli:main"
 muse-progress = "muse.progress_cli:main"
 muse-watchdog = "muse.watchdog:main"
@@ -34,6 +35,10 @@ muse-research = "muse.research:main"
 muse-research-read = "muse.research_fetch:main"
 muse-research-pipeline = "muse.research_pipeline:main"
 muse-source-identity = "muse.source_identity_cli:main"
+muse-research-wiki-audit = "muse.research_wiki_audit:main"
+muse-research-wiki-review = "muse.research_wiki_review:main"
+muse-research-wiki-review-record = "muse.research_wiki_review_record:main"
+muse-research-wiki-citation = "muse.research_wiki_citation:main"
 muse-model-supervisor = "muse.model_supervisor:main"
 
 muse-test = "muse.test_runner:main"
@@ -55,3 +60,11 @@ muse-product = "muse.product_builder:main"
 muse-video-worker = "muse.video_task_worker:main"
 muse-recreate = "muse.software_recreation:main"
 muse-software-craft = "muse.software_crafting:main"
+muse-open-design = "muse.open_design:main"
+muse-business = "muse.business_opportunities:main"
+
+[project.optional-dependencies]
+video-diagnostics = [
+    "numpy>=1.26",
+    "opencv-python-headless>=4.8",
+]
