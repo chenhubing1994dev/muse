@@ -10,7 +10,9 @@ import json
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
+
+from muse.process_utils import no_console_window_kwargs, Callable
 
 from muse.calendar_context import CalendarContext
 
@@ -131,6 +133,7 @@ class KinliurenProvider:
                 errors="replace",
                 timeout=ENGINE_TIMEOUT_SECONDS,
                 check=False,
+                **no_console_window_kwargs(),
             )
         except subprocess.TimeoutExpired as error:
             raise KinliurenExecutionError("Kinliuren calculation exceeded its time limit") from error

@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, quote, urlsplit
 
+from muse.process_utils import no_console_window_kwargs
+
 MAX_OUTPUT_BYTES = 4 * 1024 * 1024
 MAX_CAPTURE_CHARS = 50_000
 MAX_LINKS = 500
@@ -236,7 +238,7 @@ try {
                 [executable, "nodejs"], input=script, capture_output=True, text=True,
                 encoding="utf-8", errors="replace", timeout=self.timeout_seconds,
                 cwd=str(self.workspace), env=_browser_environment(self.skill_workspace),
-                shell=False, check=False,
+                shell=False, check=False, **no_console_window_kwargs(),
             )
         if completed.returncode != 0:
             diagnostic = completed.stderr[-1200:] or completed.stdout[-1200:]
@@ -543,7 +545,7 @@ try {
                     [executable, "nodejs"], input=script, capture_output=True, text=True,
                     encoding="utf-8", errors="replace", timeout=self.timeout_seconds,
                     cwd=str(self.workspace), env=_browser_environment(self.skill_workspace),
-                    shell=False, check=False,
+                    shell=False, check=False, **no_console_window_kwargs(),
                 )
             if completed.returncode != 0:
                 diagnostic = completed.stderr[-1200:] or completed.stdout[-1200:]

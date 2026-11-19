@@ -17,6 +17,8 @@ import threading
 import wave
 from pathlib import Path
 
+from muse.process_utils import no_console_window_kwargs
+
 _TEMP_DIR_LOCK = threading.RLock()
 _PREFLIGHT_CACHE: dict[tuple[str, int, int, str], dict[str, object]] = {}
 
@@ -194,6 +196,7 @@ def _run_python314_cli(arguments: list[str], *, timeout: int) -> dict[str, objec
         completed = subprocess.run(
             command, capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=timeout, check=False, env=_child_environment(),
+            **no_console_window_kwargs(),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise CantoneseTTSError(f"isolated Python 3.14 TTS helper could not complete: {type(exc).__name__}") from exc

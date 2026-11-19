@@ -7,7 +7,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
-from muse.media import build_transcode_command
+from muse.media import build_transcode_commandfrom muse.process_utils import no_console_window_kwargs
+
 
 
 class ToolAdapter(Protocol):
@@ -56,6 +57,7 @@ class FFmpegTranscodeAdapter:
         process = self._popen(
             command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL, text=True, shell=False,
+            **no_console_window_kwargs(),
         )
         job_id = uuid.uuid4().hex
         self._jobs[job_id] = {"process": process, "output": str(request["output"]), "command": command}
