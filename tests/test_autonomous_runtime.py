@@ -58,6 +58,125 @@ class AutonomousRuntimeTests(unittest.TestCase):
                 task = queue.enqueue("Review follow-up", payload)
             self.assertEqual(supervisor._next_local_workflow_id(), task["id"])
 
+    def test_review_followup_worker_flows_into_autonomous_research_without_forced_topic(self):
+        import hashlib
+        from muse.autonomous_research import AutonomousResearchEngine
+        from muse.research_knowledge import ResearchKnowledgeStore
+        from muse.worker import run_once
+
+        class FakeSearch:
+            def __init__(self):
+                self.queries = []
+
+            def search(self, query, *, limit=8):
+                self.queries.append(query)
+                counter = "counterexamples" in query or "limitations" in query
+                host = "8.8.8.8" if counter else "1.1.1.1"
+                return [{
+                    "title": "Counter-evidence source" if counter else "Supporting research source",
+                    "url": f"https://{host}/public-research",
+                    "snippet": "Public research result",
+                    "engine": "controlled-smoke",
+                    "published_at": "",
+                }]
+
+        class FakeReader:
+            def read(self, url):
+                body = (
+                    "Public source text with methods, limitations, sample boundaries "
+                    "and reproducible details. " * 8
+                )
+                return {
+                    "url": url,
+                    "content_type": "text/plain",
+                    "text": body,
+                    "sha256": hashlib.sha256(body.encode()).hexdigest(),
+                    "fetched_at": "2026-11-19T00:00:00+00:00",
+                    "truncated": False,
+                }
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with ResearchKnowledgeStore(root / "knowledge.sqlite3") as knowledge:
+                decision = knowledge.upsert_node(
+                    "decision", "Rejected independent engineering review",
+                    summary="A failed candidate was rejected by independent review.",
+                    external_ref="feedback-research-review:runtime-integration",
+                    metadata={
+                        "decision_kind": "independent_engineering_experiment_review",
+                        "improvement_proposal_id": "proposal-runtime-integration",
+                        "source_feedback_id": "feedback-runtime-integration",
+                        "approved": False,
+                        "epistemic_status": "engineering_review_rejected_not_external_evidence",
+                    },
+                    status="rejected",
+                )
+
+            supervisor = self.make_supervisor(root)
+            payload = {
+                "kind": "review_followup_research",
+                "task_scope": "read_only_research",
+                "review_id": "review-runtime-integration",
+                "review_node_id": decision["id"],
+                "review_artifact_id": "artifact-runtime-integration",
+                "proposal_id": "proposal-runtime-integration",
+                "feedback_id": "feedback-runtime-integration",
+                "plan_node_id": "plan-runtime-integration",
+                "review_findings": [{
+                    "severity": "high", "title": "Controlled finding",
+                    "detail": "Untrusted reviewer text remains data.",
+                }],
+                "reviewer_output_is_untrusted_data": True,
+                "not_claim_evidence": True,
+                "requires_separate_code_change_approval": True,
+            }
+            with TaskQueue(root / "tasks.sqlite3") as queue:
+                ticket = queue.enqueue(
+                    "Research rejected review", payload,
+                    idempotency_key="review-followup:review-runtime-integration",
+                )
+            worker_result = run_once(
+                root / "tasks.sqlite3", handlers=supervisor.handlers(),
+                task_id=ticket["id"],
+            )
+            with TaskQueue(root / "tasks.sqlite3") as queue:
+                finished = queue.get(ticket["id"])
+
+            search = FakeSearch()
+            engine = AutonomousResearchEngine(
+                evidence_db=root / "evidence.sqlite3",
+                knowledge_db=root / "knowledge.sqlite3",
+                progress_db=root / "tasks.sqlite3",
+                reminder_db=root / "reminders.sqlite3",
+                improvement_db=root / "improvements.sqlite3",
+                memory_db=root / "memory.sqlite3",
+                conversation_db=root / "conversations.sqlite3",
+                workspace=root, search=search, reader=FakeReader(),
+                resource_aware=False, max_sources=2,
+            )
+            result = engine.run_once()
+            report = result.get("report", {})
+            with ResearchKnowledgeStore(root / "knowledge.sqlite3") as knowledge:
+                evidence = knowledge.list_claim_evidence(report["claim_id"], limit=20)
+            directions = {item.get("direction") for item in evidence}
+            next_topic = engine._next_topic()
+
+            self.assertEqual(worker_result["status"], "succeeded")
+            self.assertEqual(finished["status"], "succeeded")
+            self.assertEqual(
+                finished["payload"]["_result"]["status"], "handoff_registered"
+            )
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(report["topic_origin"], "rejected_review_followup")
+            self.assertEqual(report["topic_key"], "rejected-review:" + decision["id"])
+            self.assertEqual(len(search.queries), 2)
+            self.assertEqual(report["read_source_count"], 2)
+            self.assertEqual(
+                directions, {"support_search_candidate", "counter_search_candidate"}
+            )
+            self.assertEqual(report["epistemic_status"], "hypothesis_only_not_fact")
+            self.assertNotEqual(next_topic["key"], report["topic_key"])
+
     def test_commander_video_worker_is_disabled_by_default(self):
         with tempfile.TemporaryDirectory() as directory:
             supervisor = self.make_supervisor(Path(directory))

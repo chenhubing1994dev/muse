@@ -86,7 +86,8 @@ class KinliurenProviderTests(unittest.TestCase):
             executable=Path(sys.executable),
             command_runner=runner,
         )
-        result = provider.calculate(_context())
+        with patch("muse.kinliuren_provider.no_console_window_kwargs", return_value={"creationflags": 123}):
+            result = provider.calculate(_context())
         self.assertEqual(captured["command"][-2], provider.bridge_script)
         self.assertEqual(json.loads(captured["command"][-1]), {
             "jieqi": "芒種", "cmonth": "五",
@@ -94,6 +95,7 @@ class KinliurenProviderTests(unittest.TestCase):
         })
         self.assertEqual(captured["kwargs"]["shell"], False)
         self.assertEqual(captured["kwargs"]["timeout"], 15)
+        self.assertEqual(captured["kwargs"]["creationflags"], 123)
         self.assertEqual(result["engine_version"], "0.1.2.9")
         self.assertEqual(result["chart"]["格局"], ["比用", "知一1"])
         self.assertFalse(result["is_evidence"])

@@ -44,8 +44,11 @@ class EgoBrowserAdapterTests(unittest.TestCase):
             args=["ego-browser", "nodejs"], returncode=0,
             stdout="", stderr="MUSE_EGO_RESULT:" + json.dumps(payload) + "\n",
         )
-        with patch("muse.ego_browser.subprocess.run", return_value=completed):
+        with patch("muse.ego_browser.no_console_window_kwargs", return_value={"creationflags": 123}), patch(
+            "muse.ego_browser.subprocess.run", return_value=completed
+        ) as run:
             self.assertEqual(self.adapter._run_marked_script("cliLog('result')"), payload)
+        self.assertEqual(run.call_args.kwargs["creationflags"], 123)
 
 
     def payload(self) -> dict:

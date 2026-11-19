@@ -2323,7 +2323,7 @@ eady_to_publish=false。
 - 核验同一 Plan 的批准共识、最新成功执行 run、独立 Reviewer 批准，以及每个声明步骤的非空 Ruflo 输出；证据引用必须精确覆盖 run、全部步骤和独立 Reviewer。
 - 每条 acceptance criterion 必须绑定当前 run、Reviewer 批准和对应步骤证据；`workflow.completed` 持久化 `evidence_validation` 摘要。
 - 不新增数据库、队列或调度器；继续使用现有 TaskQueue 事件账本。
-- TDD 新增伪造证据拒绝与 Reviewer 未批准拒绝测试；WorkflowProfileTests **23/23**、UnifiedRuntime + TaskQueue + WorkflowProfile 定向回归 **101/101** 通过。
+- TDD 新增伪造证据拒绝与 Reviewer 未批准拒绝测试；WorkflowProfileTests **23/23**、UnifiedRuntime + TaskQueue + WorkflowProfile 定向回归 **101/101**、视频/旁白/来源 freshness 定向回归 **98/98** 通过。
 - 全项目 Python 3.11 unittest **1,608 tests，OK，1 skipped**；`compileall` 对 `src/muse` 与 `tests` 通过。
 - 边界：这是 Ticket 事件链一致性校验，不是任意文件/外部系统内容核验，也不是防篡改的密码学审计日志。下一步可增加受限本地文件 SHA-256 证据解析器与外部只读验证适配器。详见 `docs/PROGRESS_B199_COMMANDER_EVENT_EVIDENCE.md`。
 

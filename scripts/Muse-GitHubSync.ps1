@@ -50,14 +50,24 @@ function Invoke-Sync {
         git -c user.name='Muse Workspace' -c user.email='muse@localhost' commit -m "auto-sync: $ts ($count files)" --quiet 2>&1 | Out-Null
 
         $env:GIT_TERMINAL_PROMPT = '0'
-        $out = git -c http.version=HTTP/1.0 push origin main 2>&1
-        $code = $LASTEXITCODE
-        $safe = ($out | Out-String).Replace($token, '***')
-        if ($code -eq 0) {
+
+        # Network here drops TLS intermittently; retry with backoff.
+        $ok = $false
+        $lastSafe = ''
+        for ($attempt = 1; $attempt -le 6; $attempt++) {
+            $out = git -c http.version=HTTP/1.0 push origin main 2>&1
+            $code = $LASTEXITCODE
+            $lastSafe = ($out | Out-String).Replace($token, '***').Trim()
+            if ($code -eq 0) { $ok = $true; break }
+            Write-Log "PUSH attempt $attempt failed (code=$code), retrying..."
+            Start-Sleep -Seconds ([Math]::Min(5 * $attempt, 30))
+        }
+
+        if ($ok) {
             Write-Log "PUSH OK ($count files) at $ts"
             return $true
         }
-        Write-Log "PUSH FAIL code=$code :: $($safe.Trim())"
+        Write-Log "PUSH FAIL after retries :: $lastSafe"
         return $false
     } finally {
         Pop-Location

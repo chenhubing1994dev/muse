@@ -105,12 +105,15 @@ class FFmpegAdapterTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
 
     def test_approved_execution_verifies_and_collects_output_artifact(self):
-        started = self.adapter.start(
-            {"input": str(self.source), "output": str(self.output)}, approved=True
-        )
+        from unittest.mock import patch
+        with patch("muse.adapters.no_console_window_kwargs", return_value={"creationflags": 123}):
+            started = self.adapter.start(
+                {"input": str(self.source), "output": str(self.output)}, approved=True
+            )
         import subprocess
         self.assertIs(self.calls[0][1]["stdout"], subprocess.DEVNULL)
         self.assertIs(self.calls[0][1]["stderr"], subprocess.DEVNULL)
+        self.assertEqual(self.calls[0][1]["creationflags"], 123)
         self.assertEqual(started["status"], "running")
         result = self.adapter.wait(started["job_id"], timeout=5)
         self.assertEqual(result["status"], "completed")
