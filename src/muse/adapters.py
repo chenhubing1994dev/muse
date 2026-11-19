@@ -7,7 +7,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
-from muse.media import build_transcode_commandfrom muse.process_utils import no_console_window_kwargs
+from muse.media import build_transcode_command
+from muse.process_utils import no_console_window_kwargs
 
 
 

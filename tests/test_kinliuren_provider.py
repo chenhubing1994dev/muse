@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
-
+from unittest.mock import patch
 from muse.calendar_context import CalendarContext, CalendarPolicy, CalendarContextUnsupported
 from muse.kinliuren_provider import (
     KinliurenExecutionError,

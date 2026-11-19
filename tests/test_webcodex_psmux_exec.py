@@ -19,6 +19,15 @@ class PsmuxExecAdapterTests(unittest.TestCase):
         self.assertIn("[string]$museExitCode", script)
         self.assertIn("exit $museExitCode", script)
 
+    def test_inline_powershell_is_isolated_in_a_child_process(self):
+        wrapper = adapter._build_job_script(
+            "exit 7", Path("C:/tmp/output.log"), Path("C:/tmp/result.txt"),
+            language="powershell", payload_path=Path("C:/tmp/payload.ps1"),
+        )
+        self.assertIn("powershell.exe' -NoLogo -NoProfile", wrapper)
+        self.assertIn("-File 'C:/tmp/payload.ps1'", wrapper)
+        self.assertIn("[string]$museExitCode", wrapper)
+
     def test_existing_powershell_file_is_invoked_by_path(self):
         wrapper = adapter._build_job_script(
             "", Path("C:/tmp/output.log"), Path("C:/tmp/result.txt"),
@@ -181,10 +190,12 @@ class PsmuxExecAdapterTests(unittest.TestCase):
             job_dir.mkdir(parents=True)
             (job_dir / "result.txt").write_text("0", encoding="utf-8")
             (job_dir / "payload.py").write_text("print('ok')", encoding="utf-8")
+            (job_dir / "payload.ps1").write_text("exit 7", encoding="utf-8-sig")
             adapter._write_active_job("muse-dev", job_id, "musejob_aaaaaaaaaaaa")
             result = adapter.recover_job(job_id)
             self.assertEqual(result["status"], "completed")
             self.assertFalse((job_dir / "payload.py").exists())
+            self.assertFalse((job_dir / "payload.ps1").exists())
             self.assertIsNone(adapter._active_job_id("muse-dev"))
 
     def test_invalid_request_is_rejected_before_touching_psmux(self):

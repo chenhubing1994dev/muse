@@ -12,7 +12,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from muse.process_utils import no_console_window_kwargs, Callable
+
+from muse.process_utils import no_console_window_kwargs
 
 from muse.calendar_context import CalendarContext
 

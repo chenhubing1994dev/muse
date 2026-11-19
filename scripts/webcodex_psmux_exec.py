@@ -123,7 +123,7 @@ def _ps_quote(value: str) -> str:
 
 
 def _script_payload_extension(language: str) -> str:
-    return {"python": ".py", "bash": ".sh", "batch": ".bat"}[language]
+    return {"powershell": ".ps1", "python": ".py", "bash": ".sh", "batch": ".bat"}[language]
 
 
 def _windows_to_wsl_path(value: str) -> str:
@@ -341,7 +341,7 @@ def recover_job(job_id: str) -> dict[str, Any]:
     except (OSError, ValueError):
         return _result(job_id, "outcome_unknown", error="result_file_unreadable")
     output, truncated = _read_output(output_path)
-    for generated in (directory / "job.ps1", directory / "payload.py", directory / "payload.sh", directory / "payload.bat"):
+    for generated in (directory / "job.ps1", directory / "payload.ps1", directory / "payload.py", directory / "payload.sh", directory / "payload.bat"):
         generated.unlink(missing_ok=True)
     _clear_active_for_job(job_id)
     return _result(
@@ -461,9 +461,10 @@ def execute_request(request: dict[str, Any]) -> dict[str, Any]:
     try:
         directory.mkdir(parents=True, exist_ok=False)
         payload_path = source_payload_path
-        if payload_path is None and language != "powershell":
+        if payload_path is None:
             payload_path = directory / f"payload{_script_payload_extension(language)}"
-            payload_path.write_text(user_script, encoding="utf-8")
+            payload_encoding = "utf-8-sig" if language == "powershell" else "utf-8"
+            payload_path.write_text(user_script, encoding=payload_encoding)
         script_path.write_text(
             _build_job_script(
                 user_script,

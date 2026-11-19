@@ -8,8 +8,8 @@ import wave
 from pathlib import Path
 from unittest.mock import patch
 
-from muse.cantonese_tts import MODEL_REVISION, CantoneseTTSError, synthesize_cantonesefrom muse import cantonese_tts
-
+from muse.cantonese_tts import MODEL_REVISION, CantoneseTTSError, synthesize_cantonese
+from muse import cantonese_tts
 
 class CantoneseTTSTests(unittest.TestCase):
     def setUp(self):
@@ -26,7 +26,7 @@ class CantoneseTTSTests(unittest.TestCase):
     def test_python314_helper_suppresses_windows_console_and_keeps_structured_output(self):
         completed = __import__("subprocess").CompletedProcess(
             args=["python.exe"], returncode=0,
-            stdout=cantonese_tts._RESULT_MARKER + '{"status":"ok"}\\n', stderr="",
+            stdout=cantonese_tts._RESULT_MARKER + '{"status":"ok"}\n', stderr="",
         )
         with patch("muse.cantonese_tts._python314_command", return_value=["python.exe"]), patch(
             "muse.cantonese_tts._child_environment", return_value={}

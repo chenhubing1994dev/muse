@@ -55,7 +55,7 @@ function Invoke-Sync {
         $ok = $false
         $lastSafe = ''
         for ($attempt = 1; $attempt -le 6; $attempt++) {
-            $out = git -c http.version=HTTP/1.0 push origin main 2>&1
+            $out = git -c http.sslBackend=schannel push origin main 2>&1
             $code = $LASTEXITCODE
             $lastSafe = ($out | Out-String).Replace($token, '***').Trim()
             if ($code -eq 0) { $ok = $true; break }

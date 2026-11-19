@@ -8,8 +8,11 @@
   import "./value-studio.css";
   import "./cyberpunk.css";
   import "./creative-studio.css";
+  import "./design/muse.css";
+  import "./design/bridge.css";
   import CreativeStudio from "./lib/CreativeStudio.svelte";
-  import AstrolabeHero from "./lib/AstrolabeHero.svelte";
+  import Icon from "./lib/Icon.svelte";
+  import CommandOrbit from "./lib/CommandOrbit.svelte";
   import CelestialBaguaLab from "./lib/CelestialBaguaLab.svelte";
   import KnowledgeStarMap from "./lib/KnowledgeStarMap.svelte";
   import AgentGalaxyPanel from "./lib/AgentGalaxyPanel.svelte";
@@ -163,7 +166,61 @@
   let graphSearchQuery = "";
   let presetLowerBits = "";
   let reducedFx = false;
-  let activeSector: "all" | "astrolabe" | "starmap" | "galaxy" | "prometheus" | "studio" = "all";
+
+  type ViewKey = "overview" | "tasks" | "agents" | "memory" | "knowledge" | "studio" | "evolve" | "runtime";
+  const VIEWS: Array<{ key: ViewKey; label: string; icon: string; hint: string }> = [
+    { key: "overview", label: "总览", icon: "core", hint: "调度阵、健康度与实时指标" },
+    { key: "tasks", label: "任务中心", icon: "tasks", hint: "队列、Commander 工作流与执行节点" },
+    { key: "agents", label: "智能体", icon: "agents", hint: "唯一 Commander、专家角色与实连 Agent" },
+    { key: "memory", label: "记忆库", icon: "memory", hint: "双轨记忆、MemPalace 与灵感池" },
+    { key: "knowledge", label: "知识图谱", icon: "knowledge", hint: "Research Wiki 星图与卦象透镜" },
+    { key: "studio", label: "创作台", icon: "studio", hint: "选题评分、影像工坊与成果库" },
+    { key: "evolve", label: "进化", icon: "evolve", hint: "反馈回流、能力雷达与改进提案" },
+    { key: "runtime", label: "运行时", icon: "flame", hint: "常驻引擎、创作流水线与事件流" },
+  ];
+  const ANCHOR_VIEW: Record<string, ViewKey> = {
+    "#overview": "overview",
+    "#celestial-lab": "knowledge",
+    "#knowledge-starmap": "knowledge",
+    "#agents": "agents",
+    "#prometheus-core": "overview",
+    "#value-studio": "studio",
+    "#creative-studio": "studio",
+    "#daemon-runtime": "runtime",
+    "#pipeline": "runtime",
+    "#inspirations": "memory",
+    "#mempalace": "memory",
+    "#products": "studio",
+    "#queue": "tasks",
+    "#feedback": "evolve",
+    "#events": "overview",
+  };
+  let view: ViewKey = "overview";
+  let selectedRole = "";
+  let clockLabel = "";
+  let dateLabel = "";
+
+  function tickClock(): void {
+    const now = new Date();
+    clockLabel = now.toLocaleTimeString("zh-CN", { hour12: false });
+    dateLabel = now.toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit", weekday: "short" });
+  }
+
+  function setView(next: ViewKey): void {
+    view = next;
+    document.querySelector(".stage")?.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function focusAnchor(selector: string): void {
+    view = ANCHOR_VIEW[selector] ?? "overview";
+    window.setTimeout(() => {
+      document.querySelector(selector)?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 60);
+  }
+
+  function handleRoleSelect(id: string): void {
+    selectedRole = selectedRole === id ? "" : id;
+  }
 
   async function queryKnowledgeGraph(opts: { nodeType: string | null; q: string }): Promise<void> {
     graphNodeTypeFilter = opts.nodeType;
@@ -199,10 +256,7 @@
   }
 
   function jumpToAnchor(selector: string): void {
-    activeSector = "all";
-    window.setTimeout(() => {
-      document.querySelector(selector)?.scrollIntoView({ behavior: "smooth", block: "start" });
-    }, 20);
+    focusAnchor(selector);
   }
   $: studioDirty = studioResult === null || studioScoredSource !== studioCompose();
   function studioCompose(): string {
@@ -406,6 +460,54 @@
   $: activeCount = agents.filter((agent) =>
     agent.status === "online" || agent.status === "busy"
   ).length;
+  $: pendingAttention = (queueSnapshot?.counts.waiting_approval ?? 0);
+  $: selectedRoleDetail = (galaxySnapshot?.specialist_profiles ?? []).find(
+    (item) => item.specialist_id === selectedRole,
+  ) ?? null;
+  $: ramLabel = prometheusCore?.resource_governor
+    ? (() => {
+        const g = prometheusCore!.resource_governor;
+        if (typeof g.available_memory_bytes !== "number" || typeof g.total_memory_bytes !== "number") return "未探测";
+        return `${(g.available_memory_bytes / 1024 ** 3).toFixed(1)} / ${(g.total_memory_bytes / 1024 ** 3).toFixed(0)} GiB`;
+      })()
+    : "未读取";
+  $: gpuLabel = gpuResourceStatus?.status === "reserved"
+    ? `占用 · ${gpuResourceStatus.lease?.owner_kind ?? "task"}`
+    : gpuResourceStatus?.status === "idle"
+      ? "空闲（显存未测）"
+      : "未知 · 不超卖";
+  $: stageMaxima = prometheusCore
+    ? {
+        ignition: Math.max(1, prometheusCore.stages.ignition.inspirations_count + prometheusCore.stages.ignition.initiatives_count),
+        discovery: Math.max(1, prometheusCore.stages.discovery.knowledge_nodes_total),
+        synthesis: Math.max(1, prometheusCore.stages.synthesis.knowledge_edges_total),
+        creation: Math.max(1, prometheusCore.stages.creation.products_count),
+        transmission: Math.max(1, prometheusCore.stages.transmission.progress_events_count),
+      }
+    : { ignition: 1, discovery: 1, synthesis: 1, creation: 1, transmission: 1 };
+  $: stageLadder = prometheusCore
+    ? [
+        { key: "ignition", label: "点火", value: prometheusCore.stages.ignition.inspirations_count, tone: "is-jade" },
+        { key: "discovery", label: "求知", value: prometheusCore.stages.discovery.knowledge_nodes_total, tone: "is-jade" },
+        { key: "synthesis", label: "融合", value: prometheusCore.stages.synthesis.knowledge_edges_total, tone: "is-cyan" },
+        { key: "creation", label: "创造", value: prometheusCore.stages.creation.products_count, tone: "" },
+        { key: "transmission", label: "传承", value: prometheusCore.stages.transmission.progress_events_count, tone: "" },
+      ].map((row) => ({
+        ...row,
+        pct: Math.min(100, Math.round((row.value / (stageMaxima as Record<string, number>)[row.key]) * 100)),
+      }))
+    : [];
+  $: queueLadder = (() => {
+    const c = queueSnapshot?.counts;
+    const peak = Math.max(1, c ? Math.max(c.queued, c.running, c.waiting_approval, c.failed, c.succeeded) : 1);
+    return [
+      { label: "排队", value: c?.queued ?? 0, tone: "" },
+      { label: "执行", value: c?.running ?? 0, tone: "is-cyan" },
+      { label: "待批", value: c?.waiting_approval ?? 0, tone: "" },
+      { label: "失败", value: c?.failed ?? 0, tone: "is-dim" },
+    ].map((row) => ({ ...row, pct: Math.min(100, Math.round((row.value / peak) * 100)) }));
+  })();
+
   $: filteredQueueTasks = filterQueueTasks(queueSnapshot?.active ?? [], queueQuery, queueStatusFilter);
   $: successRate = aggregateRate(agents, "succeeded", "completed");
   $: reviewRate = aggregateRate(agents, "review_approved", "reviewed");
@@ -1067,28 +1169,57 @@
   <meta name="description" content="Muse 赛博玄枢：星环、八卦星宿、知识星图、AI Agent 星系与普罗米修斯核心" />
 </svelte:head>
 
-<div class="cyber-shell" class:is-reduced-fx={reducedFx}>
-<div class="cyber-grid-bg" aria-hidden="true"></div>
-<div class="scanlines" aria-hidden="true"></div>
-<header class="topbar">
-  <div class="brand">
-    <span class="sigil" aria-hidden="true">🜂</span>
-    <div><strong>MUSE <i>赛博玄枢中枢</i></strong><small>CYBER ASTROLABE · PROMETHEUS STARSHIP OS</small></div>
+<div class="app">
+<header class="titlebar">
+  <div class="tb-brand">
+    <svg class="tb-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true">
+      <circle cx="12" cy="12" r="9.2" opacity="0.34" />
+      <circle cx="12" cy="12" r="5.6" opacity="0.6" />
+      <path d="M12 2.8v18.4M2.8 12h18.4" opacity="0.22" />
+      <path d="M12 6.6c2.4 0 4.3 2.4 4.3 5.4S14.4 17.4 12 17.4 7.7 15 7.7 12s1.9-5.4 4.3-5.4z" />
+    </svg>
+    <div class="tb-word">
+      <b>MUSE</b>
+      <span>COMMAND CENTER</span>
+    </div>
   </div>
-  <div class="top-actions">
-    <span class={`top-pill-status ${connectionStatusKey}`}>
-      <i class="status-beacon" aria-hidden="true"></i>
-      {connectionBadge} · {connectionLabel}
+
+  <div class="tb-mid">
+    <span class={`chip ${connected && !stale ? "is-live" : stale ? "is-stale" : "is-down"}`}>
+      <i class="dot" aria-hidden="true"></i>
+      {connected && !stale ? "本地核心在线" : stale ? "数据已过期" : "本地核心未连接"}
     </span>
-    <span>{updatedLabel}</span>
-    <button class="fx-toggle" class:active={reducedFx} type="button" onclick={() => (reducedFx = !reducedFx)}>
-      {reducedFx ? "静态护眼" : "全息超频"}
-    </button>
-    <button class="refresh" type="button" onclick={refresh} disabled={refreshBusy}>
-      {refreshBusy ? "正在刷新…" : "刷新状态"}
-    </button>
-    <button class="command-trigger" type="button" onclick={openGuide}>使用指南</button>
-    <button class="command-trigger" type="button" onclick={openCommandPalette} aria-keyshortcuts="Control+K Meta+K">快速跳转 <kbd>Ctrl K</kbd></button>
+    <span class="chip is-quiet">{updatedLabel}</span>
+    {#if gpuResourceStatus?.status === "reserved"}
+      <span class="chip is-stale">GPU 占用 · {gpuResourceStatus.lease?.owner_kind ?? "任务"}</span>
+    {:else if gpuResourceStatus?.status === "idle"}
+      <span class="chip is-quiet">GPU 空闲</span>
+    {/if}
+    <span class="chip is-quiet">并发 {prometheusCore ? `${prometheusCore.resource_governor.recommended_workers}/${prometheusCore.resource_governor.maximum_workers}` : "—"}</span>
+  </div>
+
+  <div class="tb-right">
+    <div class="tb-clock" aria-live="off">
+      <b>{clockLabel || "--:--:--"}</b>
+      <span>{dateLabel || "本地时间"}</span>
+    </div>
+    <div class="tb-tools">
+      <button class="btn is-sm is-ghost" type="button" onclick={openCommandPalette} aria-keyshortcuts="Control+K Meta+K" title="快速跳转 Ctrl K">
+        <Icon name="search" size={13} /><span>跳转</span>
+      </button>
+      <button class="btn is-sm is-ghost" type="button" onclick={openGuide} title="使用指南">指南</button>
+      <button class="btn is-sm" type="button" onclick={() => (reducedFx = !reducedFx)} title="切换动效强度">
+        {reducedFx ? "静态" : "动效"}
+      </button>
+      <button class="btn is-sm" type="button" onclick={refresh} disabled={refreshBusy}>
+        <Icon name="refresh" size={13} />{refreshBusy ? "刷新中" : "刷新"}
+      </button>
+    </div>
+    <div class="tb-window" aria-hidden="true">
+      <span class="win-btn"><svg viewBox="0 0 12 12"><path d="M2.5 6h7" /></svg></span>
+      <span class="win-btn"><svg viewBox="0 0 12 12"><rect x="2.6" y="2.6" width="6.8" height="6.8" /></svg></span>
+      <span class="win-btn is-close"><svg viewBox="0 0 12 12"><path d="M3 3l6 6M9 3l-6 6" /></svg></span>
+    </div>
   </div>
 </header>
 
@@ -1155,103 +1286,236 @@
     </div>
   </div>{/if}
 
-<main class="layout">
-  <aside class="rail" aria-label="主导航">
-    <div class="rail-mark">玄</div>
-    <a class="active" href="#overview" onclick={(e) => { e.preventDefault(); jumpToAnchor("#overview"); }}>◈<span>星环</span></a>
-    <a href="#celestial-lab" onclick={(e) => { e.preventDefault(); jumpToAnchor("#celestial-lab"); }}>☰<span>八卦宿</span></a>
-    <a href="#knowledge-starmap" onclick={(e) => { e.preventDefault(); jumpToAnchor("#knowledge-starmap"); }}>✦<span>知识星图</span></a>
-    <a href="#agents" onclick={(e) => { e.preventDefault(); jumpToAnchor("#agents"); }}>◎<span>Agent星系</span></a>
-    <a href="#prometheus-core" onclick={(e) => { e.preventDefault(); jumpToAnchor("#prometheus-core"); }}>🜂<span>火种核心</span></a>
-    <a href="#value-studio" onclick={(e) => { e.preventDefault(); jumpToAnchor("#value-studio"); }}>✦<span>创作台</span></a>
-    <a href="#daemon-runtime" onclick={(e) => { e.preventDefault(); jumpToAnchor("#daemon-runtime"); }}>▷<span>运行时</span></a>
-    <a href="#inspirations" onclick={(e) => { e.preventDefault(); jumpToAnchor("#inspirations"); }}>✧<span>灵感工坊</span></a>
-    <a href="#products" onclick={(e) => { e.preventDefault(); jumpToAnchor("#products"); }}>◇<span>产品库</span></a>
-    <a href="#queue" onclick={(e) => { e.preventDefault(); jumpToAnchor("#queue"); }}>⊞<span>任务</span></a>
-    <a href="#feedback" onclick={(e) => { e.preventDefault(); jumpToAnchor("#feedback"); }}>✧<span>进化</span></a>
-    <div class="rail-bottom">v0.2<br />CYBER</div>
-  </aside>
+<div class="body">
+<nav class="rail" aria-label="主导航">
+  {#each VIEWS as item (item.key)}
+    <button
+      class="rail-item"
+      type="button"
+      aria-current={view === item.key ? "page" : undefined}
+      title={item.hint}
+      onclick={() => setView(item.key)}
+    >
+      <Icon name={item.icon} size={19} />
+      <span>{item.label}</span>
+      {#if item.key === "tasks" && pendingAttention > 0}<i aria-hidden="true"></i>{/if}
+      {#if item.key === "evolve" && selfImprovementStatus && selfImprovementStatus.pending_human_review > 0}<i aria-hidden="true"></i>{/if}
+    </button>
+  {/each}
+  <div class="rail-sep" aria-hidden="true"></div>
+  <div class="rail-foot">
+    <b>璇</b>
+    <small>v0.3<br />LOCAL</small>
+  </div>
+</nav>
 
-  <section class="content" id="overview">
-    <div class="eyebrow">MUSE NEO-CYBER CELESTIAL COMMAND / 赛博玄枢 · 普罗米修斯星舰</div>
-    <div class="heading">
-      <div>
-        <h1>赛博玄枢调度中心</h1>
-        <p>星环 · 八卦 · 二十八星宿 · 知识星图 · AI Agent 星系 · 普罗米修斯核心</p>
-      </div>
-      <div class="clock">
-        <small>运行模式</small>
-        <strong>LOCAL FIRST</strong>
-        <small>真实数据 · 本地创作与受控调度</small>
-      </div>
-    </div>
-
-    <nav class="sector-tabs" aria-label="星舰舱段聚焦切换">
-      <button type="button" class="sector-tab" class:active={activeSector === "all"} onclick={() => (activeSector = "all")}>◈ 全景星舰</button>
-      <button type="button" class="sector-tab" class:active={activeSector === "astrolabe"} onclick={() => (activeSector = "astrolabe")}>☰ 星环与八卦星宿</button>
-      <button type="button" class="sector-tab" class:active={activeSector === "starmap"} onclick={() => (activeSector = "starmap")}>✦ Research Wiki 星图</button>
-      <button type="button" class="sector-tab" class:active={activeSector === "galaxy"} onclick={() => (activeSector = "galaxy")}>◎ Agent 星系与队列</button>
-      <button type="button" class="sector-tab" class:active={activeSector === "prometheus"} onclick={() => (activeSector = "prometheus")}>🜂 普罗米修斯与愿景</button>
-      <button type="button" class="sector-tab" class:active={activeSector === "studio"} onclick={() => (activeSector = "studio")}>▷ 创作与影像工坊</button>
-    </nav>
-
+<main class="stage" id="overview">
+  <div class="stage-inner">
     {#if message}
-      <div class="connection-message" role="status">{message}</div>
+      <div class={`notice ${connected && !stale ? "is-ok" : "is-bad"}`} role="status">
+        <Icon name={connected && !stale ? "shield" : "leave"} size={14} />
+        <span>{message}</span>
+      </div>
     {/if}
 
-    <MemPalacePanel status={mempalaceStatus} {connected} />
+    {#if view === "overview"}
+      <header class="view-head">
+        <div>
+          <h1>调度<em>阵</em></h1>
+          <p>唯一 Commander 统御八个专家角色；环形节点由本地专家档案真实驱动，连线只在适配器实连时点亮。所有数字来自本机 API，断链会如实标记为过期。</p>
+        </div>
+        <div class="view-head-meta">
+          <span class={`chip ${connected && !stale ? "is-live" : stale ? "is-stale" : "is-down"}`}>
+            <i class="dot" aria-hidden="true"></i>{connectionLabel}
+          </span>
+          <span class="chip is-quiet">{agents.length} 实连 Agent</span>
+        </div>
+      </header>
 
-    {#if activeSector === "all" || activeSector === "astrolabe"}
-      <AstrolabeHero
-        {connected}
-        {stale}
-        {connectionLabel}
-        {activeCount}
-        totalAgents={agents.length}
-        celestial={celestialCatalog}
-        prometheus={prometheusCore}
-        {gpuResourceStatus}
-        onInspectBagua={handleInspectBagua}
-      />
-
-      <CelestialBaguaLab
-        {client}
-        {connected}
-        celestial={celestialCatalog}
-        {presetLowerBits}
-        onSaveHypothesisInspiration={saveHypothesisInspiration}
-      />
-    {/if}
-
-    {#if activeSector === "all" || activeSector === "starmap"}
-      <KnowledgeStarMap
-        {client}
-        {connected}
-        graph={knowledgeGraph}
-        onQueryGraph={queryKnowledgeGraph}
-      />
-    {/if}
-
-    {#if activeSector === "all" || activeSector === "studio"}
-    <!-- ───────────────── Muse 视频创作工作室 ───────────────── -->
-    <CreativeStudio {client} {connected} />
-
-    <!-- ───────────────── 价值创作台 ───────────────── -->
-    <section class="value-studio" id="value-studio" aria-label="价值创作台">
-      <div class="vs-head">
-        <div class="vs-title">
-          <span class="vs-glyph" aria-hidden="true">✦</span>
+      <section class="card">
+        <div class="card-h">
           <div>
-            <div class="vs-kicker">IDEA → RESEARCH → FILM → FEEDBACK</div>
-            <h2>价值创作台</h2>
-            <p>把一闪而过的念头，变成可验证、可制作、可复盘的创作路径。</p>
+            <h2>Muse <em>调度中枢</em></h2>
+            <p>点选任一角色节点，右侧遥测会切换为该专家的信任等级、历史运行与实连状态。</p>
+          </div>
+          <div class="card-tools">
+            <button class="btn is-sm" type="button" onclick={() => setView("agents")}>角色目录</button>
+            <button class="btn is-sm" type="button" onclick={() => setView("tasks")}>任务队列</button>
           </div>
         </div>
-        <div class="vs-engine" title="纯本地启发式评分，不联网、不预测收益">
-          <span class="vs-engine-dot"></span>
-          LOCAL HEURISTIC · V1
+        <div class="overview-grid">
+          <CommandOrbit
+            galaxy={galaxySnapshot}
+            queue={queueSnapshot}
+            prometheus={prometheusCore}
+            {connected}
+            {stale}
+            selected={selectedRole}
+            onSelect={handleRoleSelect}
+          />
+          <aside class="overview-side">
+            <div class="side-block">
+              <div class="sect"><b>五阶火种账本</b><span>PROMETHEUS</span></div>
+              <div class="ladder">
+                {#each stageLadder as stage (stage.key)}
+                  <div class="ladder-row">
+                    <b>{stage.label}</b>
+                    <span class="meter {stage.tone}">
+                      <svg viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true">
+                        <rect x="0" y="0" width={stage.pct} height="6" />
+                      </svg>
+                    </span>
+                    <i>{stage.value}</i>
+                  </div>
+                {/each}
+              </div>
+            </div>
+            <div class="side-block">
+              <div class="sect"><b>角色详情</b><span>{selectedRole ? selectedRole.toUpperCase() : "未选中"}</span></div>
+              {#if selectedRoleDetail}
+                <div class="kv">
+                  <div class="kv-row"><span>角色</span><b>{selectedRoleDetail.role}</b></div>
+                  <div class="kv-row"><span>信任等级</span><b>{selectedRoleDetail.trust_tier}</b></div>
+                  <div class="kv-row"><span>适配器</span><b class={selectedRoleDetail.live_adapter_connected ? "is-live" : "is-dim"}>{selectedRoleDetail.live_adapter_connected ? "实连在线" : "模板元数据"}</b></div>
+                  <div class="kv-row"><span>历史运行</span><b>{selectedRoleDetail.historical_runs.runs_total}</b></div>
+                  <div class="kv-row"><span>成功 / 失败</span><b>{selectedRoleDetail.historical_runs.runs_succeeded} / {selectedRoleDetail.historical_runs.runs_failed}</b></div>
+                </div>
+                <p class="side-copy">{selectedRoleDetail.description}</p>
+              {:else}
+                <p class="side-copy">尚未选择角色。点击环形节点查看该专家的真实元数据；模板角色不会被描述为在线进程。</p>
+              {/if}
+            </div>
+            <div class="side-block">
+              <div class="sect"><b>核心口径</b><span>GUARDRAILS</span></div>
+              <div class="kv">
+                <div class="kv-row"><span>调度权威</span><b>{galaxySnapshot?.commander?.sole_authority ? "唯一 Commander" : "未读取"}</b></div>
+                <div class="kv-row"><span>竞态调度器</span><b class={galaxySnapshot?.commander?.competing_schedulers ? "is-warn" : "is-live"}>{galaxySnapshot?.commander?.competing_schedulers ?? "—"}</b></div>
+                <div class="kv-row"><span>显存策略</span><b class="is-dim">{gpuResourceStatus?.status === "reserved" ? "已占租约" : "未知不超卖"}</b></div>
+                <div class="kv-row"><span>自动改码</span><b class={selfImprovementStatus?.automatic_code_changes ? "is-warn" : "is-live"}>{selfImprovementStatus?.automatic_code_changes ? "已启用" : "关闭"}</b></div>
+              </div>
+            </div>
+          </aside>
         </div>
+      </section>
+
+      <section class="stats" aria-label="实时指标">
+        <div class="stat">
+          <small>已登记智能体</small>
+          <b>{agents.length}</b>
+          <em>Agent Registry 实连记录</em>
+        </div>
+        <div class="stat">
+          <small>在线 / 执行中</small>
+          <b class="is-jade">{activeCount}</b>
+          <em>按最近心跳推导</em>
+        </div>
+        <div class="stat">
+          <small>任务成功率</small>
+          <b>{percent(successRate)}</b>
+          <em>仅统计真实完成样本</em>
+        </div>
+        <div class="stat">
+          <small>审查通过率</small>
+          <b>{percent(reviewRate)}</b>
+          <em>仅统计 Reviewer 样本</em>
+        </div>
+        <div class="stat">
+          <small>排队 / 待批</small>
+          <b class="is-gold">{queueSnapshot?.counts.queued ?? 0}<span class="stat-sep">/</span>{queueSnapshot?.counts.waiting_approval ?? 0}</b>
+          <em>Commander 队列实时</em>
+        </div>
+        <div class="stat">
+          <small>已交付产品</small>
+          <b>{products.length}</b>
+          <em>需人工验收后发布</em>
+        </div>
+      </section>
+
+      <section class="card" id="mempalace">
+        <MemPalacePanel status={mempalaceStatus} {connected} />
+      </section>
+
+      <div class="split">
+        <section class="card" id="events">
+          <div class="card-h">
+            <div>
+              <h2>星轨<em>事件流</em></h2>
+              <p>SSE 实时推送；断线后自动重连并显示最后一次成功刷新时间。</p>
+            </div>
+            <span class="chip is-quiet">{events.length} 条</span>
+          </div>
+          {#if events.length === 0}
+            <div class="empty"><b>暂无事件</b><span>后端产生进度事件后会实时出现在这里。</span></div>
+          {:else}
+            <ol class="rows">
+              {#each events.slice(0, 12) as event, index (event.id ?? index)}
+                <li class="row event-row">
+                  <span>
+                    <b>{eventTitle(event)}</b>
+                    <small>{eventSource(event) || "本地运行时"}</small>
+                  </span>
+                  <span class="row-meta">{eventTime(event)}</span>
+                </li>
+              {/each}
+            </ol>
+          {/if}
+        </section>
+
+        <section class="card" id="prometheus-core">
+          <div class="card-h">
+            <div>
+              <h2>数据与<em>权限</em></h2>
+              <p>界面只通过回环受限 API 读取状态与提交受控指令，从不直连 SQLite，也不会自动批准提案。</p>
+            </div>
+            <span class="chip is-quiet">本机受限</span>
+          </div>
+          <div class="kv">
+            <div class="kv-row"><span>连接</span><b>127.0.0.1 · Bearer 会话</b></div>
+            <div class="kv-row"><span>事件通道</span><b>SSE / Text-Event-Stream</b></div>
+            <div class="kv-row"><span>写操作</span><b class="is-dim">灵感、反馈、审片、运行控制</b></div>
+            <div class="kv-row"><span>禁止</span><b class="is-dim">自动改码 / 自动发布</b></div>
+          </div>
+          {#if pairingCode && lanUrls.length}
+            <div class="notice" style="margin-top:12px">
+              <Icon name="lock" size={14} />
+              <span>局域网配对已开启：{lanUrls.join(" · ")} · 配对码 {pairingCode}（12 小时有效）</span>
+            </div>
+          {/if}
+          <p class="side-copy">玄学推演（八卦、星宿、干支）仅作为结构隐喻与假设生成工具，明确标注 symbolic_hypothesis_only，不会写入 User Track 记忆，也不作为事实证据。</p>
+        </section>
       </div>
+    {/if}
+
+    {#if view === "studio"}
+      <header class="view-head">
+        <div>
+          <h1>创作<em>台</em></h1>
+          <p>从灵感评分到影像成片，再回到审片反馈。评分是排序启发，成片必须人工验收；模型推理与合成全部在本机完成。</p>
+        </div>
+        <div class="view-head-meta">
+          <span class="chip is-quiet">本地渲染</span>
+          <span class="chip is-quiet">{products.length} 件成果</span>
+        </div>
+      </header>
+
+      <CreativeStudio {client} {connected} />
+
+      <!-- ───────────────── 价值创作台 ───────────────── -->
+      <section class="value-studio" id="value-studio" aria-label="价值创作台">
+        <div class="vs-head">
+          <div class="vs-title">
+            <span class="vs-glyph" aria-hidden="true">✦</span>
+            <div>
+              <div class="vs-kicker">IDEA → RESEARCH → FILM → FEEDBACK</div>
+              <h2>价值创作台</h2>
+              <p>把一闪而过的念头，变成可验证、可制作、可复盘的创作路径。</p>
+            </div>
+          </div>
+          <div class="vs-engine" title="纯本地启发式评分，不联网、不预测收益">
+            <span class="vs-engine-dot"></span>
+            LOCAL HEURISTIC · V1
+          </div>
+        </div>
 
       <ol class="vs-flow" aria-label="创作闭环阶段">
         <li class:done={studioStage >= 1}><b>01</b><span>注入灵感</span></li>
@@ -1332,9 +1596,23 @@
         </div>
       </div>
     </section>
+    {/if}
 
-    <!-- ───────────────── 自主运行时 ───────────────── -->
-    <section class="ops-grid" id="daemon-runtime" aria-label="自主运行时">
+    {#if view === "runtime"}
+      <header class="view-head">
+        <div>
+          <h1>运行<em>时</em></h1>
+          <p>常驻监督循环与一键配方流水线。运行时使用确定性 allowlist 例行任务，不自动批准代码、不自动发布；生命周期操作全部写入本地审计日志。</p>
+        </div>
+        <div class="view-head-meta">
+          <span class={`chip ${daemonStatus?.running ? "is-live" : daemonStatus?.state === "paused" ? "is-stale" : "is-quiet"}`}>
+            <i class="dot" aria-hidden="true"></i>{daemonStatus?.running ? "运行时运行中" : daemonStatus?.state === "paused" ? "已暂停" : "未运行"}
+          </span>
+          <span class="chip is-quiet">配方 {pipelineRecipes.length}</span>
+        </div>
+      </header>
+
+      <section class="ops-grid" id="daemon-runtime" aria-label="自主运行时">
       <section class="panel daemon-panel">
         <div class="panel-head">
           <div><small>AUTONOMOUS RUNTIME / 常驻引擎</small><h2>自主运行时</h2></div>
@@ -1398,12 +1676,29 @@
           <div class="empty-state compact">尚无流水线任务。选择一个配方开始。</div>
         {/if}
       </section>
-    </section>
+      </section>
+    {/if}
 
-    <section class="panel inspiration-panel" id="inspirations">
-      <div class="panel-head">
-        <div><small>00 / CREATOR STUDIO</small><h2>灵感工坊 · 创作与成果</h2></div>
-        <span class="tag">本地保存 · 可选联网研究</span>
+    {#if view === "memory"}
+      <header class="view-head">
+        <div>
+          <h1>记忆<em>库</em></h1>
+          <p>User Track 与 Agent Track 严格隔离：界面只显示计数与健康状态，从不读取记忆正文。灵感默认仅存本地，只有显式勾选才会用于公开资料检索。</p>
+        </div>
+        <div class="view-head-meta">
+          <span class="chip is-quiet">{inspirations.length} 条灵感</span>
+          <span class="chip is-quiet">{artifacts.length} 份报告</span>
+        </div>
+      </header>
+
+      <section class="card" aria-label="记忆殿堂">
+        <MemPalacePanel status={mempalaceStatus} {connected} />
+      </section>
+
+    <section class="card inspiration-panel" id="inspirations">
+      <div class="card-h">
+        <div><h2>灵感<em>工坊</em></h2><p>写下想法、问题或故事种子；默认只保存在本机，不联网。</p></div>
+        <span class="chip is-quiet">本地保存 · 可选联网</span>
       </div>
       {#if pairingCode && lanUrls.length}
         <div class="lan-share">
@@ -1477,8 +1772,15 @@
           <small class="artifact-note">报告原件保存在 Muse 项目目录的 data/research/reports；下载后可用 Markdown 阅读器或编辑器打开。</small>
         </div>
       </div>
-      <section class="product-library" id="products">
-          <div class="worker-heading"><b>一键视频创作</b><span>本地素材剪辑 + Wan 2.1 AI 文生视频 · 交付审片闭环</span></div>
+    </section>
+    {/if}
+
+    {#if view === "studio"}
+      <section class="card product-library" id="products">
+          <div class="card-h">
+            <div><h2>影像<em>工坊</em> · 成果库</h2><p>本地素材剪辑 + Wan 2.1 文生视频，成片需人工审片后才能发布。</p></div>
+            <span class="chip is-quiet">{products.length} 件</span>
+          </div>
           <p class="artifact-note">{videoEngineSummary}</p>
           <p class="panel-intro">可以直接输入灵感生成 AI 短片，也可以导入自己的图片/视频素材剪辑。AI 模式使用本机 ComfyUI + Wan 2.1 1.3B，不调用云端视频 API；当前为 1–5 秒预览级生成，成片仍需人工验收。</p>
           <div class="inspiration-form">
@@ -1767,14 +2069,52 @@
         {/if}
         <small class="artifact-note">产品原件保存在 data/products；视频素材放在 data/video_sources。视频工程 ZIP 包含 MP4、素材顺序清单和说明。所有产品初始为 testing，须人工验收后才能发布。</small>
       </section>
-    </section>
     {/if}
 
-    {#if activeSector === "all" || activeSector === "prometheus"}
+    {#if view === "overview"}
       <PrometheusCorePanel prometheus={prometheusCore} />
     {/if}
 
-    {#if activeSector === "all" || activeSector === "galaxy"}
+    {#if view === "knowledge"}
+      <header class="view-head">
+        <div>
+          <h1>知识<em>图谱</em></h1>
+          <p>Research Wiki 中的主张、来源、实验与失败构成可追溯星图；卦象与星宿作为结构透镜，只生成可证伪假设，不冒充事实证据。</p>
+        </div>
+        <div class="view-head-meta">
+          <span class="chip is-quiet">{knowledgeGraph?.nodes.length ?? 0} 星体</span>
+          <span class="chip is-quiet">{knowledgeGraph?.edges.length ?? 0} 连边</span>
+        </div>
+      </header>
+
+      <KnowledgeStarMap
+        {client}
+        {connected}
+        graph={knowledgeGraph}
+        onQueryGraph={queryKnowledgeGraph}
+      />
+
+      <CelestialBaguaLab
+        {client}
+        {connected}
+        celestial={celestialCatalog}
+        {presetLowerBits}
+        onSaveHypothesisInspiration={saveHypothesisInspiration}
+      />
+    {/if}
+
+    {#if view === "agents"}
+      <header class="view-head">
+        <div>
+          <h1>智能<em>体</em></h1>
+          <p>唯一调度权威 Muse Commander 统御专家角色、角色安全策略与本机能力；模板元数据与实连进程在界面上严格区分。</p>
+        </div>
+        <div class="view-head-meta">
+          <span class="chip is-quiet">{galaxySnapshot?.specialist_profiles.length ?? 0} 专家席</span>
+          <span class={`chip ${registryConfigured ? "is-live" : "is-quiet"}`}>{registryConfigured ? "Registry 已连接" : "Registry 未配置"}</span>
+        </div>
+      </header>
+
     <AgentGalaxyPanel
       {client}
       {connected}
@@ -1782,139 +2122,149 @@
       {registryConfigured}
       galaxy={galaxySnapshot}
     />
+    {/if}
 
-    <section class="metrics" aria-label="实时指标">
-      <article>
-        <small>已登记智能体</small>
-        <strong>{agents.length}</strong>
-        <em>来自本地 Agent Registry</em>
-      </article>
-      <article>
-        <small>在线 / 忙碌</small>
-        <strong>{activeCount}</strong>
-        <em>按最近心跳实时推导</em>
-      </article>
-      <article>
-        <small>任务成功率</small>
-        <strong>{percent(successRate)}</strong>
-        <em>仅统计真实完成样本</em>
-      </article>
-      <article>
-        <small>审查通过率</small>
-        <strong>{percent(reviewRate)}</strong>
-        <em>仅统计真实 Reviewer 样本</em>
-      </article>
-    </section>
+    {#if view === "tasks"}
+      <header class="view-head">
+        <div>
+          <h1>任务<em>中心</em></h1>
+          <p>只读监控 Commander 队列、工作流阶段与 Worker 心跳。撤销、重试与审批全部由后端策略裁决，界面不会绕过授权。</p>
+        </div>
+        <div class="view-head-meta">
+          <span class="chip is-quiet">{queueSnapshot?.active.length ?? 0} 活跃任务</span>
+          <span class="chip is-quiet">{workflowRuns.length} 工作流</span>
+        </div>
+      </header>
 
-    <div class="main-grid">
-      <section class="panel queue-panel" id="queue">
-        <div class="panel-head">
-          <div><small>02 / TASK FLOW & WORKERS</small><h2>任务队列 · 执行节点</h2></div>
-          <span class="tag">只读监控</span>
+    <div class="cols-2">
+      <section class="card" id="queue">
+        <div class="card-h">
+          <div><h2>任务<em>队列</em></h2><p>只读监控；筛选仅作用于当前已载入的任务。</p></div>
+          <span class="chip is-quiet">只读</span>
         </div>
         {#if !queueSnapshot}
-          <div class="empty-state">任务队列数据暂不可用。</div>
+          <div class="empty"><b>队列数据不可用</b><span>本地 API 未返回任务快照。</span></div>
         {:else}
-          <div class="queue-counts">
-            <div><small>排队中</small><strong>{queueSnapshot.counts.queued}</strong></div>
-            <div><small>执行中</small><strong>{queueSnapshot.counts.running}</strong></div>
-            <div><small>待审批</small><strong>{queueSnapshot.counts.waiting_approval}</strong></div>
-            <div><small>失败</small><strong>{queueSnapshot.counts.failed}</strong></div>
+          <div class="stats" style="margin-bottom:14px">
+            <div class="stat"><small>排队中</small><b>{queueSnapshot.counts.queued}</b></div>
+            <div class="stat"><small>执行中</small><b class="is-jade">{queueSnapshot.counts.running}</b></div>
+            <div class="stat"><small>待审批</small><b class="is-gold">{queueSnapshot.counts.waiting_approval}</b></div>
+            <div class="stat"><small>失败</small><b class="is-dim">{queueSnapshot.counts.failed}</b></div>
           </div>
           <div class="queue-tools" aria-label="任务筛选">
-            <label class="queue-search-label" for="queue-search">查找任务</label>
-            <input id="queue-search" class="queue-search" type="search" bind:value={queueQuery} placeholder="按任务名称或编号搜索…" />
-            <label class="queue-search-label" for="queue-status">状态</label>
-            <select id="queue-status" class="queue-status-filter" bind:value={queueStatusFilter}>
+            <input id="queue-search" class="input" type="search" bind:value={queueQuery} placeholder="按任务名称或编号搜索…" aria-label="查找任务" />
+            <select id="queue-status" class="select" bind:value={queueStatusFilter} aria-label="按状态筛选">
               <option value="all">全部状态</option>
               <option value="queued">排队中</option>
               <option value="running">执行中</option>
               <option value="waiting_approval">待审批</option>
               <option value="failed">失败</option>
             </select>
-            <span class="queue-result-count">显示 {filteredQueueTasks.length} / {queueSnapshot.active.length} 条已载入任务</span>
           </div>
+          <p class="queue-note">显示 {filteredQueueTasks.length} / {queueSnapshot.active.length} 条已载入任务</p>
           {#if filteredQueueTasks.length}
-            <div class="queue-list" aria-live="polite">
+            <div class="rows" aria-live="polite">
               {#each filteredQueueTasks as task (task.id)}
-                <div class="queue-task">
-                  <span class="task-status task-{task.status}">{task.status}</span>
-                  <b>{task.title}</b>
-                  <small>{task.depends_on?.length ? `依赖 ${task.depends_on.length} 项 · ` : ""}尝试 {task.attempts} 次 · 更新于 {relativeTime(task.updated_at)}</small>
+                <div class="task">
+                  <span class={`state state-${task.status}`}>{task.status}</span>
+                  <div class="task-title">
+                    <b>{task.title}</b>
+                    <small>{task.depends_on?.length ? `依赖 ${task.depends_on.length} 项 · ` : ""}尝试 {task.attempts} 次 · 更新于 {relativeTime(task.updated_at)}</small>
+                  </div>
+                  <span class="row-meta">{task.id.slice(0, 8)}</span>
                 </div>
               {/each}
             </div>
           {:else if queueSnapshot.active.length}
-            <div class="empty-state compact">没有符合条件的任务。<button type="button" class="radar-scan" onclick={() => { queueQuery = ""; queueStatusFilter = "all"; }}>清除筛选</button></div>
+            <div class="empty"><b>没有符合条件的任务</b><span>调整关键词或状态筛选。</span><button class="btn is-sm" type="button" onclick={() => { queueQuery = ""; queueStatusFilter = "all"; }}>清除筛选</button></div>
           {:else}
-            <div class="empty-state compact">当前没有排队、执行或等待审批的任务。</div>
+            <div class="empty"><b>队列已清空</b><span>当前没有排队、执行或等待审批的任务。</span></div>
           {/if}
           {#if queueSnapshot.active_truncated}
             <small class="queue-note">后端返回的活跃任务列表已截断；搜索与筛选仅作用于当前已载入的 {queueSnapshot.active.length} 条任务。</small>
           {/if}
         {/if}
-        <div class="workflow-heading"><b>Commander 工作流</b><span>{workflowRuns.length} 个活跃流程</span></div>
+        <div class="sect" style="margin-top:18px"><b>Commander 工作流</b><span>{workflowRuns.length} 个活跃流程</span></div>
         {#if workflowRuns.length}
-          <div class="workflow-list">
+          <div class="rows">
             {#each workflowRuns as workflow (workflow.ticket_id)}
-              <article class="workflow-card">
-                <div class="workflow-card-head">
+              <article class="wf">
+                <div class="wf-head">
                   <b>{workflow.title}</b>
-                  <span class="workflow-state workflow-{workflow.status}">{workflow.status}</span>
+                  <span class={`state state-${workflow.status}`}>{workflow.status}</span>
                 </div>
-                <div class="workflow-stage">
+                <div class="wf-stage">
                   <strong>{workflow.stage}</strong>
                   <small>{workflow.profile_name ?? "team"} · v{workflow.profile_version} · 尝试 {workflow.attempt}</small>
                 </div>
-                {#if workflow.step_id}
-                  <small>当前 DAG 步骤：{workflow.step_id}</small>
-                {/if}
-                {#if workflow.next_action}
-                  <small>下一步：{workflow.next_action}</small>
-                {/if}
-                <small class="workflow-id">Ticket {workflow.ticket_id.slice(0, 8)} · Flow {workflow.workflow_id.slice(0, 8)}</small>
+                {#if workflow.step_id}<small class="wf-note">当前 DAG 步骤：{workflow.step_id}</small>{/if}
+                {#if workflow.next_action}<small class="wf-note">下一步：{workflow.next_action}</small>{/if}
+                <small class="wf-id">Ticket {workflow.ticket_id.slice(0, 8)} · Flow {workflow.workflow_id.slice(0, 8)}</small>
               </article>
             {/each}
           </div>
         {:else}
-          <div class="empty-state compact">当前没有已绑定的 Commander 工作流。</div>
+          <div class="empty"><b>暂无工作流</b><span>Commander 绑定工作流后会出现在这里。</span></div>
         {/if}
-        <div class="worker-heading"><b>Worker 运行状态</b><span>{workers.length} 个记录</span></div>
+      </section>
+
+      <section class="card">
+        <div class="card-h">
+          <div><h2>执行<em>节点</em></h2><p>Worker 心跳与存活状态。</p></div>
+          <span class="chip is-quiet">{workers.length} 记录</span>
+        </div>
         {#if workers.length}
-          <div class="worker-list">
-            {#each workers.slice(0, 6) as worker (worker.worker_id)}
+          <div class="rows">
+            {#each workers.slice(0, 12) as worker (worker.worker_id)}
               <div class="worker-row">
                 <span class:worker-stale={worker.stale} class="worker-indicator"></span>
                 <b>{worker.worker_id}</b>
-                <small>{worker.stale ? "心跳过期" : worker.state === "active" ? "运行中" : "已停止"}</small>
+                <small>{worker.stale ? "心跳过期" : worker.state === "active" ? "运行中" : "已停止"} · {relativeTime(worker.heartbeat_at)}</small>
               </div>
             {/each}
           </div>
         {:else}
-          <div class="empty-state compact">尚无 Worker 心跳记录。</div>
+          <div class="empty"><b>尚无 Worker</b><span>Worker 启动并写入心跳后会显示在这里。</span></div>
         {/if}
       </section>
+    </div>
+    {/if}
 
-      <section class="panel feedback-panel" id="feedback">
-        <div class="panel-head">
-          <div><small>03 / LEARNING LOOP</small><h2>反馈 · 自我改进</h2></div>
-          <span class="tag">人工输入 · 审批保护</span>
+    {#if view === "evolve"}
+      <header class="view-head">
+        <div>
+          <h1>进化<em>回路</em></h1>
+          <p>反馈只记录 allowlist 标签与严重度，不采集自由文本；能力雷达生成的提案必须人工批准，界面不会自动改码或自动发布。</p>
         </div>
-        <p class="panel-intro">只记录预设分类标签和严重程度，不收集聊天原文或自由文本。</p>
+        <div class="view-head-meta">
+          <span class="chip is-quiet">{proposals.length} 提案</span>
+          <span class={`chip ${selfImprovementStatus?.automatic_code_changes ? "is-stale" : "is-live"}`}>{selfImprovementStatus?.automatic_code_changes ? "自动改码已启用" : "自动改码关闭"}</span>
+        </div>
+      </header>
+
+      <div class="cols-2">
+      <section class="card" id="feedback">
+        <div class="card-h">
+          <div><h2>反馈 · <em>自我改进</em></h2><p>只记录预设分类标签和严重程度，不收集聊天原文或自由文本。</p></div>
+          <span class="chip is-quiet">人工输入</span>
+        </div>
         {#if selfImprovementStatus}
-          <div class="queue-counts" aria-label="自我进化状态">
-            <div><small>待研究</small><strong>{selfImprovementStatus.pending_research}</strong></div>
-            <div><small>待人工审查</small><strong>{selfImprovementStatus.pending_human_review}</strong></div>
-            <div><small>已批准待执行</small><strong>{selfImprovementStatus.approved_waiting_execution}</strong></div>
-            <div><small>拒绝 / 回滚</small><strong>{selfImprovementStatus.proposal_counts.rejected + selfImprovementStatus.proposal_counts.rolled_back}</strong></div>
+          <div class="stats" aria-label="自我进化状态" style="margin-bottom:14px">
+            <div class="stat"><small>待研究</small><b>{selfImprovementStatus.pending_research}</b></div>
+            <div class="stat"><small>待人工审查</small><b class="is-gold">{selfImprovementStatus.pending_human_review}</b></div>
+            <div class="stat"><small>已批待执行</small><b>{selfImprovementStatus.approved_waiting_execution}</b></div>
+            <div class="stat"><small>拒绝 / 回滚</small><b class="is-dim">{selfImprovementStatus.proposal_counts.rejected + selfImprovementStatus.proposal_counts.rolled_back}</b></div>
           </div>
-          <div class="worker-heading"><b>Evolution Cycle</b><span>{selfImprovementStatus.cycle_state === "progress" ? "运行中 / 可恢复" : selfImprovementStatus.cycle_state === "started" ? "已启动 / 可恢复" : selfImprovementStatus.cycle_state === "completed" ? "最近周期已完成" : selfImprovementStatus.cycle_state === "failed" ? "最近周期失败" : selfImprovementStatus.cycle_state === "cancelled" ? "最近周期已取消" : "尚未运行"}</span></div>
-          <small>下一步：{selfImprovementStatus.next_action} · {selfImprovementStatus.topic_checkpoint_saved ? "研究主题检查点已保存" : "等待主题检查点"}</small>
-          <small>安全门：{selfImprovementStatus.approval_required ? "需要人工批准" : "未启用人工批准"} · {selfImprovementStatus.automatic_code_changes ? "自动代码修改已启用" : "自动代码修改关闭"}</small>
+          <div class="kv">
+            <div class="kv-row"><span>Evolution Cycle</span><b>{selfImprovementStatus.cycle_state === "progress" ? "运行中 / 可恢复" : selfImprovementStatus.cycle_state === "started" ? "已启动 / 可恢复" : selfImprovementStatus.cycle_state === "completed" ? "最近周期已完成" : selfImprovementStatus.cycle_state === "failed" ? "最近周期失败" : selfImprovementStatus.cycle_state === "cancelled" ? "最近周期已取消" : "尚未运行"}</b></div>
+            <div class="kv-row"><span>下一步</span><b>{selfImprovementStatus.next_action}</b></div>
+            <div class="kv-row"><span>主题检查点</span><b class={selfImprovementStatus.topic_checkpoint_saved ? "is-live" : "is-dim"}>{selfImprovementStatus.topic_checkpoint_saved ? "已保存" : "待保存"}</b></div>
+            <div class="kv-row"><span>安全门</span><b class={selfImprovementStatus.approval_required ? "is-live" : "is-warn"}>{selfImprovementStatus.approval_required ? "需要人工批准" : "未启用批准"}</b></div>
+          </div>
         {/if}
         <div class="feedback-form">
           <label>反馈类别
-            <select bind:value={feedbackCategory}>
+            <select bind:value={feedbackCategory} class="select">
               <option value="reliability">可靠性</option>
               <option value="accuracy">准确性</option>
               <option value="usability">易用性</option>
@@ -1923,7 +2273,7 @@
             </select>
           </label>
           <label>问题标签
-            <select bind:value={feedbackTag}>
+            <select bind:value={feedbackTag} class="select">
               <option value="workflow_gap">流程缺口</option>
               <option value="repeated_manual_fix">重复手工修正</option>
               <option value="repeated_retry">重复重试</option>
@@ -1934,7 +2284,7 @@
             </select>
           </label>
           <label>严重程度
-            <select bind:value={feedbackSeverity}>
+            <select bind:value={feedbackSeverity} class="select">
               <option value="1">1 · 轻微</option>
               <option value="2">2</option>
               <option value="3">3 · 一般</option>
@@ -1942,209 +2292,519 @@
               <option value="5">5 · 严重</option>
             </select>
           </label>
-          <button type="button" class="feedback-submit" onclick={submitFeedback} disabled={feedbackBusy || !connected}>
+          <button type="button" class="btn is-primary" onclick={submitFeedback} disabled={feedbackBusy || !connected}>
             {feedbackBusy ? "正在提交…" : "记录反馈"}
           </button>
         </div>
         {#if feedbackMessage}
           <p class="feedback-message" role="status">{feedbackMessage}</p>
         {/if}
-        <div class="feedback-columns">
-          <div>
-            <div class="worker-heading"><b>最近反馈</b><span>{feedbackRows.length} 条</span></div>
-            {#if feedbackRows.length}
-              <div class="feedback-list">
-                {#each feedbackRows.slice(0, 5) as item, index}
-                  <div class="feedback-row" data-feedback-index={index}>
-                    <b>{item.tag}</b><span>严重度 {item.severity}/5</span><small>{item.category} · {relativeTime(item.created_at)}</small>
-                  </div>
-                {/each}
-              </div>
-            {:else}
-              <div class="empty-state compact">还没有用户反馈。</div>
-            {/if}
-          </div>
-          <div>
-            <div class="worker-heading"><b>改进提案 · {proposals.length} 项</b><button type="button" class="radar-scan" onclick={runRadarScan} disabled={radarBusy || !connected}>{radarBusy ? "扫描中…" : "扫描改进机会"}</button></div>
-            {#if radarMessage}<p class="feedback-message" role="status">{radarMessage}</p>{/if}
-            {#if proposals.length}
-              <div class="feedback-list">
-                {#each proposals.slice(0, 5) as proposal (proposal.id)}
-                  <button type="button" class="feedback-row proposal-row" onclick={() => openProposal(proposal.id)} disabled={proposalBusy}>
-                    <b>{proposal.title}</b><span>优先级 {proposal.priority}/100</span>
-                    <small>{proposal.status} · 更新于 {relativeTime(proposal.updated_at)} · 查看研究详情 ↗</small>
-                  </button>
-                {/each}
-              </div>
-              {#if selectedProposal}
-                <article class="proposal-detail">
-                  <div class="worker-heading"><b>提案详情 · {selectedProposal.status}</b><button type="button" class="radar-scan" onclick={() => selectedProposal = null}>收起</button></div>
-                  <h3>{selectedProposal.title}</h3>
-                  <p>{selectedProposal.problem}</p>
-                  <p><b>研究假设：</b>{selectedProposal.hypothesis}</p>
-                  <p><b>预期影响：</b>{selectedProposal.impact} · 置信度 {selectedProposal.confidence === null ? "—" : Math.round(selectedProposal.confidence * 100) + "%"}</p>
-                  <b>验收标准</b>
-                  <ul>{#each selectedProposal.acceptance_criteria as criterion}<li>{criterion}</li>{/each}</ul>
-                  <p><b>回滚方案：</b>{selectedProposal.rollback_plan}</p>
-                  <b>研究来源 · {selectedProposal.sources.length}</b>
-                  {#if selectedProposal.sources.length}
-                    <ul>{#each selectedProposal.sources as source}<li><a href={source.url} target="_blank" rel="noreferrer">{source.title}</a> · {source.license_status} / {source.security_status}</li>{/each}</ul>
-                  {:else}<p>尚无已登记研究来源。</p>{/if}
-                  <small>审批仍由人工完成；详情页不会自动批准或执行提案。</small>
-                </article>
-              {/if}
-            {:else}
-              <div class="empty-state compact">尚无改进提案。反馈达到触发条件后可运行能力雷达生成。</div>
-            {/if}
-          </div>
-        </div>
+        <div class="sect" style="margin-top:18px"><b>最近反馈</b><span>{feedbackRows.length} 条</span></div>
+        {#if feedbackRows.length}
+            <div class="rows">
+              {#each feedbackRows.slice(0, 6) as item, index}
+                <div class="row" data-feedback-index={index}>
+                  <span><b>{item.tag}</b><small>{item.category} · {relativeTime(item.created_at)}</small></span>
+                  <span class="row-meta">严重度 {item.severity}/5</span>
+                </div>
+              {/each}
+            </div>
+        {:else}
+          <div class="empty"><b>还没有用户反馈</b><span>提交一条反馈即可启动学习回路。</span></div>
+        {/if}
       </section>
 
-      <section class="panel events-panel" id="events">
-        <div class="panel-head">
-          <div><small>02 / CHRONICLE STREAM</small><h2>星轨事件</h2></div>
-          <span class="tag">真实事件</span>
+      <section class="card">
+        <div class="card-h">
+          <div><h2>改进<em>提案</em></h2><p>能力雷达扫描现有反馈与运行信号，生成待人工审批的改进候选。</p></div>
+          <button type="button" class="btn is-sm" onclick={runRadarScan} disabled={radarBusy || !connected}>{radarBusy ? "扫描中…" : "扫描改进机会"}</button>
+        </div>
+        {#if radarMessage}<p class="feedback-message" role="status">{radarMessage}</p>{/if}
+        {#if proposals.length}
+          <div class="rows">
+            {#each proposals.slice(0, 6) as proposal (proposal.id)}
+              <button type="button" class="row proposal-row" onclick={() => openProposal(proposal.id)} disabled={proposalBusy}>
+                <span><b>{proposal.title}</b><small>{proposal.status} · 更新于 {relativeTime(proposal.updated_at)} · 查看详情</small></span>
+                <span class="row-meta">P{proposal.priority}</span>
+              </button>
+            {/each}
+          </div>
+          {#if selectedProposal}
+            <article class="proposal-detail">
+              <div class="card-h"><div><h2>提案详情 · {selectedProposal.status}</h2></div><button type="button" class="btn is-sm" onclick={() => selectedProposal = null}>收起</button></div>
+              <h3>{selectedProposal.title}</h3>
+              <p>{selectedProposal.problem}</p>
+              <p><b>研究假设：</b>{selectedProposal.hypothesis}</p>
+              <p><b>预期影响：</b>{selectedProposal.impact} · 置信度 {selectedProposal.confidence === null ? "—" : Math.round(selectedProposal.confidence * 100) + "%"}</p>
+              <b>验收标准</b>
+              <ul>{#each selectedProposal.acceptance_criteria as criterion}<li>{criterion}</li>{/each}</ul>
+              <p><b>回滚方案：</b>{selectedProposal.rollback_plan}</p>
+              <b>研究来源 · {selectedProposal.sources.length}</b>
+              {#if selectedProposal.sources.length}
+                <ul>{#each selectedProposal.sources as source}<li><a href={source.url} target="_blank" rel="noreferrer">{source.title}</a> · {source.license_status} / {source.security_status}</li>{/each}</ul>
+              {:else}<p>尚无已登记研究来源。</p>{/if}
+              <small>审批仍由人工完成；详情页不会自动批准或执行提案。</small>
+            </article>
+          {/if}
+        {:else}
+          <div class="empty"><b>尚无改进提案</b><span>反馈达到触发条件后可运行能力雷达生成。</span></div>
+        {/if}
+      </section>
+      </div>
+    {/if}
+
+    {#if view === "runtime"}
+      <section class="card" id="events">
+        <div class="card-h">
+          <div><h2>星轨<em>事件</em></h2><p>SSE 实时推送；断线自动重连。</p></div>
+          <span class="chip is-quiet">{events.length} 条</span>
         </div>
         {#if events.length === 0}
-          <div class="empty-state">暂无已记录事件。后端产生事件后会显示在这里。</div>
+          <div class="empty"><b>暂无事件</b><span>后端产生事件后会显示在这里。</span></div>
         {:else}
-          <div class="event-list">
-            {#each events.slice(0, 20) as event, index}
-              <div class="event" data-event-index={index}>
-                <time>{eventTime(event)}</time>
-                <i class="event-dot"></i>
-                <span><b>{eventTitle(event)}</b><small>{eventSource(event)}</small></span>
+          <div class="rows">
+            {#each events.slice(0, 24) as event, index}
+              <div class="row event-row" data-event-index={index}>
+                <span><b>{eventTitle(event)}</b><small>{eventSource(event) || "本地运行时"}</small></span>
+                <span class="row-meta">{eventTime(event)}</span>
               </div>
             {/each}
           </div>
         {/if}
       </section>
-
-      <section class="panel integrity-panel">
-        <div class="panel-head">
-          <div><small>03 / SYSTEM INTEGRITY</small><h2>数据与权限</h2></div>
-          <span class="tag">本机受限写入</span>
-        </div>
-        <p>界面通过受限本地 API 读取状态、提交系统能力反馈和作品审片意见，并可手动运行本地统计扫描；不直接访问 SQLite，也不触发 Agent 执行或自动批准提案。</p>
-        <ul>
-          <li>本机回环地址</li>
-          <li>临时 Bearer 会话凭据</li>
-          <li>来源与能力仅作展示，不授予权限</li>
-          <li>系统能力反馈仅限 allowlist 标签与 1–5 级严重度；作品审片意见单独写入 Creator Initiative，进入待研究队列</li>
-        </ul>
-      </section>
-    </div>
     {/if}
 
-    <footer>
-      ✧ MUSE · NEO-CYBER CELESTIAL SUPER AGENT OS
+    <footer class="stage-foot">
+      <span>MUSE · LOCAL-FIRST SUPER AGENT COMMAND CENTER</span>
       <span>所有状态来自本地 API；玄学推演仅作启发假设，绝不冒充事实证据。</span>
     </footer>
-  </section>
+  </div>
 </main>
 
-<nav class="cyber-dock" aria-label="赛博星舰快捷指令坞">
-  <button type="button" class="dock-item" onclick={() => jumpToAnchor("#overview")}>◈ 星环</button>
-  <button type="button" class="dock-item" onclick={() => jumpToAnchor("#celestial-lab")}>☰ 八卦星宿</button>
-  <button type="button" class="dock-item" onclick={() => jumpToAnchor("#knowledge-starmap")}>✦ 知识星图</button>
-  <button type="button" class="dock-item core" onclick={() => jumpToAnchor("#prometheus-core")}>🜂 普罗米修斯核心</button>
-  <button type="button" class="dock-item" onclick={() => jumpToAnchor("#agents")}>◎ Agent 星系</button>
-  <button type="button" class="dock-item" onclick={() => jumpToAnchor("#value-studio")}>▷ 创作工坊</button>
-  <button type="button" class="dock-item" onclick={openCommandPalette}>⌘ 指令面板</button>
+<aside class="telemetry" aria-label="系统遥测">
+  <div class="tele-head"><b>系统遥测</b><span>LIVE · 5s</span></div>
+
+  <div class="tele-card">
+    <div class="kv">
+      <div class="kv-row"><span>核心</span><b class={connected && !stale ? "is-live" : "is-warn"}>{connectionBadge}</b></div>
+      <div class="kv-row"><span>更新时间</span><b class="is-dim">{updatedLabel}</b></div>
+      <div class="kv-row"><span>网关</span><b class="is-dim">127.0.0.1 · Bearer</b></div>
+    </div>
+  </div>
+
+  <div class="tele-card">
+    <div class="sect"><b>队列</b><span>QUEUE</span></div>
+    <div class="ladder">
+      {#each queueLadder as row (row.label)}
+        <div class="ladder-row">
+          <b>{row.label}</b>
+          <span class="meter {row.tone}">
+            <svg viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true"><rect x="0" y="0" width={row.pct} height="6" /></svg>
+          </span>
+          <i>{row.value}</i>
+        </div>
+      {/each}
+    </div>
+  </div>
+
+  <div class="tele-card">
+    <div class="sect"><b>资源护栏</b><span>GOVERNOR</span></div>
+    <div class="kv">
+      <div class="kv-row"><span>逻辑核</span><b>{prometheusCore?.resource_governor.logical_cpu_count ?? "—"}</b></div>
+      <div class="kv-row"><span>安全并发</span><b class="is-gold">{prometheusCore?.resource_governor.recommended_workers ?? "—"} / {prometheusCore?.resource_governor.maximum_workers ?? "—"}</b></div>
+      <div class="kv-row"><span>可用内存</span><b>{ramLabel}</b></div>
+      <div class="kv-row"><span>GPU 显存</span><b class={gpuResourceStatus?.status === "reserved" ? "is-warn" : "is-dim"}>{gpuLabel}</b></div>
+    </div>
+  </div>
+
+  <div class="tele-card">
+    <div class="sect"><b>知识</b><span>WIKI</span></div>
+    <div class="kv">
+      <div class="kv-row"><span>星体</span><b>{prometheusCore?.stages.discovery.knowledge_nodes_total ?? 0}</b></div>
+      <div class="kv-row"><span>连边</span><b>{prometheusCore?.stages.synthesis.knowledge_edges_total ?? 0}</b></div>
+      <div class="kv-row"><span>候选证据</span><b>{prometheusCore?.stages.discovery.claim_evidence_count ?? 0}</b></div>
+      <div class="kv-row"><span>已收入库</span><b class="is-dim">{prometheusCore?.stages.transmission.user_track_memories_count ?? 0} / {prometheusCore?.stages.transmission.agent_track_memories_count ?? 0}</b></div>
+    </div>
+  </div>
+
+  <div class="tele-card">
+    <div class="sect"><b>最新动态</b><span>STREAM</span></div>
+    {#if events.length}
+      <div class="rows">
+        {#each events.slice(0, 5) as event, index (event.id ?? index)}
+          <div class="tele-event">
+            <i aria-hidden="true"></i>
+            <span><b>{eventTitle(event)}</b><small>{eventTime(event)}</small></span>
+          </div>
+        {/each}
+      </div>
+    {:else}
+      <p class="side-copy">暂无事件。</p>
+    {/if}
+  </div>
+</aside>
+</div>
+
+<nav class="dock" aria-label="快捷指令坞">
+  <button type="button" class="dock-item is-key" onclick={openCommandPalette}>
+    <Icon name="search" size={18} /><span>指令</span>
+  </button>
+  <button type="button" class="dock-item" onclick={() => setView("tasks")}>
+    <Icon name="tasks" size={18} /><span>任务</span>
+  </button>
+  <button type="button" class="dock-item" onclick={() => setView("agents")}>
+    <Icon name="agents" size={18} /><span>智能体</span>
+  </button>
+  <div class="dock-key">
+    <button type="button" onclick={() => setView("overview")} aria-label="回到调度阵">
+      <Icon name="core" size={21} />
+    </button>
+  </div>
+  <button type="button" class="dock-item" onclick={() => setView("knowledge")}>
+    <Icon name="knowledge" size={18} /><span>知识</span>
+  </button>
+  <button type="button" class="dock-item" onclick={() => setView("studio")}>
+    <Icon name="studio" size={18} /><span>创作</span>
+  </button>
+  <button type="button" class="dock-item" onclick={() => setView("runtime")}>
+    <Icon name="flame" size={18} /><span>运行时</span>
+  </button>
 </nav>
 </div>
+
 <style>
-  .panel-intro{color:var(--muted);font-size:11px;margin:0 0 14px}
-  .feedback-form{display:grid;grid-template-columns:repeat(3,minmax(0,1fr)) auto;gap:10px;align-items:end}
-  .feedback-form label{display:grid;gap:6px;color:var(--muted);font-size:10px}
-  .feedback-form select{min-width:0;width:100%;padding:9px;background:#0b1424;border:1px solid #31415d;color:var(--text);font:inherit}
-  .feedback-submit{padding:10px 14px;border:1px solid #5a8a9a;background:#10283a;color:#d8f7ff;cursor:pointer;font:inherit;font-size:10px}
-  .feedback-submit:disabled,.radar-scan:disabled{opacity:.45;cursor:not-allowed}
-  .radar-scan{border:1px solid #425c75;background:transparent;color:var(--cyan);padding:6px 9px;font:inherit;font-size:9px;cursor:pointer}
-  .feedback-message{color:var(--mint);font-size:10px;margin:10px 0}
-  .inspiration-form{display:grid;gap:9px;margin:14px 0}
-  .inspiration-form>label{font-size:11px;color:var(--muted)}
-  .inspiration-form textarea{width:100%;box-sizing:border-box;resize:vertical;min-height:100px;padding:12px;background:#0b1424;border:1px solid #31415d;color:var(--text);font:inherit;line-height:1.6}
-  .inspiration-form input[type="text"]{width:100%;box-sizing:border-box;padding:9px 10px;background:#0b1424;border:1px solid #31415d;color:var(--text);font:inherit;font-size:10px}
-  .privacy-option{display:flex;align-items:center;gap:8px}
-  .privacy-option input{accent-color:#63b6bd}
-  .inspiration-actions{display:flex;justify-content:space-between;align-items:center}
-  .inspiration-actions small,.artifact-note{color:var(--muted);font-size:9px}
-  .inspiration-row,.artifact-row{padding:10px 0;border-bottom:1px solid #243149}
-  .inspiration-row b,.artifact-row b{font-size:10px;overflow-wrap:anywhere}
-  .inspiration-row p{font-size:10px;line-height:1.6;color:var(--muted);white-space:pre-wrap;overflow-wrap:anywhere;margin:6px 0}
-  .inspiration-row small,.artifact-row small{display:block;font-size:9px;color:var(--muted);margin-top:5px}
-  .artifact-row{display:flex;justify-content:space-between;align-items:center;gap:10px}
-  .artifact-row span{min-width:0}
-  .artifact-note{display:block;margin-top:10px;line-height:1.6}
-  .lan-share{display:grid;gap:7px;padding:12px;margin:12px 0;background:#0b1b2a;border:1px solid #356073}
-  .lan-share b,.lan-share strong{color:#c7f4ee;font-size:12px}
-  .lan-share small{display:block;color:var(--muted);font-size:9px;line-height:1.5}
-  .lan-share a{color:var(--cyan);font-size:10px;overflow-wrap:anywhere}
-  .pair-code{display:flex;justify-content:space-between;align-items:center;gap:10px}
+  /* shell-scoped layout details that belong to this view only */
 
+  .overview-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1.5fr) minmax(268px, 1fr);
+    gap: 20px;
+    align-items: start;
+  }
 
-  .feedback-columns{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:16px}
-  .feedback-list{display:grid;gap:7px}
-  .feedback-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 8px;padding:8px 0;border-bottom:1px solid #243149}
-  .feedback-row b{font-size:10px;overflow-wrap:anywhere}
-  .feedback-row span,.feedback-row small{font-size:9px;color:var(--muted)}
-  .feedback-row small{grid-column:1/-1}
-  .queue-counts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin:4px 0 14px}
-  .queue-counts div{border:1px solid #263650;background:#0b1424;padding:9px;min-width:0}
-  .queue-counts small,.queue-counts strong{display:block}
-  .queue-counts small{font-size:9px;color:var(--muted)}
-  .queue-counts strong{font:600 20px Consolas,monospace;margin-top:5px}
-  .queue-tools{display:grid;grid-template-columns:auto minmax(120px,1fr) auto minmax(110px,.55fr) auto;align-items:center;gap:7px;margin:4px 0 10px}
-  .queue-search-label{color:var(--muted);font-size:9px}
-  .queue-search,.queue-status-filter{min-width:0;width:100%;box-sizing:border-box;padding:8px 9px;border:1px solid #31415d;background:#0b1424;color:var(--text);font:inherit;font-size:10px}
-  .queue-search:focus-visible,.queue-status-filter:focus-visible{outline:2px solid var(--cyan);outline-offset:2px}
-  .queue-result-count{grid-column:1/-1;color:var(--muted);font-size:9px;text-align:right}
-  @media(max-width:700px){.queue-tools{grid-template-columns:auto minmax(0,1fr)}.queue-result-count{grid-column:1/-1;text-align:left}}
-  .queue-list,.worker-list{display:grid;gap:7px}
-  .queue-task{display:grid;grid-template-columns:auto minmax(0,1fr);gap:5px 9px;align-items:center;padding:8px 0;border-bottom:1px solid #243149}
-  .queue-task b,.worker-row b{font-size:10px;overflow-wrap:anywhere}
-  .queue-task small{grid-column:2;color:var(--muted);font-size:9px}
-  .task-status{font:9px Consolas,monospace;color:var(--cyan);border:1px solid #347486;padding:3px 5px}
-  .task-waiting_approval{color:var(--gold);border-color:#806849}
-  .task-failed{color:var(--red);border-color:#75464b}
-  .queue-note{display:block;color:var(--muted);margin-top:8px;font-size:9px}
-  .worker-heading{display:flex;justify-content:space-between;margin:15px 0 8px;padding-top:12px;border-top:1px solid #243149;font-size:10px}
-  .worker-heading span,.worker-row small{color:var(--muted);font-size:9px}
-  .worker-row{display:flex;align-items:center;gap:8px;padding:5px 0}
-  .worker-row b{flex:1}
-  .worker-indicator{width:7px;height:7px;border-radius:50%;background:var(--mint);box-shadow:0 0 8px currentColor;flex:none}
-  .worker-indicator.worker-stale{background:var(--gold);color:var(--gold)}
-  .empty-state.compact{padding:12px;font-size:10px}
-  @media(max-width:700px){.queue-counts{grid-template-columns:repeat(2,minmax(0,1fr))}.feedback-form{grid-template-columns:1fr 1fr}.feedback-columns{grid-template-columns:1fr}}
+  .overview-side {
+    display: grid;
+    gap: 14px;
+    align-content: start;
+  }
 
-  .command-trigger{display:inline-flex;align-items:center;gap:9px;padding:8px 11px;border:1px solid #38536a;background:#0c1a29;color:#c8e7e8;font:inherit;font-size:10px;cursor:pointer}
-  .command-trigger kbd,.command-dialog kbd{padding:3px 6px;border:1px solid #3a5068;background:#101d2d;color:#a9c1cf;font:10px Consolas,monospace}
-  .command-backdrop{position:fixed;inset:0;z-index:1000;display:grid;place-items:start center;padding:12vh 18px 24px;background:rgba(2,7,14,.78);backdrop-filter:blur(10px)}
-  .command-dialog{width:min(620px,100%);max-height:72vh;overflow:auto;border:1px solid #47677d;background:linear-gradient(155deg,#101e30,#09111d 72%);box-shadow:0 28px 100px rgba(0,0,0,.55);padding:18px}
-  .command-title-row{display:flex;justify-content:space-between;align-items:start;gap:12px;margin-bottom:14px}
-  .command-title-row small{color:#7cb7bd;font-size:9px;letter-spacing:.12em}
-  .command-title-row h2{margin:6px 0 0;color:#e4f2ef;font-size:19px;font-weight:600}
-  .command-close{border:1px solid #3a5068;background:#0d1928;color:#b9cbd4;padding:6px 9px;cursor:pointer}
-  .command-search{box-sizing:border-box;width:100%;padding:13px 14px;border:1px solid #4b7182;outline:none;background:#07111d;color:#e5f4f2;font:inherit;font-size:13px}
-  .command-search:focus{border-color:#8ad2cb;box-shadow:0 0 0 2px rgba(138,210,203,.14)}
-  .command-results{display:grid;gap:4px;margin-top:12px}
-  .command-result{display:grid;grid-template-columns:28px minmax(0,1fr) auto;align-items:center;gap:10px;padding:10px 9px;border:1px solid transparent;color:#e0ecec;text-decoration:none}
-  .command-result:hover,.command-result:focus-visible{outline:none;border-color:#3e6979;background:#102538}
-  .command-result-glyph{display:grid;place-items:center;width:27px;height:27px;border:1px solid #385d6c;color:#9bd4cb}
-  .command-result b,.command-result small{display:block}
-  .command-result b{font-size:12px}
-  .command-result small{margin-top:3px;color:#91a6b3;font-size:10px}
-  .command-empty{padding:14px;color:#a6b7c0;font-size:11px}
-  .command-dialog footer{display:flex;justify-content:space-between;gap:10px;margin-top:12px;padding-top:10px;border-top:1px solid #26394c;color:#91a6b3;font-size:9px}
-  @media(max-width:700px){.command-trigger kbd{display:none}.command-backdrop{padding:8vh 10px 12px}.command-dialog{padding:13px}.top-actions{gap:6px}.top-actions>span{display:none}}
-  @media(prefers-reduced-motion:reduce){.command-backdrop{backdrop-filter:none}}
-  .guide-backdrop{position:fixed;inset:0;z-index:1100;display:grid;place-items:center;padding:18px;background:rgba(2,7,14,.84);backdrop-filter:blur(12px)}
-  .guide-dialog{position:relative;margin:0;max-width:none;width:min(760px,100%);max-height:88vh;overflow:auto;border:1px solid #54758a;background:radial-gradient(ellipse at 50% 0%,#17334a 0%,#0c1727 48%,#08111d 100%);box-shadow:0 30px 110px rgba(0,0,0,.62);padding:clamp(16px,3vw,28px);color:#e3f0ee}
-  .guide-header{display:flex;justify-content:space-between;gap:18px;align-items:start}.guide-header small{color:#8ed0c8;font-size:9px;letter-spacing:.14em}.guide-header h2{font-size:clamp(20px,3vw,28px);margin:7px 0}.guide-header p{color:#a8bbc4;font-size:11px;line-height:1.6;margin:0;max-width:520px}
-  .guide-step-count{display:flex;justify-content:space-between;gap:12px;color:#9cb2be;font-size:10px}.guide-step-count span{color:#d7c18b}
-  .guide-visual{display:flex;align-items:center;justify-content:center;gap:24px;min-height:100px;margin:14px 0;padding:12px;border:1px solid #263d53;background:rgba(4,12,22,.55)}.guide-orbit{width:62px;height:62px;display:grid;place-items:center;border:1px solid #6ba7a5;border-radius:50%;box-shadow:0 0 24px rgba(95,191,182,.18);color:#c6f2e8;font-size:28px}.guide-flow{display:flex;align-items:center;gap:9px;color:#c4d6d9;font-size:10px}.guide-flow b{padding:8px 10px;border:1px solid #3b6172;background:#10283a}.guide-flow i{width:20px;height:1px;background:#6ca6a3}
-  .guide-copy h3{font-size:18px;margin:12px 0;color:#e8f6f1}.guide-copy>p,.guide-copy div p,.guide-copy aside p{font-size:12px;line-height:1.75;color:#b8c9cf;margin:6px 0 0}.guide-copy>div{padding:12px 0;border-top:1px solid #263a4e}.guide-copy>div>b{font-size:11px;color:#8ed0c8}.guide-copy aside{margin-top:12px;padding:12px;border-left:2px solid #b89556;background:rgba(103,77,35,.13)}.guide-copy aside b{font-size:11px;color:#e0c487}.guide-actions{display:flex;justify-content:space-between;gap:9px;margin-top:20px;padding-top:14px;border-top:1px solid #293d50}.guide-actions button{font-size:11px}
-  @media(max-width:600px){.guide-backdrop{padding:8px}.guide-dialog{max-height:94vh;padding:14px}.guide-visual{min-height:76px;gap:12px}.guide-orbit{width:48px;height:48px}.guide-flow{gap:5px}.guide-flow b{padding:7px 6px}.guide-flow i{width:10px}.guide-actions{flex-wrap:wrap}.guide-actions button{flex:1;min-width:90px}}
-  @media(prefers-reduced-motion:reduce){.guide-backdrop{backdrop-filter:none}}
+  .side-block {
+    padding: 13px 14px;
+    border: 1px solid var(--hair-soft);
+    border-radius: var(--r-md);
+    background: #0a0d14;
+  }
+
+  .side-block .sect {
+    margin: 0 0 9px;
+  }
+
+  .side-copy {
+    margin-top: 8px;
+    font-size: 10.5px;
+    line-height: 1.7;
+    color: var(--muted);
+  }
+
+  .ladder {
+    display: grid;
+    gap: 2px;
+  }
+
+  .ladder-row {
+    display: grid;
+    grid-template-columns: 46px minmax(0, 1fr) 52px;
+    align-items: center;
+    gap: 9px;
+    padding: 4px 0;
+    font-size: 10.5px;
+    color: var(--ivory-dim);
+  }
+
+  .ladder-row b {
+    font-weight: 400;
+    color: var(--muted);
+  }
+
+  .ladder-row i {
+    font: 500 10.5px var(--font-data);
+    font-style: normal;
+    color: var(--ivory);
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .stat-sep {
+    margin: 0 3px;
+    color: #4b5158;
+    font-size: 15px;
+  }
+
+  .event-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 10px;
+    align-items: baseline;
+  }
+
+  .tele-card {
+    padding: 12px 13px;
+    border: 1px solid var(--hair-soft);
+    border-radius: var(--r-md);
+    background: #0a0d14;
+  }
+
+  .tele-card .sect {
+    margin: 0 0 8px;
+    letter-spacing: 0.04em;
+  }
+
+  .tele-card .sect::after {
+    display: none;
+  }
+
+  .tele-event {
+    display: flex;
+    gap: 8px;
+    align-items: flex-start;
+    padding: 5px 0;
+    border-bottom: 1px dashed rgba(33, 39, 52, 0.8);
+  }
+
+  .tele-event:last-child {
+    border-bottom: 0;
+  }
+
+  .tele-event i {
+    width: 5px;
+    height: 5px;
+    margin-top: 5px;
+    flex: none;
+    border-radius: 50%;
+    background: var(--gold);
+    box-shadow: 0 0 7px rgba(200, 162, 74, 0.6);
+  }
+
+  .tele-event b {
+    display: -webkit-box;
+    display: block;
+    font-size: 10.5px;
+    font-weight: 400;
+    line-height: 1.5;
+    color: var(--ivory-2);
+    overflow: hidden;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+  }
+
+  .tele-event small {
+    display: block;
+    margin-top: 2px;
+    font: 9px var(--font-data);
+    color: #5f6672;
+  }
+
+  .queue-tools {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 130px;
+    gap: 8px;
+  }
+
+  .queue-note {
+    margin: 8px 0 6px;
+  }
+
+  .wf {
+    padding: 10px 0;
+    border-bottom: 1px solid var(--hair-soft);
+  }
+
+  .wf:last-child {
+    border-bottom: 0;
+  }
+
+  .wf-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px;
+  }
+
+  .wf-head b {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--ivory);
+  }
+
+  .wf-stage {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    margin-top: 4px;
+  }
+
+  .wf-stage strong {
+    font: 500 10.5px var(--font-data);
+    color: var(--gold);
+  }
+
+  .wf-stage small,
+  .wf-note,
+  .wf-id {
+    font-size: 10px;
+    color: var(--muted);
+  }
+
+  .wf-note {
+    display: block;
+    margin-top: 3px;
+  }
+
+  .wf-id {
+    display: block;
+    margin-top: 4px;
+    font-family: var(--font-data);
+    color: #5a6068;
+  }
+
+  .worker-row {
+    display: grid;
+    grid-template-columns: 8px minmax(0, 1fr);
+    gap: 3px 9px;
+    align-items: center;
+    padding: 9px 0;
+    border-bottom: 1px solid var(--hair-soft);
+  }
+
+  .worker-row:last-child {
+    border-bottom: 0;
+  }
+
+  .worker-row b {
+    font-size: 11.5px;
+    font-weight: 500;
+    color: var(--ivory);
+    overflow-wrap: anywhere;
+  }
+
+  .worker-row small {
+    grid-column: 2;
+    font-size: 10px;
+    color: var(--muted);
+  }
+
+  .worker-indicator {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--jade);
+    box-shadow: 0 0 7px rgba(79, 183, 154, 0.5);
+  }
+
+  .worker-indicator.worker-stale {
+    background: var(--amber);
+    box-shadow: none;
+  }
+
+  .feedback-form {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+    align-items: end;
+    margin: 14px 0;
+  }
+
+  .feedback-form label {
+    display: grid;
+    gap: 6px;
+    font-size: 10.5px;
+    color: var(--muted);
+  }
+
+  .feedback-message {
+    font-size: 11px;
+    color: var(--jade);
+    margin: 8px 0;
+  }
+
+  .proposal-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 10px;
+    align-items: baseline;
+    width: 100%;
+    text-align: left;
+    padding: 10px 0;
+    border: 0;
+    border-bottom: 1px solid var(--hair-soft);
+    background: none;
+    cursor: pointer;
+  }
+
+  .proposal-row:hover b {
+    color: var(--gold-hi);
+  }
+
+  .proposal-detail {
+    margin-top: 12px;
+    padding: 14px;
+    border: 1px solid var(--hair);
+    border-radius: var(--r-md);
+    background: #0a0d14;
+  }
+
+  .proposal-detail h3 {
+    font: 600 14px var(--font-display);
+    color: var(--ivory);
+    margin: 0 0 8px;
+  }
+
+  .proposal-detail p,
+  .proposal-detail li {
+    font-size: 11px;
+    line-height: 1.7;
+    color: var(--ivory-2);
+  }
+
+  .proposal-detail ul {
+    padding-left: 16px;
+    list-style: disc;
+    margin: 6px 0;
+  }
+
+  .stage-foot {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 8px 18px;
+    margin-top: 6px;
+    padding-top: 14px;
+    border-top: 1px solid var(--hair-soft);
+    font: 9.5px var(--font-data);
+    letter-spacing: 0.06em;
+    color: #4f545c;
+  }
+
+  .stage-foot span:last-child {
+    font-family: var(--font-ui);
+    letter-spacing: 0;
+  }
+
+  @media (max-width: 1240px) {
+    .overview-grid {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+
+  @media (max-width: 780px) {
+    .feedback-form {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .queue-tools {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
 </style>
+

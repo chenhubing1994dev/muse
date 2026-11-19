@@ -17,7 +17,8 @@
 
 - TDD：新增“伪造 Commander 证据必须拒绝”测试，先观察到旧实现未抛出预期错误，再实现事件回查。
 - WorkflowProfileTests：**23/23 passed**。
-- UnifiedRuntime + TaskQueue + WorkflowProfile 定向回归：**101/101 passed**。- 视频 Worker/Builder/Wan、旁白证据契约/编排与来源 freshness 定向回归：**98/98 passed**。
+- UnifiedRuntime + TaskQueue + WorkflowProfile 定向回归：**101/101 passed**。
+- 视频 Worker/Builder/Wan、旁白证据契约/编排与来源 freshness 定向回归：**98/98 passed**。
 - 全项目 Python 3.11 unittest：**1,608 tests，OK，1 skipped**。
 - `compileall`：`src/muse` 与 `tests` 通过。
 - 最终格式清理后重新执行 WorkflowProfileTests：**23/23 passed**。
