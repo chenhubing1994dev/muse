@@ -9,9 +9,6 @@ from typing import Any, Callable, Protocol
 
 from muse.media import build_transcode_command
 from muse.process_utils import no_console_window_kwargs
-
-
-
 class ToolAdapter(Protocol):
     """Common lifecycle expected from executable tool adapters."""
 

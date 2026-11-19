@@ -64,6 +64,10 @@ muse-open-design = "muse.open_design:main"
 muse-business = "muse.business_opportunities:main"
 
 [project.optional-dependencies]
+web-scraping = [
+    "scrapling>=0.5.1,<0.6",
+]
+
 video-diagnostics = [
     "numpy>=1.26",
     "opencv-python-headless>=4.8",

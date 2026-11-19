@@ -37,13 +37,13 @@
 ## 2026-11-19｜修复后实测与拒绝反馈闭环验收更新
 
 - 并行语法问题已由原写入会话修复；复查 research_knowledge.py 对应代码后，Python 3.11 compileall -q src/muse 通过，test_feedback_experiments.py 56/56 passed。
-- 修复后全仓 Python 3.11 unittest：1,595 tests，163.586s，OK，1 skipped，0 failures / 0 errors。唯一 skip 是当前解释器未安装可选依赖 celestial-calendar==0.8.0。测试输出仍出现一次 FFmpeg moov atom not found 警告，未定位到具体媒体文件；不影响测试退出码，但媒体完整性问题仍待单独定位。
-- 正向真实模型 E2E：真实 Gemma Reviewer 审查 run_feedback_research_experiment 实际运行的 56 项 allowlisted 回归，返回 reviewed_approved；Review ID 33e1767d736949cfaf585761f5f561b3。临时 SQLite 存储，approved 不创建 follow-up Ticket。
-- 负向真实模型 E2E：只在临时 workspace 副本的 test_autonomous_research.py 追加一个受控失败用例；allowlisted suite 实际运行 57 项、1 项失败。真实 Gemma 返回 reviewed_rejected / approved=false，ReviewStore 读回成功、1 条 finding；TaskQueue 实际生成且只生成 1 条 review_followup_research，状态 queued、scope read_only_research，事件为 ticket.created 与 review.followup.requested。失败 fixture 未写入正式源码。
-- 拒绝研究周期 E2E：在独立临时知识库写入拒绝决策，使用受控 Search/Reader 适配器运行真实 AutonomousResearchEngine.run_once()；周期 completed，topic origin 为 rejected_review_followup，检索并读取 2 个来源，分别以 support_search_candidate 与 counter_search_candidate 写入 Claim evidence。Claim 仍为 hypothesis_only_not_fact；下一轮 topic selection 不再重复已研究 query pair。
-- 所有上述端到端数据库均为临时目录；未触碰生产知识库、TaskQueue 或 ReviewStore。same-endpoint 的不同模型只证明模型身份区分，不证明 Provider/进程独立性。
-- 当前 Builder 配置仍指向 127.0.0.1:1235/v1（不可达）；Reviewer Gemma 位于 127.0.0.1:1234/v1（可达）。Provider-level independence 与 Builder 恢复仍 pending。
-
+- 最新正式集成回归：新增 `test_review_followup_worker_flows_into_autonomous_research_without_forced_topic`，Worker `run_once` 真正领取拒绝 Ticket 并登记 handoff；随后 `AutonomousResearchEngine.run_once()` 不注入 `preferred_topic_key`，自行从知识库选中拒绝主题。受控 Search/Reader 检索并读取 2 个来源，支持与反证候选分别入库；Claim 保持 `hypothesis_only_not_fact`，下一轮自动转向其他主题。
+- 最新全仓 Python 3.11 验证：`compileall -q src/muse tests` 通过；**1,616 tests，168.603s，OK，1 skipped，0 failures / 0 errors**。唯一 skip 为可选 `celestial-calendar==0.8.0` 未安装。FFmpeg 仍输出一次 `moov atom not found` 警告，尚未定位具体文件。
+- 下一 tick 唤醒：新增 `RoutineStore.trigger()`，只将启用的自主研究 Routine 提前到期，不抢占/清除 lease；Commander `run_tick()` 在 Worker 成功登记拒绝 handoff 后触发 `idle-autonomous-research`，下一次 supervisor poll 即可消费，不必等待默认 3600 秒间隔。定向测试 **3/3**、`test_autonomous_runtime.py` **21/21**、`test_routines.py` **14/14** 通过。- 正向真实模型 E2E：真实 Gemma Reviewer 审查 `run_feedback_research_experiment` 实际运行的 56 项 allowlisted 回归，返回 `reviewed_approved`；Review ID `33e1767d736949cfaf585761f5f561b3`。临时 SQLite 存储，approved 不创建 follow-up Ticket。
+- 负向真实模型 E2E：只在临时 workspace 副本的 `test_autonomous_research.py` 追加一个受控失败用例；allowlisted suite 实际运行 57 项、1 项失败。真实 Gemma 返回 `reviewed_rejected` / `approved=false`，ReviewStore 读回成功、1 条 finding；TaskQueue 实际生成且只生成 1 条 `review_followup_research`，状态 `queued`、scope `read_only_research`，事件为 `ticket.created` 与 `review.followup.requested`。失败 fixture 未写入正式源码。
+- 拒绝研究周期 E2E：临时知识库 + 受控 Search/Reader 适配器运行真实 `AutonomousResearchEngine.run_once()`；周期 completed，topic origin 为 `rejected_review_followup`，支持/反证候选分别入库。Claim 保持 `hypothesis_only_not_fact`，query-pair 去重通过。
+- 所有 E2E 均使用临时数据库与隔离副本，未触碰生产数据。same-endpoint 的不同模型不证明 Provider/进程独立性。
+- Builder `DeepSeek-V4-Pro-Qwen3.5-9B` 当前指向 `127.0.0.1:1235/v1`，端点无监听；LM Studio `1234` 暴露 Gemma、deep、Eva、VoxCPM2 与 embedding 模型。Gemma 和 Eva 候选可响应，但 `deep` 返回 HTTP 400；没有把 Eva 擅自替换为 Builder。LM Studio 1234 由单一服务进程持有，Provider/进程独立性仍未验收。
 ## 下一步
 
 1. 恢复并核验 Builder 1235 端点及进程身份，再做不同 Provider 的独立审查验证。

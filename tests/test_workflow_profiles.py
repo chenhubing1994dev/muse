@@ -401,7 +401,7 @@ class WorkflowProfileTests(unittest.TestCase):
                     },
                 )
                 run_ref = "orchestration-run:review-rejected"
-                refs = (run_ref, *(f"step:{step_id}" for step_id in step_ids), "step:independent_review")
+                refs = tuple(dict.fromkeys((run_ref, *(f"step:{step_id}" for step_id in step_ids), "step:independent_review")))
                 with self.assertRaises(ValueError):
                     controller.complete(
                         ticket, worker_id="worker-a", expected_revision=1,
@@ -428,7 +428,7 @@ class WorkflowProfileTests(unittest.TestCase):
                 controller = WorkflowController(queue)
                 controller.bind_plan_to_ticket(plan, ticket, worker_id="worker-a", contract=contract)
                 run_ref = "orchestration-run:run-verified"
-                evidence_refs = (run_ref, *(f"step:{step_id}" for step_id in step_ids), "step:independent_review")
+                evidence_refs = tuple(dict.fromkeys((run_ref, *(f"step:{step_id}" for step_id in step_ids), "step:independent_review")))
                 evidence = {
                     contract.acceptance_criteria[0]: (run_ref, f"step:{step_ids[0]}", "step:independent_review"),
                     contract.acceptance_criteria[1]: (run_ref, f"step:{step_ids[1]}", "step:independent_review"),

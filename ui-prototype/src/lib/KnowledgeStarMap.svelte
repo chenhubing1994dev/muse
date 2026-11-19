@@ -84,7 +84,7 @@
     const cy = LOGICAL_H / 2;
 
     // Celestial astrolabe coordinate rings on star map
-    ctx.strokeStyle = "rgba(40, 88, 138, 0.35)";
+    ctx.strokeStyle = "rgba(200, 162, 74, 0.16)";
     ctx.lineWidth = 1 / zoom;
     for (const r of [90, 175, 240]) {
       ctx.beginPath();
@@ -96,6 +96,7 @@
     ctx.lineTo(cx + 255, cy);
     ctx.moveTo(cx, cy - 245);
     ctx.lineTo(cx, cy + 245);
+    ctx.strokeStyle = "rgba(200, 162, 74, 0.08)";
     ctx.stroke();
 
     const highlightNeighbors = new Set<string>();
@@ -115,10 +116,10 @@
       ctx.moveTo(edge.x1, edge.y1);
       ctx.lineTo(edge.x2, edge.y2);
       ctx.strokeStyle = isActiveEdge
-        ? "rgba(255, 182, 74, 0.85)"
+        ? "rgba(240, 215, 155, 0.8)"
         : activeHighlightId
-          ? "rgba(45, 92, 136, 0.14)"
-          : "rgba(56, 130, 178, 0.28)";
+          ? "rgba(80, 96, 120, 0.12)"
+          : "rgba(120, 134, 158, 0.2)";
       ctx.lineWidth = (isActiveEdge ? 1.8 : 0.8) / zoom;
       ctx.stroke();
     }
@@ -130,30 +131,33 @@
       const isNeighbor = highlightNeighbors.has(node.id);
       const dimmed = activeHighlightId !== null && !isSelected && !isHovered && !isNeighbor;
 
-      if (!dimmed && (node.degree >= 4 || isSelected || isHovered)) {
+      if (!dimmed && (node.degree >= 6 || isSelected || isHovered)) {
         ctx.beginPath();
         ctx.arc(node.x, node.y, node.r + 5 / zoom, 0, Math.PI * 2);
-        ctx.fillStyle = isSelected ? "rgba(255, 182, 74, 0.24)" : "rgba(0, 240, 255, 0.14)";
+        ctx.fillStyle = isSelected ? "rgba(240, 215, 155, 0.22)" : "rgba(200, 162, 74, 0.1)";
         ctx.fill();
       }
 
       ctx.beginPath();
       ctx.arc(node.x, node.y, node.r, 0, Math.PI * 2);
       ctx.fillStyle = node.color;
-      ctx.globalAlpha = dimmed ? 0.28 : 0.95;
+      ctx.globalAlpha = dimmed ? 0.2 : 0.86;
       ctx.fill();
       ctx.globalAlpha = 1;
 
       if (isSelected || isHovered) {
         ctx.lineWidth = 2 / zoom;
-        ctx.strokeStyle = "#ffffff";
+        ctx.strokeStyle = "#f6efdd";
         ctx.stroke();
       }
 
-      if (isSelected || isHovered || (zoom >= 1.15 && node.degree >= 5) || (!activeHighlightId && node.degree >= 8)) {
-        const label = node.title.length > 22 ? node.title.slice(0, 22) + "…" : node.title;
-        ctx.font = `${Math.max(9, Math.round(11 / Math.sqrt(zoom)))}px "Microsoft YaHei", sans-serif`;
-        ctx.fillStyle = isSelected ? "#ffe3a0" : "#dbeeff";
+      // Labels are the scarce resource in a dense graph: only the selected,
+      // hovered or genuinely hub-like nodes get one until the user zooms in.
+      const labelable = isSelected || isHovered || zoom >= 1.6;
+      if (labelable) {
+        const label = node.title.length > 16 ? node.title.slice(0, 16) + "…" : node.title;
+        ctx.font = `${Math.max(9, Math.round(10.5 / Math.sqrt(zoom)))}px "Microsoft YaHei", sans-serif`;
+        ctx.fillStyle = isSelected || isHovered ? "#f0d79b" : "rgba(196, 191, 180, 0.7)";
         ctx.fillText(label, node.x + node.r + 5, node.y + 3);
       }
     }

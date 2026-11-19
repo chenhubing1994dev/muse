@@ -4,14 +4,11 @@
   import { USER_GUIDE_STEPS, getGuideProgress, getGuideStep } from "../user-guide.js";
   import { filterQueueTasks } from "../queue-filter.js";
   import { scoreIdea, toInspirationBrief } from "../value-studio.js";
-  import "./workflow.css";
-  import "./value-studio.css";
-  import "./cyberpunk.css";
-  import "./creative-studio.css";
   import "./design/muse.css";
   import "./design/bridge.css";
   import CreativeStudio from "./lib/CreativeStudio.svelte";
   import Icon from "./lib/Icon.svelte";
+  import WindowChrome from "./lib/WindowChrome.svelte";
   import CommandOrbit from "./lib/CommandOrbit.svelte";
   import CelestialBaguaLab from "./lib/CelestialBaguaLab.svelte";
   import KnowledgeStarMap from "./lib/KnowledgeStarMap.svelte";
@@ -601,7 +598,7 @@
             client.selfImprovement(),
             client.inspirations(50),
             client.artifacts(50),
-            client.products(50),
+            client.products(50).catch(() => null),
             client.videoEngines(),
             client.videoAttempts().catch(() => null),
             client.gpuResources().catch(() => null),
@@ -630,7 +627,7 @@
           if (mempalaceResponse) mempalaceStatus = mempalaceResponse;
           inspirations = Array.isArray(inspirationResponse.inspirations) ? inspirationResponse.inspirations : [];
           artifacts = Array.isArray(artifactResponse.artifacts) ? artifactResponse.artifacts : [];
-          products = Array.isArray(productResponse.products) ? productResponse.products : [];
+          products = Array.isArray(productResponse?.products) ? productResponse.products : [];
           videoAttemptSummary = videoAttemptResponse;
           videoEngineStatus = engineResponse;
           gpuResourceStatus = gpuResourceResponse;
@@ -1152,11 +1149,14 @@
     lanUrls = Array.isArray(localConfig?.lanUrls) ? localConfig.lanUrls : [];
 
     eventStreamController = new AbortController();    window.addEventListener("keydown", handleGlobalKeydown);
+    tickClock();
+    const clockHandle = window.setInterval(tickClock, 1000);
     void refresh();
     void runEventStream(eventStreamController.signal);
     pollHandle = window.setInterval(() => void refresh(), POLL_INTERVAL_MS);
     return () => {
       window.removeEventListener("keydown", handleGlobalKeydown);
+      window.clearInterval(clockHandle);
       stopPolling();
       if (pipelinePollHandle) clearInterval(pipelinePollHandle);
       eventStreamController?.abort();
@@ -1165,8 +1165,8 @@
   });
 </script>
 <svelte:head>
-  <title>MUSE · 赛博玄枢 · 普罗米修斯星舰中枢</title>
-  <meta name="description" content="Muse 赛博玄枢：星环、八卦星宿、知识星图、AI Agent 星系与普罗米修斯核心" />
+  <title>MUSE · 璇玑终端 · 本地优先 Super Agent 指挥中枢</title>
+  <meta name="description" content="Muse 璇玑终端：唯一 Commander 调度阵、任务队列、知识图谱、记忆库与创作工坊" />
 </svelte:head>
 
 <div class="app">
@@ -1215,11 +1215,7 @@
         <Icon name="refresh" size={13} />{refreshBusy ? "刷新中" : "刷新"}
       </button>
     </div>
-    <div class="tb-window" aria-hidden="true">
-      <span class="win-btn"><svg viewBox="0 0 12 12"><path d="M2.5 6h7" /></svg></span>
-      <span class="win-btn"><svg viewBox="0 0 12 12"><rect x="2.6" y="2.6" width="6.8" height="6.8" /></svg></span>
-      <span class="win-btn is-close"><svg viewBox="0 0 12 12"><path d="M3 3l6 6M9 3l-6 6" /></svg></span>
-    </div>
+    <WindowChrome title="MUSE · 璇玑终端" />
   </div>
 </header>
 
@@ -1476,7 +1472,7 @@
             <div class="kv-row"><span>禁止</span><b class="is-dim">自动改码 / 自动发布</b></div>
           </div>
           {#if pairingCode && lanUrls.length}
-            <div class="notice" style="margin-top:12px">
+            <div class="notice is-spaced">
               <Icon name="lock" size={14} />
               <span>局域网配对已开启：{lanUrls.join(" · ")} · 配对码 {pairingCode}（12 小时有效）</span>
             </div>
@@ -2145,7 +2141,7 @@
         {#if !queueSnapshot}
           <div class="empty"><b>队列数据不可用</b><span>本地 API 未返回任务快照。</span></div>
         {:else}
-          <div class="stats" style="margin-bottom:14px">
+          <div class="stats is-spaced">
             <div class="stat"><small>排队中</small><b>{queueSnapshot.counts.queued}</b></div>
             <div class="stat"><small>执行中</small><b class="is-jade">{queueSnapshot.counts.running}</b></div>
             <div class="stat"><small>待审批</small><b class="is-gold">{queueSnapshot.counts.waiting_approval}</b></div>
@@ -2184,7 +2180,7 @@
             <small class="queue-note">后端返回的活跃任务列表已截断；搜索与筛选仅作用于当前已载入的 {queueSnapshot.active.length} 条任务。</small>
           {/if}
         {/if}
-        <div class="sect" style="margin-top:18px"><b>Commander 工作流</b><span>{workflowRuns.length} 个活跃流程</span></div>
+        <div class="sect is-spaced"><b>Commander 工作流</b><span>{workflowRuns.length} 个活跃流程</span></div>
         {#if workflowRuns.length}
           <div class="rows">
             {#each workflowRuns as workflow (workflow.ticket_id)}
@@ -2249,7 +2245,7 @@
           <span class="chip is-quiet">人工输入</span>
         </div>
         {#if selfImprovementStatus}
-          <div class="stats" aria-label="自我进化状态" style="margin-bottom:14px">
+          <div class="stats is-spaced" aria-label="自我进化状态">
             <div class="stat"><small>待研究</small><b>{selfImprovementStatus.pending_research}</b></div>
             <div class="stat"><small>待人工审查</small><b class="is-gold">{selfImprovementStatus.pending_human_review}</b></div>
             <div class="stat"><small>已批待执行</small><b>{selfImprovementStatus.approved_waiting_execution}</b></div>
@@ -2299,7 +2295,7 @@
         {#if feedbackMessage}
           <p class="feedback-message" role="status">{feedbackMessage}</p>
         {/if}
-        <div class="sect" style="margin-top:18px"><b>最近反馈</b><span>{feedbackRows.length} 条</span></div>
+        <div class="sect is-spaced"><b>最近反馈</b><span>{feedbackRows.length} 条</span></div>
         {#if feedbackRows.length}
             <div class="rows">
               {#each feedbackRows.slice(0, 6) as item, index}

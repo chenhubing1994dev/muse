@@ -413,7 +413,7 @@ class MuseRuntime:
                 self._agent_execution_concurrency(model_settings["provider"], max_workers)
             )
 
-            workflow = WorkflowController(queue)
+            workflow = WorkflowController(queue, artifact_root=self.workspace)
             workflow_bound = False
             prior_knowledge = []
             try:

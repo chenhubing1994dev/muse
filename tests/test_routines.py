@@ -29,6 +29,24 @@ class RoutineSchedulerTests(unittest.TestCase):
             with RoutineStore(db) as store:
                 self.assertEqual(store.list()[0]["payload"], {"x": 1})
 
+    def test_trigger_makes_enabled_routine_due_without_claiming_it(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "routines.sqlite3"
+            with RoutineStore(db) as store:
+                routine = store.add(
+                    "idle-autonomous-research", "autonomous_research",
+                    interval_seconds=3600, run_immediately=False,
+                )
+                self.assertIsNone(store.claim_due())
+                self.assertTrue(store.trigger("idle-autonomous-research"))
+                triggered = store.get(routine["id"])
+                self.assertLessEqual(triggered["next_run_at"], store._now().isoformat())
+                claimed = store.claim_due()
+                self.assertEqual(claimed["id"], routine["id"])
+                store.finish(routine["id"], status="succeeded", lease_token=claimed["lease_token"])
+                store.set_enabled(routine["id"], False)
+                self.assertFalse(store.trigger("idle-autonomous-research"))
+
     def test_existing_database_migrates_missing_lease_token_column(self) -> None:
         import sqlite3
         with tempfile.TemporaryDirectory() as directory:

@@ -423,6 +423,8 @@ class ResearchPipeline:
                                     "browser_screenshot_path": page.get("browser_screenshot_path"),
                                     "asset_manifest_path": page.get("asset_manifest_path"),
                                     "asset_count": page.get("asset_count", 0),
+                                    "structured_extract": page.get("structured_extract"),
+                                    "structured_extract_error": page.get("structured_extract_error"),
                                 },
                             )
                             knowledge_node_ids.add(page_source_node["id"]); knowledge_source_refs[page["url"]] = page_source_node["id"]
@@ -439,6 +441,8 @@ class ResearchPipeline:
                         "sha256": page["sha256"], "fetched_at": page["fetched_at"],
                         "truncated": page["truncated"], "text": page["text"],
                         "source_metadata": page.get("source_metadata") or {},
+                        "structured_extract": page.get("structured_extract"),
+                        "structured_extract_error": page.get("structured_extract_error"),
                         "capture_method": str(page.get("capture_method", "http"))[:40],
                         "browser_evidence_directory": page.get("browser_evidence_directory"),
                         "browser_screenshot_path": page.get("browser_screenshot_path"),
@@ -594,10 +598,16 @@ def main() -> int:
                         help="SQLite typed research knowledge graph (separate from source-body evidence)")
     parser.add_argument("--max-sources", type=int, default=8)
     parser.add_argument("--workers", type=int, default=8)
+    parser.add_argument("--scrapling", action="store_true",
+                        help="enable optional Scrapling extraction on HTML already fetched by Muse")
+    parser.add_argument("--scrapling-adaptive-mode", choices=("off", "learn", "reuse"), default="off",
+                        help="optional selector learning/reuse; requires --scrapling")
     parser.add_argument("--task-id", help="optional existing Muse Ticket ID for knowledge provenance")
     args = parser.parse_args()
     if args.provider == "searxng" and not args.endpoint:
         parser.error("SearXNG requires --endpoint or MUSE_SEARXNG_URL; alternatively select --provider duckduckgo-html or bing-rss")
+    if args.scrapling_adaptive_mode != "off" and not args.scrapling:
+        parser.error("--scrapling-adaptive-mode requires --scrapling")
     if args.provider == "searxng":
         search = SearxngSearchAdapter(args.endpoint)
     elif args.provider == "bing-rss":
@@ -605,12 +615,25 @@ def main() -> int:
     else:
         search = DuckDuckGoHTMLSearchAdapter()
     queries = tuple([args.query, *args.angle])
+    reader: PublicSourceReader
+    if args.scrapling:
+        try:
+            from scrapling import Selector as _ScraplingSelector  # noqa: F401
+            from muse.scrapling_adapter import ScraplingHTMLParser
+        except ImportError:
+            parser.error("Scrapling is optional; install the Muse web-scraping extra first")
+        reader = PublicSourceReader(
+            structured_parser=ScraplingHTMLParser(Path.cwd()),
+            adaptive_mode=args.scrapling_adaptive_mode,
+        )
+    else:
+        reader = PublicSourceReader()
     try:
         with ResearchEvidenceStore(Path(args.evidence_db)) as evidence, ProgressEventStore(
             Path(args.progress_db)
         ) as progress, ResearchKnowledgeStore(Path(args.knowledge_db)) as knowledge:
             result = ResearchPipeline(
-                search, PublicSourceReader(), evidence,
+                search, reader, evidence,
                 max_workers=args.workers, progress_events=progress, knowledge_store=knowledge,
             ).run(queries, max_sources=args.max_sources, task_id=args.task_id)
     except (ValueError, OSError, RuntimeError) as exc:

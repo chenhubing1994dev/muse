@@ -84,6 +84,12 @@
 - 下一步：持久化首次匯出 hash/last-seen hash，增加逐筆 diff、人工批准回流及可回滾合併。
 
 ## P1：建立真正的自我改進閉環
+### B-026 Scrapling 自适应网页采集与解析能力
+- 状态：第一阶段完成（可选依赖、CSS/XPath、自适应 selector、workspace SQLite、单页结构化输出 20,000 字符上限、PublicSourceReader → ResearchPipeline 可选接线）；Scrapling 0.5.1 已安装到 D 盘项目 `.venv`；10/10 适配器/Reader 测试、61/61 Research Fetch/Pipeline/Browser 回归、11/11 dashboard 回归通过，真实 Selector API smoke 通过。CLI 需显式 `--scrapling`，默认关闭；未启用 Scrapling 网络 Fetcher、动态浏览器、Spider 或 MCP。全量 1,637 测试首轮受环境代理影响有 1 项失败，修复测试代理隔离后定向通过；第二轮全量任务因 Runner 替换丢失，整体仍待全量复验。
+- 定位：Scrapling 仅作为 Muse Research 的能力提供者；Commander、TaskQueue、ResourceGovernor、ResearchEvidenceStore 和审批/证据链仍由 Muse 统一控制。
+- 下一步：在获准的公开测试目标上完成端到端研究 smoke，核对结构化字段、来源归因和知识图谱落库；随后评估在 PublicSourceReader 安全边界内接入 Fetcher，并与现有 ego-lite/Playwright 做动态页面基准比较；最后才考虑受 Commander 限额的 Spider。
+- 安全：默认不启动 Scrapling MCP，不启用代理轮换、登录态复用或反自动化绕过；尊重 robots.txt/条款/限速；遇到访问挑战、登录或付费墙停止。
+
 ### B-016 持久化 Routine Scheduler
 - 狀態：第一階段完成（SQLite interval routines、lease、防重複 claim、fencing token、heartbeat renewal、enable/disable、前台 loop）。
 - 已有：`muse-routines add/list/enable/disable` 管理 routine；handler 運行期間以 token-fenced heartbeat 續租；finish 要求 lease 尚未過期且 token 仍有效；過期或被重新領取的 lease 不能由舊 Runner 完成。舊資料庫 `lease_token` 遷移現以 `BEGIN IMMEDIATE` 串行化，並容忍並發首次開啟時 WAL PRAGMA 的 locked 競爭。
@@ -338,12 +344,11 @@
 - 最新源码复审：Reviewer `local-reviewer:011d7c5831f7d581e81cce35`，Review ID `b3add74f52b64c87b14270aa99bb173c`，approved=true、1 条 info finding；ReviewStore 读回成功。
 - 真实模型拒绝 smoke：合成 SQL 注入样本获 `approved=false`，包含 critical/high findings，临时 ReviewStore 读回成功；未写入生产库。
 - 最新真实闭环验收（2026-11-19）：正向真实 Gemma 审查 56 项反馈实验回归并批准；负向隔离副本 57 项测试中 1 项受控失败，Gemma 实际拒绝，ReviewStore 持久化并生成唯一 read_only_research follow-up Ticket；随后 AutonomousResearchEngine.run_once() 实际消费拒绝主题，支持/反证方向各入库 1 条，Claim 保持 hypothesis-only，下一轮 query-pair 去重通过。全部使用临时数据库/副本，未写生产库。
-- 当前 B-063 状态：反馈实验真实模型批准/拒绝双分支、拒绝 Ticket 与后续研究周期已验证；Builder 1235 不可达，Provider/进程独立性仍 pending。修复后全仓 Python 3.11 unittest 1,595 tests，1 skipped，0 failures / 0 errors；另有未定位的 FFmpeg moov atom not found 警告。详见 docs/PROGRESS_20261119_B063_REJECTION_FEEDBACK_LOOP.md。
-### B-064 证据覆盖与来源质量画像
+- 当前 B-063 状态：真实模型批准/拒绝双分支、拒绝 Ticket、Worker handoff、不注入 preferred topic key 的自主研究周期，以及 handoff 后下一 tick 唤醒 Routine 均已验证。最新 Python 3.11 compileall 通过；全仓 unittest **1,616 tests，1 skipped，0 failures / 0 errors**。Builder 1235 无监听，Provider/进程独立性仍 pending；FFmpeg moov 警告待定位。详见 docs/PROGRESS_20261119_B063_REJECTION_FEEDBACK_LOOP.md。
 
+### B-064 证据覆盖与来源质量画像
 - 状态：已实现并通过专项与完整回归。
-- Claim dossier 统计支持/反证/上下文覆盖、已审/未审证据、最新 verdict、质量/独立性等级、reviewer 数量与 verdict 冲突。
-- 汇总 SHA-256、正文长度、HTTPS、发布日期状态、hostname/启发式 registrable-domain，以及经过审查的来源依赖/独立关系。
+- Claim dossier 统计支持/反证/上下文覆盖、已审/未审证据、最新 verdict、质量/独立性等级、reviewer 数量与 verdict 冲突。- 汇总 SHA-256、正文长度、HTTPS、发布日期状态、hostname/启发式 registrable-domain，以及经过审查的来源依赖/独立关系。
 - 自主研究 JSON/Markdown 报告直接呈现 coverage 与 lineage；不自动生成信誉分/置信度总分，不把检索方向当证据 verdict，不把域名分组当所有权证明，不改变 Claim 状态。
 - 验收：`test_research_knowledge.py` **30/30**、`test_autonomous_research.py` **39/39**；Python 3.11 compileall 通过；完整 unittest **816 项，0 failures、0 errors**（65.179 秒）。
 

@@ -22,7 +22,7 @@
   };
 
   const W = 720;
-  const H = 470;
+  const H = 520;
   const CX = W / 2;
   const CY = H / 2 + 6;
 
@@ -48,12 +48,15 @@
     return list.map((p, i) => {
       // Start at 12 o'clock, go clockwise; elliptical so plates breathe at 16:10.
       const angle = (i / n) * Math.PI * 2 - Math.PI / 2;
-      const rx = 250;
-      const ry = 170;
+      const rx = 246;
+      const ry = 166;
       const x = CX + Math.cos(angle) * rx;
       const y = CY + Math.sin(angle) * ry;
       const zh = ZH[p.specialist_id] ?? { name: p.role, glyph: p.role.slice(0, 1) };
-      const side = Math.cos(angle) > 0.25 ? "right" : Math.cos(angle) < -0.25 ? "left" : "top";
+      const cos = Math.cos(angle);
+      const sin = Math.sin(angle);
+      const side: Node["side"] =
+        cos > 0.22 ? "right" : cos < -0.22 ? "left" : sin > 0 ? "bottom" : "top";
       return {
         id: p.specialist_id,
         zh: zh.name,
@@ -64,7 +67,7 @@
         x,
         y,
         anchor: side === "right" ? "start" : side === "left" ? "end" : "middle",
-        side: side as Node["side"],
+        side,
       };
     });
   }
@@ -76,7 +79,8 @@
   $: nodesTotal = prometheus?.stages.discovery.knowledge_nodes_total ?? 0;
   $: coreState = !connected ? "未连接" : stale ? "数据过期" : "运行中";
 
-  function ticks(count: number, r1: number, r2: number, ry1: number, ry2: number) {
+  function ticks(count: number, deltas: number[]) {
+    const [r1, r2, ry1, ry2] = deltas;
     return Array.from({ length: count }, (_, i) => {
       const a = (i / count) * Math.PI * 2 - Math.PI / 2;
       return {
@@ -89,316 +93,306 @@
     });
   }
 
-  $: ringTicks = ticks(60, 214, 222, 138, 146);
-  $: plateOf = (node: Node) => {
-    const dx = node.side === "right" ? 30 : node.side === "left" ? -30 : 0;
-    const dy = node.side === "top" ? -44 : 40;
-    return { x: node.x + dx, y: node.y + dy };
-  };
+  $: ringTicks = ticks(60, [212, 220, 137, 145]);
 
-  function short(text: string, max: number): string {
-    return text.length > max ? text.slice(0, max - 1) + "…" : text;
+  const PLATE_W = 86;
+
+  function platePos(node: Node) {
+    if (node.side === "right") {
+      return { tx: node.x + 44, ty: node.y + 36, anchor: "start" as const, boxX: node.x + 21, boxY: node.y + 22 };
+    }
+    if (node.side === "left") {
+      return { tx: node.x - 44, ty: node.y + 36, anchor: "end" as const, boxX: node.x - 21 - PLATE_W, boxY: node.y + 22 };
+    }
+    if (node.side === "bottom") {
+      return { tx: node.x, ty: node.y + 42, anchor: "middle" as const, boxX: node.x - PLATE_W / 2, boxY: node.y + 28 };
+    }
+    return { tx: node.x, ty: node.y - 32, anchor: "middle" as const, boxX: node.x - PLATE_W / 2, boxY: node.y - 46 };
+  }
+
+  function nodeKey(event: KeyboardEvent, id: string): void {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      onSelect?.(id);
+    }
   }
 </script>
 
-<div class="orbit">
-  <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label="调度阵：Muse 核心与专家角色节点">
+<div class="co">
+  <svg viewBox="0 38 720 442" role="img" aria-label="调度阵：Muse 核心与专家角色节点">
     <defs>
-      <radialGradient id="coreGlow" cx="50%" cy="46%" r="52%">
-        <stop offset="0%" stop-color="#f6e4b4" stop-opacity="0.5" />
-        <stop offset="34%" stop-color="#c8a24a" stop-opacity="0.2" />
-        <stop offset="72%" stop-color="#7a5f22" stop-opacity="0.06" />
+      <radialGradient id="coCoreGlow" cx="50%" cy="46%" r="52%">
+        <stop offset="0%" stop-color="#f6e4b4" stop-opacity="0.42" />
+        <stop offset="34%" stop-color="#c8a24a" stop-opacity="0.16" />
+        <stop offset="72%" stop-color="#7a5f22" stop-opacity="0.05" />
         <stop offset="100%" stop-color="#000" stop-opacity="0" />
       </radialGradient>
-      <radialGradient id="plateFill" cx="50%" cy="0%" r="120%">
-        <stop offset="0%" stop-color="#1a1710" stop-opacity="0.96" />
-        <stop offset="100%" stop-color="#0a0b10" stop-opacity="0.96" />
+      <radialGradient id="coPlateFill" cx="50%" cy="0%" r="120%">
+        <stop offset="0%" stop-color="#1a1710" />
+        <stop offset="100%" stop-color="#0a0b10" />
       </radialGradient>
-      <linearGradient id="linkGold" x1="0" y1="0" x2="1" y2="1">
-        <stop offset="0%" stop-color="#c8a24a" stop-opacity="0.06" />
-        <stop offset="50%" stop-color="#c8a24a" stop-opacity="0.5" />
-        <stop offset="100%" stop-color="#c8a24a" stop-opacity="0.06" />
-      </linearGradient>
     </defs>
 
-    <g class="halo">
-      <ellipse cx={CX} cy={CY} rx="268" ry="186" fill="url(#coreGlow)" />
+    <ellipse cx={CX} cy={CY} rx="266" ry="184" fill="url(#coCoreGlow)" />
+
+    <g class="co-rails">
+      <ellipse cx={CX} cy={CY} rx="246" ry="166" class="co-rail-outer" />
+      <ellipse cx={CX} cy={CY} rx="196" ry="132" class="co-rail-mid" />
+      <ellipse cx={CX} cy={CY} rx="140" ry="94" class="co-rail-in" />
     </g>
 
-    <!-- orbit rails -->
-    <g class="rails">
-      <ellipse cx={CX} cy={CY} rx="250" ry="170" class="rail-outer" />
-      <ellipse cx={CX} cy={CY} rx="196" ry="132" class="rail-mid" />
-      <ellipse cx={CX} cy={CY} rx="140" ry="94" class="rail-in" />
-    </g>
-
-    <g class="ticks">
+    <g class="co-ticks">
       {#each ringTicks as t, i (i)}
-        <line x1={t.x1} y1={t.y1} x2={t.x2} y2={t.y2} class:major={t.major} />
+        <line x1={t.x1} y1={t.y1} x2={t.x2} y2={t.y2} class:co-major={t.major} />
       {/each}
     </g>
 
-    <!-- links from core to each role -->
-    <g class="links">
-      {#each nodes as node (node.id)}
+    <g class="co-links">
+      {#each nodes as nd (nd.id)}
         <path
-          d={`M ${CX} ${CY} Q ${(CX + node.x) / 2 + (node.y - CY) * 0.16} ${(CY + node.y) / 2 - (node.x - CX) * 0.16} ${node.x} ${node.y}`}
-          class:live={node.live}
-          class:active={selected === node.id}
+          d={`M ${CX} ${CY} Q ${(CX + nd.x) / 2 + (nd.y - CY) * 0.14} ${(CY + nd.y) / 2 - (nd.x - CX) * 0.14} ${nd.x} ${nd.y}`}
+          class:co-live-link={nd.live}
+          class:co-selected={selected === nd.id}
         />
       {/each}
       {#each liveAgents.slice(0, 10) as agent, i (agent.agent_id)}
         {@const a = (i / Math.max(1, Math.min(10, liveAgents.length))) * Math.PI * 2 - Math.PI / 2}
-        <circle
-          cx={CX + Math.cos(a) * 158}
-          cy={CY + Math.sin(a) * 108}
-          r="2.6"
-          class="live-dot"
-        />
+        <circle cx={CX + Math.cos(a) * 158} cy={CY + Math.sin(a) * 106} r="2.6" class="co-live-dot" />
       {/each}
     </g>
 
-    <!-- core -->
-    <g class="core" class:offline={!connected || stale}>
-      <circle cx={CX} cy={CY} r="66" class="core-halo" />
-      <circle cx={CX} cy={CY} r="52" class="core-ring" />
-      <circle cx={CX} cy={CY} r="44" class="core-disc" />
-      <text x={CX} y={CY - 4} class="core-mark">Muse</text>
-      <text x={CX} y={CY + 16} class="core-state">{coreState}</text>
+    <g class="co-core" class:co-offline={!connected || stale}>
+      <circle cx={CX} cy={CY} r="66" class="co-core-halo" />
+      <circle cx={CX} cy={CY} r="52" class="co-core-ring" />
+      <circle cx={CX} cy={CY} r="43" class="co-core-disc" />
+      <text x={CX} y={CY - 3} class="co-core-mark">Muse</text>
+      <text x={CX} y={CY + 16} class="co-core-state">{coreState}</text>
     </g>
 
-    <!-- role nodes + plates -->
-    {#each nodes as node (node.id)}
-      {@const plate = plateOf(node)}
+    {#each nodes as nd (nd.id)}
+      {@const plate = platePos(nd)}
       <g
-        class="node"
-        class:live={node.live}
-        class:active={selected === node.id}
+        class="co-node"
+        class:co-live={nd.live}
+        class:co-active={selected === nd.id}
         role="button"
         tabindex="0"
-        aria-label={`${node.zh} · ${node.role} · 历史 ${node.runs} 次`}
-        onclick={() => onSelect?.(node.id)}
-        onkeydown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onSelect?.(node.id); } }}
+        aria-label={`${nd.zh} · ${nd.role} · 历史 ${nd.runs} 次`}
+        onclick={() => onSelect?.(nd.id)}
+        onkeydown={(e) => nodeKey(e, nd.id)}
       >
-        <circle cx={node.x} cy={node.y} r="15" class="node-halo" />
-        <circle cx={node.x} cy={node.y} r="10.5" class="node-disc" />
-        <text x={node.x} y={node.y + 3.4} class="node-glyph">{node.glyph}</text>
-        <g class="plate">
-          <rect x={plate.x - (node.anchor === "middle" ? 46 : node.anchor === "end" ? 84 : 0)} y={plate.y - 15} width="86" height="30" rx="3" />
-          <text
-            x={plate.x + (node.anchor === "middle" ? 0 : node.anchor === "end" ? -41 : 43)}
-            y={plate.y - 3}
-            class="plate-name"
-            text-anchor={node.anchor}
-          >{node.zh}</text>
-          <text
-            x={plate.x + (node.anchor === "middle" ? 0 : node.anchor === "end" ? -41 : 43)}
-            y={plate.y + 9}
-            class="plate-meta"
-            text-anchor={node.anchor}
-          >{node.live ? "实连" : "待接入"} · {node.runs}</text>
-        </g>
+        <circle cx={nd.x} cy={nd.y} r="15" class="co-node-halo" />
+        <circle cx={nd.x} cy={nd.y} r="10.5" class="co-node-disc" />
+        <text x={nd.x} y={nd.y + 3.4} class="co-node-glyph">{nd.glyph}</text>
+        <rect class="co-plate" x={plate.boxX} y={plate.boxY} width={PLATE_W} height="28" rx="3" />
+        <text x={plate.tx} y={plate.boxY + 12} class="co-plate-name" text-anchor={plate.anchor}>{nd.zh}</text>
+        <text x={plate.tx} y={plate.boxY + 23} class="co-plate-meta" text-anchor={plate.anchor}>{nd.live ? "实连" : "待接入"} · {nd.runs}</text>
       </g>
     {/each}
   </svg>
 
-  <div class="orbit-caption">
-    <span class:ok={connected && !stale}>{connected && !stale ? "核心在线" : "核心未连接"}</span>
+  <div class="co-caption">
+    <span class:co-ok={connected && !stale}>{connected && !stale ? "核心在线" : "核心未连接"}</span>
     <span>排队 {queued}</span>
-    <span class:hot={waiting > 0}>待批 {waiting}</span>
-    <span class:live={running > 0}>执行 {running}</span>
+    <span class:co-hot={waiting > 0}>待批 {waiting}</span>
+    <span class:co-running={running > 0}>执行 {running}</span>
     <span>成片 {products}</span>
     <span>知识 {nodesTotal}</span>
   </div>
   {#if nodes.length === 0}
-    <p class="orbit-empty">角色目录尚未读取：本地核心返回专家档案后，调度阵会按真实角色亮起。</p>
+    <p class="co-empty">角色目录尚未读取：本地核心返回专家档案后，调度阵会按真实角色亮起。</p>
   {/if}
 </div>
 
 <style>
-  .orbit {
-    position: relative;
+  .co {
     display: grid;
-    gap: 8px;
+    gap: 6px;
     min-width: 0;
   }
 
-  svg {
+  .co svg {
     display: block;
-    width: 100%;
+    /* Constrain both axes so the drawn ring, not an empty letterbox, fills the
+       card. Short desktop windows (653 CSS px at 125% DPI) used to leave the
+       orbit stranded in dead space. */
+    width: auto;
     height: auto;
+    max-width: 100%;
+    aspect-ratio: 720 / 442;
+    max-height: min(44vh, 420px);
+    margin: 0 auto;
     overflow: visible;
   }
 
-  .rail-outer {
+  .co-rail-outer {
     fill: none;
-    stroke: rgba(200, 162, 74, 0.24);
+    stroke: rgba(200, 162, 74, 0.26);
     stroke-width: 1;
   }
 
-  .rail-mid {
+  .co-rail-mid {
     fill: none;
     stroke: rgba(120, 140, 190, 0.16);
     stroke-width: 1;
     stroke-dasharray: 2 6;
   }
 
-  .rail-in {
+  .co-rail-in {
     fill: none;
     stroke: rgba(200, 162, 74, 0.13);
     stroke-width: 1;
   }
 
-  .ticks line {
-    stroke: rgba(200, 162, 74, 0.2);
+  .co-ticks line {
+    stroke: rgba(200, 162, 74, 0.18);
     stroke-width: 0.8;
   }
 
-  .ticks line.major {
-    stroke: rgba(240, 215, 155, 0.4);
+  .co-ticks line.co-major {
+    stroke: rgba(240, 215, 155, 0.42);
     stroke-width: 1;
   }
 
-  .links path {
+  .co-links path {
     fill: none;
-    stroke: url(#linkGold);
+    stroke: rgba(200, 162, 74, 0.2);
     stroke-width: 1;
   }
 
-  .links path.live {
-    stroke: rgba(79, 183, 154, 0.4);
+  .co-links path.co-live-link {
+    stroke: rgba(79, 183, 154, 0.42);
   }
 
-  .links path.active {
+  .co-links path.co-selected {
     stroke: rgba(240, 215, 155, 0.85);
     stroke-width: 1.4;
   }
 
-  .live-dot {
+  .co-live-dot {
     fill: #4fb79a;
     opacity: 0.85;
   }
 
-  .core-halo {
+  .co-core-halo {
     fill: none;
     stroke: rgba(240, 215, 155, 0.2);
     stroke-width: 1;
   }
 
-  .core-ring {
+  .co-core-ring {
     fill: none;
     stroke: rgba(200, 162, 74, 0.55);
     stroke-width: 1.1;
   }
 
-  .core-disc {
+  .co-core-disc {
     fill: #0d0c0a;
-    stroke: rgba(240, 215, 155, 0.32);
+    stroke: rgba(240, 215, 155, 0.3);
     stroke-width: 0.8;
   }
 
-  .core-mark {
+  .co-core-mark {
     fill: #f0d79b;
     font: 600 19px "Noto Serif SC", Georgia, serif;
-    letter-spacing: 0.06em;
+    letter-spacing: 0.05em;
     text-anchor: middle;
   }
 
-  .core-state {
+  .co-core-state {
     fill: #8d8a80;
     font: 8.5px "Cascadia Mono", Consolas, monospace;
-    letter-spacing: 0.14em;
+    letter-spacing: 0.12em;
     text-anchor: middle;
   }
 
-  .core.offline .core-ring {
-    stroke: rgba(196, 84, 74, 0.45);
+  .co-core.co-offline .co-core-ring {
+    stroke: rgba(196, 84, 74, 0.42);
   }
 
-  .core.offline .core-mark {
+  .co-core.co-offline .co-core-mark {
     fill: #d9b6ae;
   }
 
-  .node {
+  .co-node {
     cursor: pointer;
   }
 
-  .node-halo {
-    fill: rgba(200, 162, 74, 0.08);
-    stroke: rgba(200, 162, 74, 0.22);
+  .co-node-halo {
+    fill: rgba(200, 162, 74, 0.07);
+    stroke: rgba(200, 162, 74, 0.2);
     stroke-width: 0.8;
   }
 
-  .node.live .node-halo {
+  .co-node.co-live .co-node-halo {
     fill: rgba(79, 183, 154, 0.1);
     stroke: rgba(79, 183, 154, 0.3);
   }
 
-  .node.active .node-halo {
+  .co-node.co-active .co-node-halo {
     fill: rgba(240, 215, 155, 0.18);
-    stroke: rgba(240, 215, 155, 0.6);
+    stroke: rgba(240, 215, 155, 0.62);
   }
 
-  .node-disc {
+  .co-node-disc {
     fill: #11131a;
-    stroke: rgba(200, 162, 74, 0.55);
+    stroke: rgba(200, 162, 74, 0.5);
     stroke-width: 1;
   }
 
-  .node-glyph {
+  .co-node-glyph {
     fill: #e4d7b2;
     font: 600 10px "Noto Serif SC", "Microsoft YaHei", serif;
     text-anchor: middle;
   }
 
-  .plate rect {
-    fill: url(#plateFill);
-    stroke: rgba(200, 162, 74, 0.34);
+  .co-plate {
+    fill: url(#coPlateFill);
+    stroke: rgba(200, 162, 74, 0.3);
     stroke-width: 0.8;
   }
 
-  .node.active .plate rect {
+  .co-node.co-active .co-plate {
     stroke: rgba(240, 215, 155, 0.8);
   }
 
-  .plate-name {
+  .co-plate-name {
     fill: #e9e4d8;
     font: 500 11px "Noto Sans SC", "Microsoft YaHei", sans-serif;
-    letter-spacing: 0.14em;
+    letter-spacing: 0.12em;
   }
 
-  .plate-meta {
+  .co-plate-meta {
     fill: #7b786e;
     font: 8px "Cascadia Mono", Consolas, monospace;
-    letter-spacing: 0.08em;
+    letter-spacing: 0.06em;
   }
 
-  .orbit-caption {
+  .co-caption {
     display: flex;
     flex-wrap: wrap;
     justify-content: center;
-    gap: 4px 16px;
-    padding-top: 2px;
+    gap: 3px 16px;
     font: 10px "Cascadia Mono", Consolas, monospace;
-    letter-spacing: 0.05em;
+    letter-spacing: 0.04em;
     color: #6e6b63;
   }
 
-  .orbit-caption span.ok {
+  .co-caption span.co-ok {
     color: #4fb79a;
   }
 
-  .orbit-caption span.hot {
+  .co-caption span.co-hot {
     color: #d8a44a;
   }
 
-  .orbit-caption span.live {
+  .co-caption span.co-running {
     color: #5ec8d8;
   }
 
-  .orbit-empty {
+  .co-empty {
     margin: 0;
-    padding: 10px 12px;
+    padding: 9px 12px;
     border: 1px dashed #232833;
     border-radius: 8px;
     color: #6e6b63;
@@ -408,33 +402,22 @@
   }
 
   @media (prefers-reduced-motion: no-preference) {
-    .core-halo {
-      animation: core-breathe 6.5s ease-in-out infinite;
+    .co-core-halo {
+      animation: co-breathe 6.5s ease-in-out infinite;
     }
 
-    .ticks {
-      animation: slow-spin 90s linear infinite;
-      transform-origin: 50% 50%;
+    .co-live-dot {
+      animation: co-pulse 3.4s ease-in-out infinite;
     }
 
-    .live-dot {
-      animation: dot-pulse 3.4s ease-in-out infinite;
-    }
-
-    @keyframes core-breathe {
+    @keyframes co-breathe {
       50% {
-        stroke: rgba(240, 215, 155, 0.4);
+        stroke: rgba(240, 215, 155, 0.42);
         stroke-width: 1.6;
       }
     }
 
-    @keyframes slow-spin {
-      to {
-        transform: rotate(360deg);
-      }
-    }
-
-    @keyframes dot-pulse {
+    @keyframes co-pulse {
       50% {
         opacity: 0.3;
       }

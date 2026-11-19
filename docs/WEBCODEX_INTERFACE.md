@@ -86,6 +86,7 @@ Job scripts, language payloads, output logs, result markers, and the per-session
 
 Verified on 2026-11-19: the adapter and ChatGPT bridge regression suites compile and pass (25 tests, Python 3.11). Live detached psmux jobs completed for PowerShell (exit 0, including a 2-second task), Python (exit 9), batch (exit 7), and Bash via WSL (exit 11); each returned its marker output and matching real exit code. A project-relative Python `script_path` also ran the adapter's 20-test module successfully in a detached psmux window. The WSL startup emits a host warning in the captured log, but the Bash payload still ran and its exit code was preserved. Runner config validates at generation 1 with no restart required; process inspection shows `webcodex-runner.exe` hosted by `pythonw.exe` and the desktop launcher by `wscript.exe`, so leave the Runner outside psmux. `run_shell`, `run_script`, and `run_process` remain Runner-owned and are not globally intercepted: project work must explicitly use this adapter to enter psmux. Zero-flash behavior has not been visually verified. The logon task recreates the psmux session after login; it does not restore terminal process state across reboot/logoff.
 Further verified on 2026-11-19: 67 targeted tests across process utilities, browser, Cantonese TTS, Kinliuren, FFmpeg adapters, psmux execution, and ChatGPT bridge passed under Python 3.11. The Windows helper reports `CREATE_NO_WINDOW` (`creationflags=134217728`). A live PowerShell payload containing `exit 7` returned `exit_code=7` and its marker output, proving the outer result marker survives user exit statements. `muse-dev` remained available after the test jobs. These checks prove process-level quiet-launch configuration and command routing, not a visual zero-flash guarantee.
+Full Muse regression on 2026-11-19: `unittest` discovery ran 1,614 tests in 182.355 seconds; all passed, with 1 intentionally skipped. The run was executed as a detached psmux job and returned exit code 0.
 
 ## Acceptance checklist
 
@@ -99,3 +100,12 @@ Further verified on 2026-11-19: 67 targeted tests across process utilities, brow
 - [ ] Missing-tool and schema-error recovery follows rediscovery, not blind retries.
 - [ ] Host schema refresh is reported only with host-side evidence.
 - [ ] Deliverables reviewed and task-fit tests run; results reported accurately.
+## 2026-11-19 Runner interception and desktop observation boundary
+
+The current Host catalogue and Runner manifest expose Runner-owned `run_shell`, `run_script`, and `run_process`; no admitted global command-interception hook or Runner configuration writer was found. `check_runner_config` is read-only (`valid=true`, generation 1, `restart_required=false`); `reload_runner_config` activates an existing candidate and does not create or edit one. The startup config is outside the Muse Project's authorized write root, so do not use Project shell, GUI automation, or private filesystem access to bypass that boundary. Keep the Runner outside psmux.
+
+A read-only desktop snapshot (1920×1080 display sampled at 1280×720) showed OrcaTerm in the foreground and a PowerShell window behind it. This is one frame only: it does not establish which component owns that window, whether it flashed, or a zero-flash guarantee. Use before/after window observations for future visual verification; do not activate or manipulate the user's desktop as a diagnostic shortcut.
+
+Until an official Project-level hook or authorized Desktop configuration path is available, the supported policy remains adapter-first for project commands: short Runner bootstrap → `scripts/webcodex_psmux_exec.py` → detached psmux job. This is a project workflow convention, not a transparent global replacement for Runner execution.
+
+Live recheck on 2026-11-19: a detached Python smoke returned marker `20261119` with exit code 0 and `transport=psmux-detached-window`; subsequent adapter inspection showed the `muse-dev` main window and `active_job_id=null`. A post-run window enumeration no longer listed a standalone PowerShell surface. This validates the specific smoke path and cleanup state, not a universal no-flash guarantee.

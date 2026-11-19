@@ -525,14 +525,34 @@ class AutonomousSupervisor:
             self.routine_db, self._routine_handlers,
             max_routines=len(self.ROUTINES), max_workers=len(self.ROUTINES),
             stop_event=event,
-        )        # Never let the offline worker claim arbitrary ChatGPT/Ruflo tickets.
+        )
+        # Never let the offline worker claim arbitrary ChatGPT/Ruflo tickets.
         local_task_id = self._next_local_workflow_id()
         task = run_once(
             self.task_db, self.handlers(), lease_seconds=60, task_id=local_task_id
         ) if local_task_id else None
-        return {"routines": routines, "task": (
-            {"id": task["id"], "status": task["status"]} if task else None
-        )}
+        research_wakeup = None
+        if task and task.get("status") == "succeeded":
+            task_payload = task.get("payload")
+            task_payload = task_payload if isinstance(task_payload, dict) else {}
+            handler_result = task_payload.get("_result")
+            handler_result = handler_result if isinstance(handler_result, dict) else {}
+            if (
+                task_payload.get("kind") == "review_followup_research"
+                and handler_result.get("status") == "handoff_registered"
+            ):
+                with RoutineStore(self.routine_db) as store:
+                    scheduled = store.trigger("idle-autonomous-research")
+                research_wakeup = {
+                    "status": "scheduled" if scheduled else "routine_unavailable",
+                    "next_tick": bool(scheduled),
+                    "topic_key": handler_result.get("preferred_topic_key"),
+                }
+        return {
+            "routines": routines,
+            "task": {"id": task["id"], "status": task["status"]} if task else None,
+            "research_wakeup": research_wakeup,
+        }
 
     def _self_improvement_status(self) -> dict[str, Any]:
         """Expose the durable improvement backlog without triggering model or worker work."""

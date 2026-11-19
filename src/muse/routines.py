@@ -121,6 +121,19 @@ class RoutineStore:
             raise KeyError(routine_id)
         return self.get(routine_id)
 
+    def trigger(self, name: str) -> bool:
+        """Make an enabled routine due on the next supervisor tick without stealing its lease."""
+        if not isinstance(name, str) or not name.strip() or len(name) > 120:
+            raise ValueError("name must be 1-120 characters")
+        stamp = self._now().isoformat()
+        cursor = self.connection.execute(
+            "UPDATE routines SET next_run_at=CASE WHEN next_run_at>? THEN ? ELSE next_run_at END, "
+            "updated_at=? WHERE name=? AND enabled=1",
+            (stamp, stamp, stamp, name.strip()),
+        )
+        self.connection.commit()
+        return cursor.rowcount == 1
+
     def claim_due(self, *, lease_seconds: int = 300) -> dict[str, Any] | None:
         if isinstance(lease_seconds, bool) or not isinstance(lease_seconds, int) or lease_seconds < 1:
             raise ValueError("lease_seconds must be a positive integer")

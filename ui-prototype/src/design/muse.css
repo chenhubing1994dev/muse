@@ -178,6 +178,114 @@ textarea {
   padding: 0 10px 0 18px;
   border-bottom: 1px solid var(--hair);
   background: linear-gradient(180deg, #0b0d15, #070910);
+  user-select: none;
+  overflow: hidden;
+}
+
+/* The brand and the window controls must never be squeezed out of the bar:
+   everything else in the middle gives way first. */
+.tb-brand,
+.tb-right {
+  flex: none;
+  min-width: 0;
+}
+
+.tb-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: nowrap;
+}
+
+/* Drag surface sits behind the titlebar content: empty space drags the
+   window, while every control above it stays clickable. */
+.tb-drag {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+}
+
+.titlebar > *:not(.tb-drag):not(.tb-window) {
+  position: relative;
+  z-index: 1;
+}
+
+/* Frameless window resize grips. They overlay the viewport corners/edges only
+   when the Tauri host is present. */
+.frame {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  pointer-events: none;
+}
+
+.frame .edge {
+  position: absolute;
+  pointer-events: auto;
+}
+
+.edge-n,
+.edge-s {
+  left: 10px;
+  right: 10px;
+  height: 5px;
+  cursor: ns-resize;
+}
+
+.edge-n {
+  top: 0;
+}
+
+.edge-s {
+  bottom: 0;
+}
+
+.edge-w,
+.edge-e {
+  top: 10px;
+  bottom: 10px;
+  width: 5px;
+  cursor: ew-resize;
+}
+
+.edge-w {
+  left: 0;
+}
+
+.edge-e {
+  right: 0;
+}
+
+.edge-nw,
+.edge-ne,
+.edge-sw,
+.edge-se {
+  width: 11px;
+  height: 11px;
+}
+
+.edge-nw {
+  top: 0;
+  left: 0;
+  cursor: nwse-resize;
+}
+
+.edge-ne {
+  top: 0;
+  right: 0;
+  cursor: nesw-resize;
+}
+
+.edge-sw {
+  bottom: 0;
+  left: 0;
+  cursor: nesw-resize;
+}
+
+.edge-se {
+  bottom: 0;
+  right: 0;
+  cursor: nwse-resize;
 }
 
 .titlebar::after {
@@ -229,6 +337,35 @@ textarea {
   gap: 8px;
   min-width: 0;
   overflow: hidden;
+  flex-wrap: nowrap;
+}
+
+.tb-mid > * {
+  flex: none;
+}
+
+/* Progressively drop the least critical titlebar chips so the clock and the
+   window controls always fit. */
+@media (max-width: 1400px) {
+  .tb-mid .chip.is-quiet:last-child {
+    display: none;
+  }
+}
+
+@media (max-width: 1250px) {
+  .tb-mid .chip:nth-child(2) {
+    display: none;
+  }
+
+  .tb-clock span {
+    display: none;
+  }
+}
+
+@media (max-width: 1120px) {
+  .tb-tools .btn span {
+    display: none;
+  }
 }
 
 .tb-right {
@@ -262,15 +399,37 @@ textarea {
   display: flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
+  overflow: hidden;
 }
 
+/* Window controls are pinned to the true right edge instead of participating
+   in the flexible grid, so they stay reachable at any DPI or window width. */
+/* Fixed, not absolute: the containing block would otherwise become the
+   ancestor `.tb-right` (itself positioned), and the controls would sit in the
+   middle of the bar instead of on the window's true right edge. */
 .tb-window {
+  position: fixed;
+  top: 0;
+  right: 0;
+  height: var(--titlebar-h);
   display: flex;
   align-items: center;
   gap: 2px;
-  margin-left: 6px;
-  padding-left: 8px;
+  padding: 0 8px;
   border-left: 1px solid var(--hair);
+  background: linear-gradient(180deg, #0b0d15, #070910);
+  z-index: 60;
+}
+
+.titlebar {
+  padding-right: 10px;
+}
+
+/* Reserve room for the absolutely positioned window controls; a margin on the
+   last grid column works because the controls sit outside the grid flow. */
+.tb-right {
+  margin-right: 122px;
 }
 
 .win-btn {
@@ -295,6 +454,16 @@ textarea {
   color: #ffdcd6;
 }
 
+.win-btn.is-inert {
+  cursor: default;
+  opacity: 0.35;
+}
+
+.win-btn.is-inert:hover {
+  background: none;
+  color: var(--ivory-dim);
+}
+
 .win-btn svg {
   width: 12px;
   height: 12px;
@@ -306,7 +475,14 @@ textarea {
 .body {
   display: grid;
   grid-template-columns: var(--rail-w) minmax(0, 1fr) var(--telemetry-w);
+  grid-template-rows: minmax(0, 1fr);
   min-height: 0;
+  overflow: hidden;
+}
+
+.body > * {
+  min-height: 0;
+  max-height: 100%;
 }
 
 /* rail */
@@ -315,6 +491,7 @@ textarea {
   display: flex;
   flex-direction: column;
   gap: 3px;
+  width: auto;
   min-height: 0;
   padding: 14px 10px 10px;
   border-right: 1px solid var(--hair);
@@ -1053,6 +1230,18 @@ textarea {
   color: #e2a49b;
 }
 
+.is-spaced {
+  margin-bottom: 14px;
+}
+
+.sect.is-spaced {
+  margin-top: 18px;
+}
+
+.notice.is-spaced {
+  margin-top: 12px;
+}
+
 /* view header */
 
 .view-head {
@@ -1218,9 +1407,9 @@ textarea {
 
 /* scroll-snap-free sticky nothing; keep layout honest */
 
-@media (max-width: 1440px) {
+@media (max-width: 1400px) {
   :root {
-    --telemetry-w: 286px;
+    --telemetry-w: 268px;
   }
 
   .stage {
@@ -1228,7 +1417,9 @@ textarea {
   }
 }
 
-@media (max-width: 1230px) {
+/* A 1500px window on a 125% DPI display is only 1200 CSS px wide, so the
+   telemetry column must survive down to ~1120 before collapsing. */
+@media (max-width: 1120px) {
   .body {
     grid-template-columns: var(--rail-w) minmax(0, 1fr);
   }
@@ -1242,7 +1433,6 @@ textarea {
   :root {
     --rail-w: 66px;
   }
-
   .rail-item span {
     display: none;
   }

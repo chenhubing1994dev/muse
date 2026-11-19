@@ -2327,3 +2327,53 @@ eady_to_publish=false。
 - 全项目 Python 3.11 unittest **1,608 tests，OK，1 skipped**；`compileall` 对 `src/muse` 与 `tests` 通过。
 - 边界：这是 Ticket 事件链一致性校验，不是任意文件/外部系统内容核验，也不是防篡改的密码学审计日志。下一步可增加受限本地文件 SHA-256 证据解析器与外部只读验证适配器。详见 `docs/PROGRESS_B199_COMMANDER_EVENT_EVIDENCE.md`。
 
+## 2026-11-19｜B-063 Worker → 自主研究常驻路径实测
+
+- 新增正式回归：拒绝审查 Ticket 通过现有 Worker `run_once` 与注册的 `review_followup_research_handler` 成功完成只读 handoff；随后 `AutonomousResearchEngine.run_once()` 不依赖 `preferred_topic_key`，自动选中知识库中的 rejected-review topic。
+- 使用临时知识库/TaskQueue 与受控 Search/Reader 适配器完整跑完研究周期：检索并读取 2 个来源，分别写入 `support_search_candidate` 与 `counter_search_candidate`；Claim 保持 `hypothesis_only_not_fact`，query-pair 去重后下一轮选择其他主题；没有执行代码修改。
+- 新增 Routine 唤醒机制：Worker 成功登记拒绝 handoff 后，Commander 将启用的 `idle-autonomous-research` Routine 提前到期；下一次 supervisor poll 即触发研究，不必等待 3600 秒常规周期。不会抢占或清除 Routine lease。
+- 最新全仓 Python 3.11：`compileall -q src/muse tests` 通过；**1,616 tests，168.603s，OK，1 skipped，0 failures / 0 errors**。唯一 skip 是可选 `celestial-calendar==0.8.0` 未安装。
+- Builder `127.0.0.1:1235/v1` 仍无监听；LM Studio `1234` 只有一个服务进程。Gemma Reviewer 可用，Eva 模型也能响应但未替换 Builder；不同模型不等于独立 Provider。DSH NEXT 主进程仍在运行，但未发现其监听 1235。
+- FFmpeg 的 `moov atom not found` 仍出现一次，尚未定位具体媒体文件；不删除、不覆盖任何未知媒体。
+## 2026-11-19｜B200 psmux 默认执行边界与桌面观察
+
+- 重新检查当前 WebCodex Host callable 与 Runner runtime manifest：`run_shell`、`run_script`、`run_process` 仍是 Runner-owned 执行入口；未发现获准的全局 command hook、PATH shim 注入接口或 Runner config writer。`check_runner_config` 仅只读校验，当前候选配置 `valid=true`、generation=1、`restart_required=false`；`reload_runner_config` 只激活已存在候选，不负责写入配置。
+- 因 Runner 启动配置位于 `D:\Tools\WebCodex\env\runner.toml`，且该路径不在 Muse Project 的授权写入范围，继续 fail-closed：不通过 Muse shell、GUI 或私有文件路径越权修改，不把 Runner 主进程塞入 psmux，不宣称所有 Host 命令已自动重定向。
+- 当前安全默认仍是：项目开发命令显式经 `scripts/webcodex_psmux_exec.py` → detached `psmux new-window -d`；短 bootstrap 留在 Runner；同步内部子进程使用 `CREATE_NO_WINDOW` 并保留 pipes/timeout；常驻服务由既有 Supervisor 管理。
+- 完成一次真实桌面只读快照（1920×1080 屏幕，1280×720 采样）：前景为 OrcaTerm，后方可见 PowerShell 窗口。该单帧只能证明采样时窗口状态，不能证明该窗口由 psmux 创建，也不能证明闪屏频率或零闪屏。后续需在命令执行前后做多帧/窗口句柄对照，且不激活或控制用户窗口。
+- 下一步：寻找 WebCodex 官方支持的 Project-level command launcher/default workflow 接入点；若不存在，则保持明确的 adapter-first 开发规范，并把任何需要全局 Runner 配置写入的工作转交给官方 Desktop/Runner 管理界面，而不是绕过授权。- 本轮实机复验：经 Runner 短 bootstrap 调用 adapter 执行 detached Python smoke，输出 `20261119`、`exit_code=0`、`transport=psmux-detached-window`；随后 `inspect` 返回 `muse-dev` 主窗口正常、`active_job_id=null`。执行后的桌面窗口枚举未再列出独立 PowerShell 窗口。前后观察证明本次测试任务完成且没有残留可见 PowerShell surface；不能外推为所有命令均无闪屏或绝对零闪屏。
+## 2026-11-19｜B200 本地交付物 SHA-256 证据验证
+
+- 新增 `src/muse/artifact_evidence.py`：只接受显式工作区根目录下的规范相对路径与普通文件；拒绝路径穿越、符号链接、目录、空文件、超限文件和 SHA-256 / byte-count 不匹配；以 1 MiB 分块计算 SHA-256，并在读取前后核验文件身份/大小/修改时间。
+- `WorkflowController` 新增 `record_artifact_evidence()`：要求当前 Ticket lease、已绑定 Plan、最新成功 Commander Run 与 Reviewer 批准；将相对路径、字节数、摘要、Plan ID 和 Run ID 记入既有 TaskQueue。
+- `complete()` 对 artifact 引用进行完成时二次哈希验证，拒绝无事件引用、跨 Ticket/worker/Plan/Run 引用、文件变更及未关联验收标准的 artifact。
+- `UnifiedRuntime` 已把 Muse 工作区根目录配置给 WorkflowController；无需新数据库、调度器或队列。
+- 新增本地文件验证和工作流集成测试；定向回归 **79/79 passed**；全项目 Python 3.11 unittest **1,626 tests，OK，1 skipped**；`compileall` 通过。
+- 边界：本轮验证的是临时 fixture 文件，尚未把 VideoProductBuilder 的真实 MP4 / ZIP manifest 自动注册到 Commander；需要调用方显式登记 artifact。下一步接通产品 manifest → 当前 Ticket/Run → SHA-256 复核闭环。详见 `docs/PROGRESS_B200_LOCAL_ARTIFACT_EVIDENCE.md`。
+## 2026-11-19｜B201 VideoProductBuilder Manifest → Commander 交付证据
+
+## 2026-11-19｜B202 Scrapling 网页解析能力第一阶段融合
+
+- 评估 D4Vinci/Scrapling 上游 README、pyproject、BSD-3-Clause LICENSE、解析/Fetcher/Spider/MCP 文档；确认其核心价值为自适应 Selector、CSS/XPath、HTTP/浏览器 Fetcher、并发 Spider、会话、AutoThrottle、断点续爬和 Agent MCP。
+- 选择 adapter-first，而不是复制整库或建立第二套 MCP/调度器。新增 `src/muse/scrapling_adapter.py`：只对 Muse 已经取得的公开 HTML 做 Scrapling CSS/XPath 结构化提取；可选 off/learn/reuse 自适应模式，学习数据限制在 Muse workspace 的 `data/scrapling/adaptive`。
+- 新增可选 `web-scraping` extra（`scrapling>=0.5.1,<0.6`），默认安装不增加依赖；未安装时通过明确异常提示，不影响 Muse 基础功能。
+- 安全边界：不自行联网、不启动浏览器、不绕过登录/付费墙/CAPTCHA/访问控制；既有 PublicSourceReader 仍拥有 URL/DNS/redirect/size 安全校验，网页内容继续作为不可信输入。Scrapling MCP server 暂不启动，避免绕过 Muse Commander。
+- 新增 `docs/SCRAPLING_INTEGRATION.md` 记录定位、许可证、阶段路线与验收边界；适配器/Reader 集成测试 **10/10 passed**，Research Fetch/Pipeline/Browser 定向回归 **61/61 passed**，Python 3.11 `compileall` 通过。
+- 按 Scrapling 0.5.1 官方 API 修正自适应存储参数：使用 `storage_args={"storage_file": ...}`，而不是把路径误传给 `storage`；新增非字符串 selector type 防御。
+- 已将 Scrapling **0.5.1** 安装到 Muse 的 D 盘项目虚拟环境 `D:\\AI AGENT\\Muse\\.venv`；真实 Selector CSS/XPath + adaptive learn/reuse + workspace SQLite 文件 smoke 通过。
+- 已接通 `PublicSourceReader → ScraplingHTMLParser → ResearchPipeline` 可选路径；默认关闭，显式使用 `muse-research-pipeline --scrapling` 启用，`--scrapling-adaptive-mode off|learn|reuse` 控制自适应策略。只在 Muse 原有安全读取器已获取的 HTML 上抽取，不让 Scrapling 自行联网。
+- 结构化字段与解析错误类型随研究结果输出，并进入 ResearchKnowledgeStore 来源节点 metadata；原始 HTML 不写入证据库，既有可读文本路径保持不变。单页结构化抽取另设 20,000 字符总量上限；适配器/Reader 集成测试 **10/10 passed**，Research Fetch/Pipeline/Browser 回归 **61/61 passed**，compileall 与 CLI 参数检查通过。
+- 全项目 unittest 首轮发现 1,637 tests / 9 skipped / 1 failure：`test_local_dashboard` 的 localhost 请求被环境 `HTTP_PROXY` 代理截获（502）；测试 opener 改为显式 `ProxyHandler({})` 后，dashboard 定向 **11/11 passed**。后续全量回归任务因 Runner 进程替换而丢失，未获得第二次全量通过证据，故不宣称全量测试通过。
+- 尝试对公开练习站 `quotes.toscrape.com` 做端到端读取时，Muse 在公共 URL 安全校验阶段调用 Google DoH 遇到本机代理 TLS EOF（`SSLEOFError`），请求尚未进入页面抓取；这属于当前网络/DNS 代理通路问题，不是 Scrapling 解析测试失败。未绕过安全校验，真实外站 E2E 仍待网络通路恢复后验收。
+- 当前是 ResearchPipeline 的可选 HTML 增强路径；默认仍关闭，未进行真实外部网站端到端验收，未启用 Scrapling Fetcher、动态浏览器或 Spider，不宣称全量融合完成。
+
+
+- 新增 `WorkflowController.record_video_product_evidence()`，复用 `VideoProductBuilder.verify_path()` 验证 MP4 容器、manifest、文件 SHA-256、ZIP CRC、ZIP 成员及 ZIP 内外内容一致性。
+- 将 manifest 及其声明的 README、Storyboard、MP4、ZIP，以及存在时的 QA 报告/字幕/字幕审核文件逐一交给 B200 SHA-256 验证器；为每份文件写入绑定当前 Ticket、Plan、Run 的 `workflow.artifact_verified` 事件。
+- 返回 evidence_refs 与新的 workflow revision；完成时再次哈希，登记后被修改的 MP4/ZIP 不得通过。
+- Windows 返回的 VideoProductBuilder 相对路径规范化为 POSIX 证据路径；路径必须位于 `data/products/<initiative>/<version>`。
+- B201 定向回归 **35/35 passed**；全项目 Python 3.11 unittest **1,628 tests，OK，1 skipped**；`compileall` 通过。
+- 使用符合 VideoProductBuilder legacy manifest/ZIP 合同的本地产品 fixture；没有启动 Wan GPU，也没有冒充真实 AI 成片实测。
+- 下一步：把该 API 接入明确的 Video Worker 成功路径，只处理当前 Ticket 绑定的 initiative/version；不得全盘扫描猜测产品归属。详见 `docs/PROGRESS_B201_VIDEO_PRODUCT_EVIDENCE.md`。
+
+

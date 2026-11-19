@@ -13,16 +13,21 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "MUSE · 赛博玄枢 · 普罗米修斯星舰中枢",
+        "label": "main",
+        "title": "MUSE · 璇玑终端",
         "width": 1500,
         "height": 960,
         "minWidth": 960,
         "minHeight": 680,
-        "resizable": true
+        "resizable": true,
+        "decorations": false,
+        "transparent": false,
+        "shadow": true,
+        "center": true
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src ipc: http://127.0.0.1:*; style-src 'self'; script-src 'self'; img-src 'self' asset: data:"
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost http://127.0.0.1:*; style-src 'self'; script-src 'self'; img-src 'self' asset: data:; font-src 'self' data:"
     }
   },
   "bundle": {

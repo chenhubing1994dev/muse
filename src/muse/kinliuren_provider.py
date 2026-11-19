@@ -12,11 +12,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
-
-from muse.process_utils import no_console_window_kwargs
-
 from muse.calendar_context import CalendarContext
-
+from muse.process_utils import no_console_window_kwargs
 
 ENGINE_VERSION = "0.1.2.9"
 ENGINE_SOURCE_REFS = (

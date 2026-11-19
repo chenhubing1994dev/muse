@@ -144,12 +144,29 @@ class _ReadableText(HTMLParser):
 
 class PublicSourceReader:
     def __init__(self, *, timeout: float = 12.0, resolver: Callable[..., Any] = socket.getaddrinfo,
-                 opener: Any = None) -> None:
+                 opener: Any = None, structured_parser: Any = None,
+                 structured_selectors: dict[str, dict[str, str]] | None = None,
+                 adaptive_mode: str = "off") -> None:
         if timeout <= 0:
             raise ValueError("timeout must be positive")
+        if adaptive_mode not in {"off", "learn", "reuse"}:
+            raise ValueError("adaptive_mode must be off, learn or reuse")
+        if structured_parser is not None and not callable(getattr(structured_parser, "extract", None)):
+            raise TypeError("structured_parser must provide an extract method")
+        if structured_parser is None and (structured_selectors is not None or adaptive_mode != "off"):
+            raise ValueError("structured selectors/adaptive mode require a structured_parser")
+        if structured_selectors is not None and not isinstance(structured_selectors, dict):
+            raise TypeError("structured_selectors must be a dictionary")
         self.timeout = timeout
         self.resolver = resolver
         self.opener = opener or build_opener(_RedirectGuard(resolver)).open
+        self.structured_parser = structured_parser
+        self.structured_selectors = structured_selectors if structured_selectors is not None else {
+            "document_title": {"type": "css", "query": "title::text"},
+            "meta_description": {"type": "css", "query": "meta[name=description]::attr(content)"},
+            "headings": {"type": "css", "query": "h1::text, h2::text"},
+        }
+        self.adaptive_mode = adaptive_mode
 
     def read(self, url: str, *, max_bytes: int = 1_000_000, max_chars: int = 20_000) -> dict[str, Any]:
         if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or not 1024 <= max_bytes <= 2_000_000:
@@ -184,8 +201,19 @@ class PublicSourceReader:
             raise SourceReadError("source exceeded the configured byte limit")
         decoded = raw.decode("utf-8", errors="replace")
         source_metadata: dict[str, Any] = {}
+        structured_extract: dict[str, Any] | None = None
+        structured_extract_error: str | None = None
         if "html" in content_type or "xhtml" in content_type:
             source_metadata = extract_html_source_metadata(decoded, final_url)
+            if self.structured_parser is not None:
+                try:
+                    structured_extract = self.structured_parser.extract(
+                        decoded, url=final_url, selectors=self.structured_selectors,
+                        adaptive_mode=self.adaptive_mode,
+                    )
+                except Exception as exc:
+                    # Structured enrichment must never suppress the existing safe text path.
+                    structured_extract_error = type(exc).__name__
             parser = _ReadableText()
             parser.feed(decoded)
             decoded = " ".join("".join(parser.parts).split())
@@ -204,6 +232,8 @@ class PublicSourceReader:
             "status_code": status_code,
             "etag": str(etag)[:256] if etag is not None else None,
             "last_modified": str(last_modified)[:256] if last_modified is not None else None,
+            **({"structured_extract": structured_extract} if structured_extract is not None else {}),
+            **({"structured_extract_error": structured_extract_error} if structured_extract_error else {}),
         }
 
 class ResearchEvidenceStore:

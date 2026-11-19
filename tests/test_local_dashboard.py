@@ -40,7 +40,8 @@ class LocalDashboardTests(unittest.TestCase):
             thread.start()
         self.base = f"http://127.0.0.1:{self.dashboard.server_address[1]}"
         self.api_base = f"http://127.0.0.1:{self.api.server_address[1]}"
-        self.opener = build_opener(HTTPCookieProcessor(CookieJar()))
+        # Localhost security tests must never be routed through environment proxies.
+        self.opener = build_opener(ProxyHandler({}), HTTPCookieProcessor(CookieJar()))
 
     def tearDown(self):
         self.dashboard.shutdown()

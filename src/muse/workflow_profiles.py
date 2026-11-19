@@ -9,8 +9,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 import re
+from pathlib import Path
 from typing import Any, Mapping
 
+from muse.artifact_evidence import ArtifactEvidenceError, LocalArtifactEvidenceVerifier
 from muse.commander_planner import CommanderPlan
 from muse.task_queue import TaskQueue
 
@@ -192,10 +194,13 @@ class WorkflowContract:
 class WorkflowController:
     """Ticket-backed lifecycle controls; TaskQueue remains the only durable store."""
 
-    def __init__(self, queue: TaskQueue) -> None:
+    def __init__(self, queue: TaskQueue, *, artifact_root: str | Path | None = None) -> None:
         if not isinstance(queue, TaskQueue):
             raise TypeError("queue must be the existing TaskQueue")
         self.queue = queue
+        self.artifact_verifier = (
+            LocalArtifactEvidenceVerifier(artifact_root) if artifact_root is not None else None
+        )
 
     def bind_plan(
         self, plan: CommanderPlan, ticket_ids: Mapping[str, str], *,
@@ -400,6 +405,127 @@ class WorkflowController:
             },
         )
 
+    def record_artifact_evidence(
+        self, ticket_id: str, *, worker_id: str, expected_revision: int,
+        orchestration_run_id: str, relative_path: str, expected_sha256: str,
+        expected_bytes: int | None = None,
+    ) -> dict[str, Any]:
+        """Hash a local deliverable and persist its evidence in this Ticket."""
+        if self.artifact_verifier is None:
+            raise ValueError("local artifact evidence requires an explicitly configured artifact_root")
+        task = self._require_running_lease(ticket_id, worker_id)
+        del task
+        bound = next(
+            (event for event in self.queue.workflow_events(ticket_id)
+             if event["event_type"] == "workflow.bound"),
+            None,
+        )
+        if bound is None:
+            raise ValueError("Ticket is not bound to a Commander workflow")
+        if not isinstance(orchestration_run_id, str) or not orchestration_run_id.strip() or len(orchestration_run_id) > 128:
+            raise ValueError("orchestration_run_id must be non-empty bounded text")
+        plan_id = bound["payload"].get("commander_plan_id")
+        finished = [
+            event for event in self.queue.events(ticket_id, limit=500)
+            if event["event_type"] == "commander.execution_finished"
+            and event["actor"] == "commander"
+            and event["payload"].get("plan_id") == plan_id
+        ]
+        latest = finished[-1] if finished else None
+        if not latest or any(latest["payload"].get(key) != value for key, value in (
+            ("orchestration_run_id", orchestration_run_id), ("status", "succeeded"),
+            ("orchestration_status", "succeeded"), ("review_approved", True),
+        )):
+            raise ValueError("artifact evidence must belong to the latest successful Commander run with Reviewer approval")
+        evidence = self.artifact_verifier.verify(
+            relative_path, expected_sha256, expected_bytes=expected_bytes,
+        )
+        evidence["plan_id"] = plan_id
+        evidence["orchestration_run_id"] = orchestration_run_id
+        return self.queue.record_workflow_event(
+            ticket_id, "workflow.artifact_verified", actor=worker_id,
+            expected_revision=expected_revision, expected_worker_id=worker_id,
+            payload=evidence,
+        )
+
+    def record_video_product_evidence(
+        self, ticket_id: str, *, worker_id: str, expected_revision: int,
+        orchestration_run_id: str, initiative_id: str, version_id: str,
+    ) -> dict[str, Any]:
+        """Verify a VideoProductBuilder package, then bind its manifest and files to this Run."""
+        if self.artifact_verifier is None:
+            raise ValueError("video product evidence requires an explicitly configured artifact_root")
+        from muse.video_product_builder import VideoProductBuilder
+
+        products_root = self.artifact_verifier.root / "data" / "products"
+        verified = VideoProductBuilder.verify_path(products_root, initiative_id, version_id)
+        validation = verified.get("validation_summary")
+        if (verified.get("validated") is not True or not isinstance(validation, Mapping)
+                or validation.get("validated") is not True):
+            raise ValueError("VideoProductBuilder did not validate this product package")
+        relative_dir = verified.get("relative_path")
+        product_path = Path(relative_dir) if isinstance(relative_dir, str) else Path()
+        if (not isinstance(relative_dir, str) or not relative_dir
+                or product_path.is_absolute()
+                or product_path.parts[:2] != ("data", "products")
+                or product_path.parts[-2:] != (initiative_id, version_id)
+                or any(part in {"", ".", ".."} for part in product_path.parts)):
+            raise ValueError("VideoProductBuilder returned an unsafe product-relative path")
+
+        manifest_relative = (product_path / "manifest.json").as_posix()
+        manifest_digest = verified.get("manifest_sha256")
+        manifest_evidence = self.artifact_verifier.verify(manifest_relative, manifest_digest)
+        manifest_path = self.artifact_verifier.root / Path(*product_path.parts) / "manifest.json"
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError("validated video product manifest could not be read") from exc
+        files = manifest.get("files") if isinstance(manifest, dict) else None
+        allowed_names = {
+            "README.md", "storyboard.json", "video.mp4", "product.zip",
+            "qa-report.json", "subtitles.srt", "subtitle-review.json",
+        }
+        if (manifest.get("product_kind") != "video_creator"
+                or manifest.get("initiative_id") != initiative_id
+                or manifest.get("version_id") != version_id
+                or not isinstance(files, dict)
+                or not {"README.md", "storyboard.json", "video.mp4", "product.zip"}.issubset(files)
+                or not set(files).issubset(allowed_names)):
+            raise ValueError("VideoProductBuilder manifest has an unexpected artifact inventory")
+
+        artifact_specs = [(manifest_relative, manifest_digest, manifest_evidence["bytes"])]
+        for name in sorted(files):
+            digest = files[name]
+            if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+                raise ValueError("video product manifest contains an invalid file digest")
+            relative = (product_path / name).as_posix()
+            candidate = self.artifact_verifier.root / Path(*product_path.parts) / name
+            try:
+                expected_bytes = candidate.stat().st_size
+            except OSError as exc:
+                raise ValueError("a manifest-declared video artifact is unavailable") from exc
+            artifact_specs.append((relative, digest, expected_bytes))
+
+        records = []
+        for index, (relative, digest, byte_count) in enumerate(artifact_specs):
+            event = self.record_artifact_evidence(
+                ticket_id, worker_id=worker_id, expected_revision=expected_revision + index,
+                orchestration_run_id=orchestration_run_id,
+                relative_path=relative, expected_sha256=digest, expected_bytes=byte_count,
+            )
+            records.append(event["payload"])
+        return {
+            "status": "verified",
+            "initiative_id": initiative_id,
+            "version_id": version_id,
+            "product_status": verified.get("status"),
+            "quality_gate": verified.get("quality_gate"),
+            "validation_summary": dict(validation),
+            "artifacts": records,
+            "evidence_refs": [item["evidence_ref"] for item in records],
+            "workflow_revision": expected_revision + len(records),
+        }
+
     def complete(
         self, ticket_id: str, *, worker_id: str, expected_revision: int,
         evidence_refs: tuple[str, ...], outcome_verified: bool,
@@ -407,10 +533,11 @@ class WorkflowController:
     ) -> dict[str, Any]:
         if outcome_verified is not True:
             raise ValueError("workflow completion requires an explicit verified outcome")
-        if not isinstance(evidence_refs, tuple) or not 1 <= len(evidence_refs) <= 32 or any(
-            not isinstance(ref, str) or not ref.strip() or len(ref) > 240 for ref in evidence_refs
-        ):
+        if (not isinstance(evidence_refs, tuple) or not 1 <= len(evidence_refs) <= 32
+                or any(not isinstance(ref, str) or not ref.strip() or len(ref) > 240 for ref in evidence_refs)):
             raise ValueError("evidence_refs must contain 1-32 bounded evidence references")
+        if len(set(evidence_refs)) != len(evidence_refs):
+            raise ValueError("evidence_refs must not contain duplicates")
         events = self.queue.workflow_events(ticket_id)
         bound = next((event for event in events if event["event_type"] == "workflow.bound"), None)
         if bound is None or "contract" not in bound["payload"]:
@@ -477,8 +604,45 @@ class WorkflowController:
         if not set(step_ids).issubset(submitted_steps):
             raise ValueError("workflow completion requires a non-empty submitted output for every Commander step")
 
+        artifact_refs = [ref for ref in evidence_refs if ref.startswith("artifact:")]
+        artifact_records: list[dict[str, Any]] = []
+        if artifact_refs:
+            if self.artifact_verifier is None:
+                raise ValueError("artifact evidence cannot be accepted without an explicitly configured artifact_root")
+            for artifact_ref in artifact_refs:
+                matches = [
+                    event for event in ticket_events
+                    if event["event_type"] == "workflow.artifact_verified"
+                    and event["actor"] == worker_id
+                    and event["payload"].get("plan_id") == plan_id
+                    and event["payload"].get("orchestration_run_id") == run_id
+                    and event["payload"].get("evidence_ref") == artifact_ref
+                ]
+                if not matches:
+                    raise ValueError("artifact evidence reference has no verified event in this Ticket")
+                recorded = matches[-1]["payload"]
+                try:
+                    current = self.artifact_verifier.verify(
+                        recorded.get("relative_path"), recorded.get("sha256"),
+                        expected_bytes=recorded.get("bytes"),
+                    )
+                except ArtifactEvidenceError as exc:
+                    raise ValueError("local artifact failed completion-time revalidation") from exc
+                if any(current.get(key) != recorded.get(key) for key in (
+                    "relative_path", "bytes", "sha256", "evidence_ref", "verifier",
+                )):
+                    raise ValueError("local artifact evidence changed after its verification event")
+                artifact_records.append({
+                    "relative_path": current["relative_path"],
+                    "bytes": current["bytes"],
+                    "sha256": current["sha256"],
+                    "evidence_ref": current["evidence_ref"],
+                    "verified_at": current["verified_at"],
+                })
+
         required_refs = {run_refs[0], "step:independent_review"}
         required_refs.update(f"step:{step_id}" for step_id in step_ids)
+        required_refs.update(artifact_refs)
         if set(evidence_refs) != required_refs:
             raise ValueError("evidence_refs must exactly identify the verified run, all steps and independent review")
 
@@ -501,6 +665,12 @@ class WorkflowController:
                 raise ValueError("criterion evidence must include at least one submitted Commander step")
             normalized_evidence[criterion] = list(refs)
 
+        criterion_artifacts = {
+            ref for refs in normalized_evidence.values() for ref in refs if ref.startswith("artifact:")
+        }
+        if criterion_artifacts != set(artifact_refs):
+            raise ValueError("every artifact reference must be attached to at least one acceptance criterion")
+
         verification = {
             "verified": True,
             "verified_at": datetime.now(timezone.utc).isoformat(),
@@ -511,6 +681,10 @@ class WorkflowController:
                 "orchestration_run_id": run_id,
                 "verified_steps": step_ids,
                 "independent_review_approved": True,
+            },
+            "artifact_validation": {
+                "status": "verified" if artifact_records else "not_required",
+                "verified_artifacts": artifact_records,
             },
         }
         return self.queue.record_workflow_event(

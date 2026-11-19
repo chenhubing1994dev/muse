@@ -177,6 +177,62 @@ class AutonomousRuntimeTests(unittest.TestCase):
             self.assertEqual(report["epistemic_status"], "hypothesis_only_not_fact")
             self.assertNotEqual(next_topic["key"], report["topic_key"])
 
+    def test_review_followup_handoff_wakes_research_routine_on_next_tick(self):
+        from muse.routines import RoutineStore
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            supervisor = self.make_supervisor(root)
+            with RoutineStore(root / "routines.sqlite3") as store:
+                store.add(
+                    "idle-autonomous-research", "autonomous_research",
+                    interval_seconds=3600, run_immediately=False,
+                )
+            payload = {
+                "kind": "review_followup_research",
+                "task_scope": "read_only_research",
+                "review_id": "review-wakeup",
+                "review_node_id": "decision-wakeup",
+                "review_artifact_id": "artifact-wakeup",
+                "proposal_id": "proposal-wakeup",
+                "feedback_id": "feedback-wakeup",
+                "plan_node_id": "plan-wakeup",
+                "review_findings": [],
+                "reviewer_output_is_untrusted_data": True,
+                "not_claim_evidence": True,
+                "requires_separate_code_change_approval": True,
+            }
+            with TaskQueue(root / "tasks.sqlite3") as queue:
+                ticket = queue.enqueue(
+                    "Wake research after rejection", payload,
+                    idempotency_key="review-followup:review-wakeup",
+                )
+            with patch(
+                "muse.autonomous_runtime.run_due_once",
+                return_value={"processed": 0, "outcomes": []},
+            ):
+                result = supervisor.run_tick()
+
+            self.assertEqual(result["task"]["id"], ticket["id"])
+            self.assertEqual(result["task"]["status"], "succeeded")
+            self.assertEqual(result["research_wakeup"]["status"], "scheduled")
+            self.assertEqual(result["research_wakeup"]["topic_key"], "rejected-review:decision-wakeup")
+            with RoutineStore(root / "routines.sqlite3") as store:
+                routine = next(item for item in store.list() if item["name"] == "idle-autonomous-research")
+                self.assertLessEqual(routine["next_run_at"], store._now().isoformat())
+
+            research_calls = []
+            supervisor._routine_handlers["autonomous_research"] = (
+                lambda routine_payload: research_calls.append(routine_payload)
+            )
+            next_tick = supervisor.run_tick()
+            self.assertEqual(next_tick["routines"]["processed"], 1)
+            self.assertEqual(research_calls, [{}])
+            with RoutineStore(root / "routines.sqlite3") as store:
+                routine = next(item for item in store.list() if item["name"] == "idle-autonomous-research")
+                self.assertEqual(routine["last_status"], "succeeded")
+
+
     def test_commander_video_worker_is_disabled_by_default(self):
         with tempfile.TemporaryDirectory() as directory:
             supervisor = self.make_supervisor(Path(directory))

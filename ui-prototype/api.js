@@ -108,7 +108,9 @@ export function createApiClient({ baseUrl, token, fetchImpl = globalThis.fetch, 
     selfImprovement: () => get("/api/v1/self-improvement"),    artifacts: (limit = 50) => get(`/api/v1/artifacts?limit=${limit}`),
     products: (limit = 50) => {
       if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new RangeError("产品数量必须介于 1 和 100 之间");
-      return get(`/api/v1/products?limit=${limit}`);
+      // Product listing verifies package hashes on disk and routinely needs
+      // several seconds on a large library; the shared 4s default is too tight.
+      return request(`/api/v1/products?limit=${limit}`, { requestTimeoutMs: 20000 });
     },
     videoAttempts: () => get("/api/v1/video-attempts"),
     initiativeTimeline: (initiativeId, limit = 100) => {

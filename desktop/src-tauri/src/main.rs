@@ -14,11 +14,14 @@ use std::{
     thread::{self, JoinHandle},
     time::Duration,
 };
-use tauri::{Manager, RunEvent};
+use tauri::{Manager, RunEvent, WindowEvent};
 
 const HEALTH_INTERVAL: Duration = Duration::from_secs(2);
 const HEALTH_FAILURE_LIMIT: u8 = 3;
 const BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(20);
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -134,6 +137,14 @@ fn start_status_api(root: &Path) -> Result<RunningApi, String> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
+
+    // A console child launched from a windowed process would otherwise pop up
+    // its own console window on top of the frameless UI.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
 
     let mut child = command.spawn().map_err(|error| {
         format!(
@@ -387,13 +398,99 @@ fn get_status_connection(state: tauri::State<'_, ApiState>) -> Result<ApiConnect
         })
 }
 
+#[derive(Default)]
+struct MaxState(Arc<Mutex<Option<(i32, i32, u32, u32)>>>);
+
+#[tauri::command]
+fn win_minimize(window: tauri::Window) -> Result<(), String> {
+    window.minimize().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn win_close(window: tauri::Window) -> Result<(), String> {
+    window.close().map_err(|e| e.to_string())
+}
+
+/// Maximize/restore against the real work area.
+///
+/// The OS maximize path leaves a hidden resize frame on undecorated windows,
+/// which pushes the window ~7px past every screen edge and clips the UI. Doing
+/// it manually keeps the client area exactly inside the work area.
+#[tauri::command]
+fn win_toggle_maximize(
+    window: tauri::Window,
+    state: tauri::State<'_, MaxState>,
+) -> Result<bool, String> {
+    let mut saved = state.0.lock().map_err(|_| "max state unavailable".to_string())?;
+    if let Some((x, y, w, h)) = saved.take() {
+        // `set_size` sets the client size, so the snapshot stores inner size to
+        // round-trip exactly; saving outer geometry grew the window on restore.
+        window
+            .set_size(tauri::PhysicalSize::new(w, h))
+            .map_err(|e| e.to_string())?;
+        window
+            .set_position(tauri::PhysicalPosition::new(x, y))
+            .map_err(|e| e.to_string())?;
+        return Ok(false);
+    }
+
+    let monitor = window
+        .current_monitor()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "no monitor".to_string())?;
+    let work = monitor.work_area();
+    let position = window.outer_position().map_err(|e| e.to_string())?;
+    let outer = window.outer_size().map_err(|e| e.to_string())?;
+    let inner = window.inner_size().map_err(|e| e.to_string())?;
+    *saved = Some((position.x, position.y, inner.width, inner.height));
+
+    // An undecorated resizable window carries a hidden frame. Maximizing to the
+    // raw work area therefore puts the *client* edge ~18px past the screen.
+    // Measure the real overhang and subtract it.
+    let over_w = ((position.x + outer.width as i32) - (work.position.x + work.size.width as i32)).max(0);
+    let over_h = ((position.y + outer.height as i32) - (work.position.y + work.size.height as i32)).max(0);
+    let frame_w = over_w.max(18);
+    let frame_h = over_h.max(5);
+
+    window
+        .set_position(tauri::PhysicalPosition::new(
+            work.position.x + frame_w / 2,
+            work.position.y + frame_h / 2,
+        ))
+        .map_err(|e| e.to_string())?;
+    window
+        .set_size(tauri::PhysicalSize::new(
+            (work.size.width as i32 - frame_w).max(320) as u32,
+            (work.size.height as i32 - frame_h).max(240) as u32,
+        ))
+        .map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
 fn main() {
     let app = tauri::Builder::default()
         .manage(ApiState(Arc::new(Mutex::new(None))))
         .manage(ProjectRootState(Arc::new(Mutex::new(None))))
         .manage(ShutdownState(Arc::new(AtomicBool::new(false))))
         .manage(SupervisorThread(Mutex::new(None)))
+        .manage(MaxState::default())
         .setup(|app| {
+            // Fit the window to the real work area. Work-area values are
+            // physical pixels, so they must not be reused as logical sizes:
+            // on a 125% display that made the window 1.25x wider than intended.
+            if let Some(window) = app.get_webview_window("main") {
+                if let Ok(Some(monitor)) = window.current_monitor() {
+                    let scale = monitor.scale_factor().max(0.5);
+                    let work = monitor.work_area();
+                    let max_w = work.size.width as f64 / scale;
+                    let max_h = work.size.height as f64 / scale;
+                    let target_w = max_w.min(1500.0).max(960.0);
+                    let target_h = max_h.min(960.0).max(640.0);
+                    let _ = window.set_size(tauri::LogicalSize::new(target_w, target_h));
+                    let _ = window.center();
+                }
+            }
+
             let root_state = app.state::<ProjectRootState>().0.clone();
             let api_state = app.state::<ApiState>().0.clone();
             let shutdown = app.state::<ShutdownState>().0.clone();
@@ -430,11 +527,29 @@ fn main() {
             }
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![get_status_connection])
+        .invoke_handler(tauri::generate_handler![
+            get_status_connection,
+            win_minimize,
+            win_close,
+            win_toggle_maximize
+        ])
         .build(tauri::generate_context!())
         .expect("failed to build Muse desktop application");
 
     app.run(|handle, event| {
+        if let RunEvent::WindowEvent {
+            label,
+            event: WindowEvent::CloseRequested { .. },
+            ..
+        } = &event
+        {
+            if label == "main" {
+                handle
+                    .state::<ShutdownState>()
+                    .0
+                    .store(true, Ordering::SeqCst);
+            }
+        }
         if matches!(event, RunEvent::Exit) {
             handle
                 .state::<ShutdownState>()

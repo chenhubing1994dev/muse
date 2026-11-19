@@ -71,12 +71,12 @@ export function buildPrometheusStageItems(stages, cx = 260, cy = 260, radius = 7
 }
 
 export const KNOWLEDGE_TYPE_META = {
-  claim: { label: "主张 Claim", color: "#00f0ff", angleDeg: 0 },
-  idea: { label: "灵感 Idea", color: "#ffb64a", angleDeg: 60 },
-  source: { label: "来源 Source", color: "#3bf5c4", angleDeg: 120 },
-  experiment: { label: "实验 Exp", color: "#b56bff", angleDeg: 180 },
-  decision: { label: "决策 Decision", color: "#ff7ad9", angleDeg: 240 },
-  failure: { label: "失败 Failure", color: "#ff5470", angleDeg: 300 },
+  claim: { label: "主张 Claim", color: "#e0c07a", angleDeg: 0 },
+  idea: { label: "灵感 Idea", color: "#c8a24a", angleDeg: 60 },
+  source: { label: "来源 Source", color: "#4fb79a", angleDeg: 120 },
+  experiment: { label: "实验 Exp", color: "#8e7bd6", angleDeg: 180 },
+  decision: { label: "决策 Decision", color: "#d08fa8", angleDeg: 240 },
+  failure: { label: "失败 Failure", color: "#c4544a", angleDeg: 300 },
 };
 
 function hashFraction(text) {
