@@ -90,3 +90,7 @@ Thumbs.db
 *.bak
 *.tmp
 *.swp
+
+# Python virtual environments (any name containing -venv)
+**/*-venv/
+pyvenv.cfg
