@@ -1511,11 +1511,11 @@ class StatusApiTests(unittest.TestCase):
         initiatives_db = root / "data" / "initiatives" / "muse.sqlite3"
         products_dir = root / "data" / "products"
         products_dir.mkdir(parents=True, exist_ok=True)
-        attempt_id = "b" * 32
+        attempt_id = "f" * 32
         with InitiativeStore(initiatives_db) as attempts:
             attempts.start_video_attempt(attempt_id, mode="prompt_to_video")
             attempts.mark_video_attempt_running(attempt_id)
-            for index in range(55):
+            for index in range(205):
                 attempts.start_video_attempt(f"{index:032x}", mode="local_assets")
         server, token = create_status_server(
             task_db=self.task_db, progress_db=self.progress_db,
@@ -1533,7 +1533,8 @@ class StatusApiTests(unittest.TestCase):
             self.assertEqual(response.status, 200)
             self.assertEqual(payload["metrics"]["running"], 1)
             self.assertEqual(payload["metrics"]["leased"], 1)
-            self.assertEqual(len(payload["attempts"]), 56)
+            self.assertEqual(len(payload["attempts"]), 200)
+            self.assertTrue(payload["attempts_truncated"])
             running_attempt = next(item for item in payload["attempts"] if item["attempt_id"] == attempt_id)
             self.assertEqual(running_attempt["worker_id"], "status-api")
             self.assertGreaterEqual(running_attempt["attempt_count"], 1)

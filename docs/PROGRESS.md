@@ -2629,6 +2629,16 @@ eady_to_publish=false。
 - 未启动视频生成、GPU、外部 Provider 或发布流程；追溯继续只读，`can_publish=false`，Commander / TaskQueue 不变。
 - 下一步：对真实桌面窗口进行视觉与交互验收；随后将同一只读追溯摘要接入视频产品详情的其他入口时，复用现有 API 与精确 Attempt 关联，不复制账本或增加调度器。
 
+## 2026-11-20｜B224 修复产品卡片 Attempt 关联键并拒绝歧义匹配
+
+- 修复 B223 遗留的关联键错误：`build_products()` 的 `product.id` 是 `initiative_id + '-' + version_id` 组合标识，而 Attempt 的 `product_id` 存的是纯 `initiative_id`；旧 UI 把两者直接比较，导致正常产品版本无法命中追溯入口。
+- 新增 `ui-prototype/src/lib/video-trace.js` 的 `resolveProductAttempt()`：只用 `attempt.product_id === product.initiative_id` 与 `attempt.version_id === product.version_id` 双重精确匹配；恰好一条才可追溯，零条显示“未找到唯一任务”，多条显示“关联歧义并停止”，绝不 `.find()` 取第一条。
+- `/api/v1/video-attempts` 从最新 50 条扩至账本支持的 200 条（产品库最多 100 个版本），降低较早产品被任务列表截断而无法关联的情况；不增加新接口或数据库。
+- 新增 4 个纯函数单测：复合产品 ID 与 initiative_id 正确区分、版本必须精确、缺失时不猜测、重复匹配时拒绝；UI tests **51/51 passed**。
+- 后端 `tests/test_status_api.py` **37/37 passed**，其中视频任务端点新增 56 条 Attempt 样本，验证 200 上限读取可覆盖超过原 50 条的记录；Windows `scripts/validate_ui.py` 验收：Svelte check **0 errors / 0 warnings**，Vite production build 成功（140 modules）。
+- 验证通过 `muse-dev run` → detached psmux：后端测试 Job `77bdb00323a14233a5e9381da8e5ea07`，UI 验收 Job `a3ce3d817f9545209e1e8794a07a2e47`；最后 `muse-dev inspect` 显示无活动 Job。
+- 本次未启动 GPU/ComfyUI、外部 Provider 或发布流程；追溯保持只读，`can_publish=false`，Commander 与 TaskQueue 架构不变。
+
 
 
 

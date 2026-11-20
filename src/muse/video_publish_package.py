@@ -455,10 +455,10 @@ def build_publish_package(
         readme_text = (
             f"# {title}\n\n"
             f"- 画幅与技术指标：{master_aspect_ratio}（{width}×{height}, {fps:g} FPS）；技术 QA：passed；Muse 产品状态：testing。\n"
-            f"- 目标平台草稿：{', '.join(selected)}。\n"            "- 视频、封面、字幕、分镜、来源说明和 Muse 产品 ZIP 均随包提供。\n"
+            f"- 目标平台草稿：{', '.join(selected)}。\n"
+            "- 视频、封面、字幕、分镜、来源说明和 Muse 产品 ZIP 均随包提供。\n"
             "- 各平台可直接复制的标题备选、标签、置顶评论与简介，见 `platform-drafts/<platform>.json`。\n"
-            "- 发布前必须复核事实、来源、视觉/模型权利、隐私、AI 合成披露、商业关系披露及平台上传规格。\n"
-            "- 未登录平台账号，未调用发布 API，未生成平台视频 ID 或发布链接。\n"
+            "- 发布前必须复核事实、来源、视觉/模型权利、隐私、AI 合成披露、商业关系披露及平台上传规格。\n"            "- 未登录平台账号，未调用发布 API，未生成平台视频 ID 或发布链接。\n"
         )
         (staging / "README.md").write_text(readme_text, encoding="utf-8")
 
@@ -480,7 +480,8 @@ def build_publish_package(
             "source_video_sha256": mp4_info["sha256"],
             "muse_product_zip_sha256": _sha256(product_zip),
             "release_quality_report": release_quality_report,
-            "release_quality_status": release_quality_report["overall_status"],            "platforms": list(selected),
+            "release_quality_status": release_quality_report["overall_status"],
+            "platforms": list(selected),
             "files": file_hashes,
         }
         (staging / "manifest.json").write_bytes(_json_bytes(manifest))

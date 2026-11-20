@@ -129,6 +129,34 @@ class VideoPublishPackageTests(unittest.TestCase):
         self.assertFalse(manifest["can_publish"])
         self.assertEqual(set(manifest["platforms"]), {"youtube_shorts", "tiktok", "instagram_reels", "bilibili"})
 
+    def test_release_quality_report_verifies_subtitle_approval_against_exact_video_and_srt(self):
+        from muse.video_publish_package import _release_quality_report
+
+        video = self.source_dir / "reviewed.mp4"
+        subtitles = self.source_dir / "reviewed.srt"
+        video.write_bytes(b"video-v1")
+        subtitles.write_bytes(b"subtitle-v1")
+        video_hash = hashlib.sha256(video.read_bytes()).hexdigest()
+        subtitle_hash = hashlib.sha256(subtitles.read_bytes()).hexdigest()
+        review = {
+            "schema_version": 1, "status": "approved", "human_approved": True,
+            "approved_by": "human-editor", "approval_timestamp": "2026-11-20T12:00:00Z",
+            "review_sha256": "a" * 64, "approved_srt_sha256": subtitle_hash,
+            "video_sha256": video_hash,
+        }
+        report = _release_quality_report(
+            product_manifest={"subtitle_review": review}, qa_warnings=[],
+            subtitles=subtitles, video=video,
+        )
+        self.assertEqual(report["checks"]["subtitle_review"]["status"], "verified_human_approval")
+        self.assertFalse(report["can_publish"])
+        video.write_bytes(b"video-v2")
+        changed = _release_quality_report(
+            product_manifest={"subtitle_review": review}, qa_warnings=[],
+            subtitles=subtitles, video=video,
+        )
+        self.assertEqual(changed["checks"]["subtitle_review"]["status"], "evidence_mismatch_or_incomplete")
+
     def test_blocks_publish_pack_when_technical_qa_did_not_pass(self):
         self._create_generation("failed")
         with self.assertRaisesRegex(VideoPublishPackageError, "passed technical QA"):

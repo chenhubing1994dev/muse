@@ -1312,7 +1312,7 @@ def create_status_server(
                             "terminal": 0, "success_rate": None,
                             "success_rate_numerator": 0, "success_rate_denominator": 0,
                             "scope": "persisted_video_attempts",
-                        }, "attempts": []})
+                        }, "attempts": [], "attempts_truncated": False})
                         return
                     from muse.initiative_engine import InitiativeStore
                     with InitiativeStore(initiatives_path) as attempts_store:
@@ -1335,7 +1335,10 @@ def create_status_server(
                         "attempt_count": item.get("attempt_count", 0),
                         "cancel_requested": bool(item.get("cancel_requested", 0)),
                     } for item in attempts]
-                    self._send(200, {"api_version": 1, "metrics": metrics, "attempts": public_attempts})
+                    self._send(200, {
+                        "api_version": 1, "metrics": metrics, "attempts": public_attempts,
+                        "attempts_truncated": metrics["total"] > len(attempts),
+                    })
                 elif parsed.path == "/api/v1/daemon/status":
                     self._send(200, {"api_version": 1, **daemon.status()})
                 elif parsed.path == "/api/v1/pipelines/recipes":

@@ -1990,7 +1990,7 @@
                   {#if product.kind === "video_creator" && recipeTraceLink.status === "matched" && recipeTraceLink.attemptId}
                     <button type="button" class="radar-scan" onclick={() => toggleVideoRecipeTrace(recipeTraceLink.attemptId!)} disabled={recipeTraceBusy} aria-expanded={selectedRecipeTraceAttemptId === recipeTraceLink.attemptId}>{selectedRecipeTraceAttemptId === recipeTraceLink.attemptId ? "收起配方追溯" : "配方追溯"}</button>
                   {:else if product.kind === "video_creator"}
-                    <small class="quality-gate-line">{recipeTraceLink.status === "ambiguous" ? "存在多条匹配任务，已停止关联；需核对 Attempt 账本" : videoAttemptSummary ? "未找到对应的唯一视频任务，旧作品不猜测关联" : "视频任务账本暂不可用，配方追溯入口未启用"}</small>
+                    <small class="quality-gate-line">{recipeTraceLink.status === "ambiguous" ? "存在多条匹配任务，已停止关联；需核对 Attempt 账本" : videoAttemptSummary?.attempts_truncated ? "最近 200 条账本中未找到匹配；更早记录尚未核验" : videoAttemptSummary ? "未找到对应的唯一视频任务；不猜测关联" : "视频任务账本暂不可用，配方追溯入口未启用"}</small>
                   {/if}
                   <button type="button" class="radar-scan" onclick={() => previewProduct(product)}>预览</button>
                   {#if product.kind === "video_creator" && product.subtitle_review?.status === "pending_human_review"}

@@ -64,7 +64,7 @@ Muse 已有相当完整的本地优先生产链，不能重复造轮子：
 - 配方指纹已贯通 Creator Brief、Video Attempt、产品 Manifest、产品资产事件与 Research Knowledge 来源节点；旧 Attempt 兼容保留 NULL。
 - 新增只读 `muse.video_recipe_trace.build_video_recipe_trace`、CLI `muse-video-recipe-trace` 与认证 Status API `GET /api/v1/video-recipe-traces/{attempt_id}`。追溯候选、人工审批事件、Attempt 时间线、Manifest 哈希与发布准备包人工审核状态；不读取凭据、不写库、不触发渲染或发布。
 - 审批追溯进一步绑定精确 `attempt_id`：Ticket payload 必须指向当前 Video Attempt；跨 Attempt 复用审批会被拒绝并令 `chain_consistent=false`。TaskQueue + VideoTaskWorker + recipe trace 的模拟渲染端到端测试已通过。
-- Muse 桌面最近视频任务面板与产品卡片复用认证只读追溯 API，展示候选配方、审批、产品 Manifest、整链一致性、发布权限与精确 Attempt 绑定状态；产品卡片只有 `product_id + version_id` 双重匹配才显示入口，旧记录缺少绑定字段时显示未知，不推断通过。
+- Muse 桌面最近视频任务面板与产品卡片复用认证只读追溯 API，展示候选配方、审批、产品 Manifest、整链一致性、发布权限与精确 Attempt 绑定状态。产品卡片按 `attempt.product_id === product.initiative_id` + `attempt.version_id === product.version_id` 双重精确匹配；只允许唯一匹配，多条匹配视为歧义并关闭入口，缺少匹配时不猜测。视频任务读取最多 200 条以覆盖产品库最多 100 个版本。
 ### P2：可选运行时桥接（未批准执行）
 
 只有在证明 Muse 原生能力无法覆盖具体 Provider 时，才考虑将已安装的 MPT 作为可选执行后端：

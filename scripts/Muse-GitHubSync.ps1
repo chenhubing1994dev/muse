@@ -51,15 +51,40 @@ function Invoke-Sync {
 
         $env:GIT_TERMINAL_PROMPT = '0'
 
-        # Network here drops TLS intermittently; retry with backoff.
+        # Inherited HTTP_PROXY/HTTPS_PROXY can point at a dead local port, which
+        # breaks every push. Never trust them: try a direct link first, then the
+        # proxy the system currently advertises.
+        function Get-ProxyCandidate {
+            $list = @('')
+            try {
+                $ie = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' -ErrorAction Stop
+                if ($ie.ProxyEnable -eq 1 -and $ie.ProxyServer) {
+                    $srv = ($ie.ProxyServer -split ';')[0].Trim()
+                    if ($srv -and $srv -notmatch '^[a-zA-Z]+://') { $srv = "http://$srv" }
+                    if ($srv) { $list += $srv }
+                }
+            } catch { }
+            return $list
+        }
+
+        function Remove-Secret([string]$text) {
+            $clean = $text -replace 'ghp_[A-Za-z0-9]{6,}', '***'
+            if ($token) { $clean = $clean.Replace($token, '***') }
+            return $clean
+        }
+
+        # Network here drops TLS intermittently; retry across transports with backoff.
         $ok = $false
         $lastSafe = ''
+        $candidates = Get-ProxyCandidate
         for ($attempt = 1; $attempt -le 6; $attempt++) {
-            $out = git -c http.sslBackend=schannel push origin main 2>&1
+            $proxy = $candidates[($attempt - 1) % $candidates.Count]
+            $via = if ($proxy) { $proxy } else { 'direct' }
+            $out = git -c http.sslBackend=schannel -c "http.proxy=$proxy" -c "https.proxy=$proxy" push origin main 2>&1
             $code = $LASTEXITCODE
-            $lastSafe = ($out | Out-String).Replace($token, '***').Trim()
-            if ($code -eq 0) { $ok = $true; break }
-            Write-Log "PUSH attempt $attempt failed (code=$code), retrying..."
+            $lastSafe = (Remove-Secret ($out | Out-String)).Trim()
+            if ($code -eq 0) { $ok = $true; Write-Log "PUSH transport OK via $via (attempt $attempt)"; break }
+            Write-Log "PUSH attempt $attempt via $via failed (code=$code), retrying..."
             Start-Sleep -Seconds ([Math]::Min(5 * $attempt, 30))
         }
 

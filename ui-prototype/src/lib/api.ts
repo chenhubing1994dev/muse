@@ -551,6 +551,7 @@ export interface VideoAttemptMetrics {
 export interface VideoAttemptSummary {
   api_version: number; metrics: VideoAttemptMetrics;
   attempts: Array<{ attempt_id: string; mode: string; status: string; created_at: string; started_at: string | null; finished_at: string | null; initiative_id: string | null; evolution_cycle_id: string | null; product_id: string | null; version_id: string | null; failure_code: string | null; error_type: string | null }>;
+  attempts_truncated?: boolean;
 }
 export interface VideoRecipeTrace {
   read_only: true;
