@@ -190,6 +190,14 @@ class VideoRecipeTraceTests(unittest.TestCase):
                 )
             release_dir = products_root / product_id / version_id / "publish-package-v1"
             release_dir.mkdir(parents=True)
+            quality_report = {
+                "schema_version": 1, "overall_status": "blocked_pending_human_review",
+                "can_publish": False, "blocking_items": ["editorial_and_fact_review"],
+                "checks": {"editorial_and_fact_review": {"status": "pending"}},
+            }
+            quality_report_bytes = json.dumps(quality_report, sort_keys=True).encode("utf-8")
+            quality_report_hash = hashlib.sha256(quality_report_bytes).hexdigest()
+            (release_dir / "release-quality-report.json").write_bytes(quality_report_bytes)
             (release_dir / "release-checklist.json").write_text(json.dumps({
                 "release_state": "draft_only", "can_publish": False,
                 "editorial_and_fact_review": "pending",
@@ -202,6 +210,8 @@ class VideoRecipeTraceTests(unittest.TestCase):
                 "initiative_id": product_id, "version_id": version_id,
                 "source_video_sha256": mp4_hash, "muse_product_zip_sha256": package_hash,
                 "release_state": "draft_only", "can_publish": False,
+                "release_quality_report": quality_report,
+                "files": {"release-quality-report.json": quality_report_hash},
             }), encoding="utf-8")
             verified = {
                 "validated": True, "recipe_sha256": recipe_hash,
@@ -210,11 +220,15 @@ class VideoRecipeTraceTests(unittest.TestCase):
             }
             with patch("muse.video_product_builder.VideoProductBuilder.verify_path", return_value=verified):
                 trace = build_video_recipe_trace(root, "completed-trace")
-            self.assertTrue(trace["chain_consistent"])
+            self.assertTrue(trace["chain_consistent"], msg=json.dumps(trace, sort_keys=True))
             self.assertEqual(trace["product"]["status"], "verified")
             self.assertEqual(trace["release_review"]["status"], "draft_only")
-            self.assertFalse(trace["release_review"]["can_publish"])
+            self.assertTrue(trace["release_review"]["quality_report_matches_package"])
+            self.assertEqual(trace["release_review"]["overall_status"], "blocked_pending_human_review")
+            self.assertEqual(trace["release_review"]["blocking_items"], ["editorial_and_fact_review"])
+            self.assertEqual(trace["release_review"]["quality_report_sha256"], quality_report_hash)
             self.assertEqual(trace["release_review"]["official_publish_api"], "not_called")
+            self.assertFalse(trace["release_review"]["can_publish"])
 
 if __name__ == "__main__":
     unittest.main()

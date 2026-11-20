@@ -176,6 +176,15 @@ class AutonomousResearchTests(unittest.TestCase):
             result = engine.run_once()
             report = result["report"]
             self.assertEqual(report["creator_inspired_hypothesis_persistence_status"], "completed")
+            self.assertEqual(report["value_forge"]["epistemic_status"], "hypothesis_only")
+            self.assertGreaterEqual(len(report["value_forge"]["candidates"]), 1)
+            self.assertTrue(all(item["evaluation"]["ratings"]["recurrence"] == 1
+                                for item in report["value_forge"]["candidates"]))
+            self.assertFalse(report["value_forge"]["dispatch_started"])
+            self.assertEqual(report["creator_brief"]["value_opportunities_epistemic_status"], "hypothesis_only")
+            self.assertGreaterEqual(len(report["creator_brief"]["value_opportunities"]), 1)
+
+
             product = report["creator_initiatives"][0]["product"]
             self.assertEqual(product["status"], "testing")
             self.assertTrue(product["validated"])

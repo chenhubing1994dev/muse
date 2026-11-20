@@ -240,12 +240,226 @@ class TaskQueue:
         )
 
     def record_event(self, task_id: str, event_type: str, *, actor: str, payload: Any = None) -> dict[str, Any]:
-        """Persist an Assignment, Mandate, Report, or human-decision event."""
+        """Persist an Assignment, Mandate, Report, or human-decision event.
+
+        Contextual-inquiry attachment is a reserved security transition. It must
+        be written only by its future lease-fenced TaskQueue operation, never
+        through this generic event API.
+        """
+        if isinstance(event_type, str) and event_type in {
+            "contextual_inquiry.context_attached",
+            "contextual_inquiry.review_only_authorized",
+        }:
+            raise PermissionError(
+                "contextual-inquiry security audit events require a trusted queue transition via the dedicated queue transition API"
+            )
         if self.get(task_id) is None:
             raise KeyError(task_id)
         self._record_event(task_id, event_type, actor, payload)
         self._connection.commit()
         return self.events(task_id)[-1]
+
+    def workflow_revision(self, task_id: str) -> int:
+        if self.get(task_id) is None:
+            raise KeyError(task_id)
+        return int(self._connection.execute(
+            "SELECT COUNT(*) FROM task_events WHERE task_id=? AND event_type LIKE 'workflow.%'",
+            (task_id,),
+        ).fetchone()[0])
+
+    def authorize_contextual_inquiry_review_only(
+        self, task_id: str, *, authorized_by: str, expected_updated_at: str,
+    ) -> dict[str, Any]:
+        """Record a separate human authorization for review-only processing.
+
+        This deliberately leaves the Ticket in waiting_approval and never sets
+        _approved. It is an auditable decision record, not a worker dispatch,
+        downstream approval, or identity/authentication boundary.
+        """
+        if not isinstance(authorized_by, str) or not authorized_by.strip() or len(authorized_by) > 120:
+            raise ValueError("authorized_by must be non-empty text of at most 120 characters")
+        if not isinstance(expected_updated_at, str) or not expected_updated_at.strip():
+            raise ValueError("expected_updated_at must be a non-empty task revision timestamp")
+
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = self._connection.execute(
+                "SELECT payload_json, status, updated_at FROM tasks WHERE id = ?",
+                (task_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(task_id)
+            if row["status"] != "waiting_approval":
+                raise PermissionError("review-only authorization requires a waiting_approval Ticket")
+            if row["updated_at"] != expected_updated_at:
+                raise RuntimeError("contextual inquiry Ticket revision conflict")
+            payload = json.loads(row["payload_json"])
+            envelope = payload.get("case_context_envelope")
+            if (
+                payload.get("kind") != "contextual_inquiry_review"
+                or payload.get("case_context_envelope_stored") is not True
+                or not isinstance(envelope, dict)
+                or set(envelope) != {"version", "protection", "ciphertext_b64"}
+                or type(envelope.get("version")) is not int
+                or envelope.get("version") != 1
+                or envelope.get("protection") != "windows-dpapi-current-user"
+                or not isinstance(envelope.get("ciphertext_b64"), str)
+                or not envelope["ciphertext_b64"]
+                or len(envelope["ciphertext_b64"]) > 4 * 1024 * 1024
+                or payload.get("context_status") != "encrypted_pending_handler"
+                or payload.get("case_context_attached") is not False
+                or payload.get("requires_context_reentry") is not True
+                or payload.get("long_term_storage_performed") is not False
+            ):
+                raise PermissionError(
+                    "review-only authorization requires a pending contextual-inquiry Ticket with a well-formed DPAPI envelope"
+                )
+            if "_review_authorization" in payload:
+                raise ValueError("contextual inquiry review-only authorization already exists")
+            authorized_at = self._now()
+            actor = authorized_by.strip()
+            payload["_review_authorization"] = {
+                "scope": "review_only",
+                "authorized_by": actor,
+                "authorized_at": authorized_at,
+            }
+            cursor = self._connection.execute(
+                "UPDATE tasks SET payload_json = ?, updated_at = ? "
+                "WHERE id = ? AND status = 'waiting_approval' AND updated_at = ?",
+                (json.dumps(payload, ensure_ascii=False), authorized_at, task_id, expected_updated_at),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("contextual inquiry Ticket revision conflict")
+            self._record_event(
+                task_id,
+                "contextual_inquiry.review_only_authorized",
+                actor,
+                {"scope": "review_only"},
+            )
+            event = self._connection.execute(
+                "SELECT event_id, task_id, event_type, actor, payload_json, created_at "
+                "FROM task_events WHERE task_id = ? ORDER BY rowid DESC LIMIT 1",
+                (task_id,),
+            ).fetchone()
+            self._connection.commit()
+            return {
+                "event_id": event["event_id"],
+                "task_id": event["task_id"],
+                "event_type": event["event_type"],
+                "actor": event["actor"],
+                "payload": json.loads(event["payload_json"]),
+                "created_at": event["created_at"],
+                "task": self.get(task_id),
+            }
+        except Exception:
+            self._connection.rollback()
+            raise
+
+    def claim_contextual_inquiry_review_only(
+        self, task_id: str, *, worker_id: str, lease_seconds: int = 300,
+        expected_updated_at: str,
+    ) -> dict[str, Any]:
+        """Claim exactly one separately authorized review-only Ticket.
+
+        This is a dedicated, auditable lease transition from waiting_approval
+        to running. It never sets the Ticket's _approved flag or authorizes
+        downstream knowledge persistence or action execution.
+        """
+        if not isinstance(task_id, str) or not task_id.strip() or len(task_id) > 128:
+            raise ValueError("task_id must be non-empty text of at most 128 characters")
+        if not isinstance(worker_id, str) or not worker_id.strip() or len(worker_id) > 120:
+            raise ValueError("worker_id must be non-empty text of at most 120 characters")
+        if isinstance(lease_seconds, bool) or not isinstance(lease_seconds, int) or lease_seconds <= 0:
+            raise ValueError("lease_seconds must be a positive integer")
+        if not isinstance(expected_updated_at, str) or not expected_updated_at.strip():
+            raise ValueError("expected_updated_at must be a non-empty Ticket revision timestamp")
+
+        now = datetime.now(timezone.utc)
+        timestamp = now.isoformat()
+        expires = (now + timedelta(seconds=lease_seconds)).isoformat()
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = self._connection.execute(
+                "SELECT payload_json, status, updated_at FROM tasks WHERE id = ?",
+                (task_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(task_id)
+            if row["status"] != "waiting_approval":
+                raise PermissionError("review-only claim requires a waiting_approval Ticket")
+            if row["updated_at"] != expected_updated_at:
+                raise RuntimeError("contextual inquiry Ticket revision conflict")
+
+            payload = json.loads(row["payload_json"])
+            authorization = payload.get("_review_authorization")
+            envelope = payload.get("case_context_envelope")
+            if (
+                payload.get("kind") != "contextual_inquiry_review"
+                or not isinstance(authorization, dict)
+                or set(authorization) != {"scope", "authorized_by", "authorized_at"}
+                or authorization.get("scope") != "review_only"
+                or not isinstance(authorization.get("authorized_by"), str)
+                or not authorization["authorized_by"].strip()
+                or not isinstance(authorization.get("authorized_at"), str)
+                or not authorization["authorized_at"].strip()
+                or payload.get("case_context_envelope_stored") is not True
+                or not isinstance(envelope, dict)
+                or set(envelope) != {"version", "protection", "ciphertext_b64"}
+                or type(envelope.get("version")) is not int
+                or envelope.get("version") != 1
+                or envelope.get("protection") != "windows-dpapi-current-user"
+                or not isinstance(envelope.get("ciphertext_b64"), str)
+                or not envelope["ciphertext_b64"]
+                or len(envelope["ciphertext_b64"]) > 4 * 1024 * 1024
+                or payload.get("context_status") != "encrypted_pending_handler"
+                or payload.get("case_context_attached") is not False
+                or payload.get("requires_context_reentry") is not True
+                or payload.get("long_term_storage_performed") is not False
+                or payload.get("_approved") is True
+            ):
+                raise PermissionError(
+                    "review-only claim requires a separately authorized pending Ticket with encrypted context"
+                )
+
+            authorization_event = self._connection.execute(
+                "SELECT actor, payload_json FROM task_events "
+                "WHERE task_id = ? AND event_type = 'contextual_inquiry.review_only_authorized' "
+                "ORDER BY rowid DESC LIMIT 1",
+                (task_id,),
+            ).fetchone()
+            if authorization_event is None:
+                raise PermissionError("review-only claim requires its dedicated human authorization audit record")
+            try:
+                authorization_event_payload = json.loads(authorization_event["payload_json"])
+            except (TypeError, ValueError):
+                authorization_event_payload = None
+            if (
+                authorization_event["actor"] != authorization["authorized_by"]
+                or authorization_event_payload != {"scope": "review_only"}
+            ):
+                raise PermissionError("review-only authorization audit record does not match the Ticket")
+
+            cursor = self._connection.execute(
+                "UPDATE tasks SET status='running', updated_at=?, lease_owner=?, "
+                "lease_expires_at=?, heartbeat_at=?, attempts=attempts+1 "
+                "WHERE id=? AND status='waiting_approval' AND updated_at=?",
+                (timestamp, worker_id.strip(), expires, timestamp, task_id, expected_updated_at),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("contextual inquiry Ticket revision conflict")
+            self._record_event(
+                task_id,
+                "assignment.contextual_review_only_claimed",
+                worker_id.strip(),
+                {"scope": "review_only", "lease_expires_at": expires},
+            )
+            self._connection.commit()
+            claimed = self.get(task_id)
+            assert claimed is not None
+            return claimed
+        except Exception:
+            self._connection.rollback()
+            raise
 
     def workflow_revision(self, task_id: str) -> int:
         if self.get(task_id) is None:
@@ -880,14 +1094,36 @@ class TaskQueue:
             if row is None:
                 raise ValueError("task is not waiting for approval")
             payload = json.loads(row["payload_json"])
-            if (
-                payload.get("kind") == "contextual_inquiry_review"
-                and payload.get("requires_context_reentry") is True
-                and payload.get("case_context_attached") is not True
-            ):
-                raise PermissionError(
-                    "contextual inquiry review cannot be approved until its case context is attached"
-                )
+            if payload.get("kind") == "contextual_inquiry_review":
+                if (
+                    payload.get("case_context_attached") is not True
+                    or payload.get("requires_context_reentry") is not False
+                    or payload.get("context_status") != "validated_attached"
+                ):
+                    raise PermissionError(
+                        "contextual inquiry review cannot be approved until its case context is attached and validated"
+                    )
+                attachment_event = self._connection.execute(
+                    "SELECT actor, payload_json FROM task_events "
+                    "WHERE task_id = ? AND event_type = 'contextual_inquiry.context_attached' "
+                    "ORDER BY rowid DESC LIMIT 1",
+                    (task_id,),
+                ).fetchone()
+                if attachment_event is None:
+                    raise PermissionError(
+                        "contextual inquiry review requires a trusted case-context attachment audit record"
+                    )
+                try:
+                    attachment_payload = json.loads(attachment_event["payload_json"])
+                except (TypeError, ValueError):
+                    attachment_payload = None
+                if (
+                    attachment_event["actor"] != "contextual-inquiry-review-handler"
+                    or attachment_payload != {"attachment_state": "validated"}
+                ):
+                    raise PermissionError(
+                        "contextual inquiry review requires a valid trusted case-context attachment audit record"
+                    )
             payload["_approved"] = True
             payload["_approval"] = {"approved_by": approved_by.strip(), "approved_at": self._now()}
             cursor = self._connection.execute(

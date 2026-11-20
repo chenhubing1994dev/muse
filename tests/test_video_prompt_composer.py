@@ -1,0 +1,152 @@
+from __future__ import annotations
+
+import unittest
+
+from muse.video_prompt_composer import (
+    PromptSourceRef,
+    VideoPromptScene,
+    VideoPromptSpec,
+    compile_video_prompt,
+)
+
+
+def sample_bible() -> dict:
+    return {
+        "schema_version": 1,
+        "title": "雨夜归途",
+        "logline": "一名旅人在雨夜寻找归途。",
+        "genre": "cinematic drama",
+        "target_audience": "成人观众",
+        "characters": [{
+            "id": "traveler", "name": "旅人", "description": "黑发，深色长风衣，左眉有小疤",
+            "canonical_asset_id": "asset_traveler",
+            "outfits": [{"id": "coat", "description": "深色长风衣，银色扣子"}],
+        }],
+        "locations": [{"id": "old_street", "name": "旧街", "description": "湿润石板路与暖色路灯"}],
+        "props": [{"id": "lantern", "name": "纸灯", "description": "暖黄色纸灯笼"}],
+        "style_guide": {
+            "visual_style": "写实电影摄影",
+            "palette": ["靛蓝", "琥珀"],
+            "lighting": "雨夜冷暖对比",
+            "camera_language": "克制的手持跟拍",
+            "audio_mood": "雨声与低沉弦乐",
+            "dialogue_language": "粤语",
+        },
+        "continuity": {
+            "rules": ["旅人左眉疤痕始终位于左侧", "纸灯保持暖黄色"],
+            "scene_states": [{
+                "scene_id": "opening",
+                "location_id": "old_street",
+                "character_states": [{
+                    "character_id": "traveler", "outfit_id": "coat", "state_note": "右手提纸灯",
+                }],
+                "prop_states": [{"prop_id": "lantern", "state_note": "灯光稳定，不熄灭"}],
+            }],
+        },
+    }
+
+
+class VideoPromptComposerTests(unittest.TestCase):
+    def make_spec(self) -> VideoPromptSpec:
+        return VideoPromptSpec(
+            title="雨夜归途",
+            creative_intent="以电影感镜头讲述旅人在雨夜寻找归途。",
+            aspect_ratio="9:16",
+            platform="短视频",
+            visual_style="写实电影摄影，真实雨滴与自然运动",
+            camera_language="手持跟拍，轻微呼吸式对焦",
+            lighting="冷色环境光与暖色纸灯形成对比",
+            audio_mood="雨声、脚步声与克制弦乐",
+            scenes=(
+                VideoPromptScene(
+                    scene_id="opening", action="旅人提着纸灯走过湿润石板路",
+                    duration_seconds=3, beat="建立地点与人物",
+                    narration="雨还未停，归途仍远。", music_cue="低音弦乐渐入",
+                ),
+                VideoPromptScene(
+                    scene_id="closeup", action="镜头靠近旅人的侧脸，纸灯映亮眉间",
+                    duration_seconds=2, beat="情绪转折",
+                    camera="缓慢推近，浅景深", depends_on=("opening",),
+                    sound_effects="近处雨滴落在布料上",
+                ),
+            ),
+            source_refs=(
+                PromptSourceRef(
+                    source_id="x-post-01", author="创作者甲",
+                    source_url="https://x.com/example/status/123",
+                    license="CC-BY-4.0", completeness="excerpt",
+                    category="cinematic", method_tags=("shot-beats", "continuity"),
+                    summary="按镜头节拍组织叙事并保持角色一致性",
+                    captured_at="2026-11-21",
+                ),
+            ),
+            model_family="Gemini",
+        )
+
+    def test_compiles_master_clip_timeline_and_existing_storyboard(self) -> None:
+        result = compile_video_prompt(self.make_spec(), sample_bible())
+        storyboard = result["storyboard"]
+        self.assertEqual(storyboard["aspect_ratio"], "9:16")
+        self.assertEqual([item["id"] for item in storyboard["scenes"]], ["opening", "closeup"])
+        self.assertIn("角色锁定 traveler", result["master_prompt"])
+        self.assertIn("指定服装", storyboard["scenes"][0]["prompt"])
+        self.assertIn("角色一致性锁定", storyboard["scenes"][1]["prompt"])
+        self.assertIn("道具一致性锁定", storyboard["scenes"][1]["prompt"])
+        self.assertEqual(result["clip_manifest"][1]["start_seconds"], 3.0)
+        self.assertEqual(result["clip_manifest"][1]["end_seconds"], 5.0)
+        self.assertEqual(result["continuity_validation"]["continuity_scene_count"], 1)
+
+    def test_audio_is_a_separate_cantonese_sidecar(self) -> None:
+        result = compile_video_prompt(self.make_spec(), sample_bible())
+        self.assertEqual(result["audio_plan"]["narration_language"], "粤语")
+        self.assertEqual(result["audio_plan"]["cues"][0]["narration"], "雨还未停，归途仍远。")
+        self.assertIn("不假设当前视频模型支持", result["audio_plan"]["note"])
+
+    def test_source_ledger_keeps_excerpt_provenance_without_prompt_copies(self) -> None:
+        result = compile_video_prompt(self.make_spec())
+        source = result["source_ledger"][0]
+        self.assertEqual(source["completeness"], "excerpt")
+        self.assertEqual(source["license"], "CC-BY-4.0")
+        self.assertEqual(source["source_url"], "https://x.com/example/status/123")
+        self.assertEqual(source["captured_at"], "2026-11-21")
+        self.assertNotIn("prompt_text", source)
+        self.assertNotIn("raw_prompt", source)
+
+    def test_unknown_model_capabilities_are_not_guessed(self) -> None:
+        result = compile_video_prompt(self.make_spec())
+        self.assertEqual(result["model_guidance"]["family"], "google")
+        self.assertEqual(result["model_guidance"]["provider_parameters_applied"], [])
+
+    def test_rejects_invalid_source_url_and_incomplete_label(self) -> None:
+        with self.assertRaises(ValueError):
+            PromptSourceRef("s1", "author", "http://example.com", "CC-BY-4.0", "full", "cinematic")
+        with self.assertRaises(ValueError):
+            PromptSourceRef("s1", "author", "https://example.com/p", "CC-BY-4.0", "partial", "cinematic")
+
+    def test_rejects_overlong_compiled_clip_prompt(self) -> None:
+        spec = VideoPromptSpec(
+            title="长提示测试", creative_intent="目" * 1200,
+            scenes=(VideoPromptScene(scene_id="one", action="动作" * 500, duration_seconds=1),),
+        )
+        with self.assertRaisesRegex(ValueError, "exceeds 2000"):
+            compile_video_prompt(spec)
+
+    def test_rejects_unknown_story_bible_references(self) -> None:
+        bible = sample_bible()
+        bible["continuity"]["scene_states"][0]["location_id"] = "missing"
+        with self.assertRaisesRegex(ValueError, "unknown location"):
+            compile_video_prompt(self.make_spec(), bible)
+
+    def test_rejects_unknown_scene_dependencies(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unknown dependencies"):
+            VideoPromptSpec(
+                title="依赖测试", creative_intent="测试",
+                scenes=(VideoPromptScene(
+                    scene_id="one", action="动作", duration_seconds=1,
+                    depends_on=("missing",),
+                ),),
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()

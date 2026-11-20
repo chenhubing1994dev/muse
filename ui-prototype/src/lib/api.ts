@@ -544,7 +544,8 @@ export interface VideoJobRecord {
   error?: string; product?: { initiative_id: string; version_id: string; title?: string; kind: string };
 }
 export interface VideoAttemptMetrics {
-  total: number; succeeded: number; failed: number; pending: number; terminal: number;
+  total: number; succeeded: number; failed: number;
+  queued: number; running: number; leased: number; pending: number; terminal: number;
   success_rate: number | null; success_rate_numerator: number; success_rate_denominator: number;
   scope: string;
 }
@@ -559,7 +560,7 @@ export interface VideoRecipeTrace {
   candidate: { candidate_id: string | null; recipe_sha256: string | null; creator_brief_sha256: string | null; brief_fingerprint_matches_attempt: boolean; mapping_status: string | null };
   approval: { ticket_id: string | null; status: string; human_decision_verified: boolean; decision_actor: string | null; brief_matches_creator_brief?: boolean; attempt_matches_ticket?: boolean };
   product: { status: string; product_id?: string; version_id?: string; manifest_sha256?: string; manifest_matches_attempt?: boolean; recipe_matches_attempt?: boolean; mp4_sha256?: string; package_sha256?: string; quality_gate?: Record<string, unknown> };
-  release_review: { status: string; can_publish: false; editorial_and_fact_review?: string; visual_and_model_rights_review?: string; privacy_and_person_release_review?: string; account_authorization?: string; official_publish_api?: string };
+  release_review: { status: string; can_publish: false; editorial_and_fact_review?: string; visual_and_model_rights_review?: string; privacy_and_person_release_review?: string; account_authorization?: string; official_publish_api?: string; quality_report_matches_package?: boolean; quality_report_sha256?: string | null; overall_status?: string; blocking_items?: string[]; checks?: Record<string, { status: string; evidence?: string; [key: string]: unknown }> };
   chain_consistent: boolean; execution: string; publishing: "not_performed";
 }
 export interface VideoEngineStatus {
@@ -821,8 +822,7 @@ export interface ApiClient {
   previewProduct(initiativeId: string, versionId: string): Promise<Blob>;
   downloadVideo(initiativeId: string, versionId: string): Promise<Blob>;
   subtitleReview(initiativeId: string, versionId: string): Promise<{ api_version: number; review: SubtitleReviewDocument }>;
-  approveSubtitleReview(initiativeId: string, versionId: string, payload: { reviewed_segment_indexes: number[]; corrections: Array<{ segment_index: number; corrected_text: string }>; reviewer: string; confirmation: string }): Promise<{ api_version: number; product: { initiative_id: string; version_id: string; validated: boolean; status: string; quality_gate?: ProductQualityGate } }>;
-  createVideoProduct(payload: { mode?: "local_assets" | "prompt_to_video"; source?: string; title: string; prompt?: string; negative_prompt?: string; duration_seconds?: number; steps?: number; seed?: number; creator_initiative_id?: string; evolution_cycle_id?: string; audio?: string; audio_mode?: "music" | "narration"; aspect_ratio?: "16:9" | "9:16" | "1:1"; fps?: number; image_seconds?: number; encoder?: "auto" | "amf" | "software"; motion_profile?: "none" | "brand_intro_outro" | "brand_scene_transitions" }): Promise<{ api_version: number; job: { id: string; status: string } }>;  videoJob(id: string): Promise<{ api_version: number; job: VideoJobRecord }>;
+  approveSubtitleReview(initiativeId: string, versionId: string, payload: { reviewed_segment_indexes: number[]; corrections: Array<{ segment_index: number; corrected_text: string }>; reviewer: string; reviewer_id: string; reviewer_role: string; rationale: string; evidence_refs: string[]; confirmation: string }): Promise<{ api_version: number; product: { initiative_id: string; version_id: string; validated: boolean; status: string; quality_gate?: ProductQualityGate } }>;  createVideoProduct(payload: { mode?: "local_assets" | "prompt_to_video"; source?: string; title: string; prompt?: string; negative_prompt?: string; duration_seconds?: number; steps?: number; seed?: number; creator_initiative_id?: string; evolution_cycle_id?: string; audio?: string; audio_mode?: "music" | "narration"; aspect_ratio?: "16:9" | "9:16" | "1:1"; fps?: number; image_seconds?: number; encoder?: "auto" | "amf" | "software"; motion_profile?: "none" | "brand_intro_outro" | "brand_scene_transitions" }): Promise<{ api_version: number; job: { id: string; status: string } }>;  videoJob(id: string): Promise<{ api_version: number; job: VideoJobRecord }>;
   submitInspiration(value: { content: string; allow_external_research: boolean; title?: string; tags?: string[]; research_domains?: string[]; source?: "chatgpt_daily_inspiration" | "muse_local_dashboard" | "user_manual" }): Promise<{ api_version: number; inspiration: InspirationRecord }>;
   evolveInspiration(payload?: { inspiration_id?: string; enqueue_video?: boolean; aspect_ratios?: Array<"9:16" | "16:9"> }): Promise<{ api_version: number; evolution: InspirationEvolutionResult }>; 
   downloadArtifact(name: string): Promise<Blob>;

@@ -2990,6 +2990,12 @@ class AutonomousResearchEngine:
                 # not just a report. This proposal is the hand-off to prototype work.
                 from muse.initiative_engine import InitiativeStore
                 with InitiativeStore(self.workspace / "data/initiatives/muse.sqlite3") as initiatives:
+                    from muse.value_forge import ValueForge
+                    value_forge = ValueForge()
+                    value_forge_result = value_forge.evaluate_research_report(
+                        report, report_path=report_path or f"research:{topic['key']}:{fetched_at}",
+                    )
+                    report["value_forge"] = value_forge_result
                     synthesis = report.get("synthesis") or {}
                     executive_summary = str(synthesis.get("executive_summary", ""))[:1200]
                     creator_brief = {
@@ -2999,6 +3005,12 @@ class AutonomousResearchEngine:
                         "research_report_path": report_path or "",
                         "evidence_status": report.get("claim_review_status", "unknown"),
                         "evidence_coverage_score": evidence_coverage_score,
+                        "value_opportunities_epistemic_status": value_forge_result["epistemic_status"],
+                        "value_opportunities": [
+                            {"pattern_id": item["pattern_id"], "score": item["evaluation"]["score"],
+                             "band": item["evaluation"]["band"]}
+                            for item in value_forge_result["candidates"][:3]
+                        ],
                         "deliverables": ["video", "offline_product"],
                         "video": {
                             "mode": "prompt_to_video", "status": "queued_for_resource_scheduler",

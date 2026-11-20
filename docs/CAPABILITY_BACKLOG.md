@@ -506,4 +506,26 @@
 - 安全边界：outbox 只允许 confidence>=0.75 的 Agent Track skill/case/foresight，凭据样式内容拒绝；Commander Ticket 绑定单条内容哈希和 revision，不能跨投影复用；User Track 仍禁止写入；不开放 mine/delete/sync-apply/hooks/远程管理。
 - 回归：lifecycle 9/9、adapter 16/16、projection 12/12、ack contract 7/7，共 44 项 MemPalace 核心专项测试通过；UnifiedRuntime 46/46 另有专项覆盖。B189 Status API 3/3、UI Node tests 46/46、Svelte check 0/0、Vite build 134 modules 通过。最新全仓 Python 回归 1,558 tests OK、9 skipped；随后全仓 compileall 通过，详见 docs/PROGRESS_B189_MEMPALACE_DASHBOARD_STATUS.md。
 - 最新全仓 Python 3.11 unittest：1,558 tests OK、9 skipped；并行写入期间 compileall 曾捕获瞬时语法状态，写入落盘后全仓 compileall 复跑通过。MemPalace 核心定向回归 90/90 的既有记录与 B189 UI/API 验证分开记录。
-- 下一步 MP-M5：增加限频、显式启用的只读 MCP health probe 和可审计索引 freshness 信号；随后实现显式 pause/resume 状态机与可追溯错误报告。任何后台同步、服务自启动和生产 User Track 写入仍需独立审批。DirectML provider 尚未启用，当前明确 CPU 推理。
+- 下一步 MP-M5：增加限频、显式启用的只读 MCP health probe 和可审计索引 freshness 信号；随后实现显式 pause/resume 状态机与可追溯错误报告。任何后台同步、服务自启动和生产 User Track 写入仍需独立审批。
+- DirectML provider 尚未启用，当前明确 CPU 推理。
+
+### B225 视频发布质量证据汇总
+- 发布准备包新增 `release-quality-report.json`，统一记录技术 QA、视觉异常、字幕人工审批、事实/编辑、版权/模型权利、隐私/肖像、音乐权利、AI 披露、商业关系、平台规格与账号授权。
+- 字幕批准必须与当前 MP4 / SRT 哈希绑定；任何版本变更使旧批准失效。其他人审缺少签署证据时一律保持 pending/blocked；技术 QA 通过不等于 release approval，`can_publish=false` 不变。
+- 定向测试 6/6；Python 全量 1,746 tests，1 skipped，0 failures；compileall 通过。UI 51/51、Svelte 0 errors / 0 warnings、Vite 140 modules 通过。真实桌面窗口与平台发布仍未验收。
+
+### B229 发布审核记录范围绑定
+- 所有 release human review 必须绑定 reviewer ID/role、时区时间、产品 initiative/version、当前视频与目标产物哈希、证据引用、理由和记录摘要；摘要不是数字签名或身份认证。
+- 字幕旧版 `approved` 文档不再直接解除发布阻塞；必须另有 `human_reviews.subtitle_review`，并绑定 SRT、字幕审核文档和当前 MP4 的精确哈希。证据引用的真实性/可解析性仍待接入证据注册表。
+- 专项测试 7/7；Python 全量 1,749 tests，1 skipped，0 failures / 0 errors；compileall 成功。UI 51/51、Svelte 0 errors / 0 warnings、Vite build 140 modules。`can_publish=false`，没有发布 API 调用。
+
+### B230 产物哈希格式校验
+- 审核记录所有目标产物哈希必须为完整小写 SHA-256；缺失或非法值 fail closed，不能通过空字符串占位。
+- `test_video_publish_package.py` 7/7 通过；B230 补丁后的 Python 3.11 全量回归 **1,749 tests，OK，1 skipped，0 failures / 0 errors**，compileall 成功。
+
+### B234 结构化字幕审核接入发布审核链
+- 审批 API/工作台要求审核者 ID、角色、审批理由、实际证据引用与明确口令；完整审核 cue 才能批准。
+- 本地自报身份显式标记 `self_asserted_local_identity`，不冒充认证。新版本 Manifest 的 `human_reviews.subtitle_review` 绑定当前 MP4、SRT、审核文档哈希及产品版本，并由发布质量报告校验摘要和范围。
+- 工作台增加结构化字段，证据引用默认空白；字幕审批只生成不可覆盖的新版本，不改变发布权限。
+- 本地字幕审校 CLI 同步要求 reviewer ID/role、理由与重复 `--evidence-ref` 参数，避免绕过 API/工作台的结构化审核要求；CLI help 已验证。
+- Python 定向回归 98/98；Node UI tests 51/51；Svelte check 0 errors / 0 warnings；Vite build 141 modules。证据注册表真实性验证和真实桌面视觉验收仍待完成。

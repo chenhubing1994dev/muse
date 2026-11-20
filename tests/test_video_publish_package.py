@@ -129,8 +129,37 @@ class VideoPublishPackageTests(unittest.TestCase):
         self.assertFalse(manifest["can_publish"])
         self.assertEqual(set(manifest["platforms"]), {"youtube_shorts", "tiktok", "instagram_reels", "bilibili"})
 
-    def test_release_quality_report_verifies_subtitle_approval_against_exact_video_and_srt(self):
-        from muse.video_publish_package import _release_quality_report
+    def test_release_review_record_is_bound_to_reviewer_scope_and_exact_artifact_hashes(self):
+        from muse.video_publish_package import _json_bytes, _review_record_status
+
+        video_hash = hashlib.sha256(b"video-v1").hexdigest()
+        subtitle_hash = hashlib.sha256(b"subtitle-v1").hexdigest()
+        record = {
+            "schema_version": 1, "category": "editorial_and_fact",
+            "decision": "approved", "reviewer": {"id": "editor-1", "role": "editor"},
+            "reviewed_at": "2026-11-20T12:00:00+00:00",
+            "subject": {"initiative_id": "initiative-1", "version_id": "version-1",
+                        "video_sha256": video_hash, "artifact_sha256": {"subtitles.srt": subtitle_hash}},
+            "evidence_refs": ["source-notes.json#citations"],
+            "rationale": "Claims and captions checked against cited source material.",
+        }
+        record["review_sha256"] = hashlib.sha256(_json_bytes(record)).hexdigest()
+        args = {"category": "editorial_and_fact", "initiative_id": "initiative-1",
+                "version_id": "version-1", "video_sha256": video_hash,
+                "required_artifacts": {"subtitles.srt": subtitle_hash}}
+        self.assertEqual(_review_record_status(record, **args), "verified_human_review_digest_scope_bound")
+        self.assertEqual(_review_record_status(None, **args), "not_recorded")
+        changed = dict(record, rationale="changed after approval")
+        self.assertEqual(_review_record_status(changed, **args), "evidence_mismatch_or_incomplete")
+        self.assertEqual(_review_record_status(record, **{**args, "version_id": "version-2"}),
+                         "evidence_mismatch_or_incomplete")
+        self.assertEqual(_review_record_status(record, **{**args, "required_artifacts": {"subtitles.srt": "0" * 64}}),
+                         "evidence_mismatch_or_incomplete")
+        self.assertEqual(_review_record_status(record, **{**args, "required_artifacts": {"subtitles.srt": ""}}),
+                         "evidence_mismatch_or_incomplete")
+
+    def test_release_quality_report_requires_scope_bound_subtitle_human_review_record(self):
+        from muse.video_publish_package import _json_bytes, _release_quality_report
 
         video = self.source_dir / "reviewed.mp4"
         subtitles = self.source_dir / "reviewed.srt"
@@ -138,24 +167,64 @@ class VideoPublishPackageTests(unittest.TestCase):
         subtitles.write_bytes(b"subtitle-v1")
         video_hash = hashlib.sha256(video.read_bytes()).hexdigest()
         subtitle_hash = hashlib.sha256(subtitles.read_bytes()).hexdigest()
-        review = {
+        review_artifact_hash = hashlib.sha256(b"subtitle-review-document").hexdigest()
+        legacy_review = {
             "schema_version": 1, "status": "approved", "human_approved": True,
             "approved_by": "human-editor", "approval_timestamp": "2026-11-20T12:00:00Z",
-            "review_sha256": "a" * 64, "approved_srt_sha256": subtitle_hash,
+            "review_sha256": review_artifact_hash, "approved_srt_sha256": subtitle_hash,
             "video_sha256": video_hash,
         }
+        product_manifest = {
+            "subtitle_review": legacy_review,
+            "files": {"subtitle-review.json": review_artifact_hash},
+        }
         report = _release_quality_report(
-            product_manifest={"subtitle_review": review}, qa_warnings=[],
-            subtitles=subtitles, video=video,
+            product_manifest=product_manifest, qa_warnings=[],
+            subtitles=subtitles, video=video, initiative_id="initiative-1", version_id="version-1",
         )
-        self.assertEqual(report["checks"]["subtitle_review"]["status"], "verified_human_approval")
-        self.assertFalse(report["can_publish"])
+        self.assertEqual(report["checks"]["subtitle_review"]["status"], "not_recorded")
+
+        record = {
+            "schema_version": 1, "category": "subtitle_review", "decision": "approved",
+            "reviewer": {"id": "editor-1", "role": "subtitle_editor"},
+            "reviewed_at": "2026-11-20T12:00:00+00:00",
+            "subject": {
+                "initiative_id": "initiative-1", "version_id": "version-1",
+                "video_sha256": video_hash,
+                "artifact_sha256": {
+                    "subtitles.srt": subtitle_hash,
+                    "subtitle-review.json": review_artifact_hash,
+                },
+            },
+            "evidence_refs": ["subtitle-review.json#segments"],
+            "rationale": "Every cue was checked against the source narration.",
+        }
+        record["review_sha256"] = hashlib.sha256(_json_bytes(record)).hexdigest()
+        product_manifest["human_reviews"] = {"subtitle_review": record}
+        approved = _release_quality_report(
+            product_manifest=product_manifest, qa_warnings=[],
+            subtitles=subtitles, video=video, initiative_id="initiative-1", version_id="version-1",
+        )
+        self.assertEqual(
+            approved["checks"]["subtitle_review"]["status"],
+            "verified_human_review_digest_scope_bound",
+        )
+        self.assertFalse(approved["can_publish"])
+
+        changed_record = {**record, "review_sha256": "b" * 64}
+        tampered = _release_quality_report(
+            product_manifest={**product_manifest, "human_reviews": {"subtitle_review": changed_record}},
+            qa_warnings=[], subtitles=subtitles, video=video,
+            initiative_id="initiative-1", version_id="version-1",
+        )
+        self.assertEqual(tampered["checks"]["subtitle_review"]["status"], "evidence_mismatch_or_incomplete")
         video.write_bytes(b"video-v2")
         changed = _release_quality_report(
-            product_manifest={"subtitle_review": review}, qa_warnings=[],
-            subtitles=subtitles, video=video,
+            product_manifest=product_manifest, qa_warnings=[],
+            subtitles=subtitles, video=video, initiative_id="initiative-1", version_id="version-1",
         )
         self.assertEqual(changed["checks"]["subtitle_review"]["status"], "evidence_mismatch_or_incomplete")
+
 
     def test_blocks_publish_pack_when_technical_qa_did_not_pass(self):
         self._create_generation("failed")

@@ -44,6 +44,48 @@ class WorkerTests(unittest.TestCase):
             with TaskQueue(database) as queue:
                 self.assertEqual(queue.get(task["id"])["status"], "succeeded")
 
+    def test_worker_passes_live_lease_context_only_to_opted_in_handler(self) -> None:
+        from muse.worker import WorkerExecutionContext
+
+        class LeaseAwareHandler:
+            accepts_execution_context = True
+
+            def __init__(self):
+                self.context = None
+
+            def execute_task(self, payload, *, task_id, execution_context):
+                self.context = execution_context
+                self.asserted = execution_context.assert_current_lease()
+                return {"task_id": task_id, "lease_checked": True}
+
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "tasks.sqlite3"
+            handler = LeaseAwareHandler()
+            with TaskQueue(database) as queue:
+                queue.enqueue("lease-aware", {"kind": "lease-aware"})
+            result = run_once(database, {"lease-aware": handler})
+            self.assertEqual(result["status"], "succeeded")
+            self.assertIsInstance(handler.context, WorkerExecutionContext)
+            self.assertEqual(handler.context.task_id, result["id"])
+            self.assertTrue(handler.asserted is None)
+            with self.assertRaises(PermissionError):
+                handler.context.assert_current_lease()
+
+    def test_worker_does_not_pass_execution_context_to_legacy_handler(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "tasks.sqlite3"
+            observed = []
+
+            def legacy_handler(payload):
+                observed.append(payload)
+                return {"legacy": True}
+
+            with TaskQueue(database) as queue:
+                queue.enqueue("legacy", {"kind": "legacy"})
+            result = run_once(database, {"legacy": legacy_handler})
+            self.assertEqual(result["status"], "succeeded")
+            self.assertEqual(observed, [{"kind": "legacy"}])
+
     def test_review_followup_ticket_hands_off_to_research_without_executing_code(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "tasks.sqlite3"

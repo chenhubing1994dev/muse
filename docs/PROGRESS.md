@@ -2633,16 +2633,247 @@ eady_to_publish=false。
 
 - 修复 B223 遗留的关联键错误：`build_products()` 的 `product.id` 是 `initiative_id + '-' + version_id` 组合标识，而 Attempt 的 `product_id` 存的是纯 `initiative_id`；旧 UI 把两者直接比较，导致正常产品版本无法命中追溯入口。
 - 新增 `ui-prototype/src/lib/video-trace.js` 的 `resolveProductAttempt()`：只用 `attempt.product_id === product.initiative_id` 与 `attempt.version_id === product.version_id` 双重精确匹配；恰好一条才可追溯，零条显示“未找到唯一任务”，多条显示“关联歧义并停止”，绝不 `.find()` 取第一条。
-- `/api/v1/video-attempts` 从最新 50 条扩至账本支持的 200 条（产品库最多 100 个版本），降低较早产品被任务列表截断而无法关联的情况；不增加新接口或数据库。
+- `/api/v1/video-attempts` 从最新 50 条扩至账本支持的 200 条，并返回 `attempts_truncated`（总账本记录超过 200 时为 true）；UI 对未命中且列表被截断的产品显示“更早记录尚未核验”，不把读取窗口外的缺失当成无关联；不增加新接口或数据库。
 - 新增 4 个纯函数单测：复合产品 ID 与 initiative_id 正确区分、版本必须精确、缺失时不猜测、重复匹配时拒绝；UI tests **51/51 passed**。
-- 后端 `tests/test_status_api.py` **37/37 passed**，其中视频任务端点新增 56 条 Attempt 样本，验证 200 上限读取可覆盖超过原 50 条的记录；Windows `scripts/validate_ui.py` 验收：Svelte check **0 errors / 0 warnings**，Vite production build 成功（140 modules）。
+- 首轮后端 `tests/test_status_api.py` **37/37 passed**；首轮 UI `npm test` **51/51 passed**、Svelte check **0 errors / 0 warnings**、Vite build 成功（140 modules）。后续又将后端样本扩至 206 条并新增 `attempts_truncated` 标志与 UI 历史窗口提示；最终复验结果见下方补记。
 - 验证通过 `muse-dev run` → detached psmux：后端测试 Job `77bdb00323a14233a5e9381da8e5ea07`，UI 验收 Job `a3ce3d817f9545209e1e8794a07a2e47`；最后 `muse-dev inspect` 显示无活动 Job。
 - 本次未启动 GPU/ComfyUI、外部 Provider 或发布流程；追溯保持只读，`can_publish=false`，Commander 与 TaskQueue 架构不变。
+- 最终复验补记：等待原有 psmux Job 自然结束后，`tests/test_status_api.py` **37/37 passed**；`scripts/validate_ui.py`：Svelte check **0 errors / 0 warnings**、UI tests **51/51 passed**、Vite build 成功（140 modules）。没有终止或覆盖原 Job。
 
+## 2026-11-20｜B225 发布质量证据报告与字幕审核绑定
 
+- `video_publish_package.py` 新增 `release-quality-report.json`：独立列出技术 QA、视觉异常人工复核、字幕审批、事实/编辑、视觉与模型权利、隐私/肖像授权、音乐/音频权利、AI 披露、商业关系披露、平台规格与账号授权状态。
+- 技术 QA 通过只表示技术检查通过；报告 `technical_qa_is_not_release_approval=true`、`can_publish=false`，任何未完成的人审/授权都保留为 `blocking_items`，不自动发布。
+- 字幕审核只在产品 Manifest 的人工批准记录与当前 MP4 / SRT SHA-256 精确匹配时标记 `verified_human_approval`；文件被替换或证据不完整即降级为 `evidence_mismatch_or_incomplete`。产品包 manifest 与 ZIP 均包含质量报告及文件哈希。
+- `tests/test_video_publish_package.py` **7/7 passed**；覆盖报告封装、缺失字幕审核阻塞、MP4 哈希变化与审核摘要哈希不匹配。
 
+- Python 3.11 全项目回归：**1,746 tests，OK，1 skipped，0 failures / 0 errors**；`compileall` 通过。UI 回归同时确认 51/51、Svelte 0 errors / 0 warnings、Vite build 140 modules。
+- 未启动 GPU、外部 Provider、平台账号或发布 API；没有真实平台发布验收。真实桌面窗口的视觉/交互验收仍待完成。
 
+## 2026-11-21｜B226 修正视频 Attempt 指标窗口偏差并完成回归
 
+- 修复 `/api/v1/video-attempts` 的统计口径：`running / queued / leased / pending` 不再从最近 200 条样本推算，改为 SQLite 对完整持久化账本聚合，避免较早但仍运行中的任务被窗口截断后显示为 0。
+- `list_video_attempts(prioritize_active=True)` 在追溯列表中优先保留 running、queued，再按时间排序历史记录；仍保留 200 条上限与 `attempts_truncated`，不会把截断外的记录误报为不存在。TypeScript metrics 类型同步加入 queued/running/leased。
+- 修复后 `tests/test_status_api.py` **37/37 passed**；其中 205 条历史任务加 1 条较早运行任务的回归用例确认 running/leased 指标正确，运行任务仍出现在 200 条追溯窗口内。
+- `scripts/validate_ui.py` 全部通过：Svelte check **0 errors / 0 warnings**、UI tests **51/51 passed**、Vite build **140 modules**。
+- `scripts/validate_python_suite.py` 全项目 Python 3.11 回归 **1,746 tests，OK，1 skipped，0 failures / 0 errors**；`compileall` 输出 `MUSE_PYTHON_COMPILEALL_OK`。
+- 所有命令均通过 `muse-dev run` 的 detached psmux `muse-dev` 会话执行；最终 `muse-dev inspect` 为 `active_job_id=null`。未杀进程、删锁或绕过会话。
+- 当前桌面观察未发现 Muse 桌面窗口；`Muse-Start.ps1` 含启动后台运行时、计划任务、LAN 防火墙与浏览器的副作用，本轮不执行。真实桌面视觉/交互验收仍待完成；尝试通过现有受控流程启动 Tauri 重建时被平台安全检查拦截，未执行，也未改用其他通道。三个 `_tmp_*` 审计/采集脚本仍在，尚未清理；研究数据库只读审计脚本调用也被安全检查拦截，未读取或修改数据库。代码审查确认 `record_claim_evidence` 以唯一键和 `INSERT OR IGNORE` 防止重复候选记录，但尚未据此推断数据库现状。
+- 未启动 GPU/ComfyUI、外部 Provider、平台账号或发布流程；`can_publish=false`，Commander / TaskQueue 不变。
 
+## 2026-11-21｜B227 字幕审核摘要必须绑定真实产品文件哈希
 
+- 加固 `video_publish_package.py`：`verified_human_approval` 不再只检查 `review_sha256` 是 64 字符；必须与已经由 `VideoProductBuilder.verify_path()` 校验过的产品 Manifest `files["subtitle-review.json"]` 精确一致，并继续匹配当前 MP4 / SRT 哈希。
+- 回归用例新增审核摘要哈希被替换的反例；伪造/不一致的 review digest 降级为 `evidence_mismatch_or_incomplete`，不能被报告标记为人工批准。
+- `tests/test_video_publish_package.py` **7/7 passed**。全项目 Python 3.11 回归 **1,747 tests，OK，1 skipped，0 failures / 0 errors**，`compileall` 输出 `MUSE_PYTHON_COMPILEALL_OK`；detached psmux Job 最终自然结束，exit code 0，`muse-dev inspect` 为 `active_job_id=null`。未杀进程或绕过会话。
+- 未启动 GPU、外部 Provider、平台账号或发布 API；`can_publish=false`，真实桌面视觉/交互验收仍待完成。
+## 2026-11-21｜B228 psmux 未知任务保持冻结
+
+- 初次只读观察时，`muse-dev inspect/list` 曾将 `8a39822ce599474aa87f258921f0c93e` 标记为 `outcome_unknown`；因此当时暂停了后续占用 `muse-dev` 的命令，没有 recover、重派或终止。
+- 后续再次只读核验：`muse-dev list --limit 3` 显示同一 Job 自然完成、`exit_code=0`、`status=completed`；随后 `muse-dev inspect` 确认 `active_job_id=null`。该未知状态已自然解除，未杀进程、删锁或切换会话。
+- B227 全项目回归结果据此确认：1,747 tests OK、1 skipped，compileall 成功；当前 `muse-dev` 执行槽空闲。 
+
+## 2026-11-21｜B229 发布审核记录统一绑定与旧字幕审批降级
+
+- 将字幕审核也纳入通用 `human_reviews` 校验：旧版字幕审核文档即使含 `approved`、审核人、时间和文件摘要，也不再单独视为发布批准；必须另有 `human_reviews.subtitle_review` 记录。
+- 记录需绑定审核人 ID/角色、带时区审核时间、initiative/version、当前 MP4 SHA-256、当前 SRT SHA-256、字幕审核文档 SHA-256、证据引用、审核理由及 canonical SHA-256 摘要。变更记录、换视频/字幕/审核文档或跨版本复用都会被拒绝。
+- 记录摘要仅是完整性/篡改检测，不是数字签名，也不认证审核人真实身份；证据引用仍需后续接入可验证的证据注册表。`can_publish=false` 不变。
+- `tests/test_video_publish_package.py` **7/7 passed**；全项目 Python 3.11 最终回归 **1,749 tests，OK，1 skipped，0 failures / 0 errors**，`MUSE_PYTHON_COMPILEALL_OK`。UI 验证 51/51、Svelte 0 errors / 0 warnings、Vite build 140 modules；真实桌面窗口与平台发布仍未验收。
+## 2026-11-21｜B229 配方追溯接入发布质量证据摘要
+
+- `src/muse/video_recipe_trace.py` 在既有只读 Attempt→产品追溯中读取精确版本目录 `publish-package-v1/release-quality-report.json`；要求发布包 Manifest 的 product/version、源 MP4 SHA-256、产品 ZIP SHA-256 与当前已验证产品一致。
+- 报告字节 SHA-256 必须匹配发布包 Manifest `files["release-quality-report.json"]`，报告规范化内容还必须与 Manifest 内嵌报告一致；缺失、路径符号链接、哈希或关联不匹配均 fail closed，不展示未经验证的审核结论。
+- Trace 新增 `quality_report_matches_package`、`quality_report_sha256`、`overall_status`、`blocking_items` 和逐项 `checks` 摘要；`can_publish` 始终为 false，不触发发布。
+- `tests/test_video_recipe_trace.py` 专项 **6/6 passed**（Python 3.11，detached psmux Job `c2ab4268a8d84fddbdaee7c9054384aa`，exit code 0）；随后全项目回归 **1,749 tests，OK，1 skipped**，compileall 成功。UI 51/51、Svelte 0 errors / 0 warnings、Vite build 140 modules；UI 尚未接入新字段，桌面视觉验收仍待完成。
+- 未启动 Muse 服务、ComfyUI/GPU、外部 Provider、平台账号或发布 API；未改 Commander / TaskQueue。
+
+## 2026-11-21｜B230 审核产物哈希格式 fail-closed
+
+- `_review_record_status` 现在要求每个目标产物都有非空名称与完整小写 64 位 SHA-256；空值、截断值、非十六进制值一律拒绝，避免缺失的 `subtitle-review.json` 被空字符串占位后误通过。
+- `tests/test_video_publish_package.py` **7/7 passed**（psmux Job `c8896e9999924fdc9a3304286b999c15`，exit code 0）。
+- B230 补丁后的 Python 3.11 全量回归已通过：**1,749 tests，OK，1 skipped，0 failures / 0 errors**，`MUSE_PYTHON_COMPILEALL_OK`（detached psmux Job `19ecc5ec9bca453f9dd0047508433fca`，exit code 0）。先前误用 Python 3.14 的尝试因环境缺少 `tzdata` 产生错误，不作为项目验收；最终验收使用项目基线 Python 3.11。
+
+## 2026-11-21｜B231 Tauri 离线验证与 Release 重建
+
+- 新增 `scripts/validate_desktop_rust.py`，通过现有 psmux `muse-dev` 会话依次执行 Rust 格式检查、离线单元测试和离线 Release 构建；不安装依赖、不访问网络。
+- `cargo fmt -- --check` 通过；`cargo test --offline` **3/3 passed**（重启退避、loopback/token bootstrap、认证 API 健康探测）；`cargo build --release --offline --features custom-protocol` 成功。
+- Release EXE：`desktop/src-tauri/target/release/muse-desktop.exe`，**9,008,640 bytes**，SHA-256 `3A02EB34E99E0F1B44A5D648A14C6E9B4BA98CB86006EEC7580DBB803E7F5655`。
+- 修正 `desktop/src-tauri/src/main.rs` 两处 rustfmt 差异；已读回核对。尝试通过受控 psmux 流程运行 `scripts/Muse-Desktop.ps1` 启动真实窗口时，被平台安全检查拦截，未执行；未改走其他启动通道，也未创建/覆盖快捷方式。当前仍不能宣称桌面窗口实机验收完成。
+- 未启动 ComfyUI/GPU、外部 Provider、平台账号或发布 API；`can_publish=false`，Commander / TaskQueue 不变。
+
+## 2026-11-21｜B232 发布质量报告接入视频追溯 UI
+
+- 扩展 `VideoRecipeTrace.release_review` TypeScript 类型，接入报告与发布包哈希匹配状态、报告摘要 SHA-256、总体结论、阻断项及逐项 checks。
+- 新增 `VideoReleaseReview.svelte`，在最近 Attempt 追溯与产品卡片追溯中复用；展示报告完整性、质量结论、摘要哈希、阻断项和逐项审核状态。只有 `quality_report_matches_package=true` 时才展开阻断项与细项；始终明确 `can_publish=false`，不提供发布按钮。
+- 已完成 API 类型、组件和两个 UI 挂载点的读回核对。修改后尝试通过 psmux 执行 `scripts/validate_ui.py`，但平台安全检查在命令执行前拦截；本轮 UI 新改动尚未完成 Svelte/npm 测试与构建，不宣称通过。
+- 桌面 Release EXE 已重建但尚未启动；Tauri 窗口实机观察仍待安全允许的受控启动流程。
+
+## 2026-11-21｜B233 视频审核链路与全项目回归复验
+
+- 修复视频配方追溯及字幕人工审核路径中被拼接的 Python 语句/函数文档字符串；恢复 `status_api.py`、`subtitle_review.py`、`video_product_builder.py` 与相关测试文件的有效语法结构。`task_queue.py` 的 `workflow_revision` 定义经复核保留为单一完整方法。
+- `python -m compileall -q src tests scripts` **通过**，输出 `MUSE_PYTHON_COMPILEALL_OK`。
+- 字幕审核、视频配方追溯、发布包、Status API、视频产品构建专项合计 **111 tests OK**；随后 Python 3.11 全量回归 **1,752 tests，OK，1 skipped，0 failures / 0 errors**。
+- UI 通过现有 psmux `muse-dev` 会话复验：Svelte **0 errors / 0 warnings**，Node 测试 **51/51 passed**，Vite production build **141 modules**。
+- 本轮未启动真实桌面窗口、ComfyUI/GPU、外部 Provider、平台账号或发布 API；桌面视觉验收仍待完成，`can_publish=false`。
+
+## 2026-11-21｜B234 结构化字幕审核接入发布审核链
+
+- 字幕审批 API 现在要求审核显示名、审核者 ID、角色、审批理由、实际证据引用和明确批准口令；必须逐条听审全部 cue 才能提交。
+- 审核者 ID/角色标记为 `self_asserted_local_identity`，仅记录本地自报身份，不声称账号认证或数字签名。证据引用默认留空，由审核者填写实际核对材料。
+- 新版本 Manifest 写入 `human_reviews.subtitle_review`，绑定新版本 initiative/version、MP4 SHA-256、SRT SHA-256、subtitle-review.json SHA-256，并生成 canonical SHA-256 记录；测试实际验证状态为 `verified_human_review_digest_scope_bound`。旧版本不覆盖。
+- Svelte 字幕工作台新增审核者 ID、角色、理由与证据引用字段；Python 3.11 定向回归 **98 tests OK**，Node UI tests **51/51**，Svelte **0 errors / 0 warnings**，Vite production build **141 modules**。
+- 同步更新 `scripts/muse-review-subtitles.py` CLI：显式批准也必须提供 `--reviewer-id`、`--reviewer-role`、`--rationale` 和至少一个 `--evidence-ref`；`PYTHONPATH=src py -3.11 scripts/muse-review-subtitles.py --help` 已验证参数入口。
+- 发布权限仍关闭：作品保持 `testing`，`ready_to_publish` 不因字幕批准自动变为 true；`can_publish=false`，没有调用平台发布 API。真实桌面窗口视觉验收和证据引用注册表仍待完成。
+
+## 2026-11-21｜B235 NeonClipping 音频优先切片能力首阶段
+
+- 研究上游 `iamajmeena/neonclipping` 的公开架构与 MIT 许可证；本轮提取音频优先、局部响度基线、句界对齐、竖屏渲染等设计，不复制上游源码、不安装其整套应用。
+- 新增 `src/muse/video_highlights.py`：本地 FFprobe 校验输入音轨，FFmpeg astats 仅分析音频；用尾随局部中位数/MAD 检测响度跳变，生成不重叠候选片段；可选使用现有 ASR 逐词时间戳做句界吸附。
+- 新增 9:16 FFmpeg 命令构建与渲染验证：可选烧录 SRT，检测到 `h264_amf` 时用 AMD AMF，否则使用 `libx264`；输出禁止覆盖，失败不保留不完整文件。新增 `muse-video-clips rank/render` 两阶段 CLI，保留人工选择候选的控制点。
+- 新增 `tests/test_video_highlights.py`，覆盖局部响度评分、可选 shout 特征校验、非重叠候选、句界对齐、输入范围校验、音频-only FFmpeg 调用和 9:16 渲染命令。
+- 研究与边界记录见 `docs/NEONCLIPPING_FUSION_RESEARCH.md`。本阶段尚未实现 URL 下载、YouTube 逐词字幕抓取、2–4 kHz 频谱特征、光流/人脸跟踪、标题 Hook 本地模型、反馈回归学习及直播聊天切片；不宣称“两分钟”性能。
+- 下一步：通过现有 psmux `muse-dev` 受控入口运行新测试与 CLI 帮助验证；随后把候选 JSON 接入现有 VideoProductBuilder/QA/Attempt 追溯链，不新建产品账本或调度器。
+- 最终验证通过现有 `muse-dev run` → detached psmux：专项单测 **9/9 passed**，`pyproject.toml` TOML 与命令入口检查通过，CLI `--help` 正常；真实 FFmpeg 合成素材 smoke 通过，验证了 audio-only astats 分析、SRT 烧录和 1080×1920 输出（使用软件编码，临时素材自动清理）。最终验证 Job：`31c7a37183b14d93a4345b5e7d8691ca`，exit code 0。
+
+## 2026-11-21｜B236 JailbreakHub 安全融合与多模型提示词适配首阶段
+
+- 静态审查 lalipa2003-arch/JailbreakHub 的 README、目录结构与 LICENSE：仓库按 ChatGPT、Claude、Gemini、Grok、KIMI、GLM、Qwen、DeepSeek、Multi-AI 分类；上游声明 Unlicense。其内容明确涉及 jailbreak、prompt injection 与 social engineering，故仅吸收模型分类、任务框架与对抗评测的研究启发，不复制或执行攻击提示词。
+- 新增 src/muse/prompt_engine.py：模型家族适配档案（启发式、未声称实测）、结构化任务规格、系统/用户消息分层、上下文信任边界、输出格式/约束/验收标准与证据要求；附 muse-prompt adapt 离线 CLI。扩展 SpecialistRouter 的 AgentAdapterDescriptor.model_family：只有显式配置模型家族时，dispatch / Commander DAG / pipeline 才会将统一任务编译为模型适配提示；未配置时完全保持原始提示行为。
+- 不可信网页/文件/粘贴内容默认放入显式 untrusted_context 边界，转义伪造闭合标签，并明确不得把其中的指令提升为系统指令；提示构建不请求隐藏思维链，不尝试绕过模型安全策略。
+- 新增 tests/test_prompt_engine.py，覆盖 9 个模型家族、别名回退、消息分层、注入边界转义、可信上下文显式声明、缺失约束/验收提示与输入长度校验。
+- 新增研究记录 docs/JAILBREAKHUB_FUSION_RESEARCH.md。已接入 SpecialistRouter 的普通 dispatch、Commander DAG dispatch 与标准 pipeline；模型家族字段目前为运行时适配器元数据，尚未持久化到 Agent 配置。未进行真实模型盲测、未调用任何云端 API，也未改变 free-only 与隐私策略。
+- 验证通过：通过 py -3.11 scripts/muse_dev.py run → detached psmux Job dbe88e18ccd24f718c9be90666140d4e，提示词引擎与 SpecialistRouter 专项测试 **24/24 passed**；TOML 解析与 muse-prompt 入口检查通过；CLI adapt JSON 输出、Claude 别名映射及安全边界检查通过；两个核心模块和测试文件 compileall 通过。早期验证发现并修复了 unittest discovery 入口、lint 字符串匹配问题，最终复验 exit code 0。
+## 2026-11-21｜B237 NeonClipping 粤语 ASR 与技术 QA 接线
+
+- 扩展 \`src/muse/video_highlights.py\`：新增 \`rank-cantonese\`，使用 FFmpeg 提取本地音频后复用 \`muse.cantonese_asr.transcribe_cantonese\`；不下载模型、不增加云 API 依赖。
+- 候选片段直接使用粤语 ASR 逐词真实时间戳进行句界对齐；分析 JSON 保存词级时间戳与候选文本。新增 \`write_candidate_srt\`，将原片时间转换为片段相对时间，剔除片段边界外的词，不虚构字幕时间。
+- \`render --captions-from-analysis\` 可自动生成并烧录片段 SRT。渲染后强制执行 Muse \`inspect_video_file\` 全解码技术 QA；QA 不通过则删除 MP4，避免将技术不合格片段保留下来。
+- B237 专项测试 **11/11 passed**；真实 FFmpeg smoke 选择 \`h264_amf\` 并成功输出 1080×1920、5 秒字幕 MP4，Muse full-decode QA \`passed\`，4,164,091 bytes。此项是本工作站合成素材实测，不是所有素材/驱动的性能承诺。
+- 验证经现有 \`muse-dev run\` → detached psmux 执行，最终 Job：\`dd74028ec65a40ff9a28a1061acf030d\`，exit code 0。此前一次 Python typed runner 因解释器路由不可用而未启动；改用项目规定的 PowerShell psmux 入口后验证成功。
+- 限制：ASR 接线单测使用模拟转写器，尚未用真实本地粤语模型完成长视频端到端转写验收；URL/平台字幕、2–4 kHz、光流/人脸、标题 Hook、反馈拟合、直播聊天仍待实现。没有改变发布权限。
+
+## 2026-11-21｜B238 ffmpeg-skill 本地剪辑契约与能力探测首阶段
+
+- 静态研究上游 `kajisho5/ffmpeg-skill`，核对 README、42 项工具分类、contract/MCP 生成机制、probe-first、typed argv、capability doctor 与 verify-last 设计；GitHub Releases 页面最新版本为 v3.12.1，MIT。未 clone、安装或执行第三方代码。
+- 新增 `src/muse/ffmpeg_skill.py`：登记 42 个上游工具族并逐项标注 Muse 的 native/partial/planned 状态、复用模块、FFmpeg 组件要求和视觉复核要求；新增机器可读 contract、FFmpeg/FFprobe doctor、只读媒体 probe。
+- Doctor 探测 encoders/decoders/filters/bsfs；列表查询失败为 unknown，只有成功读取且确实缺少组件才标记 missing。区分 FFmpeg 构建含硬件 encoder 与真实 GPU/驱动可执行，不把前者当成端到端证明。
+- 将统一 probe 接入 `video_highlights.render_vertical_clip`：渲染前检查源视频流、时长与剪辑范围，渲染后复查输出分辨率及目标时长；现有 CLI 继续调用 Muse Video QA 做完整解码门禁。
+- `muse-ffmpeg-skill contract/doctor/probe` CLI 入口加入 pyproject；本阶段尚未把 42 项操作以 MCP server 全量暴露，也未执行 npx 安装上游包；不增加依赖、不下载/安装 FFmpeg、不调用云 API、不改变 Commander/TaskQueue/发布权限。
+- 最终验证 Job `aa64960f62104015ab6bf6043d61a09c`，psmux exit code 0：TOML/CLI contract/help 通过；ffmpeg_skill 专项测试 6/6、video_highlights 专项测试 14/14；真实本机 FFmpeg 生成合成视频并由 FFprobe 探测的 smoke 通过。当前 FFmpeg/FFprobe 8.1.1；42 项依赖组合 16 项就绪、26 项缺少至少一项依赖、0 项 unknown。
+- 后续优先实现 probe-fenced cut/join/fit、输出全解码与关键帧/VFR 精度；再推进静音剪除、两遍响度归一化、字幕/图形安全区与视觉 contact sheet。目录覆盖不等于 42 项操作已全部实现。
+## 2026-11-21｜B239 Paperclip 数字员工组织与治理机制融合首阶段
+
+- 只读研究 `paperclipai/paperclip` 上游 README、Core Concepts、Architecture、Org Structure 与 LICENSE；确认上游软件为 MIT，Paperclip 是 Agent 组织控制面而非执行框架。采用“吸收控制面机制，不引入第二调度器/第二任务队列”的架构裁决。
+- 盘点 Muse 已有 Commander、TaskQueue 原子租约、AgentRegistry 心跳/绩效、AgentRoleRegistry 能力白名单、IndependentReviewGate、FreeOnlyRouter、ProgressEventStore 与任务审批；确认真实 Agent 费用计量尚不完整，不能伪造美元预算或把未知成本当成零。
+- `AgentRegistry` 向后兼容增加 Agent `title` / `reports_to`；新增 `set_org_assignment()`，经理必须已登记，单上级，拒绝自指/传递环/未知上级；组织变更写入同库 `agent_org_events` 审计表。
+- 新增有界 `org_chart()` 节点/边快照与 `list_org_events()`，超出上限显式返回截断标记；Status API Agent 摘要增加职位和上级字段，供现有指挥中心逐步展示。
+- 新增 `docs/PAPERCLIP_FUSION_RESEARCH.md` 与 `scripts/validate_agent_registry.py`，记录机制映射、预算/权限/审批边界及 B240-B245 路线；本轮不安装 Paperclip、不新增依赖、不启动服务、不调用外部 Agent 或付费 API。
+- AgentRegistry 专项测试 **12/12 passed**（Python 3.11，detached psmux Job `1596cd9b4fa142b8b337eb9ab6155288`，exit code 0）。全项目回归已启动，但外层等待 60 秒超时，原 psmux Job `294e33bfa4f440abaf8fa7c5bbe77329` 仍显示 `outcome_unknown/active`；遵守冻结规则，没有恢复、重派、终止或覆盖它，因此全项目回归结果尚未确认。
+- 预算 hard-stop、通用 Assignment 生命周期、组织图前端呈现及全项目回归仍未完成；不宣称已完成。
+
+## 2026-11-21｜B240 Muse ValueForge 万象价值发现与创造引擎首阶段
+
+- 参考 jaxxchen003/muse-use-cases 的真实使用场景组织方式，提炼 7 类可迁移的抽象价值模式：被动监测、个人资料转行动、账单/办事审查、流程微应用、研究转视频、需求商业试点、能力缺口实验；未复制上游案例正文。上游案例内容许可为 CC BY-NC-SA 4.0，保留来源链接并遵守内容许可边界。
+- 新增 src/muse/value_forge.py：提供模式目录、可解释评分（影响、复现频率、能力匹配、证据质量、可行性及风险扣分）和提案桥接。所有提案始终标记 hypothesis_only，引用只作追溯指针，不冒充已验证证据。
+- 新增 muse-value CLI 入口。非商业提案写入现有 InitiativeStore 并保持 draft；商业机会提升委托现有 BusinessOpportunityStore；不新增数据库、不创建第二调度器、不派发任务。
+- 新增 tests/test_value_forge.py 与 docs/VALUE_FORGE.md。Python 3.11 detached psmux 专项测试 7/7 passed；TOML 解析、两个文件 py_compile、CLI patterns/evaluate smoke 均通过（目录返回 7 个模式）。
+- 验证 Job：专项测试 36e9edb0213e4ca7a89d7a04d2c3ee75；TOML/编译/CLI smoke f6a640dcb64545f1b19780d378a39704。未执行全项目回归，不宣称全量测试通过；未启动 GPU、外部服务或发布流程。
+- 通过 psmux 确认本文件为 UTF-8 BOM；此前文件预览乱码属于读取显示编码问题。本次只在文件末尾追加，不重写历史内容。
+
+## 2026-11-21｜B241 NeonClipping Clip Product Adapter 与正式账本接线
+
+- 新增 `src/muse/clip_product_adapter.py`：把人工选定且已渲染的高光片段包装为正式 Muse 视频产品版本；复用 VideoProductBuilder 的 `data/products`、Manifest、SHA-256、ZIP 校验与 Creator Initiative 产品事件，不新建产品库/数据库。
+- 扩展既有产品 Manifest 校验，支持可选 `clip-captions.srt` sidecar，并严格验证字幕哈希、源视频 SHA-256、大小、候选时间区间、评分、分析模式和转写长度；ZIP 内容必须与产品目录逐字节一致。
+- 注册时复查源视频时长，拒绝超出原片范围；打包前后校验源视频、片段 MP4、字幕 SRT 哈希；再次调用 Muse 产品 QA，要求 1080×1920、30 fps、音轨、全解码通过，且输出时长与候选区间误差不超过 1 秒。
+- 新增 `muse-video-clips register` CLI。按源视频哈希+标题确定产品 ID，按片段哈希+时间/评分/字幕/转写等生成版本 ID；同一产品版本重复登记会复用现有版本。
+- 通过现有 Creator Initiative 事件记录产品，再用确定性 `clip-...` ID 创建/完成现有 `InitiativeStore` 的 `local_assets` Video Attempt；重复执行复用成功 Attempt。产品保持 `testing` 且 `ready_to_publish=false`，不自动发布、不绕过人工内容/版权审核。
+- 新增 `tests/test_clip_product_adapter.py` 三项测试，包含幂等重复登记、SRT ZIP 与哈希篡改检测、无效候选拒绝、QA 失败不登记产品/Attempt。总专项测试 **17/17 passed**。
+- 真实 FFmpeg smoke 已运行 register CLI：实际 AMF 渲染 1080×1920 / 5 秒；成功构建产品包，`VideoProductBuilder.verify_path` 完整校验通过，SRT sidecar 入 ZIP，现有 InitiativeStore 读回唯一 `succeeded` Attempt。验证 Job：`eccdfb04f09046bc96b80f70212e97bf`，psmux exit code 0。
+- 限制：真实粤语 ASR 仍未完成本地模型长视频验收；尚无平台 URL/字幕导入、2–4 kHz、光流/人脸、标题 Hook、反馈学习与直播聊天剪辑；不宣称 NeonClipping 完整功能移植或自动发布。
+
+## 2026-11-21｜B242 CHIMERA 自定义歌曲渲染与物理建模歌声适配
+
+- 基于上游当前 CLI 的 render notes 格式，扩展 `src/muse/chimera_vocal.py`：新增自定义歌词+MIDI/节拍歌曲渲染入口；先调用上游 syllables 预检音节数，再冻结 syllables 并调用 render notes，避免音节与发声音符错位。
+- 输入验证限制 BPM、MIDI 范围、休止符、每音符拍长、音符总数、最长时长、歌词字符集与 melody JSON 大小；拒绝未支持文字脚本。Han 字符路由为普通话，不冒充粤语。
+- 输出在同目录私有临时目录生成，检查 48 kHz PCM WAV、帧数和 SHA-256 后使用独占创建发布；即使渲染期间目标文件被其他进程创建，也不会覆盖该文件。
+- 模块 CLI 增加 `--mode song --melody-json`，保留原有 text/IPA 路径。未改动 pyproject 入口、未接管现有默认粤语 TTS。
+- Python 3.11 专项测试 **13/13 passed**，detached psmux Job `0c5f9f5766c044e5bd20f427fb2b7905`，exit code 0；覆盖歌曲 CLI 路由、音节/音符数不匹配、输入边界、时长/JSON 大小上限及并发文件保护。该测试使用模拟 CLI；尚未构建/安装/运行上游 CHIMERA 二进制，也没有真实音频试听或自然度结论。
+- 背景音乐动态控制已接入 `VideoProductBuilder.package_generated_clip`：有 SRT 时按旁白字幕时间窗渐降 BGM（base 0.22 / duck 0.10，attack 80ms / release 450ms），没有 SRT 时仍按真实旁白走 sidechaincompress；所有有 BGM 的旁白成片默认片尾淡出 1.5 秒。原有 sidechaincompress（threshold 0.025、ratio 8、attack 20ms、release 450ms）与 -16 LUFS loudnorm 保留，负责真实语音瞬态和总线响度。
+- `storyboard.json` 与 `manifest.json` 写入 `background_music_mix`，记录字幕时间来源、语音窗口数量、增益/淡出参数及 FFmpeg 音量表达式 SHA-256。专项测试：`video_audio_mix` **7/7 passed**（Job `03db84db74f147f2b920275042042869`）；`VideoProductBuilder` **52/52 passed**（Job `a9763c94890341a6866e05a3c4b54d93`）；完整 voice/BGM/sidechain/amix/loudnorm FFmpeg 合成 MP4 mux smoke 通过（Job `29723f02a36d4f99a2222185176aa93b`），验证 `-shortest` 能在视频结束时正确收尾旁白补齐与循环背景音。
+- 当前验证覆盖受控 SRT fixture、模拟封装测试和本机合成音频；尚未用真实粤语旁白、真实背景音乐及完整用户视频做听感 A/B。字幕时间窗是粗粒度预判，不能代替 sidechain，也不能宣称混音自然度已通过人工验收。
+
+## 2026-11-21｜B243 OpenMontage AI 视频制片厂流水线首阶段
+
+- 只读核对 OpenMontage README、Architecture、Backlot 与仓库许可证；上游为 AGPL-3.0。README 当前以“10+ pipelines”表述，项目宣传数字并非稳定契约；Muse 建立自己的 12 个 profile，不复制上游源码或技能文件。
+- 盘点 Muse 既有 video_workflow、video_prompt_composer、Story Bible、FFmpeg Skill、NeonClipping、VideoProductBuilder、Creator Initiative/Attempt、字幕审核与音频混音；确定保留唯一 Muse Commander，不引入第二调度器/账本。
+- 新增 src/muse/video_studio.py：12 个声明式制片 profile，覆盖参考再创作、科普、纪录片、电影预告、产品广告、口播、屏幕演示、播客再利用、切片工厂、角色动画、3D 动画和本地化配音；明确 native/partial/planned 模块映射、素材模式与人工创意门。
+- 新增 plan-only Commander DAG：复用既有 storyboard schema，保留镜头依赖并行波次；补齐 research/script/素材/音频/字幕/技术 QA/创意审核/权利审核/发布门等阶段。muse-video-studio pipelines|plan 只输出目录和计划，不创建 Ticket、不派发、不生成媒体、不调用 Provider。
+- 新增 tests/test_video_studio.py 与 docs/OPENMONTAGE_FUSION_RESEARCH.md；许可证/供应链边界、当前覆盖与后续 Backlot/检查点/开放档案检索路线均有记录。
+- 本轮未 clone/安装/执行 OpenMontage，未增加依赖、未调用云 API、未启用服务、未改变发布权限。验证：Python 3.11 新增专项测试 7/7 passed（psmux Job 61e0649d8cc74568b4cb8d99b2675f44，exit code 0）；py_compile、pyproject TOML 解析与 pipelines CLI smoke 通过。未运行全项目测试；旧 video_workflow/video_prompt_composer 回归测试未包含在本次通过证据中。Profile 当前是 Python dataclass，不是 YAML manifest；当前仅 plan-only，不代表 12 条流水线均已具备端到端执行能力。
+
+## 2026-11-21｜B244 Herdr Agent Runtime 状态协议首轮融合
+
+- 只读研究 `herdrdev/herdr` 与独立 `herdr-core` 文档：区分旧 Herdr TUI 与新 Core/桌面 App 体系；确认 OSC 7501 是 Agent 主动报告状态的开放协议，状态不是从终端文本猜测。Core/机器停止后原进程不会复活，保存布局只能恢复新 Shell/受支持会话，不能宣称进程级重启续跑。
+- Muse 保留现有 `MuseDaemonController`、SQLite `TaskQueue`、AgentRegistry 与 psmux 执行路径；不引入第二个 Commander、Ticket 库或后台进程管理器。
+- `AgentRegistry` 增加可迁移的 `reported_state/message/source/at` 字段及受限 `report_state()`；支持 working/blocked/idle/done/unknown。新鲜 blocked/working/idle/done 状态可映射为 Muse blocked/busy/online，过期心跳仍优先变 offline；不触发审批、输入注入或任务派发。
+- 新增 `muse.herdr_adapter` 与 `muse-agent-status` CLI：提供安全 OSC 7501 序列生成、状态映射和显式状态写入；拒绝非法状态、控制字符、超长消息与非法 app 标识。Dashboard Agent API 只暴露状态/时间/来源，不暴露自由文本消息。
+- 本轮不安装 Herdr/`hc`、不运行远程安装脚本、不启动 SSH 主机、不替换 psmux；OSC 直通仍需在真实 Herdr Core + Windows terminal 场景验收。psmux 当前将 Job 输出重定向到日志，不能据此声称嵌套 psmux 的 OSC 一定会到达外层 Herdr。
+- Python 3.11 经 `muse-dev run` → detached psmux 执行：Herdr Adapter + AgentRegistry + Status API **58/58 passed**（psmux Job `eaf0631b175e4e7a9aeca5b2b52d37eb`，exit 0）。
+- 修改模块 `py_compile`、`pyproject.toml` TOML 解析及 `python -m muse.herdr_adapter --help` 均通过（psmux Job `9f4e18f8511145b2ae5f3c41ba6f37c1`，exit 0）。
+- 全目录 `compileall src/muse` 另行检查时发现 `src/muse/video_highlights.py:291` 的 `IndentationError`；该文件不属于本轮改动，未擅自修改；因此只声明本轮修改模块编译通过，不声明全目录编译通过。
+
+## 2026-11-21｜B245–B248 OpenMontage 声明式视频工作流清单
+
+- B245：将 12 个视频制片 profile 从 Python 硬编码迁移至 `src/muse/video_pipelines.yaml`，采用 YAML 1.2 JSON-compatible 子集与标准库解析，不增加 PyYAML 依赖。
+- B245：新增严格 profile loader，限制文件大小、schema 版本、顶层/字段集合、重复键、重复 profile/stage、stage registry 引用、scene mode 与 coverage 枚举；Python dataclass 仅作为校验后的运行时模型。
+- B248：新增 `src/muse/video_stages.yaml`，将 stage_id、Commander 角色、阶段目标与 capability_hints 从 Python 硬编码迁入独立声明式清单。
+- B248：新增严格 stage loader，检查 schema、重复键/ID、未知字段、角色是否属于 `CommanderPlanner.ALLOWED_ROLES`、目标/提示格式及 intake/preflight/publish_gate 生命周期保留阶段。
+- `capability_hints` 明确只是规划提示，不授予工具权限、不证明本机能力存在；执行前仍须由 Commander 进行真实 registry 与角色权限校验。两个 YAML 资源均纳入 Python 包数据。
+- 增加 profile/stage manifest 加载、重复键、非法/保留 stage 和非法 Commander 角色拒绝测试。专项验证待执行后补录准确结果；不以脚本启动成功代替测试通过。
+- Commander 仍是唯一调度/审批中心，CLI 仍只生成计划预览，不创建 Ticket、不派发、不渲染、不调用 Provider。本轮未安装依赖、未下载素材、未生成视频、未创建第二个 checkpoint/ledger。
+- 新增 `assess_video_studio_commander_admission()`：显式检查 Commander 角色白名单与默认 16-step 上限；超限计划返回 `blocked_step_limit`，不允许误认为可派发。即使未超限也只返回 `pending_capability_registry`，因为真实本机能力、角色-能力授权、资源/成本与人工审批仍未核验。
+- 下一步：将长 DAG 切成不超过 Commander 限额的幂等批次，并复用现有 Initiative/Video Attempt 处理阶段检查点与恢复；不扩大全局 max_steps，不创建第二个队列。
+## 2026-11-21｜B246 NeonClipping 2–4 kHz 可选频谱辅助评分
+
+- `score_audio_windows` 增加可选 `band_energy_db`：用独立尾随局部中位数/MAD 计算 2–4 kHz 频带突显度；默认路径保留原始评分公式，显式开启时频谱特征占 15%，并输出逐秒 dB 与 prominence 供复核。
+- `rank` 与 `rank-cantonese` 新增 `--spectral-2-4khz`。显式开启才额外运行 FFmpeg 音频-only 2–4 kHz 带通分析；不解码视频画面、不增加第三方依赖或云 API。该特征不是情绪、语义、说话人或爆款识别。
+- 新增评分/输入校验与第二次 FFmpeg 带通调用测试。Python 3.11 专项回归 **19/19 passed**；真实 FFmpeg 合成 3 kHz 音频频带 smoke 通过；同一验证还复验 1080×1920 AMF 渲染、字幕烧录、Muse full-decode QA、正式产品 ZIP 与 InitiativeStore Attempt。
+- 验证经 `muse-dev run` → detached psmux，Job `5993e7e5820e423daec04383f55da2ca`，exit code 0；验证脚本输出 `MUSE_NEONCLIPPING_STAGE3_VALIDATION_OK`。
+- 限制：真实用户长视频的本地粤语 ASR 性能/准确率尚未验收；频谱启发式需要真实节目素材 A/B，当前不自动改变用户剪辑选择或发布权限。
+
+## 2026-11-21｜B247 Herdr Core / psmux Provider-neutral 终端发现接口
+
+- 重新核对 Herdr Core 当前生成 CLI 契约：`hc --version`、`hc schema --json`、`hc ls --json`；没有借用旧 Herdr TUI 的 `herdr api schema` 等命令，也没有猜测参数。
+- 新增 `src/muse/terminal_runtime.py`：定义 `TerminalRuntimeProvider`、`TerminalRuntimeProbe` 与 `TerminalSessionListing`；`PsmuxProvider` 仅委托现有只读 inspect/list observer，`HerdrCoreProvider` 仅执行固定 argv 的版本、OpenRPC schema 与终端列表查询。
+- `HerdrCoreProvider` 使用 `shell=False`、短超时、输出大小上限、JSON/schema 结构校验；拒绝 shell 字符串命令，二进制缺失或 schema 无效时 fail-closed。没有实现 run/send/attach/kill/SSH/机器管理能力。
+- `scripts/muse_dev.py` 新增 `terminal probe/list`：默认仍是 psmux；Herdr Core 需显式 `--provider herdr-core`。不改变默认执行路径、不创建第二套 Job/Ticket/Commander。
+- 新增 fake `hc` executable contract tests，覆盖 documented argv、JSON 解析、无 binary、无效 schema、psmux observer 委托、输出尾部/路径脱敏及 CLI provider 选择。Provider + CLI 专项测试 **10/10 passed**（psmux Job `f905468965e441c3bc62c3c976398962`，exit 0）；包含终端 Provider、CLI、muse-dev CLI 与 psmux adapter 的定向回归 **52/52 passed**（Job `432afd0fe17043f7a275179c142d8e9f`，exit 0）；Herdr Adapter/AgentRegistry/Status API 回归 **58/58 passed**（Job `14b8f7bfd6b14a47ba240fae8dbc6c4a`，exit 0）。真实 CLI `terminal probe/list --provider psmux` 均通过。
+- CLI 集成测试按 TDD 先观察到预期 RED，再完成实现并取得 10/10 GREEN。全项目 `unittest discover` **1,858 tests：1,857 passed、1 failed、1 skipped**；唯一失败为未触及的 `tests/test_task_queue.py:731`：`test_contextual_review_completion_requires_dedicated_queue_transition`，断言 dedicated TaskQueue transition 未满足。全项目 Job `1c10d9d27480465bae7743885497beed`，exit 1；因此不宣称全项目全绿。
+- 未安装/启动 Herdr Core，未调用真实 `hc`，未运行 `hc ls`，未新增依赖、SSH 主机或远程任务。`muse-dev` 默认 psmux session 最终 `active_job_id=null`。为避开并行任务临时创建了空 psmux session `muse-herdr`（未在其中启动 Job）；关闭该临时 session 的请求被宿主安全检查拦截，因此它仍是一个空 shell session。真实 Windows Core/OSC 转发/事件订阅/断线恢复仍未验收。
+
+## 2026-11-21｜B248 ValueForge 接入自主研究价值评估
+
+- 新增 ValueForge.evaluate_research_report()：读取既有研究报告的来源数、证据覆盖分数、实验与反证数量，生成研究转视频及能力缺口实验两类价值候选；结果明确保持 hypothesis_only。
+- 单轮研究不推断重复需求或市场需求：recurrence 固定最低分；来源链接和报告路径只作为追溯指针，不代表来源已独立验证；缺少实验/反证时不生成能力实验候选。
+- AutonomousResearchEngine 在现有创作者机会生成流程中附加 report["value_forge"]，不新建 Initiative、不新增数据库、不触发 Commander 或 GPU 派发。
+- 新增 ValueForge 报告评估边界测试，并在自主研究集成测试中检查假设状态、单轮 recurrence 下限及无派发行为。代码/测试已静态复读；专项测试因 psmux muse-dev 会话仍有既存 active Job c62afd21da0641a1bd35f4b85193f065 且 recover 返回 outcome_unknown，本轮未重新派发测试，故本次新增集成尚未取得运行通过证据。
+- 观察到项目其他并行工作区近期存在 video_highlights.py 语法/未赋值变量错误，以及 Herdr schema 测试预期不符；这些不属于 ValueForge 改动，本轮不越权修改。需在对应任务中单独修复并回归。
+
+## 2026-11-21｜B249 Herdr Core 事件协议 Reducer（传输层前置）
+
+- 核对 Core 官方 API schema guide：Core 是 JSON-RPC 2.0 行协议；`events.subscribe` 返回 `{seq, terminals}` 快照，随后推送无 id 的 `event` / `heartbeat` 通知；15 秒 heartbeat；Core 重启后 seq 重置；`missed` 事件携带新的终端快照。明确不混用旧 Herdr TUI Socket API。
+- 新增 `src/muse/herdr_events.py`：纯状态 Reducer，只保存 terminal id 与 Agent 报告状态；不保存 argv/cwd/终端输出，不含 socket、进程启动或调度逻辑。
+- 状态只接受严格布尔 `reported is True` 且值属于 `idle/working/done/blocked`；`error`、未报告、未知状态统一为 unknown。终端→Agent 绑定要求显式且一对一，避免多个终端竞争覆盖同一 Agent。处理 duplicate/stale、heartbeat、missed 快照替换、Core 重连 seq 重置；lost/finished/removed 清除旧 working 状态，terminal finished 不等于任务成功。
+- 新增显式 terminal→Agent 绑定映射；未绑定不更新，missed 快照通过单独 snapshot projection 函数由调用者主动 reconcile，不在事件缺口时直接套用增量。没有自动注册 Agent、Commander 派单、审批、输入注入或远程执行。
+- 新增 `tests/test_herdr_events.py` 覆盖快照脱敏、状态事件、显式绑定、AgentRegistry 写入、heartbeat、重复事件、missed/缺失快照、重连、lost/finished 与异常消息。Herdr 事件 Reducer + Provider + CLI + AgentRegistry + Status API 定向回归 **82/82 passed**，psmux Job `wc_job_scf7wSAW39jt1_28`，exit 0。
+- 当前只完成协议 Reducer，不是实时订阅器；未安装或启动 `hc`、未调用 `hc events`、未连接 Windows named pipe、未创建后台重连服务。下一阶段单独实现并验证只读传输适配，真实 Core 验收前不接入默认路径。
+
+## 2026-11-21｜B250 ValueForge 来源质量防膨胀与自主研究回归
+
+- ValueForge 的研究来源计数改为最多检查前 50 条来源记录中的去重、有效 HTTP(S) URL；非对象、无效 URL 与重复 URL 不再抬高证据质量分。报告路径仍只是追溯指针，不计作独立来源。
+- 新增重复/畸形来源边界测试，按 TDD 先观察到 RED（旧逻辑将 5 条混杂记录计为 5 个来源），再完成修正并观察 GREEN。
+- Python 3.11 经 `muse-dev run` → detached psmux：ValueForge + AutonomousResearch 定向回归 **68/68 passed**（ValueForge 10 项 + AutonomousResearch 58 项；Job `e67d595f7b5146bcba538df2066dc7e0`，exit 0）。新增边界测试单测 GREEN（Job `4e0832ef80b84076b4ba760fecccbe33`，exit 0）。修改模块 `py_compile` 与 `pyproject.toml` TOML 解析通过（Job `f71db595c0b045a68cba654ad2249649`，exit 0）。
+- 这轮未运行全项目测试；Capability Radar 仍只提供运维/研究失败聚合信号，本轮没有将其误当作商业需求证据，也未把 Radar 的优先级直接转换为 ValueForge 分数。后续需基于 Radar 的明确输出契约设计一个候选适配层，并继续保留人工审核及唯一 Commander。
+- 后续复核发现 `src/muse/value_forge.py` 有两处语句意外粘连：第 181 行导致语法错误，第 215 行虽可解析但字段排版异常；已按 revision fence 分别拆行并读回。最终修订后重新经 `muse-dev run` → detached psmux 执行 ValueForge + AutonomousResearch **68/68 passed**（Job `wc_job_i9jKhqVUayd2tt_C`，exit 0）。
+- B247 旧全量回归记录引用的 `tests/test_task_queue.py:731` 与 `test_contextual_review_completion_requires_dedicated_queue_transition` 在当前 704 行文件中均不存在；当前 TaskQueue 专项 **40/40 passed**（detached psmux Job `9d11fde6608745d88b3b4a66bd4f6d5e`，exit 0）。这只能证明当前专项通过，不能倒推旧全量失败的历史根因；全项目回归仍待重新执行。
 

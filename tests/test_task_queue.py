@@ -508,5 +508,197 @@ class TaskQueueTests(unittest.TestCase):
                 events = queue.events(task["id"])
             self.assertFalse(any(event["event_type"] == "failure.classified" for event in events))
 
+    def test_contextual_review_only_authorization_is_separate_from_downstream_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with TaskQueue(Path(directory) / "tickets.sqlite3") as queue:
+                task = queue.enqueue(
+                    "Contextual inquiry review",
+                    {
+                        "kind": "contextual_inquiry_review",
+                        "case_context_attached": False,
+                        "case_context_envelope_stored": True,
+                        "case_context_envelope": {"version": 1, "protection": "windows-dpapi-current-user", "ciphertext_b64": "b3BhcXVl"},
+                        "context_status": "encrypted_pending_handler",
+                        "requires_context_reentry": True,
+                        "long_term_storage_performed": False,
+                    },
+                    require_approval=True,
+                )
+                decision = queue.authorize_contextual_inquiry_review_only(
+                    task["id"], authorized_by="operator",
+                    expected_updated_at=task["updated_at"],
+                )
+                current = queue.get(task["id"])
+                self.assertEqual(current["status"], "waiting_approval")
+                self.assertNotIn("_approved", current["payload"])
+                self.assertEqual(current["payload"]["_review_authorization"]["scope"], "review_only")
+                self.assertEqual(decision["event_type"], "contextual_inquiry.review_only_authorized")
+                self.assertEqual(decision["payload"], {"scope": "review_only"})
+                with self.assertRaisesRegex(PermissionError, "attached and validated"):
+                    queue.approve(task["id"], approved_by="operator")
+
+    def test_contextual_review_only_claim_requires_human_authorization_and_lease(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with TaskQueue(Path(directory) / "tickets.sqlite3") as queue:
+                task = queue.enqueue(
+                    "Contextual inquiry review",
+                    {
+                        "kind": "contextual_inquiry_review",
+                        "case_context_attached": False,
+                        "case_context_envelope_stored": True,
+                        "case_context_envelope": {
+                            "version": 1, "protection": "windows-dpapi-current-user",
+                            "ciphertext_b64": "b3BhcXVl",
+                        },
+                        "context_status": "encrypted_pending_handler",
+                        "requires_context_reentry": True,
+                        "long_term_storage_performed": False,
+                    },
+                    require_approval=True,
+                )
+                with self.assertRaisesRegex(PermissionError, "separately authorized"):
+                    queue.claim_contextual_inquiry_review_only(
+                        task["id"], worker_id="review-worker",
+                        expected_updated_at=task["updated_at"],
+                    )
+                authorization = queue.authorize_contextual_inquiry_review_only(
+                    task["id"], authorized_by="operator",
+                    expected_updated_at=task["updated_at"],
+                )
+                claimed = queue.claim_contextual_inquiry_review_only(
+                    task["id"], worker_id="review-worker", lease_seconds=120,
+                    expected_updated_at=authorization["task"]["updated_at"],
+                )
+                self.assertEqual(claimed["status"], "running")
+                self.assertEqual(claimed["lease_owner"], "review-worker")
+                self.assertIsNotNone(claimed["lease_expires_at"])
+                self.assertNotIn("_approved", claimed["payload"])
+                self.assertEqual(claimed["payload"]["_review_authorization"]["scope"], "review_only")
+                events = queue.events(task["id"])
+                self.assertTrue(any(
+                    event["event_type"] == "assignment.contextual_review_only_claimed"
+                    and event["actor"] == "review-worker"
+                    and event["payload"]["scope"] == "review_only"
+                    for event in events
+                ))
+
+    def test_contextual_review_only_claim_rejects_stale_revision_and_replay(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with TaskQueue(Path(directory) / "tickets.sqlite3") as queue:
+                task = queue.enqueue(
+                    "Contextual inquiry review",
+                    {
+                        "kind": "contextual_inquiry_review",
+                        "case_context_attached": False,
+                        "case_context_envelope_stored": True,
+                        "case_context_envelope": {
+                            "version": 1, "protection": "windows-dpapi-current-user",
+                            "ciphertext_b64": "b3BhcXVl",
+                        },
+                        "context_status": "encrypted_pending_handler",
+                        "requires_context_reentry": True,
+                        "long_term_storage_performed": False,
+                    },
+                    require_approval=True,
+                )
+                authorization = queue.authorize_contextual_inquiry_review_only(
+                    task["id"], authorized_by="operator",
+                    expected_updated_at=task["updated_at"],
+                )
+                with self.assertRaisesRegex(RuntimeError, "revision conflict"):
+                    queue.claim_contextual_inquiry_review_only(
+                        task["id"], worker_id="review-worker",
+                        expected_updated_at=task["updated_at"],
+                    )
+                claimed = queue.claim_contextual_inquiry_review_only(
+                    task["id"], worker_id="review-worker",
+                    expected_updated_at=authorization["task"]["updated_at"],
+                )
+                with self.assertRaisesRegex(PermissionError, "waiting_approval"):
+                    queue.claim_contextual_inquiry_review_only(
+                        task["id"], worker_id="second-worker",
+                        expected_updated_at=claimed["updated_at"],
+                    )
+
+    def test_contextual_review_only_authorization_rejects_stale_revision_and_replay(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with TaskQueue(Path(directory) / "tickets.sqlite3") as queue:
+                task = queue.enqueue(
+                    "Contextual inquiry review",
+                    {
+                        "kind": "contextual_inquiry_review",
+                        "case_context_attached": False,
+                        "case_context_envelope_stored": True,
+                        "case_context_envelope": {"version": 1, "protection": "windows-dpapi-current-user", "ciphertext_b64": "b3BhcXVl"},
+                        "context_status": "encrypted_pending_handler",
+                        "requires_context_reentry": True,
+                        "long_term_storage_performed": False,
+                    },
+                    require_approval=True,
+                )
+                with self.assertRaisesRegex(RuntimeError, "revision conflict"):
+                    queue.authorize_contextual_inquiry_review_only(
+                        task["id"], authorized_by="operator",
+                        expected_updated_at=task["updated_at"] + "-stale",
+                    )
+                decision = queue.authorize_contextual_inquiry_review_only(
+                    task["id"], authorized_by="operator",
+                    expected_updated_at=task["updated_at"],
+                )
+                with self.assertRaisesRegex(ValueError, "already exists"):
+                    queue.authorize_contextual_inquiry_review_only(
+                        task["id"], authorized_by="operator",
+                        expected_updated_at=decision["task"]["updated_at"],
+                    )
+
+    def test_generic_event_api_cannot_forge_review_only_authorization(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with TaskQueue(Path(directory) / "tickets.sqlite3") as queue:
+                task = queue.enqueue("Contextual inquiry review", {"kind": "contextual_inquiry_review"}, require_approval=True)
+                with self.assertRaisesRegex(PermissionError, "dedicated queue transition"):
+                    queue.record_event(
+                        task["id"], "contextual_inquiry.review_only_authorized",
+                        actor="operator", payload={"scope": "review_only"},
+                    )
+
+    def test_contextual_inquiry_approval_rejects_forged_attachment_flags(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with TaskQueue(Path(directory) / "tickets.sqlite3") as queue:
+                task = queue.enqueue(
+                    "Contextual inquiry review",
+                    {
+                        "kind": "contextual_inquiry_review",
+                        "case_context_attached": True,
+                        "requires_context_reentry": False,
+                        "context_status": "validated_attached",
+                    },
+                    require_approval=True,
+                )
+                with self.assertRaisesRegex(PermissionError, "trusted case-context attachment audit record"):
+                    queue.approve(task["id"], approved_by="user")
+                unchanged = queue.get(task["id"])
+                self.assertEqual(unchanged["status"], "waiting_approval")
+                self.assertNotIn("_approved", unchanged["payload"])
+
+    def test_generic_event_api_cannot_forge_contextual_attachment_audit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with TaskQueue(Path(directory) / "tickets.sqlite3") as queue:
+                task = queue.enqueue(
+                    "Contextual inquiry review",
+                    {"kind": "contextual_inquiry_review"},
+                    require_approval=True,
+                )
+                with self.assertRaisesRegex(PermissionError, "trusted queue transition"):
+                    queue.record_event(
+                        task["id"],
+                        "contextual_inquiry.context_attached",
+                        actor="contextual-inquiry-review-handler",
+                        payload={"attachment_state": "validated"},
+                    )
+                self.assertFalse(any(
+                    event["event_type"] == "contextual_inquiry.context_attached"
+                    for event in queue.events(task["id"])
+                ))
+
 if __name__ == "__main__":
     unittest.main()

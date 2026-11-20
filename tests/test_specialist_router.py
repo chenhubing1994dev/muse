@@ -54,6 +54,19 @@ class SpecialistRouterTests(unittest.TestCase):
         self.assertEqual({x.specialist_id for x in result.decision.selected}, {"researcher", "coder"})
         self.assertEqual(len(result.orchestration.outcomes), 2)
 
+    def test_provider_profile_adapts_prompt_only_when_declared(self) -> None:
+        observed = []
+        profile = SpecialistProfile("claude-coder", "developer", ("开发",), ("代码",))
+        descriptor = AgentAdapterDescriptor("claude-coder", frozenset(), model_family="claude")
+        self.router.register_adapter(profile, descriptor, lambda prompt: observed.append(prompt) or "done")
+        result = self.router.dispatch("开发代码")
+        self.assertEqual(result.orchestration.status, "succeeded")
+        self.assertEqual(len(observed), 1)
+        self.assertIn("=== MUSE SYSTEM GUIDANCE ===", observed[0])
+        self.assertIn("## 输出格式", observed[0])
+        self.assertIn("## 验收标准", observed[0])
+        self.assertIn("=== MUSE TASK ===", observed[0])
+
     def test_default_router_fanout_selects_32_online_specialists(self) -> None:
         for index in range(32):
             agent_id = f"specialist-{index:02d}"

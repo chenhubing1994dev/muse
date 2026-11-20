@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
@@ -59,6 +60,30 @@ class AgentRegistry:
             );
             CREATE INDEX IF NOT EXISTS idx_agents_last_seen ON agents(last_seen_at);
             """
+        )
+        columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(agents)")}
+        if "title" not in columns:
+            self.connection.execute("ALTER TABLE agents ADD COLUMN title TEXT NOT NULL DEFAULT ''")
+        if "reports_to" not in columns:
+            self.connection.execute("ALTER TABLE agents ADD COLUMN reports_to TEXT")
+        if "reported_state" not in columns:
+            self.connection.execute("ALTER TABLE agents ADD COLUMN reported_state TEXT")
+        if "reported_message" not in columns:
+            self.connection.execute("ALTER TABLE agents ADD COLUMN reported_message TEXT")
+        if "reported_source" not in columns:
+            self.connection.execute("ALTER TABLE agents ADD COLUMN reported_source TEXT")
+        if "reported_at" not in columns:
+            self.connection.execute("ALTER TABLE agents ADD COLUMN reported_at TEXT")
+        self.connection.execute("CREATE INDEX IF NOT EXISTS idx_agents_reports_to ON agents(reports_to)")
+        self.connection.execute(
+            """CREATE TABLE IF NOT EXISTS agent_org_events (
+                event_id TEXT PRIMARY KEY,
+                agent_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                actor TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )"""
         )
         self.connection.commit()
 
@@ -136,6 +161,33 @@ class AgentRegistry:
         return cursor.rowcount == 1
 
     @_serialized
+    def report_state(
+        self, agent_id: str, state: str, *, message: str | None = None,
+        source: str = "herdr-osc7501", now: datetime | None = None,
+    ) -> bool:
+        """Persist an agent-reported lifecycle state without executing or approving work."""
+        agent_id = self._text(agent_id, "agent_id")
+        allowed_states = {"working", "blocked", "idle", "done", "unknown"}
+        if not isinstance(state, str) or state not in allowed_states:
+            raise ValueError("state must be working, blocked, idle, done or unknown")
+        source = self._text(source, "source", 80)
+        if any(not char.isascii() or not (char.isalnum() or char in "._:-") for char in source):
+            raise ValueError("source must be an ASCII identifier")
+        if message is not None:
+            if (not isinstance(message, str) or len(message) > 160
+                    or any(ord(char) < 32 or ord(char) == 127 for char in message)):
+                raise ValueError("message must be at most 160 characters without control characters")
+            message = message.strip() or None
+        timestamp = self._now(now).isoformat()
+        cursor = self.connection.execute(
+            "UPDATE agents SET last_seen_at=?, reported_state=?, reported_message=?, "
+            "reported_source=?, reported_at=?, updated_at=? WHERE agent_id=?",
+            (timestamp, state, message, source, timestamp, timestamp, agent_id),
+        )
+        self.connection.commit()
+        return cursor.rowcount == 1
+
+    @_serialized
     def set_enabled(self, agent_id: str, enabled: bool) -> bool:
         if not isinstance(enabled, bool):
             raise ValueError("enabled must be boolean")
@@ -153,21 +205,30 @@ class AgentRegistry:
         if isinstance(stale_after_seconds, bool) or not isinstance(stale_after_seconds, int) or stale_after_seconds < 1:
             raise ValueError("stale_after_seconds must be a positive integer")
         item = dict(row)
+        item["title"] = item.get("title") or item["role"]
+        item["reports_to"] = item.get("reports_to")
         item["capabilities"] = json.loads(item.pop("capabilities_json"))
+        item["enabled"] = bool(item["enabled"])
+        reported_state = item.get("reported_state")
         if not item["enabled"]:
             status = "disabled"
         elif not item["last_seen_at"]:
             status = "offline"
         else:
             last_seen = datetime.fromisoformat(str(item["last_seen_at"]))
-            status = "offline" if self._now(now) - last_seen > timedelta(seconds=stale_after_seconds) else (
-                "busy" if item["current_task_id"] else "online"
-            )
-        item["enabled"] = bool(item["enabled"])
+            if self._now(now) - last_seen > timedelta(seconds=stale_after_seconds):
+                status = "offline"
+            elif reported_state == "blocked":
+                status = "blocked"
+            elif reported_state == "working":
+                status = "busy"
+            elif reported_state in {"idle", "done"}:
+                status = "online"
+            else:
+                status = "busy" if item["current_task_id"] else "online"
         item["status"] = status
         item["stale_after_seconds"] = stale_after_seconds
         return item
-
     @_serialized
     def get(self, agent_id: str, *, now: datetime | None = None,
             stale_after_seconds: int = 90) -> dict[str, object] | None:
@@ -181,6 +242,114 @@ class AgentRegistry:
             raise ValueError("limit must be between 1 and 500")
         rows = self.connection.execute("SELECT * FROM agents ORDER BY agent_id LIMIT ?", (limit,)).fetchall()
         return [item for row in rows if (item := self._decode(row, now=now, stale_after_seconds=stale_after_seconds)) is not None]
+
+    @_serialized
+    def set_org_assignment(
+        self, agent_id: str, *, title: str, reports_to: str | None = None,
+        actor: str = "operator",
+    ) -> dict[str, object]:
+        """Assign one reporting parent; reject missing managers and every cycle."""
+        agent_id = self._text(agent_id, "agent_id")
+        title = self._text(title, "title", 96)
+        actor = self._text(actor, "actor", 120)
+        if reports_to is not None:
+            reports_to = self._text(reports_to, "reports_to")
+        timestamp = self._now().isoformat()
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            current = self.connection.execute(
+                "SELECT title, reports_to FROM agents WHERE agent_id=?", (agent_id,)
+            ).fetchone()
+            if current is None:
+                raise ValueError("agent is not registered")
+            if reports_to is not None:
+                if self.connection.execute(
+                    "SELECT 1 FROM agents WHERE agent_id=?", (reports_to,)
+                ).fetchone() is None:
+                    raise ValueError("reporting manager is not registered")
+                ancestor = reports_to
+                visited: set[str] = set()
+                while ancestor is not None:
+                    if ancestor == agent_id:
+                        raise ValueError("reporting assignment would create an organization cycle")
+                    if ancestor in visited:
+                        raise RuntimeError("existing organization hierarchy contains a cycle")
+                    visited.add(ancestor)
+                    row = self.connection.execute(
+                        "SELECT reports_to FROM agents WHERE agent_id=?", (ancestor,)
+                    ).fetchone()
+                    if row is None:
+                        raise RuntimeError("existing organization hierarchy contains an unknown manager")
+                    ancestor = row["reports_to"]
+            previous = current["reports_to"]
+            self.connection.execute(
+                "UPDATE agents SET title=?, reports_to=?, updated_at=? WHERE agent_id=?",
+                (title, reports_to, timestamp, agent_id),
+            )
+            payload = json.dumps({
+                "title": title, "reports_to": reports_to,
+                "previous_reports_to": previous,
+            }, ensure_ascii=False, allow_nan=False)
+            self.connection.execute(
+                "INSERT INTO agent_org_events VALUES (?, ?, ?, ?, ?, ?)",
+                (uuid.uuid4().hex, agent_id, "org.assignment_changed", actor, payload, timestamp),
+            )
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
+        result = self.get(agent_id)
+        assert result is not None
+        return result
+
+    @_serialized
+    def org_chart(self, *, limit: int = 500) -> dict[str, object]:
+        """Return a bounded, display-safe node/edge snapshot of the reporting tree."""
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
+            raise ValueError("limit must be between 1 and 500")
+        total = int(self.connection.execute("SELECT COUNT(*) FROM agents").fetchone()[0])
+        agents = self.list_agents(limit=limit)
+        included = {str(item["agent_id"]) for item in agents}
+        edges = sorted([
+            {"manager_id": str(item["reports_to"]), "report_id": str(item["agent_id"])}
+            for item in agents if item.get("reports_to") in included
+        ], key=lambda edge: (edge["manager_id"], edge["report_id"]))
+        unresolved = sum(
+            1 for item in agents
+            if item.get("reports_to") is not None and item.get("reports_to") not in included
+        )
+        nodes = [{
+            "agent_id": item["agent_id"], "title": item["title"], "role": item["role"],
+            "display_name": item["display_name"], "status": item["status"],
+            "enabled": item["enabled"], "reports_to": item["reports_to"],
+            "capabilities": item["capabilities"],
+        } for item in agents]
+        return {
+            "nodes": nodes, "edges": edges, "total": total,
+            "truncated": total > len(agents), "unresolved_parent_count": unresolved,
+        }
+
+    @_serialized
+    def list_org_events(self, *, agent_id: str | None = None, limit: int = 100) -> list[dict[str, object]]:
+        """Read recent organization changes without exposing credentials or task payloads."""
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
+            raise ValueError("limit must be between 1 and 500")
+        if agent_id is not None:
+            agent_id = self._text(agent_id, "agent_id")
+            rows = self.connection.execute(
+                "SELECT * FROM agent_org_events WHERE agent_id=? ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                (agent_id, limit),
+            ).fetchall()
+        else:
+            rows = self.connection.execute(
+                "SELECT * FROM agent_org_events ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [{
+            "event_id": row["event_id"], "agent_id": row["agent_id"],
+            "event_type": row["event_type"], "actor": row["actor"],
+            "payload": json.loads(row["payload_json"]), "created_at": row["created_at"],
+        } for row in rows]
 
     @_serialized
     def record_outcome(self, agent_id: str, *, task_kind: str, succeeded: bool,

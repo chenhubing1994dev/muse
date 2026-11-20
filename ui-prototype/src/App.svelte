@@ -16,6 +16,7 @@
   import AgentGalaxyPanel from "./lib/AgentGalaxyPanel.svelte";
   import PrometheusCorePanel from "./lib/PrometheusCorePanel.svelte";
   import InitiativePerformancePanel from "./lib/InitiativePerformancePanel.svelte";
+  import VideoReleaseReview from "./lib/VideoReleaseReview.svelte";
   import MemPalacePanel from "./lib/MemPalacePanel.svelte";
   import {
     createApiClient,
@@ -101,7 +102,10 @@
   let subtitleReviewReviewedIndexes: number[] = [];
   let subtitleReviewCorrections: Record<number, string> = {};
   let subtitleReviewReviewer = "";
-  let subtitleReviewConfirmation = "";
+  let subtitleReviewReviewerId = "";
+  let subtitleReviewReviewerRole = "subtitle_editor";
+  let subtitleReviewRationale = "";
+  let subtitleReviewEvidenceRefs = "";  let subtitleReviewConfirmation = "";
   let subtitleReviewBusy = false;
   let subtitleReviewSubmitting = false;
   let subtitleReviewMessage = "";
@@ -944,7 +948,11 @@
     subtitleReviewReviewedIndexes = [];
     subtitleReviewCorrections = {};
     subtitleReviewConfirmation = "";
-    subtitleReviewMessage = "";
+    subtitleReviewReviewer = "";
+    subtitleReviewReviewerId = "";
+    subtitleReviewReviewerRole = "subtitle_editor";
+    subtitleReviewRationale = "";
+    subtitleReviewEvidenceRefs = "";    subtitleReviewMessage = "";
     subtitleReviewBusy = true;
     try {
       const response = await client.subtitleReview(product.initiative_id, product.version_id);
@@ -969,6 +977,11 @@
       subtitleReviewMessage = "请明确输入批准口令，避免误触发布审核。";
       return;
     }
+    if (!subtitleReviewReviewer.trim() || !subtitleReviewReviewerId.trim() || !subtitleReviewReviewerRole.trim()
+        || !subtitleReviewRationale.trim() || !subtitleReviewEvidenceRefs.trim()) {
+      subtitleReviewMessage = "请填写审核者身份、角色、审批理由和证据引用。";
+      return;
+    }
     const corrections = subtitleReviewDocument.segments.flatMap((segment) => {
       const value = (subtitleReviewCorrections[segment.index] ?? segment.asr_text).trim();
       return value && value !== segment.asr_text
@@ -982,6 +995,10 @@
         reviewed_segment_indexes: subtitleReviewReviewedIndexes,
         corrections,
         reviewer: subtitleReviewReviewer.trim(),
+        reviewer_id: subtitleReviewReviewerId.trim(),
+        reviewer_role: subtitleReviewReviewerRole.trim(),
+        rationale: subtitleReviewRationale.trim(),
+        evidence_refs: subtitleReviewEvidenceRefs.split(/\r?\n/).map((value) => value.trim()).filter(Boolean),
         confirmation: subtitleReviewConfirmation,
       });
       subtitleReviewMessage = result.product.validated
@@ -1896,6 +1913,7 @@
                               <span><b>整链一致性</b><small>{recipeTrace.chain_consistent ? "通过" : "待核验 / 不一致"}</small></span>
                               <span><b>发布权限</b><small>未授权 · {recipeTrace.release_review.status}</small></span>
                             </div>
+                            <VideoReleaseReview review={recipeTrace.release_review} />
                             <small>只读追溯：不启动生成、不修改账本、不触发发布。发布仍须独立人工审核。</small>
                           {/if}
                         </section>
@@ -2025,14 +2043,14 @@
                       <span><b>整链一致性</b><small>{recipeTrace.chain_consistent ? "通过" : "待核验 / 不一致"}</small></span>
                       <span><b>发布权限</b><small>未授权 · {recipeTrace.release_review.status}</small></span>
                     </div>
+                    <VideoReleaseReview review={recipeTrace.release_review} />
                     <small>只读追溯：不启动生成、不修改账本、不触发发布。can_publish=false，发布仍须独立人工审核。</small>
                   {/if}
                 </section>
               {/if}
-              {#if selectedSubtitleReviewProductId === product.id}                <section class="product-review-form subtitle-review-workbench" aria-label="粤语字幕逐条人工审校">
-                  <b>粤语旁白 · 逐条字幕审校</b>
-                  <small>请先打开原片并听完每条旁白。机器识别结果和 CER 只作参考，不能代替人工听审。</small>
-                  <div class="product-actions">
+              {#if selectedSubtitleReviewProductId === product.id}
+                <section class="product-review-form subtitle-review-workbench" aria-label="粤语字幕逐条人工审校">
+                  <b>粤语旁白 · 逐条字幕审校</b>                  <div class="product-actions">
                     <button type="button" class="radar-scan" onclick={() => previewProduct(product)}>打开原片听审</button>
                     <span>{subtitleReviewReviewedIndexes.length} / {subtitleReviewDocument?.segments.length ?? 0} 条已确认</span>
                   </div>
@@ -2058,18 +2076,27 @@
                     <label>审核人
                       <input maxlength="120" placeholder="填写实际审核人" bind:value={subtitleReviewReviewer} />
                     </label>
-                    <label>明确批准口令
+                    <label>审核者 ID（本地自报身份，未经过账号认证）
+                      <input maxlength="120" placeholder="例如 local-editor-1" bind:value={subtitleReviewReviewerId} />
+                    </label>
+                    <label>审核角色
+                      <input maxlength="80" placeholder="例如 subtitle_editor" bind:value={subtitleReviewReviewerRole} />
+                    </label>
+                    <label>审批理由
+                      <textarea rows="2" maxlength="2000" placeholder="说明已如何核对全部字幕、旁白和修订" bind:value={subtitleReviewRationale}></textarea>
+                    </label>
+                    <label>证据引用（每行一条，填写本次实际核对过的材料）
+                      <textarea rows="2" maxlength="2000" placeholder="例如 subtitle-review.json#segments" bind:value={subtitleReviewEvidenceRefs}></textarea>
+                    </label>                    <label>明确批准口令
                       <input maxlength="40" placeholder="输入 APPROVE-HUMAN-REVIEW" bind:value={subtitleReviewConfirmation} />
                     </label>
                     <button type="button" class="feedback-submit" onclick={() => approveSubtitleReview(product)}
-                      disabled={subtitleReviewSubmitting || subtitleReviewReviewedIndexes.length !== subtitleReviewDocument.segments.length || subtitleReviewConfirmation !== "APPROVE-HUMAN-REVIEW" || !subtitleReviewReviewer.trim()}>
+                      disabled={subtitleReviewSubmitting || subtitleReviewReviewedIndexes.length !== subtitleReviewDocument.segments.length || subtitleReviewConfirmation !== "APPROVE-HUMAN-REVIEW" || !subtitleReviewReviewer.trim() || !subtitleReviewReviewerId.trim() || !subtitleReviewReviewerRole.trim() || !subtitleReviewRationale.trim() || !subtitleReviewEvidenceRefs.trim()}>
                       {subtitleReviewSubmitting ? "正在生成新版本…" : "确认人工审校并生成新版本"}
                     </button>
-                    <small>批准只会生成新的不可覆盖版本；不会自动把 Creator 标记为已发布。静帧告警、技术 QA 和其他发布门槛仍独立生效。</small>
                   {:else if subtitleReviewMessage}
-                    <small role="status">{subtitleReviewMessage}</small>
-                  {/if}
-                  {#if subtitleReviewMessage}<small role="status">{subtitleReviewMessage}</small>{/if}
+                    <small role="status">{subtitleReviewMessage}</small>                  {/if}
+
                 </section>
               {/if}
               {#if selectedTimelineId === timelineInitiativeId(product)}

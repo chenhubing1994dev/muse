@@ -471,9 +471,12 @@ test("subtitle review workbench loads cue data and requires authenticated explic
     reviewed_segment_indexes: [1],
     corrections: [{ segment_index: 1, corrected_text: "修订文案" }],
     reviewer: "creator",
+    reviewer_id: "local-editor-1",
+    reviewer_role: "subtitle_editor",
+    rationale: "Checked every subtitle cue against narration.",
+    evidence_refs: ["subtitle-review.json#segments", "narration.wav#sha256"],
     confirmation: "APPROVE-HUMAN-REVIEW",
-  };
-  const result = await client.approveSubtitleReview(identity, version, payload);
+  };  const result = await client.approveSubtitleReview(identity, version, payload);
   assert.equal(result.product.status, "testing");
   assert.equal(calls[0].url, "http://127.0.0.1:8765/api/v1/products/" + identity + "/" + version + "/subtitle-review");
   assert.equal(calls[0].options.headers.Authorization, "Bearer " + token);

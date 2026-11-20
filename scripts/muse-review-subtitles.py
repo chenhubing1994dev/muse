@@ -49,6 +49,10 @@ def main() -> int:
     parser.add_argument("--review", required=True, help="subtitle-review.json from the video delivery bundle")
     parser.add_argument("--answers", required=True, help="JSON with reviewed_segment_indexes and corrections")
     parser.add_argument("--reviewer", required=True, help="human reviewer identity or initials")
+    parser.add_argument("--reviewer-id", help="self-asserted local reviewer ID; required with --approve")
+    parser.add_argument("--reviewer-role", help="reviewer role; required with --approve")
+    parser.add_argument("--rationale", help="approval rationale; required with --approve")
+    parser.add_argument("--evidence-ref", action="append", dest="evidence_refs", help="actual evidence reference; repeat for multiple references")
     parser.add_argument("--output-review", help="new review JSON path; defaults to <review>.reviewed.json")
     parser.add_argument("--srt-output", help="approved SRT path; defaults beside output review")
     parser.add_argument("--approve", action="store_true", help="approve only after every segment has been listened to and reviewed")
@@ -62,6 +66,8 @@ def main() -> int:
     try:
         if args.approve and args.confirm != _CONFIRMATION:
             raise ValueError(f"--approve requires --confirm {_CONFIRMATION}")
+        if args.approve and (not args.reviewer_id or not args.reviewer_role or not args.rationale or not args.evidence_refs):
+            raise ValueError("--approve also requires --reviewer-id, --reviewer-role, --rationale and at least one --evidence-ref")
         if not args.approve and args.confirm is not None:
             raise ValueError("--confirm is only valid together with --approve")
         if args.remux_approved_product and (not args.approve or not args.product_id or not args.version_id):
@@ -80,6 +86,10 @@ def main() -> int:
             corrections=answers["corrections"],
             reviewer=args.reviewer,
             approve=args.approve,
+            reviewer_id=args.reviewer_id,
+            reviewer_role=args.reviewer_role,
+            rationale=args.rationale,
+            evidence_refs=args.evidence_refs,
         )
         output_review = Path(args.output_review).expanduser() if args.output_review else review_path.with_name(
             review_path.stem + ".reviewed.json"

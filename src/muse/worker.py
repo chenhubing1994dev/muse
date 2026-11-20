@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from datetime import datetime, timezone
 import json
 import os
 import threading
@@ -18,6 +20,33 @@ from muse.failure_taxonomy import FailureDescriptor, MuseTaskError, classify_fai
 from muse.resource_governor import ResourcePolicy, probe_host_resources
 
 Handler = Callable[[dict[str, Any]], Any]
+
+
+@dataclass(frozen=True)
+class WorkerExecutionContext:
+    """Lease identity for trusted handlers that explicitly opt in.
+
+    This is execution metadata, not an authentication token. Handlers must
+    re-check the live TaskQueue lease immediately before sensitive writes.
+    """
+
+    task_id: str
+    worker_id: str
+    database: str
+
+    def assert_current_lease(self) -> None:
+        """Raise unless this worker still owns an unexpired running lease."""
+        with TaskQueue(self.database) as queue:
+            task = queue.get(self.task_id)
+        if task is None or task.get("status") != "running" or task.get("lease_owner") != self.worker_id:
+            raise PermissionError("Worker execution context no longer owns this task lease")
+        raw_expiry = task.get("lease_expires_at")
+        try:
+            expiry = datetime.fromisoformat(raw_expiry)
+        except (TypeError, ValueError) as exc:
+            raise PermissionError("Worker task lease expiry is invalid") from exc
+        if expiry.tzinfo is None or expiry.astimezone(timezone.utc) <= datetime.now(timezone.utc):
+            raise PermissionError("Worker task lease has expired")
 
 def echo_handler(payload: dict[str, Any]) -> dict[str, Any]:
     """Safe built-in example handler; performs no external side effects."""
@@ -300,7 +329,19 @@ def run_once(
         heartbeat_thread.start()
         try:
             task_handler = getattr(handler, "execute_task", None)
-            result = task_handler(task["payload"], task_id=task["id"]) if callable(task_handler) else handler(task["payload"])
+            if getattr(handler, "accepts_execution_context", False) is True:
+                execution_context = WorkerExecutionContext(
+                    task_id=task["id"], worker_id=worker_id, database=str(Path(database).resolve()),
+                )
+                execution_context.assert_current_lease()
+                if callable(task_handler):
+                    result = task_handler(
+                        task["payload"], task_id=task["id"], execution_context=execution_context,
+                    )
+                else:
+                    result = handler(task["payload"], execution_context=execution_context)
+            else:
+                result = task_handler(task["payload"], task_id=task["id"]) if callable(task_handler) else handler(task["payload"])
             status = "succeeded"
             if kind == "approved_code_change" and isinstance(result, dict) and result.get("status") != "implemented":
                 status = "failed"

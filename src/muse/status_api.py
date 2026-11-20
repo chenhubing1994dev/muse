@@ -209,13 +209,17 @@ def build_agents(agent_db: str | Path, *, limit: int = 100) -> list[dict[str, An
         agents = registry.list_agents(limit=limit)
         return [{
             "agent_id": agent["agent_id"], "role": agent["role"],
+            "title": agent["title"], "reports_to": agent["reports_to"],
             "display_name": agent["display_name"], "capabilities": agent["capabilities"],
             "source": agent["source"], "enabled": agent["enabled"],
             "status": agent["status"], "last_seen_at": agent["last_seen_at"],
             "stale_after_seconds": agent["stale_after_seconds"],
+            "reported_state": agent.get("reported_state"),
+            "reported_at": agent.get("reported_at"),
+            "reported_source": agent.get("reported_source"),
             "current_task_id": agent["current_task_id"],
-            "effectiveness": registry.effectiveness(str(agent["agent_id"])),        } for agent in agents]
-
+            "effectiveness": registry.effectiveness(str(agent["agent_id"])),
+        } for agent in agents]
 
 def build_feedback(improvement_db: str | Path, *, limit: int = 50) -> list[dict[str, Any]]:
     """Return only allowlisted feedback fields; no free-text or identifiers."""
@@ -1308,7 +1312,8 @@ def create_status_server(
                 elif parsed.path == "/api/v1/video-attempts":
                     if initiatives_path is None or not initiatives_path.is_file():
                         self._send(200, {"api_version": 1, "metrics": {
-                            "total": 0, "succeeded": 0, "failed": 0, "pending": 0,
+                            "total": 0, "succeeded": 0, "failed": 0, "queued": 0,
+                            "running": 0, "leased": 0, "pending": 0,
                             "terminal": 0, "success_rate": None,
                             "success_rate_numerator": 0, "success_rate_denominator": 0,
                             "scope": "persisted_video_attempts",
@@ -1318,12 +1323,9 @@ def create_status_server(
                     with InitiativeStore(initiatives_path) as attempts_store:
                         metrics = attempts_store.aggregate_video_attempt_metrics()
                         # Product library returns up to 100 versions; expose the ledger maximum so older products can still resolve exact attempts.
-                        attempts = attempts_store.list_video_attempts(limit=200)
+                        attempts = attempts_store.list_video_attempts(limit=200, prioritize_active=True)
                     metrics["success_rate_numerator"] = metrics["succeeded"]
                     metrics["success_rate_denominator"] = metrics["terminal"]
-                    metrics["queued"] = sum(1 for item in attempts if item["status"] == "queued")
-                    metrics["running"] = sum(1 for item in attempts if item["status"] == "running")
-                    metrics["leased"] = sum(1 for item in attempts if item.get("worker_id") and item["status"] == "running")
                     public_attempts = [{
                         "attempt_id": item["attempt_id"], "mode": item["mode"],
                         "status": item["status"], "created_at": item["created_at"],
@@ -1749,9 +1751,12 @@ def create_status_server(
                     if len(raw) != length:
                         raise ValueError("incomplete request body")
                     payload = json.loads(raw.decode("utf-8"))
-                    required = {"reviewed_segment_indexes", "corrections", "reviewer", "confirmation"}
+                    required = {
+                        "reviewed_segment_indexes", "corrections", "reviewer", "reviewer_id",
+                        "reviewer_role", "rationale", "evidence_refs", "confirmation",
+                    }
                     if not isinstance(payload, dict) or set(payload) != required:
-                        raise ValueError("body requires reviewed_segment_indexes, corrections, reviewer and confirmation only")
+                        raise ValueError("body requires reviewed segments, corrections, reviewer identity, role, rationale, evidence references and confirmation only")
                     if payload["confirmation"] != "APPROVE-HUMAN-REVIEW":
                         raise ValueError("explicit human approval confirmation is required")
                     initiative_id, version = subtitle_approval_match.groups()
@@ -1767,6 +1772,10 @@ def create_status_server(
                         corrections=payload["corrections"],
                         reviewer=payload["reviewer"],
                         approve=True,
+                        reviewer_id=payload["reviewer_id"],
+                        reviewer_role=payload["reviewer_role"],
+                        rationale=payload["rationale"],
+                        evidence_refs=payload["evidence_refs"],
                     )
                     result = VideoProductBuilder(products_workspace).package_approved_subtitle_revision(
                         initiative_id, version, approved_review,

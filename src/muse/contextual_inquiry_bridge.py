@@ -8,6 +8,7 @@ never persisted in plaintext by this bridge.
 from __future__ import annotations
 
 import hashlib
+from datetime import datetime, timezone
 from typing import Any
 
 from muse.contextual_inquiry import ContextualInquiry, SafetyRoute
@@ -156,26 +157,66 @@ def enqueue_review_task(
 
 
 def load_encrypted_case_for_review(
-    queue: TaskQueue, task_id: str,
+    queue: TaskQueue, task_id: str, *, worker_id: str | None = None,
 ) -> ContextualInquiry:
-    """Read one encrypted case for a pre-approval review; never attaches or approves it.
+    """Read one encrypted case for pre-approval review; never attaches or approves it.
 
-    This narrow path accepts only a contextual-inquiry Ticket that is still
-    waiting for human approval and has an explicit encrypted-context envelope.
-    The returned object is revalidated and carries no knowledge-memory consent.
+    Before a review-only lease is claimed, the legacy read-only waiting_approval
+    path remains available. During review execution, the caller must supply the
+    exact live Worker lease owner and the Ticket must carry the separate human
+    review-only authorization and matching audit event.
     """
     if not isinstance(queue, TaskQueue):
         raise TypeError("queue must be the existing Muse TaskQueue")
     if not isinstance(task_id, str) or not task_id.strip() or len(task_id) > 128:
         raise ValueError("task_id must be non-empty text of at most 128 characters")
+    if worker_id is not None and (
+        not isinstance(worker_id, str) or not worker_id.strip() or len(worker_id) > 120
+    ):
+        raise ValueError("worker_id must be non-empty text of at most 120 characters")
     task = queue.get(task_id)
     if task is None:
         raise KeyError(task_id)
     payload = task["payload"]
     if payload.get("kind") != "contextual_inquiry_review":
         raise PermissionError("only contextual inquiry review Tickets can open case context")
-    if task["status"] != "waiting_approval":
-        raise PermissionError("case context can be opened only while the Ticket awaits human approval")
+
+    if task["status"] == "waiting_approval":
+        if worker_id is not None:
+            raise PermissionError("a Worker lease is not valid for a waiting_approval Ticket")
+    elif task["status"] == "running":
+        if worker_id is None or task.get("lease_owner") != worker_id:
+            raise PermissionError("opening a running case requires the current Worker lease owner")
+        try:
+            expiry = datetime.fromisoformat(task["lease_expires_at"])
+        except (TypeError, ValueError):
+            raise PermissionError("running case has no valid Worker lease expiry") from None
+        if expiry.tzinfo is None or expiry.astimezone(timezone.utc) <= datetime.now(timezone.utc):
+            raise PermissionError("running case Worker lease has expired")
+        authorization = payload.get("_review_authorization")
+        if (
+            not isinstance(authorization, dict)
+            or authorization.get("scope") != "review_only"
+            or not isinstance(authorization.get("authorized_by"), str)
+            or not authorization["authorized_by"].strip()
+        ):
+            raise PermissionError("running case has no separate review-only authorization")
+        authorization_event = next(
+            (
+                event for event in reversed(queue.events(task_id))
+                if event["event_type"] == "contextual_inquiry.review_only_authorized"
+            ),
+            None,
+        )
+        if (
+            authorization_event is None
+            or authorization_event["actor"] != authorization["authorized_by"]
+            or authorization_event["payload"] != {"scope": "review_only"}
+        ):
+            raise PermissionError("running case review-only authorization audit does not match")
+    else:
+        raise PermissionError("case context can be opened only for pending or leased review-only Tickets")
+
     if (
         payload.get("case_context_envelope_stored") is not True
         or payload.get("context_status") != "encrypted_pending_handler"

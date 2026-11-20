@@ -70,7 +70,9 @@ class SubtitleReviewTests(unittest.TestCase):
         approved = apply_human_subtitle_review(
             review, reviewed_segment_indexes=[1, 2],
             corrections=[{"segment_index": 1, "corrected_text": "人工智能"}],
-            reviewer="human-editor", approve=True,
+            reviewer="human-editor", approve=True, reviewer_id="local-editor-1",
+            reviewer_role="subtitle_editor", rationale="Checked all cues against narration.",
+            evidence_refs=["subtitle-review.json#segments", "narration.wav#sha256"],
         )
         self.assertTrue(approved["human_approved"])
         self.assertEqual(approved["review_status"], "approved")
@@ -82,7 +84,10 @@ class SubtitleReviewTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "immutable"):
             apply_human_subtitle_review(
                 approved, reviewed_segment_indexes=[1, 2], corrections=[], reviewer="another", approve=True,
+                reviewer_id="local-editor-2", reviewer_role="subtitle_editor",
+                rationale="Second review.", evidence_refs=["subtitle-review.json"],
             )
+
     def test_reconfirming_asr_text_clears_a_prior_correction_without_erasing_audit(self):
         review = build_subtitle_review("人工智能講得流暢。", self._asr())
         corrected = apply_human_subtitle_review(
@@ -102,6 +107,8 @@ class SubtitleReviewTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "every subtitle segment"):
             apply_human_subtitle_review(
                 review, reviewed_segment_indexes=[1], corrections=[], reviewer="human", approve=True,
+                reviewer_id="local-editor-1", reviewer_role="subtitle_editor",
+                rationale="Incomplete review.", evidence_refs=["subtitle-review.json"],
             )
         with self.assertRaisesRegex(ValueError, "invalid or duplicate"):
             apply_human_subtitle_review(

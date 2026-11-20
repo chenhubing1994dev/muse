@@ -39,6 +39,43 @@ class AgentRegistryTests(unittest.TestCase):
         stale = self.registry.get("coder", now=now + timedelta(seconds=100), stale_after_seconds=30)
         self.assertEqual(stale["status"], "offline")
 
+    def test_reported_agent_state_maps_herdr_lifecycle_without_approving_work(self) -> None:
+        now = datetime(2026, 11, 21, tzinfo=timezone.utc)
+        self.registry.register("coder", role="developer")
+        self.assertTrue(self.registry.report_state(
+            "coder", "blocked", message="waiting for operator", source="herdr-core", now=now,
+        ))
+        blocked = self.registry.get("coder", now=now)
+        self.assertEqual(blocked["status"], "blocked")
+        self.assertEqual(blocked["reported_state"], "blocked")
+        self.assertEqual(blocked["reported_message"], "waiting for operator")
+        self.assertEqual(blocked["reported_source"], "herdr-core")
+        self.assertEqual(blocked["reported_at"], now.isoformat())
+        stale = self.registry.get("coder", now=now + timedelta(seconds=91))
+        self.assertEqual(stale["status"], "offline")
+        self.assertEqual(stale["reported_state"], "blocked")
+
+    def test_reported_idle_state_overrides_old_task_marker(self) -> None:
+        now = datetime(2026, 11, 21, tzinfo=timezone.utc)
+        self.registry.register("coder", role="developer")
+        self.registry.heartbeat("coder", busy=True, current_task_id="old-task", now=now)
+        self.registry.report_state("coder", "idle", now=now + timedelta(seconds=1))
+        agent = self.registry.get("coder", now=now + timedelta(seconds=1))
+        self.assertEqual(agent["status"], "online")
+        self.assertEqual(agent["reported_state"], "idle")
+        self.assertEqual(agent["current_task_id"], "old-task")
+
+    def test_reported_state_rejects_untrusted_control_text(self) -> None:
+        self.registry.register("coder", role="developer")
+        with self.assertRaises(ValueError):
+            self.registry.report_state("coder", "approved")
+        with self.assertRaises(ValueError):
+            self.registry.report_state("coder", "blocked", source="bad\x1b")
+        with self.assertRaises(ValueError):
+            self.registry.report_state("coder", "blocked", message="bad\x1b[31m")
+        with self.assertRaises(ValueError):
+            self.registry.report_state("coder", "blocked", message="x" * 161)
+
     def test_unknown_agent_heartbeat_returns_false(self) -> None:
         self.assertFalse(self.registry.heartbeat("missing"))
 
@@ -53,6 +90,52 @@ class AgentRegistryTests(unittest.TestCase):
         self.assertEqual([item["agent_id"] for item in self.registry.list_agents(limit=2)], ["alpha", "zeta"])
         with self.assertRaises(ValueError):
             self.registry.list_agents(limit=0)
+
+    def test_org_chart_tracks_reporting_lines_and_audits_changes(self) -> None:
+        self.registry.register("ceo", role="executive")
+        self.registry.register("cto", role="engineering")
+        self.registry.register("coder", role="developer")
+        self.registry.set_org_assignment("ceo", title="Chief Executive", actor="board")
+        self.registry.set_org_assignment("cto", title="CTO", reports_to="ceo", actor="board")
+        self.registry.set_org_assignment("coder", title="Backend Engineer", reports_to="cto", actor="board")
+
+        chart = self.registry.org_chart()
+        self.assertEqual(chart["total"], 3)
+        self.assertFalse(chart["truncated"])
+        self.assertEqual(chart["edges"], [
+            {"manager_id": "ceo", "report_id": "cto"},
+            {"manager_id": "cto", "report_id": "coder"},
+        ])
+        coder = self.registry.get("coder")
+        self.assertEqual(coder["title"], "Backend Engineer")
+        self.assertEqual(coder["reports_to"], "cto")
+        events = self.registry.list_org_events(agent_id="coder")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["actor"], "board")
+        self.assertEqual(events[0]["payload"]["reports_to"], "cto")
+
+    def test_org_assignment_rejects_missing_self_and_cyclic_managers(self) -> None:
+        self.registry.register("ceo", role="executive")
+        self.registry.register("cto", role="engineering")
+        self.registry.register("coder", role="developer")
+        with self.assertRaises(ValueError):
+            self.registry.set_org_assignment("coder", title="Coder", reports_to="missing")
+        with self.assertRaises(ValueError):
+            self.registry.set_org_assignment("coder", title="Coder", reports_to="coder")
+        self.registry.set_org_assignment("cto", title="CTO", reports_to="ceo")
+        self.registry.set_org_assignment("coder", title="Coder", reports_to="cto")
+        with self.assertRaises(ValueError):
+            self.registry.set_org_assignment("ceo", title="CEO", reports_to="coder")
+        self.assertIsNone(self.registry.get("ceo")["reports_to"])
+
+    def test_org_chart_reports_truncation_and_rejects_invalid_limits(self) -> None:
+        self.registry.register("alpha", role="research")
+        self.registry.register("beta", role="writer")
+        chart = self.registry.org_chart(limit=1)
+        self.assertTrue(chart["truncated"])
+        self.assertEqual(chart["total"], 2)
+        with self.assertRaises(ValueError):
+            self.registry.org_chart(limit=0)
 
     def test_record_outcome_and_effectiveness_are_evidence_based(self) -> None:
         self.registry.register("coder", role="developer")

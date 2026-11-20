@@ -21,7 +21,10 @@ muse-watchdog = "muse.watchdog:main"
 muse-plan-hour = "muse.workload_cli:main"
 muse-radar = "muse.capability_radar:main"
 muse-media = "muse.media:main"
+muse-ffmpeg-skill = "muse.ffmpeg_skill:main"
 muse-video = "muse.video_factory:main"
+muse-video-studio = "muse.video_studio:main"
+muse-video-clips = "muse.video_highlights:main"
 muse-piper-tts = "muse.piper_tts:main"
 muse-video-product = "muse.video_product_builder:main"
 muse-video-qa = "muse.video_qa:main"
@@ -51,6 +54,7 @@ muse-reminders = "muse.reminders:main"
 muse-intake = "muse.intake_runtime:main"
 muse-status-api = "muse.status_api:main"
 muse-agents = "muse.agent_discovery:main"
+muse-agent-status = "muse.herdr_adapter:main"
 muse-ruflo = "muse.ruflo_adapter:main"
 muse-desktop = "muse.desktop_adapter:main"
 muse-runtime = "muse.unified_runtime:main"
@@ -62,7 +66,9 @@ muse-video-worker = "muse.video_task_worker:main"
 muse-recreate = "muse.software_recreation:main"
 muse-software-craft = "muse.software_crafting:main"
 muse-open-design = "muse.open_design:main"
+muse-prompt = "muse.prompt_engine:main"
 muse-business = "muse.business_opportunities:main"
+muse-value = "muse.value_forge:main"
 
 [project.optional-dependencies]
 web-scraping = [
@@ -75,3 +81,6 @@ video-diagnostics = [
     "numpy>=1.26",
     "opencv-python-headless>=4.8",
 ]
+
+[tool.setuptools.package-data]
+muse = ["video_pipelines.yaml", "video_stages.yaml"]

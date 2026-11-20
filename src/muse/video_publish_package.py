@@ -242,29 +242,86 @@ def _platform_draft(
     }
 
 
+def _review_record_status(
+    record: Any, *, category: str, initiative_id: str, version_id: str,
+    video_sha256: str, required_artifacts: dict[str, str],
+) -> str:
+    """Verify review scope and digest; the digest is not a digital signature."""
+    if not isinstance(record, dict):
+        return "not_recorded"
+    if (not isinstance(required_artifacts, dict) or not required_artifacts
+            or any(
+                not isinstance(name, str) or not name.strip()
+                or not isinstance(digest, str) or len(digest) != 64
+                or any(character not in "0123456789abcdef" for character in digest)
+                for name, digest in required_artifacts.items()
+            )):
+        return "evidence_mismatch_or_incomplete"
+    reviewer, subject = record.get("reviewer"), record.get("subject")
+    evidence_refs, rationale, reviewed_at = record.get("evidence_refs"), record.get("rationale"), record.get("reviewed_at")
+    try:
+        timestamp = datetime.fromisoformat(str(reviewed_at).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return "evidence_mismatch_or_incomplete"
+    if not isinstance(reviewer, dict) or not isinstance(subject, dict):
+        return "evidence_mismatch_or_incomplete"
+    if timestamp.tzinfo is None or not isinstance(evidence_refs, list) or not evidence_refs:
+        return "evidence_mismatch_or_incomplete"
+    if not all(isinstance(item, str) and item.strip() for item in evidence_refs):
+        return "evidence_mismatch_or_incomplete"
+    if not isinstance(rationale, str) or not rationale.strip():
+        return "evidence_mismatch_or_incomplete"
+    if not all(isinstance(reviewer.get(key), str) and reviewer[key].strip() for key in ("id", "role")):
+        return "evidence_mismatch_or_incomplete"
+    if (record.get("schema_version") != 1 or record.get("category") != category
+            or record.get("decision") != "approved"
+            or subject.get("initiative_id") != initiative_id
+            or subject.get("version_id") != version_id
+            or subject.get("video_sha256") != video_sha256
+            or subject.get("artifact_sha256") != required_artifacts):
+        return "evidence_mismatch_or_incomplete"
+    payload = {key: value for key, value in record.items() if key != "review_sha256"}
+    expected = hashlib.sha256(_json_bytes(payload)).hexdigest()
+    if record.get("review_sha256") != expected:
+        return "evidence_mismatch_or_incomplete"
+    return "verified_human_review_digest_scope_bound"
+
+
 def _release_quality_report(
     *, product_manifest: dict[str, Any], qa_warnings: list[dict[str, Any]],
-    subtitles: Path, video: Path,
+    subtitles: Path, video: Path, initiative_id: str, version_id: str,
 ) -> dict[str, Any]:
     """Summarize evidence without promoting missing human reviews to approvals."""
-    review = product_manifest.get("subtitle_review")
-    subtitle_status = "not_recorded"
-    if isinstance(review, dict):
-        approved_by = review.get("approved_by")
-        approved_at = review.get("approval_timestamp")
-        evidence_matches = (
-            review.get("schema_version") == 1
-            and review.get("status") == "approved"
-            and review.get("human_approved") is True
-            and isinstance(approved_by, str) and bool(approved_by.strip())
-            and isinstance(approved_at, str) and bool(approved_at.strip())
-            and review.get("approved_srt_sha256") == _sha256(subtitles)
-            and review.get("video_sha256") == _sha256(video)
-            and isinstance(review.get("review_sha256"), str)
-            and len(review["review_sha256"]) == 64
+    video_hash, subtitle_hash = _sha256(video), _sha256(subtitles)
+    review_records = product_manifest.get("human_reviews")
+    if not isinstance(review_records, dict):
+        review_records = {}
+    product_files = product_manifest.get("files")
+    review_artifact_sha256 = (
+        product_files.get("subtitle-review.json") if isinstance(product_files, dict) else None
+    )
+    review_specs = {
+        "subtitle_review": (
+            "subtitle_review",
+            {
+                "subtitles.srt": subtitle_hash,
+                "subtitle-review.json": review_artifact_sha256 if isinstance(review_artifact_sha256, str) else "",
+            },
+        ),
+        "editorial_and_fact_review": ("editorial_and_fact", {"subtitles.srt": subtitle_hash}),
+        "visual_and_model_rights_review": ("visual_and_model_rights", {"video.mp4": video_hash}),
+        "privacy_and_person_release_review": ("privacy_and_person_release", {"video.mp4": video_hash}),
+        "music_and_audio_rights_review": ("music_and_audio_rights", {"video.mp4": video_hash}),
+    }
+    verified_reviews = {
+        report_key: _review_record_status(
+            review_records.get(record_key), category=record_key,
+            initiative_id=initiative_id, version_id=version_id,
+            video_sha256=video_hash, required_artifacts=artifacts,
         )
-        subtitle_status = "verified_human_approval" if evidence_matches else "evidence_mismatch_or_incomplete"
-
+        for report_key, (record_key, artifacts) in review_specs.items()
+    }
+    subtitle_status = verified_reviews["subtitle_review"]
     checks = {
         "technical_quality": {"status": "passed", "evidence": "qa-report.json"},
         "visual_anomaly_review": {
@@ -272,26 +329,30 @@ def _release_quality_report(
             "warning_count": len(qa_warnings),
             "warning_codes": sorted({item["code"] for item in qa_warnings if isinstance(item.get("code"), str)}),
         },
-        "subtitle_review": {"status": subtitle_status, "evidence": "muse-product-manifest.json:subtitle_review"},
-        "editorial_and_fact_review": {"status": "pending_human_review"},
-        "visual_and_model_rights_review": {"status": "pending_human_review"},
-        "privacy_and_person_release_review": {"status": "pending_human_review"},
-        "music_and_audio_rights_review": {"status": "pending_human_review"},
+        "subtitle_review": {
+            "status": subtitle_status,
+            "evidence": "muse-product-manifest.json:human_reviews:subtitle_review",
+            "legacy_review_document_is_not_release_approval": True,
+        },
+        **{key: {"status": value, "evidence": f"muse-product-manifest.json:human_reviews:{key}"}
+           for key, value in verified_reviews.items() if key != "subtitle_review"},
         "ai_generated_content_disclosure": {"status": "pending_platform_specific_review"},
         "sponsorship_affiliate_and_product_placement": {"status": "confirmation_required"},
         "platform_upload_specifications": {"status": "manual_account_specific_check_required"},
         "account_authorization": {"status": "not_connected"},
     }
-    blockers = [name for name, item in checks.items() if item["status"] != "passed"]
+    blockers = [name for name, item in checks.items() if item["status"] not in {"passed", "verified_human_review_digest_scope_bound"}]
     return {
         "schema_version": 1,
         "overall_status": "blocked_pending_human_review" if blockers else "ready_for_separate_release_authorization",
         "can_publish": False,
         "technical_qa_is_not_release_approval": True,
+        "review_digest_is_not_a_digital_signature": True,
         "checks": checks,
         "blocking_items": blockers,
         "publish_api_called": False,
     }
+
 
 
 def build_publish_package(
@@ -376,9 +437,8 @@ def build_publish_package(
     qa_warning_codes = sorted({item["code"] for item in qa_warnings if isinstance(item.get("code"), str)})
     release_quality_report = _release_quality_report(
         product_manifest=product_manifest_document, qa_warnings=qa_warnings,
-        subtitles=subtitles, video=video,
+        subtitles=subtitles, video=video, initiative_id=initiative_id, version_id=version_id,
     )
-
     profile = product_info.get("video_metadata", {})
     if isinstance(profile, dict) and profile.get("aspect_ratio") not in (None, master_aspect_ratio):
         raise VideoPublishPackageError(f"publish-pack profile requires a {master_aspect_ratio} product manifest")
@@ -458,10 +518,10 @@ def build_publish_package(
             f"- 目标平台草稿：{', '.join(selected)}。\n"
             "- 视频、封面、字幕、分镜、来源说明和 Muse 产品 ZIP 均随包提供。\n"
             "- 各平台可直接复制的标题备选、标签、置顶评论与简介，见 `platform-drafts/<platform>.json`。\n"
-            "- 发布前必须复核事实、来源、视觉/模型权利、隐私、AI 合成披露、商业关系披露及平台上传规格。\n"            "- 未登录平台账号，未调用发布 API，未生成平台视频 ID 或发布链接。\n"
+            "- 发布前必须复核事实、来源、视觉/模型权利、隐私、AI 合成披露、商业关系披露及平台上传规格。\n"
+            "- 未登录平台账号，未调用发布 API，未生成平台视频 ID 或发布链接。\n"
         )
         (staging / "README.md").write_text(readme_text, encoding="utf-8")
-
         file_hashes = {
             path.relative_to(staging).as_posix(): _sha256(path)
             for path in sorted(staging.rglob("*"))

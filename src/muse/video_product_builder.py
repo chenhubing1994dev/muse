@@ -1366,12 +1366,45 @@ class VideoProductBuilder:
                 if _hash_file(path) != fact["sha256"] or _hash_file(copy_path) != fact["sha256"]:
                     raise VideoProductError("source scene MP4 changed while being packaged")
                 scene_asset_copies.append((copy_path, fact["archive_path"]))
+            background_music_mix = None
             if narration is not None:
                 if not ffprobe:
                     raise VideoProductError("FFprobe is required to verify narration/video duration alignment")
                 video_duration = _probe_media_duration_seconds(source, ffprobe, stream_type="video")
                 narration_duration = _probe_media_duration_seconds(narration, ffprobe, stream_type="audio")
                 narration_timeline = _validate_narration_timeline(video_duration, narration_duration)
+                if background_music is not None:
+                    from muse.video_audio_mix import build_bgm_envelope_expression, parse_srt_speech_windows
+                    speech_windows = []
+                    timing_source = "sidechain_only"
+                    if subtitles is not None:
+                        try:
+                            srt_text = subtitles.read_text(encoding="utf-8-sig")
+                            speech_windows = parse_srt_speech_windows(srt_text, video_duration)
+                        except (OSError, UnicodeError, ValueError) as exc:
+                            raise VideoProductError(
+                                f"subtitle-timed BGM ducking could not validate SRT timing: {type(exc).__name__}"
+                            ) from None
+                        timing_source = "subtitle_srt"
+                    fade_out_seconds = min(1.5, video_duration)
+                    volume_expression = build_bgm_envelope_expression(
+                        speech_windows, video_duration, base_gain=0.22, duck_gain=0.10,
+                        attack_ms=80, release_ms=450, fade_out_seconds=fade_out_seconds,
+                    )
+                    background_music_mix = {
+                        "method": "subtitle_timed_volume_plus_sidechaincompress" if subtitles is not None
+                                  else "fade_out_volume_plus_sidechaincompress",
+                        "speech_timing_source": timing_source,
+                        "speech_window_count": len(speech_windows),
+                        "base_gain": 0.22, "duck_gain": 0.10,
+                        "speech_attack_ms": 80, "speech_release_ms": 450,
+                        "fade_out_seconds": fade_out_seconds,
+                        "volume_expression_sha256": hashlib.sha256(volume_expression.encode("ascii")).hexdigest(),
+                        "sidechain_threshold": 0.025, "sidechain_ratio": 8,
+                        "sidechain_attack_ms": 20, "sidechain_release_ms": 450,
+                        "loudness_normalization": {"method": "ffmpeg_loudnorm", "target_lufs": -16,
+                                                    "true_peak_db": -1.5, "lra": 11},
+                    }
             base_rendered, rendered = staging / "base-video.mp4", staging / "video.mp4"
             shutil.copyfile(source, base_rendered)
             if _hash_file(source) != source_sha256 or _hash_file(base_rendered) != source_sha256:
@@ -1387,7 +1420,7 @@ class VideoProductBuilder:
                         "-stream_loop", "-1", "-i", str(background_music),
                         "-filter_complex",
                         "[1:a]aresample=48000,apad,volume=2.0,asplit=2[voice_sc][voice_mix];"
-                        "[2:a]aresample=48000,volume=0.22[music];"
+                        f"[2:a]aresample=48000,volume='{volume_expression}':eval=frame[music];"
                         "[music][voice_sc]sidechaincompress=threshold=0.025:ratio=8:attack=20:release=450[ducked];"
                         "[voice_mix][ducked]amix=inputs=2:duration=first:dropout_transition=2[mixed];"
                         "[mixed]loudnorm=I=-16:TP=-1.5:LRA=11[aout]",
@@ -1464,6 +1497,7 @@ class VideoProductBuilder:
                             "attack_ms": 20, "release_ms": 450,
                             "loudness_normalization": {"method": "ffmpeg_loudnorm", "target_lufs": -16, "true_peak_db": -1.5, "lra": 11}},
                 } if background_music_fact else None),
+                **({"background_music_mix": background_music_mix} if background_music_mix else {}),
                 "scenes": normalized_scenes,
                 "scene_assets": scene_asset_facts,
             }
@@ -1539,6 +1573,7 @@ class VideoProductBuilder:
                 } if narration else None),
                 **({"narration_evidence_contract": narration_evidence_contract}
                    if narration_evidence_contract is not None else {}),
+                **({"background_music_mix": background_music_mix} if background_music_mix else {}),
                 "execution": {
                     "local_tools_invoked": ["comfyui", "wan21"] + (["ffmpeg"] if narration else [])
                     + (["node", "remotion", "ffmpeg"] if motion_profile != "none" else []),
@@ -1831,12 +1866,44 @@ class VideoProductBuilder:
                 "video_sha256": files["video.mp4"],
             })).hexdigest()
             new_version = fingerprint[:20]
+            reviewer_identity = review_document.get("reviewer_identity")
+            evidence_refs = review_document.get("approval_evidence_refs")
+            rationale = review_document.get("approval_rationale")
+            if (not isinstance(reviewer_identity, dict)
+                    or not all(isinstance(reviewer_identity.get(key), str) and reviewer_identity[key].strip()
+                               for key in ("id", "role"))
+                    or reviewer_identity.get("identity_assurance") != "self_asserted_local_identity"
+                    or not isinstance(evidence_refs, list) or not evidence_refs
+                    or not isinstance(rationale, str) or not rationale.strip()):
+                raise VideoProductError("structured subtitle reviewer identity, rationale and evidence are required")
+            from muse.video_publish_package import _json_bytes
+            subtitle_release_review = {
+                "schema_version": 1, "category": "subtitle_review", "decision": "approved",
+                "reviewer": {"id": reviewer_identity["id"], "role": reviewer_identity["role"],
+                             "identity_assurance": "self_asserted_local_identity"},
+                "reviewed_at": approval_timestamp,
+                "subject": {
+                    "initiative_id": initiative_id, "version_id": new_version,
+                    "video_sha256": files["video.mp4"],
+                    "artifact_sha256": {
+                        "subtitles.srt": files["subtitles.srt"],
+                        "subtitle-review.json": files["subtitle-review.json"],
+                    },
+                },
+                "evidence_refs": evidence_refs, "rationale": rationale,
+            }
+            subtitle_release_review["review_sha256"] = hashlib.sha256(
+                _json_bytes(subtitle_release_review)
+            ).hexdigest()
+            human_reviews = dict(manifest.get("human_reviews", {})) if isinstance(manifest.get("human_reviews"), dict) else {}
+            human_reviews["subtitle_review"] = subtitle_release_review
             manifest.update({
                 "version_id": new_version, "status": "testing",
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "input_sha256": fingerprint, "files": files,
                 "video_metadata": video_metadata, "quality_gate": quality_gate,
                 "subtitles": subtitle_fact, "subtitle_review": review_record,
+                "human_reviews": human_reviews,
             })
             manifest["video_metadata"]["output"] = "video.mp4"
             (staging / "manifest.json").write_text(
@@ -1928,6 +1995,7 @@ class VideoProductBuilder:
                 "generation_metadata": generation_summary,
                 "validation": result["validation_summary"],
                 "quality_gate": result.get("quality_gate"),
+                **({"clip_provenance": {key: result["clip_provenance"].get(key) for key in ("source_sha256", "start_seconds", "end_seconds", "score", "analysis_mode", "captions_sha256")}} if isinstance(result.get("clip_provenance"), dict) else {}),
                 **({"subtitle_review": result["subtitle_review"]} if result.get("subtitle_review") else {}),
                 "product_id": result["initiative_id"],
                 "version_id": result["version_id"],
@@ -2048,10 +2116,11 @@ class VideoProductBuilder:
         qa_expected = legacy_expected | {"qa-report.json"}
         subtitle_expected = qa_expected | {"subtitles.srt"}
         reviewed_subtitle_expected = subtitle_expected | {"subtitle-review.json"}
+        clip_expected = qa_expected | {"clip-captions.srt"}
         files = manifest.get("files")
         if (manifest.get("product_kind") != "video_creator" or manifest.get("initiative_id") != initiative_id
                 or manifest.get("version_id") != version or not isinstance(files, dict)
-                or set(files) not in (legacy_expected, qa_expected, subtitle_expected, reviewed_subtitle_expected)):
+                or set(files) not in (legacy_expected, qa_expected, subtitle_expected, reviewed_subtitle_expected, clip_expected)): 
             raise VideoProductError("video product manifest is invalid")
         scene_assets = manifest.get("scene_assets", [])
         if not isinstance(scene_assets, list) or len(scene_assets) > 20:
@@ -2101,6 +2170,40 @@ class VideoProductBuilder:
                 raise VideoProductError("video subtitle manifest does not match the SRT artifact")
         elif subtitle_fact is not None or narration_asr is not None:
             raise VideoProductError("video subtitle/ASR metadata exists without a subtitle artifact")
+        clip_provenance = manifest.get("clip_provenance")
+        if "clip-captions.srt" in expected:
+            caption_path = resolved["clip-captions.srt"][0]
+            if (not isinstance(clip_provenance, dict)
+                    or clip_provenance.get("schema_version") != 1
+                    or clip_provenance.get("captions_sha256") != files["clip-captions.srt"]
+                    or caption_path.stat().st_size > 2 * 1024 * 1024):
+                raise VideoProductError("highlight clip caption provenance is invalid")
+        elif isinstance(clip_provenance, dict) and clip_provenance.get("captions_sha256") is not None:
+            raise VideoProductError("highlight caption hash exists without its SRT artifact")
+        if clip_provenance is not None:
+            if (not isinstance(clip_provenance, dict)
+                    or clip_provenance.get("schema_version") != 1
+                    or not isinstance(clip_provenance.get("source_name"), str)
+                    or Path(clip_provenance.get("source_name", "")).name != clip_provenance.get("source_name")
+                    or not isinstance(clip_provenance.get("source_sha256"), str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", clip_provenance["source_sha256"])
+                    or isinstance(clip_provenance.get("source_bytes"), bool)
+                    or not isinstance(clip_provenance.get("source_bytes"), int)
+                    or clip_provenance["source_bytes"] <= 0
+                    or any(isinstance(clip_provenance.get(key), bool)
+                           or not isinstance(clip_provenance.get(key), (int, float))
+                           or not math.isfinite(clip_provenance[key])
+                           for key in ("start_seconds", "end_seconds", "score"))
+                    or clip_provenance["start_seconds"] < 0
+                    or clip_provenance["end_seconds"] <= clip_provenance["start_seconds"]
+                    or not 0 <= clip_provenance["score"] <= 1
+                    or not isinstance(clip_provenance.get("analysis_mode"), str)
+                    or not isinstance(clip_provenance.get("transcript"), str)
+                    or len(clip_provenance["transcript"]) > 12000):
+                raise VideoProductError("highlight clip provenance is invalid")
+        elif "clip-captions.srt" in expected:
+            raise VideoProductError("highlight captions require clip provenance")
+
 
         subtitle_review_fact = manifest.get("subtitle_review")
         if "subtitle-review.json" in expected:
@@ -2248,6 +2351,7 @@ class VideoProductBuilder:
             "status": manifest.get("status", "testing"), "video_metadata": manifest.get("video_metadata", {}),
             "quality_gate": quality_gate, "source_assets": manifest.get("source_assets", []),
             "subtitles": subtitle_fact, "narration_asr": narration_asr,
+            "clip_provenance": clip_provenance,
             "subtitle_review": subtitle_review_fact,
             "background_music": background_music_fact,
             "package_sha256": files["product.zip"], "mp4_sha256": files["video.mp4"],

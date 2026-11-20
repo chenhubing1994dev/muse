@@ -326,7 +326,10 @@ class StatusApiTests(unittest.TestCase):
         endpoint = base + f"/api/v1/products/{initiative_id}/{version_id}/subtitle-review/approve"
         payload = {
             "reviewed_segment_indexes": [1], "corrections": [{"segment_index": 1, "corrected_text": "hello world"}],
-            "reviewer": "human-editor", "confirmation": "not-the-confirmation",
+            "reviewer": "human-editor", "reviewer_id": "local-editor-1", "reviewer_role": "subtitle_editor",
+            "rationale": "Checked every cue against the narration.",
+            "evidence_refs": ["subtitle-review.json#segments", "narration.wav#sha256"],
+            "confirmation": "not-the-confirmation",
         }
         try:
             with (
@@ -364,6 +367,9 @@ class StatusApiTests(unittest.TestCase):
                 approved_document = build.call_args.args[2]
                 self.assertTrue(approved_document["human_approved"])
                 self.assertEqual(approved_document["approved_by"], "human-editor")
+                self.assertEqual(approved_document["reviewer_identity"]["id"], "local-editor-1")
+                self.assertEqual(approved_document["approval_rationale"], payload["rationale"])
+                self.assertEqual(approved_document["approval_evidence_refs"], payload["evidence_refs"])
                 self.assertEqual(approved_document["segments"][0]["corrected_text"], "hello world")
         finally:
             server.shutdown()
@@ -470,6 +476,16 @@ class StatusApiTests(unittest.TestCase):
         self.assertNotIn("executable", encoded)
         self.assertEqual(result[0]["effectiveness"]["success_rate"], 1.0)
         self.assertEqual(result[0]["stale_after_seconds"], 90)
+
+    def test_agents_view_exposes_herdr_reported_state_without_free_text_message(self) -> None:
+        with AgentRegistry(self.agent_db) as registry:
+            registry.report_state("researcher", "blocked", message="private prompt text", source="herdr-core")
+        result = build_agents(self.agent_db)
+        self.assertEqual(result[0]["status"], "blocked")
+        self.assertEqual(result[0]["reported_state"], "blocked")
+        self.assertEqual(result[0]["reported_source"], "herdr-core")
+        self.assertIsNotNone(result[0]["reported_at"])
+        self.assertNotIn("private prompt text", json.dumps(result))
 
     def test_improvement_detail_exposes_review_material_but_not_arbitrary_metadata_or_notes(self) -> None:
         improvement_db = Path(self.temp.name) / "improvements.sqlite3"

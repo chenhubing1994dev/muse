@@ -1,0 +1,475 @@
+{
+  "schema_version": 1,
+  "format": "yaml-1.2-json-subset",
+  "pipelines": [
+    {
+      "pipeline_id": "reference_remake",
+      "name": "参考视频再创作",
+      "category": "reference",
+      "description": "拆解用户提供的参考视频，再形成有差异的创作方案。",
+      "before_shots": [
+        "reference_analysis",
+        "concept",
+        "script",
+        "storyboard"
+      ],
+      "after_shots": [
+        "narration",
+        "audio_design",
+        "subtitle",
+        "assemble",
+        "technical_qa",
+        "creative_review",
+        "rights_review",
+        "publish_gate"
+      ],
+      "scene_mode": "generated_shot",
+      "coverage": "partial",
+      "available_modules": [
+        "video_prompt_composer",
+        "story_bible",
+        "video_workflow",
+        "video_product_builder"
+      ],
+      "planned_gaps": [
+        "通用参考视频镜头分析与差异化方案尚未形成完整自动化入口"
+      ],
+      "creative_gates": [
+        "concept",
+        "storyboard",
+        "assets",
+        "final_review"
+      ]
+    },
+    {
+      "pipeline_id": "animated_explainer",
+      "name": "动画科普解说",
+      "category": "generated",
+      "description": "以研究和脚本为基础，制作图解、动画镜头与旁白字幕。",
+      "before_shots": [
+        "research",
+        "concept",
+        "script",
+        "storyboard"
+      ],
+      "after_shots": [
+        "narration",
+        "audio_design",
+        "subtitle",
+        "motion_design",
+        "assemble",
+        "technical_qa",
+        "creative_review",
+        "rights_review",
+        "publish_gate"
+      ],
+      "scene_mode": "generated_shot",
+      "coverage": "partial",
+      "available_modules": [
+        "research_pipeline",
+        "video_prompt_composer",
+        "story_bible",
+        "video_workflow",
+        "video_motion"
+      ],
+      "planned_gaps": [
+        "完整图表/动画素材自动生成与全片一键编排仍需接线"
+      ],
+      "creative_gates": [
+        "research_brief",
+        "script",
+        "storyboard",
+        "assets",
+        "final_review"
+      ]
+    },
+    {
+      "pipeline_id": "documentary_montage",
+      "name": "纪录片实拍混剪",
+      "category": "documentary",
+      "description": "研究主题、检索开放档案与真实动态素材，制作有来源追溯的纪录片。",
+      "before_shots": [
+        "research",
+        "archive_retrieval",
+        "source_rights",
+        "script",
+        "storyboard"
+      ],
+      "after_shots": [
+        "narration",
+        "audio_design",
+        "subtitle",
+        "assemble",
+        "technical_qa",
+        "creative_review",
+        "rights_review",
+        "publish_gate"
+      ],
+      "scene_mode": "source_footage",
+      "coverage": "partial",
+      "available_modules": [
+        "research_pipeline",
+        "media",
+        "video_qa",
+        "video_product_builder",
+        "subtitle_review"
+      ],
+      "planned_gaps": [
+        "多来源开放档案语义检索、片段嵌入排序与许可自动核验尚未完成"
+      ],
+      "creative_gates": [
+        "research_brief",
+        "source_rights",
+        "script",
+        "storyboard",
+        "assets",
+        "final_review"
+      ]
+    },
+    {
+      "pipeline_id": "cinematic_trailer",
+      "name": "电影感预告片",
+      "category": "cinematic",
+      "description": "以情绪节拍、镜头语言、角色连续性和声音设计构建预告片。",
+      "before_shots": [
+        "concept",
+        "script",
+        "storyboard"
+      ],
+      "after_shots": [
+        "audio_design",
+        "narration",
+        "assemble",
+        "technical_qa",
+        "creative_review",
+        "rights_review",
+        "publish_gate"
+      ],
+      "scene_mode": "generated_shot",
+      "coverage": "partial",
+      "available_modules": [
+        "video_prompt_composer",
+        "story_bible",
+        "wan_video",
+        "video_product_builder",
+        "video_audio_mix"
+      ],
+      "planned_gaps": [
+        "多镜头生成与最终剪辑仍需人工创意门和模型可用性检查"
+      ],
+      "creative_gates": [
+        "concept",
+        "storyboard",
+        "assets",
+        "final_review"
+      ]
+    },
+    {
+      "pipeline_id": "product_ad",
+      "name": "产品广告",
+      "category": "commercial",
+      "description": "锁定产品外观和品牌资产，制作可审查的产品展示视频。",
+      "before_shots": [
+        "product_lock",
+        "concept",
+        "script",
+        "storyboard"
+      ],
+      "after_shots": [
+        "narration",
+        "audio_design",
+        "subtitle",
+        "motion_design",
+        "assemble",
+        "technical_qa",
+        "creative_review",
+        "rights_review",
+        "publish_gate"
+      ],
+      "scene_mode": "generated_shot",
+      "coverage": "partial",
+      "available_modules": [
+        "story_bible",
+        "video_prompt_composer",
+        "video_product_builder",
+        "video_motion"
+      ],
+      "planned_gaps": [
+        "产品多视角身份保持与广告合规自动审查仍需增强"
+      ],
+      "creative_gates": [
+        "product_identity",
+        "storyboard",
+        "assets",
+        "brand_review",
+        "publish"
+      ]
+    },
+    {
+      "pipeline_id": "talking_head",
+      "name": "人物访谈与口播",
+      "category": "talking_head",
+      "description": "围绕本地访谈/口播素材进行转写、字幕、B-roll 与声音整理。",
+      "before_shots": [
+        "transcribe",
+        "script",
+        "storyboard"
+      ],
+      "after_shots": [
+        "narration",
+        "audio_design",
+        "subtitle",
+        "assemble",
+        "technical_qa",
+        "creative_review",
+        "rights_review",
+        "publish_gate"
+      ],
+      "scene_mode": "source_footage",
+      "coverage": "partial",
+      "available_modules": [
+        "cantonese_asr",
+        "subtitle_review",
+        "video_qa",
+        "video_product_builder"
+      ],
+      "planned_gaps": [
+        "自动 B-roll 语义匹配、说话人镜头跟踪与多机位切换尚未完成"
+      ],
+      "creative_gates": [
+        "source_media",
+        "transcript",
+        "subtitle",
+        "final_review"
+      ]
+    },
+    {
+      "pipeline_id": "screen_demo",
+      "name": "软件屏幕演示",
+      "category": "screen_recording",
+      "description": "制作软件演示、产品 walkthrough、步骤标注与配音字幕。",
+      "before_shots": [
+        "capture",
+        "script",
+        "storyboard"
+      ],
+      "after_shots": [
+        "narration",
+        "audio_design",
+        "subtitle",
+        "motion_design",
+        "assemble",
+        "technical_qa",
+        "creative_review",
+        "rights_review",
+        "publish_gate"
+      ],
+      "scene_mode": "captured_demo",
+      "coverage": "planned",
+      "available_modules": [
+        "video_motion",
+        "video_product_builder",
+        "video_qa"
+      ],
+      "planned_gaps": [
+        "受控屏幕录制、隐私遮挡和步骤标注自动化尚未接入制片流程"
+      ],
+      "creative_gates": [
+        "capture_scope",
+        "privacy_review",
+        "storyboard",
+        "final_review"
+      ]
+    },
+    {
+      "pipeline_id": "podcast_repurpose",
+      "name": "播客长视频再利用",
+      "category": "repurpose",
+      "description": "从播客/长视频转写、排序高光、人工选段并输出竖屏切片。",
+      "before_shots": [
+        "transcribe",
+        "highlight_select",
+        "storyboard"
+      ],
+      "after_shots": [
+        "audio_design",
+        "subtitle",
+        "assemble",
+        "technical_qa",
+        "creative_review",
+        "rights_review",
+        "publish_gate"
+      ],
+      "scene_mode": "clip_edit",
+      "coverage": "partial",
+      "available_modules": [
+        "video_highlights",
+        "cantonese_asr",
+        "clip_product_adapter",
+        "video_qa"
+      ],
+      "planned_gaps": [
+        "多说话人镜头追踪、跨平台 URL 导入和反馈学习仍待完成"
+      ],
+      "creative_gates": [
+        "candidate_selection",
+        "captions",
+        "final_review",
+        "publish"
+      ]
+    },
+    {
+      "pipeline_id": "clip_factory",
+      "name": "短视频切片工厂",
+      "category": "repurpose",
+      "description": "批量发现高光候选，逐条审核后渲染、登记为正式视频产品。",
+      "before_shots": [
+        "transcribe",
+        "highlight_select",
+        "storyboard"
+      ],
+      "after_shots": [
+        "subtitle",
+        "audio_design",
+        "assemble",
+        "technical_qa",
+        "creative_review",
+        "rights_review",
+        "publish_gate"
+      ],
+      "scene_mode": "clip_edit",
+      "coverage": "partial",
+      "available_modules": [
+        "video_highlights",
+        "cantonese_asr",
+        "clip_product_adapter",
+        "video_product_builder"
+      ],
+      "planned_gaps": [
+        "自动下载与来源授权核验、视觉主体追踪、反馈排序尚未完成"
+      ],
+      "creative_gates": [
+        "candidate_selection",
+        "captions",
+        "product_qa",
+        "publish"
+      ]
+    },
+    {
+      "pipeline_id": "character_animation",
+      "name": "角色动画短片",
+      "category": "animation",
+      "description": "通过角色圣经、姿态/动作设计和连续性约束制作角色动画。",
+      "before_shots": [
+        "character_design",
+        "concept",
+        "script",
+        "storyboard"
+      ],
+      "after_shots": [
+        "motion_design",
+        "audio_design",
+        "subtitle",
+        "assemble",
+        "technical_qa",
+        "creative_review",
+        "rights_review",
+        "publish_gate"
+      ],
+      "scene_mode": "animated_scene",
+      "coverage": "partial",
+      "available_modules": [
+        "story_bible",
+        "video_prompt_composer",
+        "video_motion",
+        "openfilm_adapter"
+      ],
+      "planned_gaps": [
+        "完整角色绑定、动作库和动画渲染器仍需逐项探测与接入"
+      ],
+      "creative_gates": [
+        "character_design",
+        "storyboard",
+        "motion_review",
+        "final_review"
+      ]
+    },
+    {
+      "pipeline_id": "three_d_animation",
+      "name": "3D 动画与世界构建",
+      "category": "animation",
+      "description": "规划可编辑 3D 场景、镜头路径、动画渲染与后期合成。",
+      "before_shots": [
+        "concept",
+        "script",
+        "storyboard"
+      ],
+      "after_shots": [
+        "motion_design",
+        "audio_design",
+        "subtitle",
+        "assemble",
+        "technical_qa",
+        "creative_review",
+        "rights_review",
+        "publish_gate"
+      ],
+      "scene_mode": "animated_scene",
+      "coverage": "planned",
+      "available_modules": [
+        "video_motion",
+        "openfilm_adapter",
+        "video_product_builder"
+      ],
+      "planned_gaps": [
+        "Blender/3D 资产自动化、物理模拟和 3D 渲染管线尚未接入"
+      ],
+      "creative_gates": [
+        "world_design",
+        "asset_review",
+        "camera_path",
+        "final_review"
+      ]
+    },
+    {
+      "pipeline_id": "localization_dub",
+      "name": "多语言本地化配音",
+      "category": "localization",
+      "description": "对已有视频进行转写、翻译、配音、字幕与时序复核。",
+      "before_shots": [
+        "transcribe",
+        "script",
+        "storyboard"
+      ],
+      "after_shots": [
+        "narration",
+        "audio_design",
+        "subtitle",
+        "assemble",
+        "technical_qa",
+        "creative_review",
+        "rights_review",
+        "publish_gate"
+      ],
+      "scene_mode": "source_footage",
+      "coverage": "partial",
+      "available_modules": [
+        "cantonese_asr",
+        "cantonese_tts",
+        "chimera_vocal",
+        "subtitle_review",
+        "video_audio_mix"
+      ],
+      "planned_gaps": [
+        "通用多语种翻译/配音时序、说话人分离和口型同步尚未完成"
+      ],
+      "creative_gates": [
+        "transcript",
+        "translation_review",
+        "voice_review",
+        "subtitle",
+        "publish"
+      ]
+    }
+  ]
+}

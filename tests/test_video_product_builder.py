@@ -1172,7 +1172,9 @@ class VideoProductBuilderTests(unittest.TestCase):
         approved = apply_human_subtitle_review(
             review, reviewed_segment_indexes=[1],
             corrections=[{"segment_index": 1, "corrected_text": "大家好，歡迎收聽。"}],
-            reviewer="human-editor", approve=True,
+            reviewer="human-editor", approve=True, reviewer_id="local-editor-1",
+            reviewer_role="subtitle_editor", rationale="Checked against narration audio.",
+            evidence_refs=["subtitle-review.json#segments", "narration.wav#sha256"],
         )
         with (
             patch("muse.video_product_builder.discover_media_tools", return_value=self._inventory()),
@@ -1202,6 +1204,19 @@ class VideoProductBuilderTests(unittest.TestCase):
         self.assertTrue(original_verified["validated"])
         self.assertIsNone(original_verified["subtitle_review"])
         revised_dir = self.root / revised["relative_path"]
+        revised_manifest = json.loads((revised_dir / "manifest.json").read_text(encoding="utf-8"))
+        from muse.video_publish_package import _review_record_status
+        release_review = revised_manifest["human_reviews"]["subtitle_review"]
+        self.assertEqual(release_review["reviewer"]["identity_assurance"], "self_asserted_local_identity")
+        self.assertEqual(release_review["subject"]["version_id"], revised["version_id"])
+        self.assertEqual(
+            _review_record_status(
+                release_review, category="subtitle_review", initiative_id=revised["initiative_id"],
+                version_id=revised["version_id"], video_sha256=release_review["subject"]["video_sha256"],
+                required_artifacts=release_review["subject"]["artifact_sha256"],
+            ),
+            "verified_human_review_digest_scope_bound",
+        )
         self.assertIn("大家好，歡迎收聽。", (revised_dir / "subtitles.srt").read_text(encoding="utf-8"))
         self.assertFalse((revised_dir / "source-video.mp4").exists())
         self.assertFalse((revised_dir / "approved-subtitles.srt").exists())
@@ -1350,9 +1365,15 @@ class VideoProductBuilderTests(unittest.TestCase):
         source = self.root / "voice-aware-source.mp4"
         narration = self.root / "voiceover.wav"
         music = self.root / "background.mp3"
+        subtitles = self.root / "subtitles.srt"
         source.write_bytes(bytes.fromhex("000000186674797069736f6d66697874757265"))
         narration.write_bytes(b"RIFF voice fixture")
         music.write_bytes(b"ID3 music fixture")
+        subtitles.write_text(
+            "1\n00:00:01,000 --> 00:00:02,000\n大家好\n\n"
+            "2\n00:00:03,000 --> 00:00:04,000\n欢迎收看\n",
+            encoding="utf-8",
+        )
         observed = {}
 
         def fake_mux(args, **kwargs):
@@ -1374,22 +1395,73 @@ class VideoProductBuilderTests(unittest.TestCase):
                 "旁白压低背景音乐", "城市夜景旁白", source,
                 generation_metadata={"status": "completed", "width": 512, "height": 288, "fps": 12},
                 narration_path=narration, narration_script="大家好，欢迎来到城市夜景。",
-                background_music_path=music,
+                subtitle_path=subtitles, background_music_path=music,
             )
 
         command = observed["command"]
         self.assertIn("-filter_complex", command)
-        self.assertIn("sidechaincompress", command[command.index("-filter_complex") + 1])
-        self.assertIn("loudnorm=I=-16:TP=-1.5:LRA=11", command[command.index("-filter_complex") + 1])
+        filter_graph = command[command.index("-filter_complex") + 1]
+        self.assertIn("sidechaincompress", filter_graph)
+        self.assertIn("eval=frame", filter_graph)
+        self.assertIn("if(between(t,0.92,2.45)", filter_graph)
+        self.assertIn("loudnorm=I=-16:TP=-1.5:LRA=11", filter_graph)
         product_dir = self.root / result["relative_path"]
         manifest = json.loads((product_dir / "manifest.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["background_music"]["sha256"], hashlib.sha256(music.read_bytes()).hexdigest())
+        self.assertEqual(manifest["background_music_mix"]["speech_timing_source"], "subtitle_srt")
+        self.assertEqual(manifest["background_music_mix"]["speech_window_count"], 2)
+        self.assertEqual(manifest["background_music_mix"]["fade_out_seconds"], 1.5)
         self.assertEqual(manifest["narration"]["background_music_file"], "music/background.mp3")
         with zipfile.ZipFile(product_dir / "product.zip") as archive:
             self.assertIn("music/background.mp3", archive.namelist())
             self.assertEqual(archive.read("music/background.mp3"), music.read_bytes())
         verified = self.builder.verify_path(self.root / "data" / "products", result["initiative_id"], result["version_id"])
         self.assertTrue(verified["validated"])
+
+    def test_voice_aware_background_music_without_subtitles_uses_sidechain_and_fade_out(self):
+        source = self.root / "voice-aware-no-srt-source.mp4"
+        narration = self.root / "voiceover-no-srt.wav"
+        music = self.root / "background-no-srt.mp3"
+        source.write_bytes(bytes.fromhex("000000186674797069736f6d66697874757265"))
+        narration.write_bytes(b"RIFF voice fixture")
+        music.write_bytes(b"ID3 music fixture")
+        observed = {}
+
+        def fake_mux(args, **kwargs):
+            observed["command"] = list(args)
+            Path(args[-1]).write_bytes(source.read_bytes())
+            return SimpleNamespace(returncode=0, stderr="")
+
+        qa = {"status": "passed", "missing_tools": [],
+              "checks": {"full_decode": {"passed": True, "detail": "decoded"}},
+              "metadata": {"width": 512, "height": 288, "fps": 12.0,
+                           "duration_seconds": 10.0, "audio_codecs": ["aac"]}}
+        with (
+            patch("muse.video_product_builder.discover_media_tools", return_value=self._inventory()),
+            patch("muse.video_product_builder._probe_media_duration_seconds", side_effect=[10.0, 5.0]),
+            patch("muse.video_product_builder.subprocess.run", side_effect=fake_mux),
+            patch("muse.video_product_builder.inspect_video_file", return_value=qa),
+        ):
+            result = self.builder.package_generated_clip(
+                "无字幕旁白压低背景音乐", "城市夜景旁白", source,
+                generation_metadata={"status": "completed", "width": 512, "height": 288, "fps": 12},
+                narration_path=narration, narration_script="大家好，欢迎来到城市夜景。",
+                background_music_path=music,
+            )
+
+        command = observed["command"]
+        filter_graph = command[command.index("-filter_complex") + 1]
+        self.assertIn("sidechaincompress", filter_graph)
+        self.assertIn("eval=frame", filter_graph)
+        self.assertIn("if(lt(t,8.5),1,max(0,(10-t)/1.5))", filter_graph)
+        self.assertNotIn("if(between(t,", filter_graph)
+        product_dir = self.root / result["relative_path"]
+        manifest = json.loads((product_dir / "manifest.json").read_text(encoding="utf-8"))
+        mix = manifest["background_music_mix"]
+        self.assertEqual(mix["method"], "fade_out_volume_plus_sidechaincompress")
+        self.assertEqual(mix["speech_timing_source"], "sidechain_only")
+        self.assertEqual(mix["speech_window_count"], 0)
+        self.assertEqual(mix["fade_out_seconds"], 1.5)
 
     def test_content_aware_scene_motion_uses_explicit_composition_metadata(self):
         from muse import video_product_builder as module

@@ -1,0 +1,189 @@
+{
+  "schema_version": 1,
+  "format": "yaml-1.2-json-subset",
+  "stages": [
+    {
+      "stage_id": "intake",
+      "role": "operator",
+      "objective": "确认目标平台、受众、时长、画幅、交付格式与素材边界",
+      "capability_hints": []
+    },
+    {
+      "stage_id": "reference_analysis",
+      "role": "analyst",
+      "objective": "分析用户授权提供的参考视频：结构、节奏、镜头与风格；输出差异化创作方向",
+      "capability_hints": [
+        "video_analysis"
+      ]
+    },
+    {
+      "stage_id": "research",
+      "role": "researcher",
+      "objective": "研究主题并区分可核实事实、解释与创作假设，保留来源和反证",
+      "capability_hints": [
+        "research"
+      ]
+    },
+    {
+      "stage_id": "concept",
+      "role": "architect",
+      "objective": "形成差异化创意方案、叙事角度与制作承诺",
+      "capability_hints": [
+        "creative_direction"
+      ]
+    },
+    {
+      "stage_id": "product_lock",
+      "role": "architect",
+      "objective": "锁定产品外观、品牌资产、禁改特征与可用参考资产",
+      "capability_hints": [
+        "story_bible"
+      ]
+    },
+    {
+      "stage_id": "character_design",
+      "role": "architect",
+      "objective": "定义角色、服装、道具、场景和跨镜头连续性",
+      "capability_hints": [
+        "story_bible"
+      ]
+    },
+    {
+      "stage_id": "capture",
+      "role": "operator",
+      "objective": "确认屏幕录制范围、隐私遮挡、演示步骤与素材授权",
+      "capability_hints": [
+        "screen_capture"
+      ]
+    },
+    {
+      "stage_id": "transcribe",
+      "role": "analyst",
+      "objective": "对本地源素材转写并保留真实时间戳",
+      "capability_hints": [
+        "speech_to_text"
+      ]
+    },
+    {
+      "stage_id": "highlight_select",
+      "role": "analyst",
+      "objective": "排序高光候选并等待人工选择，不自动认定最佳片段",
+      "capability_hints": [
+        "video_highlights"
+      ]
+    },
+    {
+      "stage_id": "archive_retrieval",
+      "role": "researcher",
+      "objective": "检索开放档案与免费动态素材，记录来源、许可和可用范围",
+      "capability_hints": [
+        "stock_media_search"
+      ]
+    },
+    {
+      "stage_id": "source_rights",
+      "role": "reviewer",
+      "objective": "检查来源、许可、肖像/音乐权利与使用限制",
+      "capability_hints": [
+        "media_rights_review"
+      ]
+    },
+    {
+      "stage_id": "script",
+      "role": "writer",
+      "objective": "撰写与目标时长匹配的脚本、旁白、节拍和事实引用",
+      "capability_hints": [
+        "scriptwriting"
+      ]
+    },
+    {
+      "stage_id": "storyboard",
+      "role": "architect",
+      "objective": "冻结分镜、镜头时长、依赖关系与画面连续性",
+      "capability_hints": [
+        "storyboard"
+      ]
+    },
+    {
+      "stage_id": "preflight",
+      "role": "operator",
+      "objective": "只读检查本地模型、媒体工具、磁盘空间、素材引用与输出参数",
+      "capability_hints": [
+        "video_preflight"
+      ]
+    },
+    {
+      "stage_id": "narration",
+      "role": "writer",
+      "objective": "制作旁白稿并选择已验证的本地语音能力；保留人工试听点",
+      "capability_hints": [
+        "tts"
+      ]
+    },
+    {
+      "stage_id": "audio_design",
+      "role": "developer",
+      "objective": "规划背景音乐、环境声、音效、混音和响度目标",
+      "capability_hints": [
+        "audio_mix"
+      ]
+    },
+    {
+      "stage_id": "subtitle",
+      "role": "developer",
+      "objective": "生成带真实时间戳的字幕并进入字幕审核",
+      "capability_hints": [
+        "subtitles"
+      ]
+    },
+    {
+      "stage_id": "motion_design",
+      "role": "developer",
+      "objective": "规划可编辑动态图形、转场、角色动作或 3D 镜头",
+      "capability_hints": [
+        "motion_graphics"
+      ]
+    },
+    {
+      "stage_id": "assemble",
+      "role": "operator",
+      "objective": "按时间线组合画面、旁白、音乐、字幕与图形，生成候选母版",
+      "capability_hints": [
+        "ffmpeg",
+        "video_assembly"
+      ]
+    },
+    {
+      "stage_id": "technical_qa",
+      "role": "reviewer",
+      "objective": "复查媒体流、分辨率、帧率、时长、全解码、音频与字幕同步",
+      "capability_hints": [
+        "media_review"
+      ]
+    },
+    {
+      "stage_id": "creative_review",
+      "role": "reviewer",
+      "objective": "检查叙事、节奏、镜头连续性、视觉质量与交付承诺",
+      "capability_hints": [
+        "creative_review"
+      ]
+    },
+    {
+      "stage_id": "rights_review",
+      "role": "reviewer",
+      "objective": "核对素材许可、肖像、音乐、字幕和平台要求",
+      "capability_hints": [
+        "media_rights_review"
+      ]
+    },
+    {
+      "stage_id": "publish_gate",
+      "role": "operator",
+      "objective": "等待明确人工发布批准；技术 QA 不会自动授予发布权限",
+      "capability_hints": [
+        "publication_approval"
+      ]
+    }
+  ]
+}

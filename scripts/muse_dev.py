@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -18,6 +19,7 @@ if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
 from muse import chatgpt_bridge  # noqa: E402
+from muse.terminal_runtime import HerdrCoreProvider, PsmuxProvider  # noqa: E402
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -49,6 +51,18 @@ def _parser() -> argparse.ArgumentParser:
 
     recover = commands.add_parser("recover", help="recover one known psmux job by job id")
     recover.add_argument("job_id")
+
+    terminal = commands.add_parser("terminal", help="inspect optional terminal runtime providers without dispatching work")
+    terminal_commands = terminal.add_subparsers(dest="terminal_action", required=True)
+    for terminal_action in ("probe", "list"):
+        terminal_command = terminal_commands.add_parser(
+            terminal_action,
+            help="probe provider capabilities" if terminal_action == "probe" else "list existing terminal sessions read-only",
+        )
+        terminal_command.add_argument("--provider", choices=("psmux", "herdr-core"), default="psmux")
+        terminal_command.add_argument("--session", default=adapter.DEFAULT_SESSION, help="psmux session (ignored by Herdr Core)")
+        if terminal_action == "list":
+            terminal_command.add_argument("--limit", type=int, default=20, choices=range(1, 101))
 
     commander = commands.add_parser("commander", help="inspect and manage approval-gated Commander Tickets")
     commander_commands = commander.add_subparsers(dest="commander_action", required=True)
@@ -113,6 +127,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = adapter.list_jobs({"session": args.session, "limit": args.limit})
     elif args.action == "recover":
         result = adapter.recover_job(args.job_id)
+    elif args.action == "terminal":
+        if args.provider == "herdr-core":
+            provider = HerdrCoreProvider()
+        else:
+            provider = PsmuxProvider(
+                inspect_session=adapter.inspect_session,
+                list_jobs=adapter.list_jobs,
+                session=args.session,
+                job_limit=getattr(args, "limit", 20),
+            )
+        observation = provider.probe() if args.terminal_action == "probe" else provider.list_sessions()
+        result = asdict(observation)
+        print(json.dumps(result, ensure_ascii=True, separators=(",", ":")))
+        return 0 if observation.available else 2
     elif args.action == "commander":
         try:
             if args.commander_action == "list":

@@ -421,7 +421,10 @@ fn win_toggle_maximize(
     window: tauri::Window,
     state: tauri::State<'_, MaxState>,
 ) -> Result<bool, String> {
-    let mut saved = state.0.lock().map_err(|_| "max state unavailable".to_string())?;
+    let mut saved = state
+        .0
+        .lock()
+        .map_err(|_| "max state unavailable".to_string())?;
     if let Some((x, y, w, h)) = saved.take() {
         // `set_size` sets the client size, so the snapshot stores inner size to
         // round-trip exactly; saving outer geometry grew the window on restore.
@@ -447,8 +450,10 @@ fn win_toggle_maximize(
     // An undecorated resizable window carries a hidden frame. Maximizing to the
     // raw work area therefore puts the *client* edge ~18px past the screen.
     // Measure the real overhang and subtract it.
-    let over_w = ((position.x + outer.width as i32) - (work.position.x + work.size.width as i32)).max(0);
-    let over_h = ((position.y + outer.height as i32) - (work.position.y + work.size.height as i32)).max(0);
+    let over_w =
+        ((position.x + outer.width as i32) - (work.position.x + work.size.width as i32)).max(0);
+    let over_h =
+        ((position.y + outer.height as i32) - (work.position.y + work.size.height as i32)).max(0);
     let frame_w = over_w.max(18);
     let frame_h = over_h.max(5);
 

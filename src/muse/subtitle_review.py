@@ -175,6 +175,8 @@ def build_subtitle_review(
 def apply_human_subtitle_review(
     review: dict[str, Any], *, reviewed_segment_indexes: list[int],
     corrections: list[dict[str, Any]], reviewer: str, approve: bool = False,
+    reviewer_id: str | None = None, reviewer_role: str | None = None,
+    rationale: str | None = None, evidence_refs: list[str] | None = None,
 ) -> dict[str, Any]:
     """Record explicit human review without modifying immutable ASR source text."""
     if not isinstance(review, dict) or review.get("schema_version") != 1:
@@ -215,7 +217,16 @@ def apply_human_subtitle_review(
     all_indexes = {item["index"] for item in segments}
     if approve and set(reviewed_segment_indexes) != all_indexes:
         raise ValueError("cannot approve until every subtitle segment has been reviewed")
-
+    if approve:
+        if not isinstance(reviewer_id, str) or not reviewer_id.strip() or len(reviewer_id.strip()) > 120:
+            raise ValueError("reviewer_id must contain 1-120 characters")
+        if not isinstance(reviewer_role, str) or not reviewer_role.strip() or len(reviewer_role.strip()) > 80:
+            raise ValueError("reviewer_role must contain 1-80 characters")
+        if not isinstance(rationale, str) or not rationale.strip() or len(rationale.strip()) > 2000:
+            raise ValueError("approval rationale must contain 1-2000 characters")
+        if (not isinstance(evidence_refs, list) or not evidence_refs or len(evidence_refs) > 30
+                or any(not isinstance(item, str) or not item.strip() or len(item) > 240 for item in evidence_refs)):
+            raise ValueError("evidence_refs must contain 1-30 non-empty references")
     result = copy.deepcopy(review)
     now = datetime.now(timezone.utc).isoformat()
     existing_corrections = result.get("corrections", [])
@@ -248,6 +259,12 @@ def apply_human_subtitle_review(
     result["approval_timestamp"] = now if result["human_approved"] else None
     if result["human_approved"]:
         result["approved_by"] = reviewer.strip()
+        result["reviewer_identity"] = {
+            "id": reviewer_id.strip(), "role": reviewer_role.strip(),
+            "identity_assurance": "self_asserted_local_identity",
+        }
+        result["approval_rationale"] = rationale.strip()
+        result["approval_evidence_refs"] = list(evidence_refs)
     return result
 
 

@@ -196,7 +196,9 @@ def build_video_recipe_trace(
             release_dir = product_dir / "publish-package-v1"
             checklist_path = release_dir / "release-checklist.json"
             package_manifest_path = release_dir / "manifest.json"
-            if release_dir.is_symlink() or checklist_path.is_symlink() or package_manifest_path.is_symlink():
+            quality_report_path = release_dir / "release-quality-report.json"
+            if (release_dir.is_symlink() or checklist_path.is_symlink()
+                    or package_manifest_path.is_symlink() or quality_report_path.is_symlink()):
                 release = {"status": "unsafe_path", "can_publish": False}
             elif checklist_path.is_file() and package_manifest_path.is_file():
                 checklist = _safe_json(checklist_path.read_text(encoding="utf-8"))
@@ -208,13 +210,37 @@ def build_video_recipe_trace(
                     and package_manifest.get("source_video_sha256") == product.get("mp4_sha256")
                     and package_manifest.get("muse_product_zip_sha256") == product.get("package_sha256")
                 )
+                report_hash = None
+                report = {}
+                report_matches_package = False
+                files = package_manifest.get("files")
+                expected_report_hash = files.get("release-quality-report.json") if isinstance(files, dict) else None
+                if quality_report_path.is_file() and isinstance(expected_report_hash, str):
+                    report_hash = hashlib.sha256(quality_report_path.read_bytes()).hexdigest()
+                    report = _safe_json(quality_report_path.read_text(encoding="utf-8"))
+                    embedded_report = package_manifest.get("release_quality_report")
+                    report_matches_package = (
+                        len(expected_report_hash) == 64
+                        and report_hash == expected_report_hash
+                        and isinstance(embedded_report, dict)
+                        and _digest(report) == _digest(embedded_report)
+                    )
+                release_valid = (
+                    package_matches_product and report_matches_package
+                    and checklist.get("release_state") == "draft_only"
+                    and package_manifest.get("release_state") == "draft_only"
+                    and checklist.get("can_publish") is False
+                    and package_manifest.get("can_publish") is False
+                    and report.get("can_publish") is False
+                )
                 release = {
-                    "status": "draft_only" if package_matches_product
-                              and checklist.get("release_state") == "draft_only"
-                              and package_manifest.get("release_state") == "draft_only"
-                              and checklist.get("can_publish") is False
-                              and package_manifest.get("can_publish") is False else "invalid_or_mismatched",
+                    "status": "draft_only" if release_valid else "invalid_or_mismatched",
                     "manifest_matches_product": bool(package_matches_product),
+                    "quality_report_matches_package": bool(report_matches_package),
+                    "quality_report_sha256": report_hash if report_matches_package else None,
+                    "overall_status": report.get("overall_status") if report_matches_package else "unavailable_or_unverified",
+                    "blocking_items": report.get("blocking_items", []) if report_matches_package and isinstance(report.get("blocking_items"), list) else [],
+                    "checks": report.get("checks", {}) if report_matches_package and isinstance(report.get("checks"), dict) else {},
                     "can_publish": False,
                     "editorial_and_fact_review": checklist.get("editorial_and_fact_review", "unknown"),
                     "visual_and_model_rights_review": checklist.get("visual_and_model_rights_review", "unknown"),
@@ -226,7 +252,6 @@ def build_video_recipe_trace(
             product = {"status": "unavailable_or_invalid"}
     elif attempt.get("status") == "failed":
         product = {"status": "not_built", "failure_code": attempt.get("failure_code"), "error_type": attempt.get("error_type")}
-
     approval_consistent = not attempt.get("approval_task_id") or ticket.get("human_decision_verified") is True
     if attempt.get("status") == "succeeded":
         product_consistent = product.get("status") == "verified"

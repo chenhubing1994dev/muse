@@ -1116,12 +1116,20 @@ class InitiativeStore:
         ).fetchall()
         return [dict(row) for row in rows]
 
-    def list_video_attempts(self, *, limit=100):
+    def list_video_attempts(self, *, limit=100, prioritize_active=False):
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 200:
             raise ValueError("limit must be between 1 and 200")
-        rows = self.connection.execute(
-            "SELECT * FROM initiative_video_attempts ORDER BY created_at DESC,attempt_id DESC LIMIT ?",            (limit,),
-        ).fetchall()
+        if not isinstance(prioritize_active, bool):
+            raise ValueError("prioritize_active must be boolean")
+        if prioritize_active:
+            query = (
+                "SELECT * FROM initiative_video_attempts "
+                "ORDER BY CASE WHEN status='running' THEN 0 WHEN status='queued' THEN 1 ELSE 2 END, "
+                "created_at DESC,attempt_id DESC LIMIT ?"
+            )
+        else:
+            query = "SELECT * FROM initiative_video_attempts ORDER BY created_at DESC,attempt_id DESC LIMIT ?"
+        rows = self.connection.execute(query, (limit,)).fetchall()
         return [dict(row) for row in rows]
 
     def aggregate_video_attempt_metrics(self):
@@ -1129,16 +1137,23 @@ class InitiativeStore:
             """SELECT COUNT(*) AS total,
             SUM(CASE WHEN status='succeeded' THEN 1 ELSE 0 END) AS succeeded,
             SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed,
+            SUM(CASE WHEN status='queued' THEN 1 ELSE 0 END) AS queued,
+            SUM(CASE WHEN status='running' THEN 1 ELSE 0 END) AS running,
+            SUM(CASE WHEN status='running' AND worker_id IS NOT NULL AND worker_id<>'' THEN 1 ELSE 0 END) AS leased,
             SUM(CASE WHEN status IN ('queued','running') THEN 1 ELSE 0 END) AS pending
             FROM initiative_video_attempts"""
         ).fetchone()
         total = int(row["total"] or 0)
         succeeded = int(row["succeeded"] or 0)
         failed = int(row["failed"] or 0)
+        queued = int(row["queued"] or 0)
+        running = int(row["running"] or 0)
+        leased = int(row["leased"] or 0)
         pending = int(row["pending"] or 0)
         terminal = succeeded + failed
         return {
-            "total": total, "succeeded": succeeded, "failed": failed, "pending": pending,
+            "total": total, "succeeded": succeeded, "failed": failed,
+            "queued": queued, "running": running, "leased": leased, "pending": pending,
             "terminal": terminal, "success_rate": succeeded / terminal if terminal else None,
             "scope": "persisted_video_attempts",
         }

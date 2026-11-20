@@ -300,6 +300,45 @@ class ContextualInquiryBridgeTests(unittest.TestCase):
                 with self.assertRaises(PermissionError):
                     queue.approve(task["id"], approved_by="security-test")
 
+    @unittest.skipUnless(os.name == "nt", "Windows DPAPI integration test")
+    def test_encrypted_case_reader_requires_live_review_worker_lease(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with TaskQueue(Path(directory) / "tasks.sqlite3") as queue:
+                inquiry = self.inquiry()
+                envelope = protect_contextual_inquiry(inquiry, consent=True)
+                task = enqueue_review_task(
+                    queue, inquiry, case_storage_consent=True,
+                    encrypted_case_context=envelope,
+                )
+                authorized = queue.authorize_contextual_inquiry_review_only(
+                    task["id"], authorized_by="operator",
+                    expected_updated_at=task["updated_at"],
+                )
+                claimed = queue.claim_contextual_inquiry_review_only(
+                    task["id"], worker_id="review-worker",
+                    expected_updated_at=authorized["task"]["updated_at"],
+                )
+                with self.assertRaisesRegex(PermissionError, "current Worker lease owner"):
+                    load_encrypted_case_for_review(queue, task["id"])
+                with self.assertRaisesRegex(PermissionError, "current Worker lease owner"):
+                    load_encrypted_case_for_review(
+                        queue, task["id"], worker_id="different-worker",
+                    )
+                restored = load_encrypted_case_for_review(
+                    queue, task["id"], worker_id="review-worker",
+                )
+                self.assertEqual(restored.inquiry_id, inquiry.inquiry_id)
+                self.assertFalse(restored.consent_to_store)
+                queue._connection.execute(
+                    "UPDATE tasks SET lease_expires_at=? WHERE id=?",
+                    ("2000-01-01T00:00:00+00:00", task["id"]),
+                )
+                queue._connection.commit()
+                with self.assertRaisesRegex(PermissionError, "lease has expired"):
+                    load_encrypted_case_for_review(
+                        queue, task["id"], worker_id="review-worker",
+                    )
+
     def test_encrypted_case_reader_rejects_wrong_task_kind_and_missing_envelope(self):
         with tempfile.TemporaryDirectory() as directory:
             with TaskQueue(Path(directory) / "tasks.sqlite3") as queue:
