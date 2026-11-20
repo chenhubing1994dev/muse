@@ -113,6 +113,10 @@ export function createApiClient({ baseUrl, token, fetchImpl = globalThis.fetch, 
       return request(`/api/v1/products?limit=${limit}`, { requestTimeoutMs: 20000 });
     },
     videoAttempts: () => get("/api/v1/video-attempts"),
+    videoRecipeTrace: (attemptId) => {
+      if (typeof attemptId !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(attemptId)) throw new Error("视频任务编号无效");
+      return get(`/api/v1/video-recipe-traces/${attemptId}`);
+    },
     initiativeTimeline: (initiativeId, limit = 100) => {
       if (typeof initiativeId !== "string" || !/^[0-9a-f]{32}$/.test(initiativeId)) throw new Error("创作项目编号无效");
       if (!Number.isInteger(limit) || limit < 1 || limit > 200) {

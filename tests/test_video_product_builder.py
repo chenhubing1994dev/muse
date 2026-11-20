@@ -9,8 +9,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from muse.initiative_engine import InitiativeStore
 from muse.video_product_builder import (
     VideoProductBuilder, VideoProductError, _default_scene_motion_directives, _quality_gate_summary,
+    _resolve_recipe_sha256,
 )
 
 
@@ -234,8 +236,11 @@ class VideoProductBuilderTests(unittest.TestCase):
             return {"status": "completed", "prompt_id": "prompt-123", "model": "Wan 2.1 T2V 1.3B",                    "seed": kwargs["seed"], "aspect_ratio": kwargs["aspect_ratio"], "fps": 12,
                     "duration_seconds": 2.0, "frames": 25, "width": 512, "height": 288,
                     "steps": kwargs["steps"], "bytes": output.stat().st_size, "output": str(output)}
+        recipe_sha256 = "a" * 64
         with patch("muse.wan_video.generate_wan21_t2v", side_effect=fake_generate):
-            result = self.builder.build_from_prompt("AI 测试短片", "一只狐狸穿过竹林", seed=123)
+            result = self.builder.build_from_prompt(
+                "AI 测试短片", "一只狐狸穿过竹林", seed=123, recipe_sha256=recipe_sha256,
+            )
         self.assertTrue(result["validated"])
         product_dir = self.root / result["relative_path"]
         manifest = json.loads((product_dir / "manifest.json").read_text(encoding="utf-8"))
@@ -244,9 +249,35 @@ class VideoProductBuilderTests(unittest.TestCase):
         self.assertEqual(storyboard["production_mode"], "local_ai_text_to_video")
         self.assertEqual(storyboard["prompt"], "一只狐狸穿过竹林")
         self.assertEqual(manifest["source_assets"], [])
+        self.assertEqual(manifest["recipe_provenance"]["recipe_sha256"], recipe_sha256)
+        self.assertEqual(result["recipe_sha256"], recipe_sha256)
         with zipfile.ZipFile(product_dir / "product.zip") as archive:
             self.assertEqual(set(archive.namelist()), {"README.md", "storyboard.json", "qa-report.json", "video.mp4"})
 
+
+    def test_recipe_sha256_resolves_from_creator_brief_without_loading_external_services(self):
+        recipe_sha256 = "b" * 64
+        with InitiativeStore(self.root / "data" / "initiatives" / "muse.sqlite3") as store:
+            initiative = store.propose(
+                "Recipe-linked creator", kind="creative_output",
+                creator_value="Preserve approved recipe provenance",
+                concept=json.dumps({"creator_brief": {"video": {"recipe_sha256": recipe_sha256}}}),
+                first_step="Build one verified preview", expected_output="A recipe-linked video manifest",
+            )
+        self.assertEqual(_resolve_recipe_sha256(self.root, initiative["id"], None), recipe_sha256)
+        self.assertEqual(_resolve_recipe_sha256(self.root, initiative["id"], recipe_sha256), recipe_sha256)
+        with self.assertRaisesRegex(ValueError, "SHA-256"):
+            _resolve_recipe_sha256(self.root, initiative["id"], "invalid")
+        with self.assertRaisesRegex(ValueError, "does not match the creator brief"):
+            _resolve_recipe_sha256(self.root, initiative["id"], "c" * 64)
+        with InitiativeStore(self.root / "data" / "initiatives" / "muse.sqlite3") as store:
+            store.start_video_attempt(
+                "recipe-linked-attempt", mode="prompt_to_video",
+                initiative_id=initiative["id"], recipe_sha256=recipe_sha256,
+            )
+        self.assertEqual(_resolve_recipe_sha256(self.root, initiative["id"], None), recipe_sha256)
+        with self.assertRaisesRegex(ValueError, "active video attempt"):
+            _resolve_recipe_sha256(self.root, initiative["id"], "c" * 64)
 
     def test_packages_recovered_wan_clip_with_ai_provenance_and_verified_zip(self):
         source = self.root / "recovered-wan.mp4"
@@ -471,7 +502,7 @@ class VideoProductBuilderTests(unittest.TestCase):
         ):
             result = self.builder.package_generated_clip(
                 "保留分镜素材", "多镜头测试", source,
-                generation_metadata={"status": "completed", "width": 512, "height": 288, "fps": 12},
+                generation_metadata={"status": "completed", "width": 512, "height": 288, "fps": 12, "recipe_sha256": "d" * 64},
                 scene_records=scene_records, scene_asset_paths=shots,
             )
         product_dir = self.root / result["relative_path"]
@@ -481,6 +512,8 @@ class VideoProductBuilderTests(unittest.TestCase):
             self.assertIn("scenes/shot_02.mp4", archive.namelist())
             self.assertEqual(archive.read("scenes/shot_01.mp4"), shots[0].read_bytes())
         self.assertEqual(len(manifest["scene_assets"]), 2)
+        self.assertEqual(manifest["recipe_provenance"]["recipe_sha256"], "d" * 64)
+        self.assertEqual(result["recipe_sha256"], "d" * 64)
         self.assertEqual(manifest["scene_assets"][0]["sha256"], hashlib.sha256(shots[0].read_bytes()).hexdigest())
     def test_narration_timeline_rejects_audio_that_would_be_truncated(self):
         source = self.root / "recovered-wan.mp4"

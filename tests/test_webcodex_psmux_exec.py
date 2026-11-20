@@ -198,6 +198,120 @@ class PsmuxExecAdapterTests(unittest.TestCase):
             self.assertFalse((job_dir / "payload.ps1").exists())
             self.assertIsNone(adapter._active_job_id("muse-dev"))
 
+    def test_list_jobs_reports_completed_active_and_untracked_without_mutating(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict("os.environ", {"LOCALAPPDATA": directory}):
+            root = adapter._job_root()
+            completed_id = "a" * 32
+            active_id = "b" * 32
+            untracked_id = "c" * 32
+            for job_id in (completed_id, active_id, untracked_id):
+                (root / job_id).mkdir(parents=True)
+            (root / completed_id / "result.txt").write_text("7", encoding="utf-8")
+            (root / completed_id / "output.log").write_text("completed output", encoding="utf-8")
+            active_path = adapter._active_path("muse-dev")
+            adapter._write_active_job("muse-dev", active_id, "musejob_bbbbbbbbbbbb")
+            lock_path = root / "muse-dev.lock"
+            lock_path.write_bytes(b"lock sentinel")
+
+            result = adapter.list_jobs({"session": "muse-dev", "limit": 10})
+            by_id = {item["job_id"]: item for item in result["jobs"]}
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(by_id[completed_id]["status"], "completed")
+            self.assertEqual(by_id[completed_id]["exit_code"], 7)
+            self.assertEqual(by_id[active_id]["status"], "outcome_unknown")
+            self.assertTrue(by_id[active_id]["active"])
+            self.assertEqual(by_id[untracked_id]["status"], "incomplete_untracked")
+            self.assertEqual(lock_path.read_bytes(), b"lock sentinel")
+            self.assertEqual(result["concurrency"]["policy"], "one_in_flight_job_per_session")
+            self.assertEqual(result["concurrency"]["lock_probe"], "not_performed_read_only")
+            self.assertEqual(lock_path.read_bytes(), b"lock sentinel")
+            self.assertTrue(active_path.is_file())
+
+    def test_list_jobs_rejects_invalid_limit(self):
+        result = adapter.list_jobs({"limit": 0})
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["error"], "limit_must_be_1_to_100")
+
+    def test_job_manifest_is_written_and_listed_with_recovery_guidance(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict("os.environ", {"LOCALAPPDATA": directory}):
+            job_id = "d" * 32
+            job_dir = adapter._job_root() / job_id
+            job_dir.mkdir(parents=True)
+            adapter._write_job_manifest(job_id, {
+                "job_id": job_id, "session": "muse-dev", "language": "python",
+                "working_directory": r"D:\\AI AGENT\\Muse", "status": "launching", "created_at": 123.0,
+            })
+            result = adapter.list_jobs({"session": "muse-dev", "limit": 10})
+            item = next(row for row in result["jobs"] if row["job_id"] == job_id)
+            self.assertEqual(item["session"], "muse-dev")
+            self.assertEqual(item["language"], "python")
+            self.assertEqual(item["next_action"], "inspect_before_retry; process_state_unknown")
+
+    def test_recover_marks_manifest_completed_with_real_exit_code(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict("os.environ", {"LOCALAPPDATA": directory}):
+            job_id = "e" * 32
+            job_dir = adapter._job_root() / job_id
+            job_dir.mkdir(parents=True)
+            (job_dir / "result.txt").write_text("9", encoding="utf-8")
+            adapter._write_job_manifest(job_id, {"job_id": job_id, "session": "muse-dev", "status": "launching"})
+            result = adapter.recover_job(job_id)
+            manifest = adapter._read_job_manifest(job_id)
+            self.assertEqual(result["exit_code"], 9)
+            self.assertEqual(manifest["status"], "completed")
+            self.assertEqual(manifest["exit_code"], 9)
+            self.assertIn("finished_at", manifest)
+
+    def test_working_directory_is_confined_to_project_root(self):
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as outside:
+            nested = Path(root) / "src"
+            nested.mkdir()
+            self.assertEqual(Path(adapter._resolve_working_directory("src", root)), nested.resolve())
+            with self.assertRaisesRegex(adapter.PsmuxError, "working_directory_outside_project_root"):
+                adapter._resolve_working_directory(outside, root)
+
+    def test_working_directory_rejects_missing_directory(self):
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaisesRegex(adapter.PsmuxError, "working_directory_not_found"):
+                adapter._resolve_working_directory("missing", root)
+
+    def test_script_path_is_project_relative_even_when_cwd_is_a_subdirectory(self):
+        with tempfile.TemporaryDirectory() as root:
+            scripts = Path(root) / "scripts"
+            nested = Path(root) / "src"
+            scripts.mkdir()
+            nested.mkdir()
+            script_path = scripts / "check.py"
+            script_path.write_text("print('ok')", encoding="utf-8")
+            source, language, resolved = adapter._resolve_script_request(
+                {"script_path": "scripts/check.py"}, str(nested), root
+            )
+        self.assertEqual(source, "")
+        self.assertEqual(language, "python")
+        self.assertEqual(resolved, script_path.resolve())
+
+    def test_script_path_still_rejects_escape_from_project_root_with_nested_cwd(self):
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as outside:
+            script_path = Path(outside) / "outside.py"
+            script_path.write_text("print('no')", encoding="utf-8")
+            nested = Path(root) / "src"
+            nested.mkdir()
+            with self.assertRaisesRegex(adapter.PsmuxError, "script_path_outside_project_root"):
+                adapter._resolve_script_request(
+                    {"script_path": str(script_path)}, str(nested), root
+                )
+
+    def test_lock_uses_low_level_open_and_preserves_exclusive_session_lease(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict("os.environ", {"LOCALAPPDATA": directory}):
+            lock_path = adapter._job_root() / "muse-dev.lock"
+            with patch.object(Path, "open", side_effect=PermissionError("pathlib open denied")):
+                first = adapter._acquire_lock(lock_path)
+                self.assertIsNotNone(first)
+                self.assertIsNone(adapter._acquire_lock(lock_path))
+                adapter._release_lock(first)
+                second = adapter._acquire_lock(lock_path)
+                self.assertIsNotNone(second)
+                adapter._release_lock(second)
+
     def test_invalid_request_is_rejected_before_touching_psmux(self):
         result = adapter.execute_request({"script": "", "timeout_secs": 30})
         self.assertEqual(result["status"], "failed")

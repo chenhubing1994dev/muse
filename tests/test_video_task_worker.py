@@ -10,6 +10,7 @@ from unittest.mock import patch
 from muse.initiative_engine import InitiativeStore
 from muse.task_queue import TaskQueue
 from muse.video_task_worker import VideoTaskWorker
+from muse.video_recipe_trace import build_video_recipe_trace
 
 
 class FakeVideoBuilder:
@@ -17,10 +18,13 @@ class FakeVideoBuilder:
         self.result = result or {
             "validated": True, "initiative_id": "a" * 32, "version_id": "b" * 20,
             "mp4_sha256": "c" * 64, "package_sha256": "d" * 64,
+            "manifest_sha256": "e" * 64,
             "relative_path": "data/products/example/version", "quality_gate": {"status": "passed"},
         }
         self.error = error
         self.calls = []
+        self.verify_calls = []
+        self.verify_overrides = {}
 
     def build_from_prompt(self, *args, **kwargs):
         self.calls.append((args, kwargs))
@@ -33,6 +37,21 @@ class FakeVideoBuilder:
         if self.error:
             raise self.error
         return dict(self.result)
+
+
+    def verify_path(self, products_root, initiative_id, version_id):
+        self.verify_calls.append((Path(products_root), initiative_id, version_id))
+        verified = {
+            "validated": True,
+            "initiative_id": self.result.get("initiative_id"),
+            "version_id": self.result.get("version_id"),
+            "relative_path": self.result.get("relative_path"),
+            "mp4_sha256": self.result.get("mp4_sha256"),
+            "package_sha256": self.result.get("package_sha256"),
+            "manifest_sha256": self.result.get("manifest_sha256"),
+        }
+        verified.update(self.verify_overrides)
+        return verified
 
 
 class VideoTaskWorkerTests(unittest.TestCase):
@@ -58,6 +77,7 @@ class VideoTaskWorkerTests(unittest.TestCase):
             store.start_video_attempt(
                 attempt_id, mode="prompt_to_video", initiative_id=initiative_id,
                 approval_task_id=ticket["id"],
+                recipe_sha256=video_brief.get("recipe_sha256"),
             )
         return ticket["id"]
 
@@ -133,6 +153,79 @@ class VideoTaskWorkerTests(unittest.TestCase):
             attempt = store.get_video_attempt("worker-test")
             self.assertEqual(attempt["status"], "succeeded")
             self.assertEqual(attempt["product_id"], "a" * 32)
+            self.assertEqual(attempt["manifest_sha256"], "e" * 64)
+            self.assertEqual(builder.verify_calls, [((self.root / "data" / "products").resolve(), "a" * 32, "b" * 20)])
+
+    def test_approved_creator_brief_recipe_fingerprint_survives_worker_and_trace(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = root / "data" / "initiatives" / "muse.sqlite3"
+            database.parent.mkdir(parents=True)
+            recipe_hash = "a" * 64
+            video_brief = {
+                "candidate_id": "candidate-01-abcdef123456",
+                "recipe_sha256": recipe_hash,
+                "title": "获批配方追溯测试",
+                "prompt": "A restrained cinematic dawn over an ancient observatory",
+                "negative_prompt": "unverified claims, text artifacts",
+                "aspect_ratio": "16:9",
+                "duration_seconds": 2,
+                "steps": 8,
+                "mapping_report": {"status": "ready", "mapped": [{"source": "scenes", "target": "scenes"}]},
+            }
+            with InitiativeStore(database) as store:
+                initiative = store.propose(
+                    "已审批配方端到端测试", kind="creative_output", creator_value="配方指纹贯通",
+                    concept=json.dumps({"creator_brief": {"video": video_brief}}, ensure_ascii=False),
+                    first_step="生成测试预览", expected_output="可追溯视频产品",
+                )
+            self._queue_approved_attempt(root, initiative["id"], "recipe-e2e-attempt", video_brief)
+            builder = FakeVideoBuilder()
+            result = VideoTaskWorker(root, builder=builder, worker_id="recipe-e2e-worker").run_once()
+            self.assertEqual(result["status"], "succeeded")
+            self.assertEqual(len(builder.calls), 1)
+            with InitiativeStore(database) as store:
+                attempt = store.get_video_attempt("recipe-e2e-attempt")
+                self.assertEqual(attempt["status"], "succeeded")
+                self.assertEqual(attempt["recipe_sha256"], recipe_hash)
+                self.assertEqual(attempt["manifest_sha256"], "e" * 64)
+            verified_product = {
+                "validated": True,
+                "recipe_sha256": recipe_hash,
+                "manifest_sha256": "e" * 64,
+                "mp4_sha256": "c" * 64,
+                "package_sha256": "d" * 64,
+                "quality_gate": {"status": "passed"},
+            }
+            with patch("muse.video_product_builder.VideoProductBuilder.verify_path", return_value=verified_product):
+                trace = build_video_recipe_trace(root, "recipe-e2e-attempt")
+            self.assertTrue(trace["approval"]["human_decision_verified"])
+            self.assertEqual(trace["approval"]["decision_actor"], "test-operator")
+            self.assertTrue(trace["candidate"]["brief_fingerprint_matches_attempt"])
+            self.assertTrue(trace["product"]["manifest_matches_attempt"])
+            self.assertTrue(trace["product"]["recipe_matches_attempt"])
+            self.assertEqual(trace["product"]["status"], "verified")
+            self.assertTrue(trace["chain_consistent"])
+            self.assertFalse(trace["release_review"]["can_publish"])
+            self.assertEqual(trace["publishing"], "not_performed")
+
+    def test_worker_fails_closed_when_builder_omits_manifest_digest(self):
+        builder = FakeVideoBuilder()
+        builder.result.pop("manifest_sha256")
+        result = VideoTaskWorker(self.root, builder=builder, worker_id="missing-manifest").run_once()
+        self.assertEqual(result["status"], "failed")
+        with InitiativeStore(self.database) as store:
+            attempt = store.get_video_attempt("worker-test")
+            self.assertEqual(attempt["status"], "failed")
+
+    def test_worker_fails_closed_when_builder_returns_invalid_manifest_digest(self):
+        builder = FakeVideoBuilder()
+        builder.result["manifest_sha256"] = "invalid"
+        result = VideoTaskWorker(self.root, builder=builder, worker_id="invalid-manifest").run_once()
+        self.assertEqual(result["status"], "failed")
+        with InitiativeStore(self.database) as store:
+            attempt = store.get_video_attempt("worker-test")
+            self.assertEqual(attempt["status"], "failed")
 
     def test_claim_grounded_worker_blocks_unreviewed_claim_before_gpu_or_builder(self):
         from muse.narration_sync import NarrationSyncStore
@@ -404,6 +497,55 @@ class VideoTaskWorkerTests(unittest.TestCase):
             self.assertEqual(attempt["status"], "failed")
             self.assertEqual(attempt["error_type"], "RuntimeError")
 
+
+    def test_worker_output_is_traceable_to_exact_approved_creator_brief_and_attempt(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = root / "data" / "initiatives" / "muse.sqlite3"
+            database.parent.mkdir(parents=True)
+            recipe_sha256 = "a" * 64
+            video_brief = {
+                "candidate_id": "candidate-integration-01",
+                "recipe_sha256": recipe_sha256,
+                "title": "端到端追溯测试", "prompt": "A grounded integration-test scene",
+                "negative_prompt": "fabricated claims", "aspect_ratio": "9:16",
+                "duration_seconds": 2, "steps": 8,
+            }
+            with InitiativeStore(database) as store:
+                initiative = store.propose(
+                    "Worker trace integration", kind="creative_output",
+                    creator_value="验证审批到产品的追溯闭环",
+                    concept=json.dumps({"creator_brief": {"video": video_brief}}, ensure_ascii=False),
+                    first_step="生成模拟预览", expected_output="可追溯的视频产品",
+                )
+            attempt_id = "worker-trace-integration"
+            ticket_id = self._queue_approved_attempt(root, initiative["id"], attempt_id, video_brief)
+            builder = FakeVideoBuilder()
+            result = VideoTaskWorker(root, builder=builder, worker_id="trace-worker").run_once()
+            self.assertEqual(result["status"], "succeeded")
+            self.assertEqual(result["attempt_id"], attempt_id)
+            self.assertEqual(len(builder.calls), 1)
+            from muse.video_recipe_trace import build_video_recipe_trace
+            verified_product = {
+                "validated": True, "recipe_sha256": recipe_sha256,
+                "manifest_sha256": builder.result["manifest_sha256"],
+                "mp4_sha256": builder.result["mp4_sha256"],
+                "package_sha256": builder.result["package_sha256"],
+                "quality_gate": {"status": "passed"},
+            }
+            with patch(
+                "muse.video_product_builder.VideoProductBuilder.verify_path",
+                return_value=verified_product,
+            ):
+                trace = build_video_recipe_trace(root, attempt_id)
+            self.assertTrue(trace["chain_consistent"])
+            self.assertEqual(trace["candidate"]["candidate_id"], "candidate-integration-01")
+            self.assertEqual(trace["candidate"]["recipe_sha256"], recipe_sha256)
+            self.assertTrue(trace["approval"]["human_decision_verified"])
+            self.assertEqual(trace["approval"]["ticket_id"], ticket_id)
+            self.assertEqual(trace["attempt"]["status"], "succeeded")
+            self.assertEqual(trace["product"]["status"], "verified")
+            self.assertFalse(trace["release_review"]["can_publish"])
 
 if __name__ == "__main__":
     unittest.main()

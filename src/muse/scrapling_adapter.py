@@ -105,5 +105,14 @@ class ScraplingHTMLParser:
             "url": url, "domain": (parsed.hostname or "").casefold(), "parser": "scrapling",
             "adaptive_mode": adaptive_mode, "fields": extracted, "field_count": len(extracted),
             "value_count": sum(len(values) for values in extracted.values()),
+            "selector_specs": {
+                field: {"type": spec["type"], "query": spec["query"]}
+                for field, spec in selectors.items()
+            },
             "source_kind": "already_fetched_public_html",
+            "content_trust": "untrusted_page_derived",
+            "verification_status": "not_independently_verified",
+            "instruction_authority": False,
+            "requires_source_verification": True,
+            "promotion_eligible": False,
         }

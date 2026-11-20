@@ -57,6 +57,25 @@ def _active_path(session: str) -> Path:
     return _job_root() / f"{session}.active.json"
 
 
+def _manifest_path(job_id: str) -> Path:
+    return _job_root() / job_id / "job.json"
+
+
+def _write_job_manifest(job_id: str, manifest: dict[str, Any]) -> None:
+    path = _manifest_path(job_id)
+    temporary = path.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(manifest, ensure_ascii=True, sort_keys=True), encoding="utf-8")
+    temporary.replace(path)
+
+
+def _read_job_manifest(job_id: str) -> dict[str, Any] | None:
+    try:
+        value = json.loads(_manifest_path(job_id).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
 def _active_job_id(session: str) -> str | None:
     path = _active_path(session)
     if not path.is_file():
@@ -82,40 +101,45 @@ def _write_active_job(session: str, job_id: str, window_name: str) -> None:
 
 def _acquire_lock(path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
-    handle = path.open("a+b")
-    handle.seek(0)
-    if not handle.read(1):
-        handle.seek(0)
-        handle.write(b"\0")
-        handle.flush()
-    handle.seek(0)
+    flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_BINARY"):
+        flags |= os.O_BINARY
+    descriptor = os.open(path, flags, 0o666)
+    if os.fstat(descriptor).st_size == 0:
+        os.write(descriptor, b"\0")
+    os.lseek(descriptor, 0, os.SEEK_SET)
     try:
         if os.name == "nt":
             import msvcrt
-            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
         else:
             import fcntl
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except (OSError, BlockingIOError):
-        handle.close()
+        os.close(descriptor)
         return None
-    return handle
+    return descriptor
 
 
 def _release_lock(handle) -> None:
     if handle is None:
         return
+    descriptor = handle if isinstance(handle, int) else handle.fileno()
     try:
-        handle.seek(0)
+        os.lseek(descriptor, 0, os.SEEK_SET)
         if os.name == "nt":
             import msvcrt
-            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
         else:
             import fcntl
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
     except OSError:
         pass
-    handle.close()
+    finally:
+        if isinstance(handle, int):
+            os.close(handle)
+        else:
+            handle.close()
 
 
 def _ps_quote(value: str) -> str:
@@ -341,6 +365,12 @@ def recover_job(job_id: str) -> dict[str, Any]:
     except (OSError, ValueError):
         return _result(job_id, "outcome_unknown", error="result_file_unreadable")
     output, truncated = _read_output(output_path)
+    manifest = _read_job_manifest(job_id) or {"job_id": job_id}
+    manifest.update({"status": "completed", "exit_code": exit_code, "finished_at": time.time()})
+    try:
+        _write_job_manifest(job_id, manifest)
+    except OSError:
+        pass
     for generated in (directory / "job.ps1", directory / "payload.ps1", directory / "payload.py", directory / "payload.sh", directory / "payload.bat"):
         generated.unlink(missing_ok=True)
     _clear_active_for_job(job_id)
@@ -380,9 +410,83 @@ def inspect_session(request: dict[str, Any]) -> dict[str, Any]:
         return _result("", "failed", error=f"{type(exc).__name__}:{exc}")
 
 
+def list_jobs(request: dict[str, Any]) -> dict[str, Any]:
+    """Read-only view of retained psmux job folders; never acquires or repairs locks."""
+    session = request.get("session", DEFAULT_SESSION)
+    limit = request.get("limit", 20)
+    if not isinstance(session, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", session):
+        return _result("", "failed", error="invalid_session_name")
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+        return _result("", "failed", error="limit_must_be_1_to_100")
+
+    root = _job_root()
+    active_job_id = _active_job_id(session)
+    try:
+        root.stat()
+    except FileNotFoundError:
+        return _result("", "completed", session=session, active_job_id=active_job_id, concurrency={"policy": "one_in_flight_job_per_session", "active_job_id": active_job_id, "lock_probe": "not_performed_read_only"}, jobs=[], count=0, read_only=True, transport="local-read-only")
+    except OSError as exc:
+        return _result("", "failed", error=f"job_directory_unreadable:{type(exc).__name__}", transport="local-read-only")
+
+    jobs: list[dict[str, Any]] = []
+    try:
+        directories = sorted(
+            (item for item in root.iterdir() if item.is_dir() and re.fullmatch(r"[0-9a-f]{32}", item.name)),
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError as exc:
+        return _result("", "failed", error=f"job_directory_unreadable:{type(exc).__name__}")
+
+    for directory in directories[:limit]:
+        job_id = directory.name
+        result_path = directory / "result.txt"
+        output_path = directory / "output.log"
+        item: dict[str, Any] = {"job_id": job_id, "active": job_id == active_job_id}
+        manifest = _read_job_manifest(job_id)
+        if manifest is not None:
+            item.update({key: manifest[key] for key in ("session", "language", "working_directory", "created_at", "finished_at") if key in manifest})
+        else:
+            item["session"] = "unknown"
+        try:
+            item["updated_at"] = directory.stat().st_mtime
+            if result_path.is_file():
+                try:
+                    item["exit_code"] = int(result_path.read_text(encoding="utf-8-sig").strip())
+                    item["status"] = "completed"
+                except (OSError, ValueError):
+                    item["status"] = "result_unreadable"
+            elif item["active"]:
+                item["status"] = "outcome_unknown"
+            else:
+                item["status"] = "incomplete_untracked"
+            if output_path.is_file():
+                output, truncated = _read_output(output_path)
+                item["output_tail"] = output[-4000:]
+                item["output_truncated"] = truncated or len(output) > 4000
+            item["next_action"] = {
+                "completed": "review_output",
+                "outcome_unknown": "recover_job_after_confirming_process_state",
+                "incomplete_untracked": "inspect_before_retry; process_state_unknown",
+                "result_unreadable": "inspect_result_file; do_not_retry",
+            }.get(item["status"], "inspect_job_record")
+        except OSError as exc:
+            item["status"] = "unreadable"
+            item["error"] = type(exc).__name__
+        jobs.append(item)
+
+    return _result(
+        "", "completed", session=session, active_job_id=active_job_id,
+        jobs=jobs, count=len(jobs), limit=limit, read_only=True,
+        concurrency={"policy": "one_in_flight_job_per_session", "active_job_id": active_job_id, "lock_probe": "not_performed_read_only"},
+        transport="local-read-only",
+    )
+
+
 def _resolve_script_request(
     request: dict[str, Any],
     working_directory: str,
+    project_root: str | None = None,
 ) -> tuple[str, str, Path | None]:
     source_path = request.get("script_path")
     if source_path is None:
@@ -397,11 +501,11 @@ def _resolve_script_request(
         raise PsmuxError("script_path_must_be_non_empty_text")
     if request.get("script") not in (None, ""):
         raise PsmuxError("script_and_script_path_are_mutually_exclusive")
+    root = Path(project_root or working_directory).resolve(strict=True)
     candidate = Path(source_path)
     if not candidate.is_absolute():
-        candidate = Path(working_directory) / candidate
-    candidate = candidate.resolve()
-    root = Path(working_directory).resolve()
+        candidate = root / candidate
+    candidate = candidate.resolve(strict=True)
     try:
         candidate.relative_to(root)
     except ValueError as exc:
@@ -420,12 +524,41 @@ def _resolve_script_request(
     return "", request.get("language", inferred), candidate
 
 
-def execute_request(request: dict[str, Any]) -> dict[str, Any]:
-    working_directory = request.get("expected_cwd", DEFAULT_PROJECT_ROOT)
-    if not isinstance(working_directory, str) or not Path(working_directory).is_dir():
-        return _result("", "failed", error="working_directory_not_found")
+
+
+def _resolve_working_directory(value: Any, project_root: str = DEFAULT_PROJECT_ROOT) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise PsmuxError("working_directory_not_found")
+    root = Path(project_root).resolve(strict=True)
+    candidate = Path(value)
+    if not candidate.is_absolute():
+        candidate = root / candidate
     try:
-        user_script, language, source_payload_path = _resolve_script_request(request, working_directory)
+        resolved = candidate.resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise PsmuxError("working_directory_not_found") from exc
+    except OSError as exc:
+        raise PsmuxError("working_directory_outside_project_root") from exc
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise PsmuxError("working_directory_outside_project_root") from exc
+    if not resolved.is_dir():
+        raise PsmuxError("working_directory_not_found")
+    return str(resolved)
+
+
+def execute_request(
+    request: dict[str, Any],
+    project_root: str = DEFAULT_PROJECT_ROOT,
+) -> dict[str, Any]:
+    try:
+        working_directory = _resolve_working_directory(
+            request.get("expected_cwd", project_root), project_root
+        )
+        user_script, language, source_payload_path = _resolve_script_request(
+            request, working_directory, project_root
+        )
     except (OSError, PsmuxError) as exc:
         return _result("", "failed", error=str(exc))
     if not isinstance(language, str):
@@ -478,6 +611,15 @@ def execute_request(request: dict[str, Any]) -> dict[str, Any]:
         )
         executable = psmux_executable()
         argv = build_psmux_argv(executable, session, window_name, working_directory, str(script_path))
+        _write_job_manifest(job_id, {
+            "job_id": job_id,
+            "session": session,
+            "language": language,
+            "working_directory": working_directory,
+            "window_name": window_name,
+            "status": "launching",
+            "created_at": time.time(),
+        })
         _write_active_job(session, job_id, window_name)
         try:
             launched = subprocess.run(
@@ -550,6 +692,8 @@ def main() -> int:
         result = recover_job(str(request.get("job_id", "")))
     elif action == "inspect":
         result = inspect_session(request)
+    elif action == "list":
+        result = list_jobs(request)
     elif action == "execute":
         result = execute_request(request)
     else:

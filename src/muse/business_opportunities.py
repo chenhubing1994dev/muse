@@ -366,12 +366,15 @@ class BusinessOpportunityStore:
                     raise ValueError("deterministic video attempt ID is already bound to another task")
                 if existing.get("approval_task_id")!=approval_task_id:
                     raise ValueError("existing video attempt is not bound to this Commander approval ticket")
+                if existing.get("recipe_sha256") != brief.get("recipe_sha256"):
+                    raise ValueError("existing video attempt is bound to a different approved recipe fingerprint")
                 attempt=existing
                 created=False
             else:
                 attempt=initiatives.start_video_attempt(
                     attempt_id,mode="prompt_to_video",initiative_id=initiative["id"],
                     approval_task_id=approval_task_id,
+                    recipe_sha256=brief.get("recipe_sha256"),
                 )
                 created=True
         linked=any(

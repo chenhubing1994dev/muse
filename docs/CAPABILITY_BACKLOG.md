@@ -180,14 +180,16 @@
 - ResearchPipeline 对缺失、无法解析及未来发布日期明确标记；每个来源快照绑定 URL + 正文 SHA-256，报告展示 citation_id、发布日期状态/日期/age_days、抓取时间与哈希。日期与 HTTPS 均不是来源真实性证明。
 - 未有：可核验证据支持的来源可信度分级、跨来源事实核验、事实级引用报告、定时监察及 Planner 自动调用研究工具。词项相关度只衡量 query/title/snippet 匹配，不能代替可信度。
 - 边界：默认只读；不任意 clone、安装、执行或上传私人资料。
-
+- 2026-11-20 Scrapling/B-202：Runner 恢复后确认外网 E2E 阻塞点是系统代理 `127.0.0.1:7890` 当前拒绝连接，而非 Scrapling parser；代理路径下 Google/Cloudflare DoH 请求失败，受控直连 DoH 对照均 HTTP 200。Muse 保持 fail-closed，不自动绕过系统代理或关闭 SSRF/DNS 防护。ResearchPipeline→ResearchKnowledgeStore `structured_extract` 集成回归验证来源 metadata 入库且不复制原始正文/HTML；结构化结果显式标记 `content_trust=untrusted_page_derived`、`verification_status=not_independently_verified`。Scrapling + Research Fetch + knowledge integration 专项 25/25，新增 adapter/pipeline 两组 41/41，compileall 通过；全项目 Python 3.11 unittest 最新复验 1,651 tests，9 skipped，0 failures / 0 errors。动态浏览器不重复造轮子：现有 `ego-lite` + `HybridSourceReader` 已提供动态 DOM、截图与受限资产采集；Scrapling DynamicFetcher/Playwright 暂不安装。真实网站 E2E 待代理服务恢复后复验。
+- 2026-11-20 Scrapling trust follow-up：adapter 保留 CSS/XPath selector_specs，并为结构化结果附加 `instruction_authority=false`、`requires_source_verification=true`、`promotion_eligible=false`。ResearchKnowledgeStore `transition_claim` 要求 source 证据具备方向匹配的 candidate、review 与 verified citation anchor；`contested` 同时需要支持/反驳审查。专项 11/11 + 31/31 + 39/39，compileall 通过；全量回归 1,697 tests，9 skipped，0 failures。psmux 初次锁访问 PermissionError 后，后续 detached 执行恢复成功，最初根因仍未证实。真实外站 Scrapling E2E 未验收。
+- 2026-11-20 B219 验收补记：Scrapling + ResearchPipeline + ResearchKnowledgeStore 专项 **83/83 passed**，`compileall` 通过；Windows 视频追踪测试显式关闭 SQLite 连接后，Python 3.11 全项目 **1,741 tests，OK，1 skipped，0 failures / 0 errors**。psmux busy 由同一 Session 已运行 Job 持锁导致；等待自然完成后继续执行，没有改 ACL 或绕过单 Job 锁。单站外网 smoke 已由 B209 验证，多站点/重定向/故障注入仍待补。
+- 2026-11-20 B209 adjacent fixes：Video Attempt Ledger 新增 `manifest_sha256` additive migration、attempt persistence/idempotency/event provenance；VideoTaskWorker 强制校验 MP4/package/manifest digest，缺失或格式无效均失败关闭。Lightpanda capture 先执行 workspace containment 与目录覆盖检查，再检查 Playwright 可选依赖。专项 VideoAttemptLedger 8/8、VideoTaskWorker 13/13、Lightpanda 6/6、BusinessOpportunity 14/14；全项目 1,697 tests，9 skipped，0 failures。未安装 Playwright，也未启动 GPU。
+- 2026-11-20 Scrapling real-site smoke：使用单次进程代理 `127.0.0.1:10808` 读取 `quotes.toscrape.com`，HTTP 200；Scrapling 解析标题 1 项与 quote 10 项；来源 metadata 写入临时 ResearchKnowledgeStore，untrusted provenance 保留且原始 HTML 未入库。仅修改该子进程环境变量，没有更改系统代理。单站 E2E 已通过；更广泛的多站点/重定向/故障注入矩阵仍待补。
 ### B-008 隔離沙箱與可回滾改動
-- 狀態：部分完成。TestRunner 已接入 Windows Job Object memory/process-tree limits、硬 runtime timeout；B-034/B-036 加入受控 source patch、hash-guarded rollback、持久化崩潰恢復；B-037 讓 baseline/candidate 測試在臨時 workspace snapshot 中執行，但尚未達成完整 OS sandbox。
 - 已有：Windows per-process + aggregate job memory limit、active-process cap（默认 16）、kill-on-job-close；无法套用 OS 限制时 fail-closed。批准代码改动限制在 workspace 内现有 Python 文件；baseline/candidate/review SHA-256 复核、并发修改保护、SQLite Journal 崩溃恢复，以及测试工作副本隔离均已测试。
 - 未有：网络默认封闭、文件系统/用户权限隔离、CPU 硬限制、第三方程序低权限账户与人工冲突处理 UI。临时 workspace copy 不是 OS sandbox，测试子进程仍可访问网络和权限允许的绝对路径；Windows Job Object 不提供网络隔离。
-- 驗收：`test_evolution_executor` **12/12**、`test_worker` **26/26**、TestRunner **7/7**；最新 Python 3.11 全量 unittest **698/698**，compileall 通過。
+- 驗收：`test_evolution_executor` **12/12**、`test_worker` **26/26**、TestRunner **7/7**；历史 Python 3.11 全量 unittest **698/698**，compileall 通過。
 - 下一步：引入可验证的低权限执行身份、网络封闭与文件系统 ACL；再补人工冲突恢复 UI 和真实双模型端到端 smoke。
-
 ### B-009 Muse 協作橋接
 - 狀態：未驗證 ChatGPT 新對話能否自動取得本機 Muse 程序。
 - 方向：提供明確的 MCP/本機 API/CLI 啟動與健康檢查協議；助手有權限時可委派研究、任務規劃及進度讀寫。

@@ -223,6 +223,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="One-command local video assembly with FFmpeg")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("engines", help="read-only health check for local ComfyUI and Velorn MCP")
+    adapt = sub.add_parser("adapt-mpt", help="preview a MoneyPrinterTurbo parameter mapping; never executes providers")
+    adapt.add_argument("params_json", help="JSON object or array of external video parameter candidates")
     plan = sub.add_parser("plan", help="validate a storyboard and preview its parallel Commander DAG")
     plan.add_argument("storyboard_json")
     plan.add_argument("--story-bible", dest="story_bible_json", help="optional Muse Story Bible JSON for continuity cross-validation")
@@ -242,6 +244,45 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = inspect_video_engines()
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if any(item.get("status") == "ready" for item in result.values()) else 2
+
+    if args.command == "adapt-mpt":
+        from muse.video_recipe import adapt_moneyprinterturbo_batch, adapt_moneyprinterturbo_params
+        from muse.video_workflow import build_video_commander_plan
+
+        def plan_preview(recipe):
+            plan = build_video_commander_plan(recipe)
+            return {
+                "source": plan.source,
+                "parallel_waves": [list(wave) for wave in plan.parallel_waves],
+                "step_ids": [step.step_id for step in plan.steps],
+            }
+
+        try:
+            source_params = json.loads(Path(args.params_json).read_text(encoding="utf-8"))
+            if isinstance(source_params, list):
+                batch = adapt_moneyprinterturbo_batch(source_params)
+                for candidate in batch["candidates"]:
+                    candidate["commander_plan_preview"] = (
+                        plan_preview(candidate["recipe"])
+                        if candidate["mapping_report"]["ready_for_commander_plan"] else None
+                    )
+                print(json.dumps(batch, ensure_ascii=False, indent=2))
+            else:
+                adapted = adapt_moneyprinterturbo_params(source_params)
+                report = adapted["mapping_report"]
+                preview = plan_preview(adapted["recipe"]) if report["ready_for_commander_plan"] else None
+                print(json.dumps({
+                    "status": report["status"],
+                    "mapping_report": report,
+                    "recipe": adapted["recipe"],
+                    "commander_plan_preview": preview,
+                    "execution": "not_started",
+                    "commander_submission": "not_submitted",
+                }, ensure_ascii=False, indent=2))
+        except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            print(json.dumps({"status": "invalid_mpt_params", "error": str(exc)}, ensure_ascii=False))
+            return 2
+        return 0
 
     if args.command == "plan":
         from muse.video_workflow import build_video_commander_plan, validate_storyboard

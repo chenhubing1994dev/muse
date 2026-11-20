@@ -2341,7 +2341,8 @@ eady_to_publish=false。
 - 因 Runner 启动配置位于 `D:\Tools\WebCodex\env\runner.toml`，且该路径不在 Muse Project 的授权写入范围，继续 fail-closed：不通过 Muse shell、GUI 或私有文件路径越权修改，不把 Runner 主进程塞入 psmux，不宣称所有 Host 命令已自动重定向。
 - 当前安全默认仍是：项目开发命令显式经 `scripts/webcodex_psmux_exec.py` → detached `psmux new-window -d`；短 bootstrap 留在 Runner；同步内部子进程使用 `CREATE_NO_WINDOW` 并保留 pipes/timeout；常驻服务由既有 Supervisor 管理。
 - 完成一次真实桌面只读快照（1920×1080 屏幕，1280×720 采样）：前景为 OrcaTerm，后方可见 PowerShell 窗口。该单帧只能证明采样时窗口状态，不能证明该窗口由 psmux 创建，也不能证明闪屏频率或零闪屏。后续需在命令执行前后做多帧/窗口句柄对照，且不激活或控制用户窗口。
-- 下一步：寻找 WebCodex 官方支持的 Project-level command launcher/default workflow 接入点；若不存在，则保持明确的 adapter-first 开发规范，并把任何需要全局 Runner 配置写入的工作转交给官方 Desktop/Runner 管理界面，而不是绕过授权。- 本轮实机复验：经 Runner 短 bootstrap 调用 adapter 执行 detached Python smoke，输出 `20261119`、`exit_code=0`、`transport=psmux-detached-window`；随后 `inspect` 返回 `muse-dev` 主窗口正常、`active_job_id=null`。执行后的桌面窗口枚举未再列出独立 PowerShell 窗口。前后观察证明本次测试任务完成且没有残留可见 PowerShell surface；不能外推为所有命令均无闪屏或绝对零闪屏。
+- 下一步：寻找 WebCodex 官方支持的 Project-level command launcher/default workflow 接入点；若不存在，则保持明确的 adapter-first 开发规范，并把任何需要全局 Runner 配置写入的工作转交给官方 Desktop/Runner 管理界面，而不是绕过授权。
+- 本轮实机复验：经 Runner 短 bootstrap 调用 adapter 执行 detached Python smoke，输出 `20261119`、`exit_code=0`、`transport=psmux-detached-window`；随后 `inspect` 返回 `muse-dev` 主窗口正常、`active_job_id=null`。执行后的桌面窗口枚举未再列出独立 PowerShell 窗口。前后观察证明本次测试任务完成且没有残留可见 PowerShell surface；不能外推为所有命令均无闪屏或绝对零闪屏。
 ## 2026-11-19｜B200 本地交付物 SHA-256 证据验证
 
 - 新增 `src/muse/artifact_evidence.py`：只接受显式工作区根目录下的规范相对路径与普通文件；拒绝路径穿越、符号链接、目录、空文件、超限文件和 SHA-256 / byte-count 不匹配；以 1 MiB 分块计算 SHA-256，并在读取前后核验文件身份/大小/修改时间。
@@ -2365,9 +2366,13 @@ eady_to_publish=false。
 - 结构化字段与解析错误类型随研究结果输出，并进入 ResearchKnowledgeStore 来源节点 metadata；原始 HTML 不写入证据库，既有可读文本路径保持不变。单页结构化抽取另设 20,000 字符总量上限；适配器/Reader 集成测试 **10/10 passed**，Research Fetch/Pipeline/Browser 回归 **61/61 passed**，compileall 与 CLI 参数检查通过。
 - 全项目 unittest 首轮发现 1,637 tests / 9 skipped / 1 failure：`test_local_dashboard` 的 localhost 请求被环境 `HTTP_PROXY` 代理截获（502）；测试 opener 改为显式 `ProxyHandler({})` 后，dashboard 定向 **11/11 passed**。后续全量回归任务因 Runner 进程替换而丢失，未获得第二次全量通过证据，故不宣称全量测试通过。
 - 尝试对公开练习站 `quotes.toscrape.com` 做端到端读取时，Muse 在公共 URL 安全校验阶段调用 Google DoH 遇到本机代理 TLS EOF（`SSLEOFError`），请求尚未进入页面抓取；这属于当前网络/DNS 代理通路问题，不是 Scrapling 解析测试失败。未绕过安全校验，真实外站 E2E 仍待网络通路恢复后验收。
-- 当前是 ResearchPipeline 的可选 HTML 增强路径；默认仍关闭，未进行真实外部网站端到端验收，未启用 Scrapling Fetcher、动态浏览器或 Spider，不宣称全量融合完成。
-
-
+- 2026-11-20 Runner 恢复后复核：`HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` 均指向 `127.0.0.1:7890`；经项目 `.venv` 对 Google DoH 与 Cloudflare DoH 的代理请求均报 `WinError 10061`（目标积极拒绝连接），确认本地代理端口当前无可用监听。仅用于诊断的直连对照请求两家 DoH 均 HTTP 200；没有修改系统代理、没有让 Muse 自动绕过代理，也没有放宽 SSRF/DNS 校验。真实外站 E2E 待代理服务恢复后验收。
+- 新增 ResearchPipeline 集成回归：验证 Scrapling `structured_extract` 从 Reader 进入结果并持久化到 ResearchKnowledgeStore 来源节点 metadata，同时不复制原始正文/HTML。Scrapling + Research Fetch + 新增知识图谱集成定向回归 **25/25 passed**，`compileall` 通过。
+- 全项目 Python 3.11 unittest 先前复验 **1,639 tests，OK，9 skipped，0 failures / 0 errors**（192.920 秒）。
+- 2026-11-20 研究数据边界加固：Scrapling 结构化结果增加 `content_trust=untrusted_page_derived` 与 `verification_status=not_independently_verified`，并由 ResearchPipeline 原样传入知识来源 metadata；防止下游把网页抽取字段误认作已核实事实。`test_scrapling_adapter` + `test_research_pipeline` **41/41 passed**，`compileall -q src\\muse` 通过。
+- 本轮最新全项目 Python 3.11 unittest 复验 **1,651 tests，OK，9 skipped，0 failures / 0 errors**（177.975 秒）。
+- 当前仍是 ResearchPipeline 的可选 HTML 增强路径；默认关闭，未进行真实外部网站端到端验收，未启用 Scrapling Fetcher 或 Spider，不宣称完整融合完成。
+- 动态浏览器能力盘点：项目 `.venv` 当前 Scrapling 0.5.1；Playwright 未安装，Scrapling `DynamicFetcher` 无法导入；但 Muse 已有独立 `ego-lite` + `HybridSourceReader` 动态浏览器 fallback（DOM snapshot、截图、受限同源资产采集）。不重复安装浏览器依赖，优先复用现有能力。`127.0.0.1:7890` 当前连接超时，真实网页 E2E 暂未运行；没有擅自更改代理。
 - 新增 `WorkflowController.record_video_product_evidence()`，复用 `VideoProductBuilder.verify_path()` 验证 MP4 容器、manifest、文件 SHA-256、ZIP CRC、ZIP 成员及 ZIP 内外内容一致性。
 - 将 manifest 及其声明的 README、Storyboard、MP4、ZIP，以及存在时的 QA 报告/字幕/字幕审核文件逐一交给 B200 SHA-256 验证器；为每份文件写入绑定当前 Ticket、Plan、Run 的 `workflow.artifact_verified` 事件。
 - 返回 evidence_refs 与新的 workflow revision；完成时再次哈希，登记后被修改的 MP4/ZIP 不得通过。
@@ -2375,5 +2380,259 @@ eady_to_publish=false。
 - B201 定向回归 **35/35 passed**；全项目 Python 3.11 unittest **1,628 tests，OK，1 skipped**；`compileall` 通过。
 - 使用符合 VideoProductBuilder legacy manifest/ZIP 合同的本地产品 fixture；没有启动 Wan GPU，也没有冒充真实 AI 成片实测。
 - 下一步：把该 API 接入明确的 Video Worker 成功路径，只处理当前 Ticket 绑定的 initiative/version；不得全盘扫描猜测产品归属。详见 `docs/PROGRESS_B201_VIDEO_PRODUCT_EVIDENCE.md`。
+## 2026-11-20｜B202 psmux 项目工作目录边界加固
+
+- `scripts/webcodex_psmux_exec.py` 新增 canonical working-directory resolver：`expected_cwd` 只允许 Muse Project 根目录或其真实子目录；拒绝项目外路径、缺失目录和解析异常。已有 script_path 仍单独执行 Project-root containment 校验。
+- 新增工作目录根约束/缺失目录测试；psmux adapter 专项 **23/23 passed**，Python 3.11 `py_compile` 通过。
+- 实机 detached Python smoke 经 Runner 短 PowerShell bootstrap → adapter → psmux 完成，输出 `2026`，真实退出码 `0`，transport=`psmux-detached-window`。先前两次 stdin 传输试验未正确传递 JSON，未启动任何目标任务；改用临时请求文件作为 bootstrap 数据载体后成功，临时文件在 finally 中清理。
+- 本轮没有改变 Runner 配置、PATH、任务计划或 psmux 生命周期；仍未实现 Runner 全局透明拦截。
+## 2026-11-20｜B203 MoneyPrinterTurbo 万象超融合研究与适配决策
+
+- 只读审查上游 `harry0703/MoneyPrinterTurbo`：`pyproject.toml` 声明版本 1.3.10，许可证 MIT；阅读 README、LICENSE、VideoParams、素材/视频/语音/任务/发布服务与 Agent Skill 文档。研究记录：`docs/MONEYPRINTERTURBO_FUSION_RESEARCH.md`。
+- 识别其高价值能力：统一视频配方、多候选批量生成、素材匹配/缓存、阶段进度与幂等恢复、动态字幕/转场、可编辑本地项目。
+- 与 Muse 对照后确认：Muse 已有 Commander、Wan/ComfyUI、多镜头、粤语 TTS、FFmpeg/Remotion、QA、产品账本、OpenFilm 导出与多平台发布准备包。不得复制第二套调度器/产品账本，也不应引入整套 MoviePy/Streamlit/API Provider 依赖。
+- 决策：adapter-first、能力择优吸收；本阶段没有下载/安装/运行 MPT，没有读取密钥，没有调用付费 API，没有启动 MPT WebUI/API 或执行其自动安装 Skill。
+- 下一阶段：在 Muse Commander 之下实现原生 VideoRecipe 参数映射与有限批量候选计划，先用本地 fixture 做 TDD；任何外部 MPT 产物必须经路径、哈希、FFprobe、来源/许可和 Muse QA 验证后才可进入产品账本。
+
+## 2026-11-20｜B204 muse-dev 统一命令入口
+
+- 新增 `scripts/muse_dev.py`，提供 `run`、`inspect`、`recover` 三个子命令；统一语言、项目相对脚本路径/inline 脚本、项目相对 cwd、session 与 timeout 参数。
+- CLI 只把结构化参数转交现有 `webcodex_psmux_exec.py`，不另建执行器/队列；不使用 `shell=True`，不修改 PATH 或 Runner 私有配置。结果以 JSON 输出，真实脚本退出码原样传播；`outcome_unknown` 返回独立状态码 3，适配器失败返回 2。
+- 加固路径语义：`--script-path` 始终相对 Muse Project 根目录，`--cwd` 可独立选择项目内子目录；两者分别经过 canonical root containment 检查，拒绝项目外路径。
+- 新增 CLI 参数、互斥、inline 转发、扩展名推断、退出码与 inspect/recover 委托测试；CLI + psmux adapter 定向回归 **32/32 passed**，Python 3.11 detached psmux 测试任务退出码 0。
+- 实机通过 `py -3.11 scripts/muse_dev.py run --script-path tests/test_muse_dev_cli.py ...`（省略 `--language`）完成 CLI → adapter → detached psmux → CLI JSON 结果的端到端测试，确认 `.py` 扩展名推断并返回真实退出码 0；另以 `--cwd ..` 验证项目外路径被拒绝，CLI 返回 2 且错误码为 `working_directory_outside_project_root`。
+- 尚未安装全局 `muse-dev` 命令，也未实现 Runner 全局透明拦截；当前正式入口是 `py -3.11 scripts/muse_dev.py ...`。不修改 PATH、Runner 配置或任务计划。
+
+## 2026-11-20｜B205 Scrapling 来源溯源与 Claim Promotion Gate
+
+- Scrapling structured extraction 现在保留完整字段选择器规格（CSS/XPath type + query），并明确写入 `instruction_authority=false`、`requires_source_verification=true`、`promotion_eligible=false`；页面中的指令式文本仍只是原样保留的不可信网页数据。
+- 复用既有 `ResearchKnowledgeStore` 的 claim/evidence/review 结构，没有新建审核系统。加固 `transition_claim`：source 类型证据要支持/反驳/争议主张，必须先登记对应方向的 claim-evidence candidate，并有独立于主张作者的 evidence review 与已验证 citation anchor；`contested` 必须同时具备 supports 与 refutes 两类审查。
+- 新增适配器 prompt-injection 数据保留测试、selector provenance 测试，以及知识图谱对未审查来源阻止升级的回归测试。
+- 初次 psmux adapter 执行曾在 `muse-dev.lock` 打开阶段遇到 `PermissionError`；随后同一 Python 3.11 身份的 `a+b` 打开与 `msvcrt.locking` 只读诊断均成功，多个 detached psmux 测试 Job 正常完成。未证明最初错误根因，也未修改 ACL、删除锁或绕过 psmux。
+- 验证：Scrapling Adapter **11/11**、ResearchPipeline **31/31**、ResearchKnowledgeStore **39/39**；视频 Attempt Ledger **8/8**、VideoTaskWorker **13/13**、Lightpanda Adapter **6/6**、BusinessOpportunity **14/14**；Python 3.11 `compileall` 通过。全项目 unittest **1,697 tests，OK，9 skipped，0 failures / 0 errors**。这些测试均经 `muse_dev.py → psmux detached window` 执行；真实外站 Scrapling E2E 仍未验收。
+## 2026-11-20｜B206 创作者灵感候选检索适配与一次研究尝试
+
+- 复核当日创作者灵感 Claim：节点 `09e820f1bbe25dfb361fcbcf76363b48`，内容 SHA-256 `e52d5c9102243626830a1b6d4da449007e0cac39ffd9af5dd9527dae31dfd79f`；状态仍为 `proposed` / `not_researched`，标签 8 项、研究领域 5 项。2026-11-20 快照 `data/handoff/daily-inspiration-20261120.sqlite3` 完整性检查 `ok`；快照是在节点写入前创建，因此快照中没有该新节点，这是预期的备份时间点。
+- 使用现有 `AutonomousResearchEngine.run_once(preferred_topic_key=...)` 对该节点执行一次有界研究周期；Cycle `cycle_f8dde2a033d743ad8d1c07fdea34b331` 精确命中目标，生成研究报告和 Reminder，但读取来源为 0，结果 `no_readable_sources`。报告只记录 `primary_search / ResearchError`，没有证据可供主张升级；Claim 保持原状态。
+- 独立复测 Muse 现有 `QuantumAwareSearchAdapter`：`HTTPS_PROXY` 指向 `127.0.0.1:7890`，该端口当前连接失败；所有已配置搜索提供方返回 `ResearchError: all configured search providers failed`。没有修改系统代理、绕过代理或放宽 URL/DNS 安全边界。
+- 修正创作者灵感候选解析：完整读取最多 2,000 字符而非截断 500 字符；支持“明确问题”字段及结构化 `research_question`；新增数字内容实验、因果推断、平台 A/B 测试、创作者分析和统计功效的查询映射；为 YouTube 标题实验生成独立的支持与反证检索词。修复不改变既有节点正文或 SHA-256。
+- 新增回归测试；`tests/test_autonomous_research.py` 定向 **57/57 passed**，Python 3.11 `compileall -q src/muse` 通过。对生产 Claim 的只读选择器复测精确命中该节点，完整保留 1,370 字符简报、8 个标签、5 个研究领域，并生成针对性的支持/反证查询。
+- psmux 诊断中曾遇到 `muse-dev.lock` PermissionError；按 adapter 的 inspect/recover 流程回收既有 Job `e0b3338df1ec45e9b2ae7d3064a3a16d`（40 项测试成功），之后本轮 detached psmux 诊断与测试任务均正常完成。未修改 ACL、PATH、Runner 配置或任务计划；不据此宣称根因已完全查明。
+- 当前 Autonomous Runtime 仍为 `stopped`；`idle-autonomous-research` 例程记录存在过期 lease（2026-11-16），TaskQueue 无活动任务。本轮只执行一个有界研究周期，没有启动常驻 Supervisor，也没有声称后台自主研究已持续运行。待恢复本地代理/搜索链路并修复常驻 Runtime 的 lease 恢复后，再重试该 Claim。
+- 没有自动批准代码升级，没有把灵感标记为结论。
+
+## 2026-11-20｜B207 本地代理端口发现、第二轮研究与收尾缺陷
+
+- 只读枚举发现 `sing-box` 监听 `127.0.0.1:10808` 与 `127.0.0.1:10814`；逐端口 HTTP CONNECT 探测确认 10808 可经 HTTPS 访问 Crossref（HTTP 200），10814 返回 405。原 `127.0.0.1:7890` 无监听。只在单次 Muse Python 进程设置 HTTP(S)_PROXY=127.0.0.1:10808，没有改系统代理、v2rayN/sing-box 配置或 Runner。
+- 通过正确端口，现有 `QuantumAwareSearchAdapter` 的支持/反证查询均返回检索结果；随后再次对同一候选执行有界研究。报告：`data/research/reports/autonomous-research-creator-hypothesis-review-09e820f1bbe25dfb361fcbcf76363b48-20261120T113951524874_0000.md`；Cycle `cycle_1a2356017e8a40ed87ea10bc79446680`。
+- 第二轮报告读取 2 个来源，但相关性质量不足：支持候选是 YouTube 观看历史中的政治内容研究，反证候选是低功率放大镜的无损检测标准，均不能直接检验标题 A/B 假设；来源独立性与证据审查均未完成。报告覆盖指数 80 只是检索覆盖启发式，不是可信度。第二阶段主张审查为 `not_requested`，不得据此确认或升级 Claim。
+- 报告生成后，周期在 ReminderStore 收尾阶段失败：`ValueError: message must be 1-2000 characters`。根因是完整创作者简报进入提醒正文后超过提醒长度限制。报告已落盘，但 Reminder 未创建；需给提醒正文设置有意义的短摘要/截断并新增边界测试，再重试。
+- 补充的外部研究线索（由 ChatGPT Web 检索，不是 Muse 已入库来源）：YouTube 官方 A/B 测试说明（最多 3 个标题/缩略图变体、并发测试、最长约两周、watch-time share、Performed Same/Inconclusive、受众构成变化）；Berman & Van den Bulte, *False Discovery in A/B Testing*, DOI `10.1287/mnsc.2021.4207`；在线实验统计挑战综述 DOI `10.1080/00031305.2023.2257237`；YouTube CTR 与 watch time 观察研究 DOI `10.1108/IJPCC-10-2021-0269`。这些线索尚未写入 Muse 数据库，也未完成逐条主张映射。
+- 本轮末尾 psmux `inspect` 显示 `muse-dev` 无 active job，但下一次 adapter 执行仍在读取 `muse-dev.lock` 时遇到 `PermissionError`。不删除锁、不改 ACL、不切换会话绕过。当前无法安全完成第二轮 Claim 数据库回读；报告显示主张仍为 `proposed`、证据未审查，但最终 DB 状态需锁恢复后复核。
+- 下一步顺序：先恢复默认 `muse-dev` psmux adapter 锁访问；再修复 ReminderStore 长度限制并运行测试；改进检索相关性过滤，排除明显词面误匹配；随后只读回查 Claim/Source/Evidence/Reminder，再决定是否重试。不要自动批准代码升级或提升主张状态。
+
+## 2026-11-20｜B208 muse-dev 只读任务清单
+
+- 扩展 `scripts/webcodex_psmux_exec.py` 与 `scripts/muse_dev.py`：新增 `list` 子命令，读取 `%LOCALAPPDATA%\\Muse\\psmux-jobs` 最近任务目录，显示 Job ID、完成/未知/未跟踪状态、退出码、更新时间及最多 4,000 字符输出尾部。
+- `list_jobs` 不获取执行锁、不写 active marker、不清理 payload、不删除或重试任务；不可读取的目录/结果明确标记失败或 unreadable。完成标记缺失时只报告 `outcome_unknown` 或 `incomplete_untracked`，不猜测进程仍在运行。
+- 新增 adapter 测试：混合 completed/active/untracked 状态识别、退出码读取、锁文件和 active marker 保持不变、limit 参数校验；新增 CLI 委托测试。
+- CLI + adapter 定向测试通过：**35/35 passed**。因 psmux adapter 锁访问问题，测试通过 Runner PowerShell typed-script 直接调用 `py -3.11` 执行（不是 psmux detached Job）；另 `py_compile` 两个入口文件通过。
+- 实机只读清单通过 `py -3.11 scripts/muse_dev.py list --session muse-dev --limit 10` 返回最近任务与输出尾部；该动作不获取 `muse-dev.lock`。清单帮助发现近期并行开发 Job 曾留下若干失败记录；对应 `research_knowledge.py`、`contextual_inquiry_bridge.py` 当前文件已重新编译通过，随后相关回归 **50/50 passed**。历史失败记录保留为审计线索，不把它们误报为当前源文件仍有语法错误。
+- B208 记录之后，psmux detached 执行链已在本轮多次成功启动、回收和读取退出码；`muse-dev.lock` 初次 PermissionError 的根因仍未证实。未改 ACL、锁文件、PATH、Runner 配置或任务计划。
+
+## 2026-11-20｜B209 Scrapling 证据门禁、视频产物账本与 Lightpanda 校验闭环
+
+- 完成 B205 的 Claim Promotion Gate：source 证据在升级 `supported` / `refuted` / `contested` 前必须有方向匹配的 claim-evidence candidate、review verdict 与 verified citation anchor；支持结论只接受 `support_search_candidate + supports`，反驳结论只接受 `counter_search_candidate + refutes`，争议状态两边都要有。新增错误方向拒绝测试。
+- Scrapling 结构化抽取保留 selector_specs 和 untrusted provenance；网页指令只作为数据，不具备指令权威或自动事实升级资格。
+- 补齐 Video Attempt Ledger 的 `manifest_sha256` 可选列与旧库 additive migration；成功完成时将 manifest digest 纳入校验、幂等比较、事件详情及 attempt row。VideoTaskWorker 对 Builder 返回的 MP4/package/manifest 三个 SHA-256 做格式验证，缺失或无效时 fail-closed。
+- 修正 Lightpanda `capture_url` 校验顺序：先验证目标路径在 workspace 内且目录不存在，再检查可选 Playwright 依赖；不安装 Playwright、不绕过运行时缺失状态。
+- 专项回归：Scrapling 11/11、ResearchPipeline 31/31、ResearchKnowledge 39/39、VideoAttemptLedger 8/8、VideoTaskWorker 13/13、Lightpanda 6/6、BusinessOpportunity 14/14；`compileall` 通过。全项目 unittest **1,697 tests，OK，9 skipped，0 failures / 0 errors**。
+- 所有上述测试经 `py -3.11 scripts/muse_dev.py run ...` 的 psmux detached 路径执行。最初 lock PermissionError 后，同一 Python 进程对锁文件 `a+b` 打开及 Windows byte lock 诊断成功，后续 detached Job 正常；根因未证实，不改 ACL/系统代理。
+- 真实外站 Scrapling E2E 已通过：在单次 psmux 子进程临时设置代理 `127.0.0.1:10808`（未修改系统代理），读取 `https://quotes.toscrape.com/` 返回 HTTP 200；Scrapling 抽取标题 1 项、引用 10 项；结构化来源 metadata 写入临时 ResearchKnowledgeStore，`content_trust=untrusted_page_derived`、`verification_status=not_independently_verified`、`instruction_authority=false` 均保留，且没有把原始 HTML 写入知识节点。
+- 未接入第二套调度器。Muse Commander 继续拥有业务 TaskQueue；`muse-dev list` 只管理开发执行器自己的运行记录，不替代业务任务队列。
+
+## 2026-11-20｜B210 MoneyPrinterTurbo VideoRecipe 原生适配器首个增量
+
+- 新增 `src/muse/video_recipe.py`：纯标准库适配器，仅把无歧义字段映射为 Muse 配方字段（标题、画幅、FPS、风格、负面提示词、已符合 Muse schema 的 scenes）；复用 `validate_storyboard`，不引入 MoneyPrinterTurbo 依赖。
+- 新增字段映射报告：`mapped`、`unsupported`、`requires_confirmation`；语音、BGM、字幕、Provider、素材源、脚本/搜索词、批量数量与凭据字段不会被静默忽略。凭据字段仅记录字段名与拒绝原因，不保留/回显值。
+- 新增 `muse-video adapt-mpt <params.json>` 只读预览：仅在 storyboard 完整且没有未处理字段时生成 Commander DAG 预览；明确 `execution=not_started`，不会提交任务或调用外部服务。
+- 新增 `tests/test_video_recipe.py`。核心适配器与 CLI 预览现均通过 psmux detached 回归 **7/7 passed**；`tests/test_video_workflow.py` **12/12 passed**。CLI 预览只输出 Commander DAG 计划，不执行任务。
+- 本轮没有安装/启动 MPT，没有修改 Commander/TaskQueue/VideoTaskWorker 执行路径，没有调用付费 Provider 或发布；当前完成的是参数兼容与 DAG 预览，不代表完整视频生产线已接通。
+- 下一步：在保持 Commander 单一调度中心前提下扩展批量候选计划（由 Commander 管理）、阶段状态/幂等恢复与素材来源/授权元数据映射。
+
+## 2026-11-20｜Lightpanda 可选 CDP 适配器第一阶段
+- 按 adapter-first 方案新增 `src/muse/lightpanda_adapter.py`：显式 loopback CDP endpoint、惰性 Playwright 导入、双重研究授权、公共 URL 校验、请求路由拦截、工作区证据目录、正文 SHA-256 与 Markdown/JSON provenance。
+- 在 `pyproject.toml` 新增独立可选 extra `lightpanda`（Playwright）；基础依赖不变，没有安装 Playwright 或 Lightpanda。
+- 新增 `tests/test_lightpanda_adapter.py` 与 `docs/LIGHTPANDA_INTEGRATION.md`。测试覆盖默认禁用、CDP loopback 限制、授权门禁、缺少可选依赖、CDP capture/provenance、私网请求拦截和输出目录边界。
+- TDD RED 已验证：实现文件尚不存在时，定向测试因 `ModuleNotFoundError: muse.lightpanda_adapter` 按预期失败；随后新增首版实现。
+- GREEN 已通过：`tests/test_lightpanda_adapter.py` **6/6 passed**，包含输出目录边界测试；测试经 psmux detached 执行。此前记录的 lock PermissionError 是旧状态，后续 psmux 已恢复；本轮没有安装 Playwright，也没有真实 Lightpanda CDP E2E。
+- 本阶段未接入 `HybridSourceReader` / `AutonomousResearchEngine`，未启动 CDP 服务，未安装 WSL2，未进行真实 Lightpanda E2E。Lightpanda 不提供视觉截图；当前网络路由校验也不能替代 OS 级网络出口隔离，故不启用自动研究链。
+- 下一步：在不自动安装 Playwright 的前提下，评估是否复用现有 `ego-lite` / `HybridSourceReader` 能力；只有存在明确功能缺口并完成依赖/安全审查后，才考虑显式配置 Lightpanda fallback。
+
+## 2026-11-20｜B211 视频 Manifest 哈希账本与 psmux 锁恢复
+
+- initiative_video_attempts 增加 manifest_sha256 列及旧库迁移；complete_video_attempt() 校验并持久化 Manifest 哈希，将其写入成功事件并纳入幂等比较。
+- VideoTaskWorker 要求 Manifest、MP4、ZIP 三个 SHA-256 均为 64 位小写十六进制；缺失/非法时 fail-closed。
+- scripts/webcodex_psmux_exec.py 将 Windows 锁文件访问改为 os.open + 原生文件描述符锁，修复 Python Path.open() 在当前 muse-dev.lock 上的 PermissionError；未修改 ACL、未切换 Session 绕过。
+- 定向测试：psmux adapter **30/30 passed**、muse-dev CLI **8/8 passed**、视频 attempt ledger **8/8 passed**。
+- 全项目 Python 3.11 unittest **1,697 tests，OK，9 skipped，0 failures / 0 errors**；`tests/test_video_task_worker.py` 另行专项 **13/13 passed**。只读 `muse-dev list --session muse-dev --limit 5` 实机核验返回 Job manifest 元数据、`read_only=true`、`lock_probe=not_performed_read_only` 与 `active_job_id=null`。
+- 本阶段没有启动 Wan GPU 生成。下一步在 Worker 成功入账前再次调用 VideoProductBuilder.verify_path()，对照 Manifest/MP4/ZIP 哈希，并完成 ZIP 内容与 MP4 实际解码/播放验收。
+- 详见 docs/PROGRESS_B211_VIDEO_MANIFEST_AND_PSMUX_LOCK.md。
+
+## 2026-11-20｜B212 muse-dev Job Manifest 与恢复指引
+
+- 在现有 psmux Job 目录中新增原子写入的 `job.json` manifest，记录 job_id、session、language、working_directory、window_name、创建时间与生命周期状态；不记录脚本正文或凭据。
+- `recover_job()` 在读取结果标记后，把真实 exit_code 与 finished_at 写回 manifest；保留原始 job 目录、输出日志和 manifest，不覆盖历史记录。
+- `muse-dev list` 的每条记录增加 manifest 元数据与保守 `next_action`。响应明确说明单 Session 单活动任务策略、active_job_id，以及 `lock_probe=not_performed_read_only`；只读列表不尝试探测或获取执行锁，避免制造竞争或把锁文件存在误判为正在执行。
+- 新增 manifest 元数据、完成回写与并发状态契约测试。旧 Job 没有 manifest 时继续可见并标记 `session=unknown`，保持向后兼容。
+- 验证：psmux adapter **30/30 passed**、muse-dev CLI **8/8 passed**；`muse-dev list --session muse-dev --limit 5` 实机只读输出成功，返回 Job manifest 元数据、`read_only=true`、`lock_probe=not_performed_read_only`、`active_job_id=null`。全量 unittest **1,697 tests，OK，9 skipped**；detached psmux E2E 与只读列表验收通过。
+## 2026-11-20｜B213 创作者研究收尾修复与数据库审计
+
+- 默认 `muse-dev` psmux 锁通道恢复：B211 已将 Windows 锁访问改为 `os.open + msvcrt.locking`；本轮 `inspect`、只读 `list` 和 detached Python 探针均成功，探针输出 `MUSE_PSMUX_LOCK_PROBE_OK`、退出码 0。未删除锁、改 ACL 或切换 Session 绕过。
+- 对 Claim `09e820f1bbe25dfb361fcbcf76363b48` 完成只读回查：节点仍为 `claim/proposed`；metadata 为 `research_completed_at=2026-11-20T11:39:51.524874+00:00`、`review_state=researched_needs_independent_review`、`research_claim_review_status=not_requested`。没有自动升级为结论。
+- 第二轮 Cycle `cycle_1a2356017e8a40ed87ea10bc79446680` 已写入 2 个 Source 节点和 2 条指向 Claim 的 `relates` 边；边 metadata 分别标注 `supporting_search` / `counter_evidence_search`、`review_state=unreviewed`、`relation_is_not_support_or_refutation=true`。`claim_evidence` 与人工 review 记录均为 0；因此来源只属于检索候选，不是已审查证据。
+- 两个来源分别是 YouTube 观看历史/政治内容研究与低功率放大镜无损检测标准，均不直接检验标题 A/B 假设。它们的来源节点与原始 URL 已保留，未删除或伪装成支持/反证结论。
+- Reminder 数据库核对发现：同一创作者灵感标题有一条较早的 pending reminder（创建于 11:24:24Z）；第二轮报告生成于 11:39:51Z 后没有新增对应提醒，符合该轮 ReminderStore 长度校验失败的记录。没有把旧提醒误报成第二轮成功创建。
+- 修复 `_build_research_reminder_message()`：在 2,000 字符上限内保留状态、研究问题、报告路径、待验证假设摘要及“未审核前不要当作事实”边界；新增超长 Unicode 输入测试。
+- 修复 `ResearchPipeline` 的 YouTube 标题 A/B 专项相关性门禁：必须同时匹配平台锚点与实验锚点；政治观看历史与 low-power magnifier 词面误匹配不进入来源读取候选。检索归因仍保留，并记录 `relevance_gate_passed` 与门禁版本；相关度分数不代表可信度。
+- 验证：`tests/test_autonomous_research.py` **58/58 passed**；`tests/test_research_pipeline.py` **32/32 passed**；`tests/test_reminders.py` **16/16 passed**；修改过的两个源文件 Python 3.11 `py_compile` 通过。
+- 本轮有一次 psmux busy 竞争响应；只读 inspect/list 随后显示默认 Session 无 active job。没有并行重派任务。临时只读审计脚本已全部删除。
+- 两项先前自主研究测试失败的根因是相关性版本标识误用了 `+`，违反 `ResearchEvidenceStore` 对方法标识符的安全格式校验，造成来源归因失败及额外失败边；改为合法下划线标识后，原有图谱边数与失败分组断言均恢复通过，没有放宽测试断言。
+- 未重跑该 Claim：只读 evidence coverage 为 `no_evidence`（0 条 claim_evidence）；其 `review_state=researched_needs_independent_review`、`research_claim_review_status=not_requested`，当前 `_next_topic()` 会跳过该节点并选择下一条未研究创作者候选。因此下一步应补齐独立 Claim Review / source-to-claim evidence mapping，而不是重复抓取同一批来源；Claim 保持 `proposed`。Autonomous Runtime 仍未被本轮启动为常驻服务。
+
+## 2026-11-20｜B214 MoneyPrinterTurbo 批量候选适配与计划预览
+
+- 扩展 `src/muse/video_recipe.py`：新增纯标准库 `adapt_moneyprinterturbo_batch()`，限制 1–8 个候选；逐个复用既有单项适配器与 Muse storyboard 校验，不复制渲染或任务调度逻辑。
+- 每个候选生成确定性 ID、状态、配方及独立映射报告；批次汇总 ready / needs_review / incomplete / blocked 数量。非法候选按序号 fail-closed，不跳过错误项。
+- 增加规范化配方的完整 SHA-256 `recipe_sha256`；候选 ID 同时绑定配方摘要与字段映射报告，方便后续与 Muse 现有任务/产品证据关联。摘要只覆盖已规范化的 Muse 配方，不保存外部 Provider 参数或凭据值。
+- 扩展 `muse-video adapt-mpt`：输入 JSON 对象时保留单项预览兼容；输入 JSON 数组时输出批次结果，只为 ready 候选生成 Commander DAG 预览。所有路径明确 `execution=not_started`、`commander_submission=not_submitted`。
+- 新增批次稳定 ID、候选上限、错误定位、部分就绪和 CLI 预览测试；`tests/test_video_recipe.py` **10/10 passed**，`tests/test_video_workflow.py` **12/12 passed**，均经 `scripts/muse_dev.py run` → psmux detached Job 执行，退出码 0。
+- 本次仅改适配层、CLI 只读预览与测试；未改 Commander/TaskQueue/VideoTaskWorker 执行链，未启动 GPU、MPT、外部 Provider、付费 API 或发布。
+
+## 2026-11-20｜B212 muse-dev Job Manifest 与恢复指引（验收补记）
+
+- Python 3.11 定向回归：CLI + adapter **38/38 passed**；首次运行暴露一处测试期望字符串与实际保守提示不一致，修正测试断言后整组通过。此前一次重跑遇到 `another_psmux_command_is_in_flight`，按只读 inspect/list 观察并回收已完成 Job 后再运行，没有重复派发未知任务。
+- detached psmux E2E 通过：测试组 Job `1a46d902c3f846b99a5305d10c85bef7` 真实退出码 0；随后 CLI `list` 实机显示 manifest、语言、工作目录、创建/完成时间、退出码与输出尾部。`inspect` 显示 `muse-dev` 主窗口存在、`active_job_id=null`；Python 3.11 `py_compile` 通过。
+- 清单同时显示其他并行开发留下的历史失败 Job；它们被保留并如实标记为已完成但退出码非 0，不属于本次 38 项回归。没有删除日志、清理历史 Job 或改锁 ACL。
+
+- 下一步：将候选批次的配方指纹与既有任务/产品证据关联设计为纯只读契约；随后研究阶段进度与幂等恢复的现有存储点，避免新增第二套状态账本。
+
+## 2026-11-20｜B215 muse-dev Commander Ticket 控制面接入
+
+- `scripts/muse_dev.py` 新增 `commander list/status/submit/approve` 子命令，薄封装现有 `src/muse/chatgpt_bridge.py`；所有 Ticket 仍由原 SQLite `TaskQueue` 持有，没有新增队列、调度器或 Ticket 表。
+- `submit` 要求显式稳定 `--request-id`，复用 TaskQueue 唯一 idempotency key；新 Ticket 仍为 `waiting_approval`、`recovery_policy=manual`、`execution_authorized=false`。`approve` 只写入现有 human.decision 并将 Ticket 变为 queued，不调用 Worker/Ruflo。
+- 新增只读 `task-status`：输出 Ticket 状态、审批者、租约/尝试元数据和事件头，不暴露 payload 或 event payload；`task-list` 复用已有 payload-free `TaskQueue.snapshot()`。
+- 该入口不提供 dispatch/retry/recover 未知 Ticket；执行仍须显式调用 `MuseRuntime.dispatch_commander_once(task_id=..., approved=True)`，并经过现有 Commander DAG/能力/独立 Reviewer/审批约束。`muse-dev` 的 psmux job 控制与 Commander Ticket 控制分层，不互相替代。
+- Python 3.11 定向回归：`tests.test_muse_dev_cli` + `tests.test_chatgpt_bridge` **20/20 passed**；覆盖稳定 request-id 重复提交返回同一 Ticket、status/list 脱敏只读、审批事件回写和不自动 dispatch。
+- 实机 detached psmux E2E：测试在临时 SQLite DB 上真实调用 `muse-dev commander submit` 两次、`status`、`approve`、`list`；确认仅一张 Ticket、状态由 waiting_approval 变为 queued、存在 human.decision 事件，且 execution 始终 not_started。Job `fcb42b731d034d56b72469d780e1f589` 退出码 0。
+- 当前真实队列只读快照：queued=0、running=0、waiting_approval=0、succeeded=9、failed=38、cancelled=0；没有活动 Ticket。`muse-dev commander list` 实机返回 exit 0；没有触碰这些历史失败 Ticket。
+- 最终 Python 3.11 `py_compile` 通过；回归再次确认 **20/20 passed**。结束后 `muse-dev inspect` 显示 `muse-dev` 仅保留主窗口、`active_job_id=null`；只读 `list` 同时发现另一 Session `muse-shendeng-phase3` 的历史 Job `47c2f9d134f44f97a3553ffa05caeb72` 为 `incomplete_untracked`，进程状态未知，已保留且未恢复/重派。
+- 本轮未启动 Ruflo、LLM Provider、Worker 或 Commander dispatch；Runner 配置、PATH、任务计划和后台服务均未修改。
+
+## 2026-11-20｜B216 Claim 证据映射与来源审核闭环
+
+- 对 Claim `09e820f1bbe25dfb361fcbcf76363b48` 重新打开并核对两条来源网页，而非只依赖搜索摘要：Journal of Quantitative Description 论文研究 YouTube 政治/非政治内容的受众曝光与极化，不研究标题变体或 watch-time share；BSI 的 BS ISO 3058:1998 是无损检测低倍放大镜选择标准，与创作实验无关。
+- 使用既有 `ResearchKnowledgeStore.record_claim_evidence()` 将两个已存 Source 节点映射为 `support_search_candidate` 与 `counter_search_candidate`；检索方向只说明来源为何被取回，不代表内容支持/反驳主张。
+- 使用 `record_claim_evidence_review()` 为两条候选追加审核：均为 `verdict=insufficient`、证据相关性质量 `very_low`、来源独立性 `unassessed`。不附加支持/反驳 citation anchor，因为没有任何直接支持或反驳陈述；不伪造原始快照偏移或摘要哈希。
+- 使用 `record_claim_review()` 写入整体审核：`verdict=insufficient`、`confidence_level=unassessed`、reviewer=`chatgpt_web_audit_2026-11-20`。该审核是与检索阶段分离的网页复核，但不是独立人类或独立模型审查；底层审计字段明确保留 `role_separated_not_independent_model` 与 `separate_review_pending_human_confirmation`。
+- 改进 `ResearchKnowledgeStore.record_claim_review()`：追加更新 `research_claim_review_status=completed`、`research_claim_review_verdict`、审核者/时间和顶层 `review_state`；不足时设为 `reviewed_insufficient_evidence`。该 API 不改变 Claim lifecycle status。
+- 回归：`tests/test_research_knowledge.py` **40/40 passed**；`src/muse/research_knowledge.py` Python 3.11 `py_compile` 通过。
+- 独立进程重新打开 SQLite 回读验收通过：evidence=2、reviewed=2、insufficient=2、supports=0、refutes=0、confidence=unassessed；Claim 仍为 `proposed`。没有将不相关来源升级为事实。
+- 本轮 psmux 曾出现 `another_psmux_command_is_in_flight`；按规范先 `inspect`，确认 `active_job_id=null` 后再重试，最终写入及独立回读均经默认 `muse-dev` detached psmux Job 退出码 0。临时审计脚本已删除。
+- 后续重点：获取 YouTube 官方原生标题 A/B 规则和在线受控实验方法的直接来源；按精确页面/段落保存可复核引用锚点，再逐条评估其对实验设计命题的适用范围。不能把平台功能说明误当成某种标题框架有效的实证结果；Claim 保持 `proposed`，等待人工确认与更直接证据。
+
+## 2026-11-20｜B217 大页面来源读取修复与受控资料抓取准备
+
+- 发现 `PublicSourceReader` 允许最多 2 MiB 响应，但 `extract_html_source_metadata()` 只接受 1 MiB HTML；超过阈值会让整页正文也被拒绝。修复为仅将 UTF-8 安全截断到 1 MiB 的前缀交给元数据解析器，正文仍由原有完整读取上限提取，并在元数据中标注 `metadata_input_truncated=true`。
+- 新增大 HTML 回归：验证超大 inline script 不进入正文、前缀中的作者元数据仍能提取、正文证据仍可读。Python 3.11 `tests/test_research_fetch.py` **14/14 passed**；`src/muse/research_fetch.py` `py_compile` 通过。
+- 用 Muse `PublicSourceReader` 探测来源：RePEc 的 Berman & Van den Bulte 论文摘要页可读（15,841 字符）；arXiv 的在线受控实验方法综述 HTML 全文可读（50,000 字符截取，含随机分配、SUTVA、false-positive 等方法内容）。INFORMS 出版商页与 Taylor & Francis 页面返回 HTTP 403，故改用 RePEc 摘要页及 arXiv 作者全文版本，来源类型会明确标注，不伪装为出版商原页。
+- YouTube 官方帮助页响应超过原元数据解析上限；本轮代码修复已通过回归，但真实页面重抓尚待验证。
+- 首次受控抓取没有读取任何正文：Runner 子进程仍继承旧代理 `127.0.0.1:7890`，因为临时脚本用了 `setdefault`；此轮已确认正确代理为 `127.0.0.1:10808`，并把待执行脚本改为显式设置大小写代理变量、清除 `ALL_PROXY`，改用可读 RePEc/arXiv URL、2 MiB 响应和 50,000 字符正文上限。失败轮次未写入 Claim evidence/review；只留下检索归因和初始 Source 候选节点。
+- 受控抓取脚本 `scripts/_tmp_ingest_creator_context_sources.py` 已准备但尚未运行/编译验收；不能报告新来源已入库。
+- 默认 `muse-dev` psmux 出现非本轮发起的活动 Job `3a61d60e4baf448aa8588aef4896d9b9`，状态 `outcome_unknown`。只读进程核验确认其 PowerShell PID 31488 与 Python PID 37400 仍存活；没有恢复、终止、注入输入或覆盖 Session。当前必须等该 Job 自然结束并重新 inspect，不能并发启动新命令。
+- 下一步：确认该活动 Job 终态；若进程结束且状态仍未知，才按官方 recover 流程恢复默认 Session；随后编译并运行受控抓取脚本，为 YouTube 官方文档、RePEc 论文和 arXiv 方法综述保存正文哈希/引用锚点，映射为 `context_candidate` 并记录 `mentions` 审核。任何方法学来源都不能被误写成某种标题框架有效的直接实证。
+
+## 2026-11-20｜Lightpanda URL 证据门禁补强与全量回归
+
+- 强化 `src/muse/lightpanda_adapter.py`：网页链接写入 `capture.json` / `capture.md` 前逐条执行 Muse `_validate_public_url`；非 HTTP(S)、超长、私网/本机或无法安全解析的链接不进入证据清单。新增私网链接过滤断言；`tests/test_lightpanda_adapter.py` **6/6 passed**。
+- 浏览器/研究回归（Ego Browser、Browser Research、Research Fetch、Scrapling、Adapter Handlers）**57/57 passed**；修改过的 Python 文件 `compileall` 通过。
+- 全量回归过程中定位并修复视频账本事件 SQL：`start_video_attempt()` 的 queued event 现在正确写入 `details_json`，保留 `recipe_sha256`；新增 queued event provenance 断言。
+- 恢复 `VideoTaskWorker` 在成功入账前调用 `VideoProductBuilder.verify_path()` 的二次磁盘验收，并逐项比较产品身份、相对路径、MP4/ZIP/Manifest SHA-256；任何文件变化均 fail-closed。更新测试 StubBuilder 以实现同一验收契约。
+- 视频账本、Worker、二次文件复核、Dashboard 与 Status API 专项 **63/63 passed**；自主研究 **58/58 passed**；反馈实验幂等用例复跑 **1/1 passed**；业务机会审批视频用例 **1/1 passed**。
+- Python 3.11 全量 `unittest discover -s tests` 最终 **1,731 tests，OK，1 skipped，0 failures / 0 errors**；修改过的 8 个 Python 文件 `compileall` 通过。所有执行均通过默认 `muse-dev` psmux detached Job，未清理其他历史 Job。
+- Lightpanda 仍默认禁用；没有安装 Playwright、Lightpanda 或 WSL2，没有启动 CDP，也没有接入 `HybridSourceReader` / `AutonomousResearchEngine`。真实 CDP 兼容性与 OS 级网络出口隔离仍是进入主研究链前的硬门槛。
+- 只读 `muse-dev inspect` 与 `list` 最终观察到 `active_job_id=null`；此前进度记录中的 PID 31488 / 37400 已不在进程表中。未删除锁、修改 ACL 或绕过 Session。
+
+## 2026-11-20｜B218 MoneyPrinterTurbo 配方指纹贯通 Video Attempt 与产品证据
+
+- 扩展既有 `initiative_video_attempts` 表，新增可空 `recipe_sha256` 列；旧数据库通过原有列迁移循环升级，历史行保留 NULL，不新建第二套账本。入队事件与成功事件都记录指纹。
+- `start_video_attempt()` 对指纹执行 64 位小写 SHA-256 校验；商机审批入队、自治研究创建任务和 Status API 都将已批准/已提交的配方指纹写入同一 Attempt。商机重放时若审批票据或配方指纹不一致，拒绝复用旧 Attempt。
+- `VideoProductBuilder` 从现有 Creator Initiative 与活动 Attempt 读取配方指纹；同时核对显式传入值、活动 Attempt 和 Creator Brief。多个活动 Attempt 指纹冲突、或 Attempt 与 Brief 不一致时 fail-closed，不猜测绑定对象。
+- 将指纹纳入 AI 视频产品输入指纹，写入 prompt/多镜头产品 Manifest 的 `recipe_provenance`，`verify_path()` 校验其 schema 与 SHA-256，并在返回结果、Creator Initiative 产品资产事件、Research Knowledge 来源节点中保留同一指纹。关系标记为 `recipe_reference`，不声称 Wan 渲染器执行了 MPT 所有参数。
+- Status API 支持 prompt-to-video 可选 `recipe_sha256`；若调用方未提供但关联 Creator Brief 已有指纹，则在启动 GPU 前读取、校验并写入 Attempt。产品返回的指纹必须与 Attempt 一致，完成入账时同时保存 Manifest SHA-256。
+- Python 3.11 定向回归：`test_video_attempt_ledger.py` **8/8**、`test_video_product_builder.py` **52/52**、`test_video_task_worker.py` **13/13**、`test_business_opportunities.py` **14/14**、`test_status_api.py` **37/37**、`test_autonomous_research.py` **58/58**、`test_initiative_engine.py` **19/19**、`test_video_recipe.py` **10/10**；合计 **211/211 passed**。相关源文件 Python 3.11 `py_compile` 通过。
+- 本轮未启动 GPU、MoneyPrinterTurbo、外部 Provider、付费 API 或自动发布。没有改 Commander/TaskQueue 调度逻辑，也没有新增队列或状态机。
+- `tests/test_video_workflow.py` 的既有 B214 **12/12** 通过记录保留；本轮复跑请求被工具安全检查拒绝。另一次 `test_video_product_api.py` 复跑同样遭安全检查拒绝，故不计入本轮 211 项通过数。
+- `video_task_worker.py` 存在混合 LF/CRLF，受保护编辑器拒绝直接改动；没有脚本绕过。Worker 现有审批校验后调用 Builder，Builder 通过活动 Attempt/Brief 指纹核验完成关联。
+- 下一步：为配方来源建立“候选 → 审批 Brief → Attempt → Manifest → 发布审核”的只读追溯视图，并补一条真实 Creator Brief 带指纹的审批 Worker 集成测试；仍不触发 GPU 或自动发布。
+
+## 2026-11-20｜B219 Scrapling Claim Gate 与全量回归验收
+
+- Scrapling 来源溯源与 Claim Promotion Gate 专项定向测试 **83/83 passed**：覆盖 adapter selector provenance / prompt-injection 数据边界、ResearchPipeline 来源 metadata、ResearchKnowledgeStore 支持/反驳/争议门禁与错误检索方向拒绝；`compileall -q src/muse` 通过。
+- 首次全量回归发现 `test_video_recipe_trace.py` 在 Windows 临时目录清理时仍持有 `sqlite3.Connection`。测试改用 `contextlib.closing()` 显式关闭连接；该文件 **4/4 passed**。这是测试资源释放问题，不改变只读追踪器的生产行为。
+- 第二次全量回归发现 `test_contextual_inquiry_bridge.py` 导入缩进异常；在随后的并行文件更新后，使用 Python 3.11 对当前文件执行 `compile()` 确认语法正常，再次全量回归通过。
+- 最终 Python 3.11 `unittest discover -s tests` **1,741 tests，OK，1 skipped，0 failures / 0 errors**；`compileall` 通过。全部执行通过默认 `muse-dev` psmux detached Job，且检查适配器 JSON 的 `command_succeeded` 与实际退出码，不把外层 launcher 的退出码误当测试结果。
+- psmux busy/锁竞争已定位为同一 `muse-dev` Session 的单活动 Job 锁：只读 inspect 找到当时仍运行的全量测试进程，等待其自然结束后再运行定向/全量测试；未杀进程、删锁、改 ACL 或切换 Session 绕过。最终 WebCodex Runner 在线，active/running/queued/recovering/lost jobs 均为 0。
+- 真实外站 Scrapling smoke 仍以 B209 记录为准：单站 `quotes.toscrape.com` 已通过，尚未完成多站点、重定向及故障注入矩阵。
+
+## 2026-11-20｜B220 MoneyPrinterTurbo 配方追溯视图与发布证据核验
+
+- 新增 `src/muse/video_recipe_trace.py`：只读打开现有 Initiative / Commander TaskQueue SQLite（`mode=ro` + `query_only`），不创建/迁移数据库、不写入事件、不调度任务。
+- 追溯链覆盖候选标识（Creator Brief 有记录时）、配方 SHA-256、Creator Brief、审批 Ticket、持久化 `human.decision=approved` 事件、Video Attempt 事件时间线、产品 Manifest SHA-256、MP4/ZIP 哈希与发布准备包审核状态。审批核验要求 Ticket 类型/范围正确、审批事件与批准人一致、Brief 内容哈希与 Creator Brief 一致、Initiative ID 对应。
+- 成功 Attempt 必须通过 `VideoProductBuilder.verify_path()`，Manifest 哈希和配方指纹必须与 Attempt 一致，才报告产品链 `verified`；成功 Attempt 缺产品或产物不匹配时 `chain_consistent=false`。
+- 发布准备包核对包类型、产品 ID、版本 ID、源 MP4 SHA-256、Muse 产品 ZIP SHA-256 与 `draft_only` 标志。追溯视图的 `can_publish` 恒为 false，不触发发布 API。
+- 新增认证只读 Status API：`GET /api/v1/video-recipe-traces/{attempt_id}`；新增 CLI：`muse-video-recipe-trace <attempt_id> --workspace .`。输出为隐私最小摘要，不返回脚本/提示词正文或凭据。
+- 最终追溯测试 **5/5 passed**，覆盖只读不变性、审批/Brief 哈希篡改 fail-closed、不安全 ID、认证 API，以及成功产品与发布包的关联且永不授予发布权限。
+- Python 3.11 定向回归：追溯 **5/5**、Status API **37/37**、Autonomous Research **58/58**、VideoRecipe **10/10**、Video Attempt Ledger **8/8**、Video Product Builder **52/52**、VideoTaskWorker **13/13**、Business Opportunities **14/14**；合计 **197/197 passed**。测试通过默认 psmux detached Job。
+- B219 已记录的完整 `unittest discover -s tests` **1,741 tests，OK，1 skipped** 是本轮新增第 5 个追溯测试之前的全量结果；本轮没有再次运行完整套件，故不把它冒充为本轮全量结果。
+- 本轮未安装/启动 MoneyPrinterTurbo，未启动 GPU，未调用外部 Provider / 付费 API，未发布内容；未增加队列、数据库或第二个调度器。
+- 下一步：将已审批 Creator Brief 的 `recipe_sha256` 端到端集成测试接入 Worker，并把只读追溯摘要挂到 Muse 视频产品详情/桌面面板；保持 `can_publish=false`。
+- 后续验收补记：`tests.test_video_task_worker` 已扩展至 **15/15 passed**（包含 Creator Brief `recipe_sha256` 到 Attempt 与 trace 的新端到端用例）；通过 `muse-dev run` → 默认 `muse-dev` detached psmux 执行，真实退出码 0。测试使用 FakeVideoBuilder/mock 产物，不启动 GPU、真实 Provider 或发布流程。
+
+## 2026-11-20｜B221 Attempt 绑定校验与 Worker 端到端追溯验收
+
+- 加固 `video_recipe_trace._approval_trace()`：除审批事件、批准人、Ticket 类型/范围、Creator Brief SHA-256 与 Initiative ID 外，必须验证 Ticket payload 的 `attempt_id` 与当前 Video Attempt 完全一致；不一致时 `human_decision_verified=false`，整条 `chain_consistent=false`。
+- TDD RED 已复现：将持久化审批 Ticket 的 `attempt_id` 改为另一条任务时，旧追溯器错误地返回审批有效；修复后追溯测试 **6/6 passed**。
+- 新增真实 TaskQueue + InitiativeStore + VideoTaskWorker + recipe trace 端到端测试：已审批 Creator Brief（含 `candidate_id` / `recipe_sha256`）经 Worker 完成 Attempt 后，追溯器能核验相同 Ticket、Brief、配方指纹与产品 Manifest 摘要；使用 FakeVideoBuilder 与模拟产品验证，不启动 GPU、外部 Provider 或发布。
+- 相关专项回归补记 **144/144 passed**：追溯 6、VideoTaskWorker 15、Video Attempt Ledger 8、Video Product Builder 52、VideoRecipe 10、Worker Reverification 2、Status API 37、Business Opportunities 14。新增 Creator Brief 指纹端到端测试单独在 `test_video_task_worker.py` **15/15 passed**；追溯测试 `test_video_recipe_trace.py` **6/6 passed**。全部经 `muse-dev run` → psmux detached 执行。
+- 当前代码后的完整 Python 3.11 `unittest discover`：**1,745 tests，OK，1 skipped，0 failures / 0 errors**；通过 `scripts/validate_python_suite.py` 经默认 `muse-dev` psmux detached Job `5707517ca1aa44e1825466a624a1b8aa`，耗时约 180 秒；同时 `compileall` 通过。
+- 本阶段仍未安装/启动 MoneyPrinterTurbo、未启动 GPU、未调用付费 API、未发布内容；未新增 TaskQueue、调度器或产品账本。追溯 `can_publish` 仍恒为 false。
+- 后续：产品卡片已补充配方追溯入口；只有 `product_id + version_id` 同时匹配同一条 Video Attempt 才显示，避免按 Initiative ID 猜测关联。保持 Commander 唯一调度、详情页只读与发布人工总闸。
+
+## 2026-11-20｜B222 桌面视频任务追溯状态展示
+
+- 在 `ui-prototype/src/App.svelte` 的现有最近视频任务追溯面板中增加“审批任务绑定”状态，明确显示当前 Attempt 一致、Attempt 不匹配或旧记录未提供；复用现有认证只读 `videoRecipeTrace()` API，不新增写入或执行动作。
+- `VideoRecipeTrace` 类型已包含可选 `attempt_matches_ticket`，旧记录缺字段时 UI 显示“旧记录未提供”，不把未知状态误报为通过。
+- UI 验收经 `muse-dev run` → psmux detached：`npm run check`（Svelte 0 errors / 0 warnings）、`npm test` **47/47 passed**、`npm run build` 成功（Vite 139 modules）。
+- 追溯区仍明确 `can_publish=false`，只读取证，不触发生成、修改账本或发布；Commander / TaskQueue 架构不变。
+- Python 3.11 全项目回归：`scripts/validate_python_suite.py` 显式加入 `src/` 与 `tests/` 搜索路径后，`unittest discover` **1,745 tests，OK，1 skipped**，`compileall` 通过。原先直接从 PowerShell 调用全局 `py -m unittest discover` 会因缺少 `src/` 路径导致 `test_adapter_handlers` 导入失败；单测脚本本身 5/5 正常，已由可复用 Runner 修正验证入口，不修改业务模块。
+- 最近视频任务面板与产品卡片均可打开同一只读追溯视图；产品卡片仅在精确 `product_id + version_id` 匹配时显示入口，不匹配/旧产品不猜测 Attempt。API 使用 Bearer、`no-store`、禁止 redirect，并验证 attempt ID 字符集。
+- 产品卡片入口后的 UI 回归：`npm test` **47/47 passed**；`svelte-check` **0 errors / 0 warnings**；Vite production build 成功（139 modules，JS 280.52 kB）。真实桌面窗口的视觉/交互验收仍待做。
+
+## 2026-11-20｜B223 产品卡片内嵌配方追溯摘要
+
+- 补齐产品卡片追溯按钮的展示闭环：点击后在对应产品卡片下方显示只读摘要（候选 ID / recipe SHA-256、审批核验与 Attempt-Ticket 绑定、产品 Manifest、整链一致性、发布审核状态）；最近任务列表仍可使用同一追溯状态。
+- 关联继续严格限定为同一产品 `product_id + version_id` 对应的 Video Attempt；无精确匹配时不显示入口，不以 Initiative ID 推测。
+- 新增可复用 `scripts/validate_ui.py`，依次执行 `npm.cmd run check`、`npm.cmd test`、`npm.cmd run build`，适配 Windows Python 子进程不能直接执行 PowerShell `npm` shim 的情况。
+- 最终 UI 验收通过 `muse-dev run` → 默认 `muse-dev` detached psmux Job `60f6c05dff6c435998aa1ebd193dd4e1`：Svelte check **0 errors / 0 warnings**；UI tests **47/47 passed**；Vite production build 成功（139 modules，JS 282.74 kB）。
+
+- 未启动视频生成、GPU、外部 Provider 或发布流程；追溯继续只读，`can_publish=false`，Commander / TaskQueue 不变。
+- 下一步：对真实桌面窗口进行视觉与交互验收；随后将同一只读追溯摘要接入视频产品详情的其他入口时，复用现有 API 与精确 Attempt 关联，不复制账本或增加调度器。
+
+
+
+
+
+
 
 

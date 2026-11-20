@@ -242,6 +242,58 @@ def _platform_draft(
     }
 
 
+def _release_quality_report(
+    *, product_manifest: dict[str, Any], qa_warnings: list[dict[str, Any]],
+    subtitles: Path, video: Path,
+) -> dict[str, Any]:
+    """Summarize evidence without promoting missing human reviews to approvals."""
+    review = product_manifest.get("subtitle_review")
+    subtitle_status = "not_recorded"
+    if isinstance(review, dict):
+        approved_by = review.get("approved_by")
+        approved_at = review.get("approval_timestamp")
+        evidence_matches = (
+            review.get("schema_version") == 1
+            and review.get("status") == "approved"
+            and review.get("human_approved") is True
+            and isinstance(approved_by, str) and bool(approved_by.strip())
+            and isinstance(approved_at, str) and bool(approved_at.strip())
+            and review.get("approved_srt_sha256") == _sha256(subtitles)
+            and review.get("video_sha256") == _sha256(video)
+            and isinstance(review.get("review_sha256"), str)
+            and len(review["review_sha256"]) == 64
+        )
+        subtitle_status = "verified_human_approval" if evidence_matches else "evidence_mismatch_or_incomplete"
+
+    checks = {
+        "technical_quality": {"status": "passed", "evidence": "qa-report.json"},
+        "visual_anomaly_review": {
+            "status": "pending_human_review" if qa_warnings else "heuristics_only_review_required",
+            "warning_count": len(qa_warnings),
+            "warning_codes": sorted({item["code"] for item in qa_warnings if isinstance(item.get("code"), str)}),
+        },
+        "subtitle_review": {"status": subtitle_status, "evidence": "muse-product-manifest.json:subtitle_review"},
+        "editorial_and_fact_review": {"status": "pending_human_review"},
+        "visual_and_model_rights_review": {"status": "pending_human_review"},
+        "privacy_and_person_release_review": {"status": "pending_human_review"},
+        "music_and_audio_rights_review": {"status": "pending_human_review"},
+        "ai_generated_content_disclosure": {"status": "pending_platform_specific_review"},
+        "sponsorship_affiliate_and_product_placement": {"status": "confirmation_required"},
+        "platform_upload_specifications": {"status": "manual_account_specific_check_required"},
+        "account_authorization": {"status": "not_connected"},
+    }
+    blockers = [name for name, item in checks.items() if item["status"] != "passed"]
+    return {
+        "schema_version": 1,
+        "overall_status": "blocked_pending_human_review" if blockers else "ready_for_separate_release_authorization",
+        "can_publish": False,
+        "technical_qa_is_not_release_approval": True,
+        "checks": checks,
+        "blocking_items": blockers,
+        "publish_api_called": False,
+    }
+
+
 def build_publish_package(
     workspace: str | Path,
     source_dir: str | Path,
@@ -316,11 +368,16 @@ def build_publish_package(
     product_zip = _project_file(root, (product_dir / "product.zip").relative_to(root).as_posix(), "Muse product ZIP")
     product_manifest = _project_file(root, (product_dir / "manifest.json").relative_to(root).as_posix(), "Muse product manifest")
     qa_document = _load_object(qa_report, "QA report")
+    product_manifest_document = _load_object(product_manifest, "Muse product manifest")
     raw_warnings = qa_document.get("warnings", [])
     if not isinstance(raw_warnings, list):
         raise VideoPublishPackageError("QA report warnings must be a list")
     qa_warnings = [item for item in raw_warnings if isinstance(item, dict)]
     qa_warning_codes = sorted({item["code"] for item in qa_warnings if isinstance(item.get("code"), str)})
+    release_quality_report = _release_quality_report(
+        product_manifest=product_manifest_document, qa_warnings=qa_warnings,
+        subtitles=subtitles, video=video,
+    )
 
     profile = product_info.get("video_metadata", {})
     if isinstance(profile, dict) and profile.get("aspect_ratio") not in (None, master_aspect_ratio):
@@ -375,6 +432,7 @@ def build_publish_package(
             "release_state": "draft_only",
             "can_publish": False,
             "technical_quality": {"status": "passed", "report": "qa-report.json"},
+            "release_quality_report": "release-quality-report.json",
             "visual_anomaly_review": {
                 "status": "required",
                 "warning_count": len(qa_warnings),
@@ -393,12 +451,11 @@ def build_publish_package(
             "real_platform_metrics_and_revenue": "not_available_until_authorized_data_import",
         }
         (staging / "release-checklist.json").write_bytes(_json_bytes(release_checklist))
+        (staging / "release-quality-report.json").write_bytes(_json_bytes(release_quality_report))
         readme_text = (
             f"# {title}\n\n"
-            "此目录是平台发布准备包，不是自动发布凭据。所有平台草稿都必须经人工核对。\n\n"
             f"- 画幅与技术指标：{master_aspect_ratio}（{width}×{height}, {fps:g} FPS）；技术 QA：passed；Muse 产品状态：testing。\n"
-            f"- 目标平台草稿：{', '.join(selected)}。\n"
-            "- 视频、封面、字幕、分镜、来源说明和 Muse 产品 ZIP 均随包提供。\n"
+            f"- 目标平台草稿：{', '.join(selected)}。\n"            "- 视频、封面、字幕、分镜、来源说明和 Muse 产品 ZIP 均随包提供。\n"
             "- 各平台可直接复制的标题备选、标签、置顶评论与简介，见 `platform-drafts/<platform>.json`。\n"
             "- 发布前必须复核事实、来源、视觉/模型权利、隐私、AI 合成披露、商业关系披露及平台上传规格。\n"
             "- 未登录平台账号，未调用发布 API，未生成平台视频 ID 或发布链接。\n"
@@ -422,8 +479,8 @@ def build_publish_package(
             "evolution_cycle_id": generation.get("evolution_cycle_id"),
             "source_video_sha256": mp4_info["sha256"],
             "muse_product_zip_sha256": _sha256(product_zip),
-            "quality_gate": gate,
-            "platforms": list(selected),
+            "release_quality_report": release_quality_report,
+            "release_quality_status": release_quality_report["overall_status"],            "platforms": list(selected),
             "files": file_hashes,
         }
         (staging / "manifest.json").write_bytes(_json_bytes(manifest))
@@ -453,6 +510,8 @@ def build_publish_package(
             "technical_qa": "passed",
             "review_warning_count": len(qa_warnings),
             "review_warning_codes": qa_warning_codes,
+            "release_quality_status": release_quality_report["overall_status"],
+            "release_blocker_count": len(release_quality_report["blocking_items"]),
             "official_publish_api_called": False,
             "account_authorization": "not_connected",
         }

@@ -47,6 +47,24 @@ class ResearchFetchTests(unittest.TestCase):
         self.assertEqual(len(page["sha256"]), 64)
 
 
+    def test_large_html_uses_bounded_metadata_prefix_but_keeps_readable_body(self):
+        body = (
+            b'<html><head><meta name="citation_author" content="Ada Lovelace"></head>'
+            b'<body><script>' + (b"large-inline-script;" * 60_000) + b'</script>'
+            b'<h1>Experiment report</h1><p>' + (b"Useful research evidence. " * 20)
+            + b'</p></body></html>'
+        )
+        reader = PublicSourceReader(
+            resolver=public_resolver,
+            opener=lambda *_args, **_kwargs: FakeResponse(body),
+        )
+        page = reader.read("https://example.com/large-report", max_bytes=2_000_000)
+        self.assertTrue(page["source_metadata"]["metadata_input_truncated"])
+        self.assertEqual(page["source_metadata"]["authors"], ["Ada Lovelace"])
+        self.assertIn("Experiment report", page["text"])
+        self.assertIn("Useful research evidence.", page["text"])
+        self.assertNotIn("large-inline-script", page["text"])
+
     def test_extracts_source_identity_metadata_before_discarding_html_markup(self):
         body = (
             b'<html><head><link rel="canonical" href="/original">'

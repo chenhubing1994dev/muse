@@ -284,12 +284,27 @@ class VideoTaskWorker:
                     result = self._builder().build_from_prompt(title.strip(), prompt.strip(), **build_options)
                 if result.get("validated") is not True:
                     raise RuntimeError("video product builder did not verify its output package")
-                required = ("initiative_id", "version_id", "mp4_sha256", "package_sha256")
+                required = ("initiative_id", "version_id", "mp4_sha256", "package_sha256", "manifest_sha256")
                 if any(not isinstance(result.get(key), str) or not result[key] for key in required):
                     raise RuntimeError("video product builder returned incomplete artifact identity")
+                for key in ("mp4_sha256", "package_sha256", "manifest_sha256"):
+                    if not re.fullmatch(r"[0-9a-f]{64}", result[key]):
+                        raise RuntimeError(f"video product builder returned an invalid {key} digest")
+                verified = self._builder().verify_path(
+                    self.workspace / "data" / "products", result["initiative_id"], result["version_id"],
+                )
+                if not isinstance(verified, dict) or verified.get("validated") is not True:
+                    raise RuntimeError("video product filesystem reverification did not pass")
+                for key in (
+                    "initiative_id", "version_id", "relative_path",
+                    "mp4_sha256", "package_sha256", "manifest_sha256",
+                ):
+                    if verified.get(key) != result.get(key):
+                        raise RuntimeError(f"video product changed after build: {key}")
                 completed = store.complete_video_attempt(
                     attempt_id, product_id=result["initiative_id"], version_id=result["version_id"],
                     mp4_sha256=result["mp4_sha256"], package_sha256=result["package_sha256"],
+                    manifest_sha256=result["manifest_sha256"],
                 )
                 return {
                     "status": completed["status"], "attempt_id": attempt_id,

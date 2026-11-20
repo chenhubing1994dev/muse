@@ -1128,6 +1128,7 @@ def create_status_server(
                     timeout_seconds=1800, creator_initiative_id=payload.get("creator_initiative_id"),
                     evolution_cycle_id=payload.get("evolution_cycle_id"),
                     motion_profile=payload.get("motion_profile", "none"),
+                    recipe_sha256=payload.get("recipe_sha256"),
                 )
             else:
                 result = builder.build_from_source(
@@ -1139,12 +1140,15 @@ def create_status_server(
                     evolution_cycle_id=payload.get("evolution_cycle_id"),
                     motion_profile=payload.get("motion_profile", "none"),
                 )
+            if result.get("recipe_sha256") != payload.get("recipe_sha256"):
+                raise RuntimeError("video product recipe fingerprint does not match the submitted attempt")
             if initiatives_path is not None:
                 with InitiativeStore(initiatives_path) as attempts:
                     attempts.complete_video_attempt(
                         job_id, initiative_id=result["creator_initiative_id"],
                         product_id=result["initiative_id"], version_id=result["version_id"],
                         mp4_sha256=result["mp4_sha256"], package_sha256=result["package_sha256"],
+                        manifest_sha256=result.get("manifest_sha256"),
                     )
             outcome = {"status": "succeeded", "product": {
                 "initiative_id": result["initiative_id"], "version_id": result["version_id"],
@@ -1313,7 +1317,8 @@ def create_status_server(
                     from muse.initiative_engine import InitiativeStore
                     with InitiativeStore(initiatives_path) as attempts_store:
                         metrics = attempts_store.aggregate_video_attempt_metrics()
-                        attempts = attempts_store.list_video_attempts(limit=50)
+                        # Product library returns up to 100 versions; expose the ledger maximum so older products can still resolve exact attempts.
+                        attempts = attempts_store.list_video_attempts(limit=200)
                     metrics["success_rate_numerator"] = metrics["succeeded"]
                     metrics["success_rate_denominator"] = metrics["terminal"]
                     metrics["queued"] = sum(1 for item in attempts if item["status"] == "queued")
@@ -1502,6 +1507,20 @@ def create_status_server(
                             "kind": "video_creator",
                         }
                     self._send(200, {"api_version": 1, "job": recovered})
+                elif re.fullmatch(r"/api/v1/video-recipe-traces/[A-Za-z0-9_-]{1,64}", parsed.path):
+                    if initiatives_path is None or not initiatives_path.is_file():
+                        self._send(503, {"error": "initiative store is not configured"})
+                        return
+                    attempt_id = parsed.path.rsplit("/", 1)[-1]
+                    from muse.video_recipe_trace import build_video_recipe_trace
+                    trace = build_video_recipe_trace(
+                        workspace_root, attempt_id,
+                        initiative_db=initiatives_path, task_db=task_path,
+                    )
+                    if trace is None:
+                        self._send(404, {"error": "video recipe trace not found"})
+                    else:
+                        self._send(200, {"api_version": 1, "trace": trace})
                 elif re.fullmatch(r"/api/v1/initiatives/[0-9a-f]{32}/timeline", parsed.path):
                     if initiatives_path is None or not initiatives_path.is_file():
                         self._send(503, {"error": "initiative store is not configured"})
@@ -1961,7 +1980,7 @@ def create_status_server(
                     if mode == "prompt_to_video":
                         if motion_profile == "brand_scene_transitions":
                             raise ValueError("brand_scene_transitions is available for multi-scene local assets; AI clip uses brand_intro_outro")
-                        allowed = {"mode", "title", "prompt", "negative_prompt", "aspect_ratio", "duration_seconds", "steps", "seed", "creator_initiative_id", "evolution_cycle_id", "motion_profile"}
+                        allowed = {"mode", "title", "prompt", "negative_prompt", "aspect_ratio", "duration_seconds", "steps", "seed", "creator_initiative_id", "evolution_cycle_id", "motion_profile", "recipe_sha256"}
                         if set(payload) - allowed or "prompt" not in payload:
                             raise ValueError("AI video body requires title and prompt with only documented generation settings")
                         prompt = payload["prompt"]
@@ -1979,6 +1998,25 @@ def create_status_server(
                             raise ValueError("steps must be between 8 and 30")
                         if seed is not None and (isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed <= 2**32 - 1):
                             raise ValueError("seed must be an unsigned 32-bit integer")
+                        recipe_sha256 = payload.get("recipe_sha256")
+                        if recipe_sha256 is None and creator_initiative_id is not None and initiatives_path is not None:
+                            from muse.initiative_engine import InitiativeStore
+                            with InitiativeStore(initiatives_path) as source_store:
+                                source_initiative = source_store.get_by_id(creator_initiative_id)
+                            if source_initiative is not None:
+                                try:
+                                    source_concept = json.loads(source_initiative["concept"])
+                                except (TypeError, json.JSONDecodeError):
+                                    source_concept = {}
+                                source_brief = source_concept.get("creator_brief") if isinstance(source_concept, dict) else None
+                                source_video = source_brief.get("video") if isinstance(source_brief, dict) else None
+                                if isinstance(source_video, dict):
+                                    recipe_sha256 = source_video.get("recipe_sha256")
+                        if recipe_sha256 is not None and (
+                            not isinstance(recipe_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", recipe_sha256)
+                        ):
+                            raise ValueError("creator brief recipe_sha256 must be a lowercase SHA-256 digest")
+                        payload["recipe_sha256"] = recipe_sha256
                     else:
                         allowed = {"mode", "source", "title", "audio", "audio_mode", "aspect_ratio", "fps", "image_seconds", "encoder", "creator_initiative_id", "evolution_cycle_id", "motion_profile"}
                         if set(payload) - allowed or "source" not in payload:
@@ -2006,6 +2044,7 @@ def create_status_server(
                             attempts_store.start_video_attempt(
                                 job_id, mode=mode, initiative_id=creator_initiative_id,
                                 evolution_cycle_id=payload.get("evolution_cycle_id"),
+                                recipe_sha256=payload.get("recipe_sha256"),
                             )
                     except Exception:
                         video_job_slot.release()

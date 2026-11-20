@@ -1363,6 +1363,7 @@ class StatusApiTests(unittest.TestCase):
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         cycle = "cycle_" + "9" * 32
+        recipe_sha256 = "f" * 64
         try:
             with patch("muse.status_api.VideoProductBuilder.build_from_prompt", side_effect=RuntimeError("private GPU failure detail")) as build_prompt:
                 request = Request(
@@ -1372,6 +1373,7 @@ class StatusApiTests(unittest.TestCase):
                         "prompt": "A short cinematic test scene",
                         "creator_initiative_id": item["id"], "evolution_cycle_id": cycle,
                         "motion_profile": "brand_intro_outro",
+                        "recipe_sha256": recipe_sha256,
                     }).encode("utf-8"),
                     headers={
                         "Authorization": "Bearer " + token,
@@ -1395,9 +1397,12 @@ class StatusApiTests(unittest.TestCase):
                     time.sleep(0.02)
             build_prompt.assert_called_once()
             self.assertEqual(build_prompt.call_args.kwargs["motion_profile"], "brand_intro_outro")
+            self.assertEqual(build_prompt.call_args.kwargs["recipe_sha256"], recipe_sha256)
             self.assertEqual(status, "failed")
             with InitiativeStore(initiatives_db) as initiatives:
                 failures = initiatives.list_failures(initiative_id=item["id"])
+                attempt = initiatives.get_video_attempt(job_id)
+            self.assertEqual(attempt["recipe_sha256"], recipe_sha256)
             self.assertEqual(len(failures), 1)
             self.assertEqual(failures[0]["failure_code"], "video.product_job_failed")
             self.assertEqual(failures[0]["error_type"], "RuntimeError")
@@ -1510,6 +1515,8 @@ class StatusApiTests(unittest.TestCase):
         with InitiativeStore(initiatives_db) as attempts:
             attempts.start_video_attempt(attempt_id, mode="prompt_to_video")
             attempts.mark_video_attempt_running(attempt_id)
+            for index in range(55):
+                attempts.start_video_attempt(f"{index:032x}", mode="local_assets")
         server, token = create_status_server(
             task_db=self.task_db, progress_db=self.progress_db,
             capability_db=self.capability_db, products_dir=products_dir,
@@ -1526,9 +1533,11 @@ class StatusApiTests(unittest.TestCase):
             self.assertEqual(response.status, 200)
             self.assertEqual(payload["metrics"]["running"], 1)
             self.assertEqual(payload["metrics"]["leased"], 1)
-            self.assertEqual(payload["attempts"][0]["worker_id"], "status-api")
-            self.assertGreaterEqual(payload["attempts"][0]["attempt_count"], 1)
-            self.assertIsNotNone(payload["attempts"][0]["lease_expires_at"])
+            self.assertEqual(len(payload["attempts"]), 56)
+            running_attempt = next(item for item in payload["attempts"] if item["attempt_id"] == attempt_id)
+            self.assertEqual(running_attempt["worker_id"], "status-api")
+            self.assertGreaterEqual(running_attempt["attempt_count"], 1)
+            self.assertIsNotNone(running_attempt["lease_expires_at"])
         finally:
             server.shutdown()
             server.server_close()

@@ -62,6 +62,47 @@ class VideoAttemptLedgerTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     store.fail_video_attempt("attempt-1", error_type="RuntimeError")
 
+    def test_manifest_digest_is_persisted_and_participates_in_idempotency(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with InitiativeStore(Path(directory) / "initiatives.sqlite3") as store:
+                initiative = self._initiative(store)
+                manifest_hash = "e" * 64
+                store.start_video_attempt(
+                    "attempt-manifest", mode="prompt_to_video", recipe_sha256=manifest_hash,
+                )
+                queued_event = store.list_video_attempt_events("attempt-manifest")[0]
+                self.assertEqual(queued_event["event_type"], "queued")
+                self.assertEqual(queued_event["details"]["recipe_sha256"], manifest_hash)
+                completed = store.complete_video_attempt(
+                    "attempt-manifest", initiative_id=initiative["id"],
+                    product_id="product-manifest", version_id="version-manifest",
+                    mp4_sha256="a" * 64, package_sha256="b" * 64,
+                    manifest_sha256=manifest_hash,
+                )
+                self.assertEqual(completed["manifest_sha256"], manifest_hash)
+                event = store.list_video_attempt_events("attempt-manifest")[-1]
+                self.assertEqual(event["details"]["manifest_sha256"], manifest_hash)
+                self.assertEqual(completed["recipe_sha256"], manifest_hash)
+                self.assertEqual(event["details"]["recipe_sha256"], manifest_hash)
+                with self.assertRaises(ValueError):
+                    store.complete_video_attempt(
+                        "attempt-manifest", initiative_id=initiative["id"],
+                        product_id="product-manifest", version_id="version-manifest",
+                        mp4_sha256="a" * 64, package_sha256="b" * 64,
+                        manifest_sha256="f" * 64,
+                    )
+
+    def test_manifest_digest_rejects_invalid_values(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with InitiativeStore(Path(directory) / "initiatives.sqlite3") as store:
+                store.start_video_attempt("attempt-invalid-manifest", mode="prompt_to_video")
+                with self.assertRaises(ValueError):
+                    store.complete_video_attempt(
+                        "attempt-invalid-manifest", product_id="product", version_id="version",
+                        mp4_sha256="a" * 64, package_sha256="b" * 64,
+                        manifest_sha256="not-a-hash",
+                    )
+
     def test_video_attempt_validation_rejects_unverified_hashes_and_duplicate_start_conflicts(self):
         with tempfile.TemporaryDirectory() as directory:
             with InitiativeStore(Path(directory) / "initiatives.sqlite3") as store:
@@ -73,6 +114,8 @@ class VideoAttemptLedgerTests(unittest.TestCase):
                     )
                 with self.assertRaises(ValueError):
                     store.start_video_attempt("attempt-1", mode="local_assets")
+                with self.assertRaisesRegex(ValueError, "recipe_sha256"):
+                    store.start_video_attempt("attempt-invalid-recipe", mode="prompt_to_video", recipe_sha256="not-a-hash")
 
 
 
@@ -147,5 +190,9 @@ class VideoAttemptLedgerTests(unittest.TestCase):
                 ).fetchone()
                 self.assertEqual(legacy["status"], "failed")
                 self.assertEqual(legacy["evolution_cycle_id"], "")
+                self.assertIn("manifest_sha256", columns)
+                self.assertIsNone(legacy["manifest_sha256"])
+                self.assertIn("recipe_sha256", columns)
+                self.assertIsNone(legacy["recipe_sha256"])
 
 if __name__ == "__main__":    unittest.main()

@@ -94,6 +94,28 @@ class TaskQueueTests(unittest.TestCase):
                     queue.approve(task["id"], approved_by="user")
 
 
+    def test_contextual_inquiry_placeholder_cannot_be_approved_before_context_is_attached(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with TaskQueue(Path(directory) / "tickets.sqlite3") as queue:
+                task = queue.enqueue(
+                    "Contextual inquiry review - context required",
+                    {
+                        "kind": "contextual_inquiry_review",
+                        "case_context_attached": False,
+                        "requires_context_reentry": True,
+                    },
+                    require_approval=True,
+                )
+                with self.assertRaisesRegex(PermissionError, "case context is attached"):
+                    queue.approve(task["id"], approved_by="user")
+                unchanged = queue.get(task["id"])
+                self.assertEqual(unchanged["status"], "waiting_approval")
+                self.assertNotIn("_approved", unchanged["payload"])
+                self.assertEqual(
+                    [event["event_type"] for event in queue.events(task["id"])],
+                    ["ticket.created", "approval.requested"],
+                )
+
     def test_claim_records_lease_owner_expiry_and_attempt_count(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             with TaskQueue(Path(directory) / "tasks.sqlite3") as queue:

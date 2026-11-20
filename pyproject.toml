@@ -26,6 +26,7 @@ muse-piper-tts = "muse.piper_tts:main"
 muse-video-product = "muse.video_product_builder:main"
 muse-video-qa = "muse.video_qa:main"
 muse-video-publish-pack = "muse.video_publish_package:main"
+muse-video-recipe-trace = "muse.video_recipe_trace:main"
 muse-intent = "muse.intent_cli:main"
 muse-capabilities = "muse.capability_cli:main"
 muse-resume = "muse.handoff:main"
@@ -67,7 +68,9 @@ muse-business = "muse.business_opportunities:main"
 web-scraping = [
     "scrapling>=0.5.1,<0.6",
 ]
-
+lightpanda = [
+    "playwright>=1.50,<2",
+]
 video-diagnostics = [
     "numpy>=1.26",
     "opencv-python-headless>=4.8",

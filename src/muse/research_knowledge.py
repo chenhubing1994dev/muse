@@ -587,6 +587,38 @@ class ResearchKnowledgeStore:
             if row is None or row["id"] == claim_id or row["node_type"] not in {"source", "experiment"}:
                 raise ValueError(f"evidence reference must identify a stored source or experiment: {ref[:80]}")
             evidence_nodes.append(row["id"])
+        if status in {"supported", "refuted", "contested"}:
+            required_reviews = {
+                "supported": (("support_search_candidate", "supports"),),
+                "refuted": (("counter_search_candidate", "refutes"),),
+                "contested": (
+                    ("support_search_candidate", "supports"),
+                    ("counter_search_candidate", "refutes"),
+                ),
+            }[status]
+            source_ids = []
+            for evidence_id in evidence_nodes:
+                source_row = self.connection.execute(
+                    "SELECT node_type FROM knowledge_nodes WHERE id=?", (evidence_id,)
+                ).fetchone()
+                if source_row is not None and source_row["node_type"] == "source":
+                    source_ids.append(evidence_id)
+            if source_ids:
+                placeholders = ",".join("?" for _ in source_ids)
+                for direction, verdict in required_reviews:
+                    reviewed = self.connection.execute(
+                        "SELECT 1 FROM claim_evidence e "
+                        "JOIN claim_evidence_reviews r ON r.claim_evidence_id=e.id "
+                        "JOIN claim_evidence_review_citations c ON c.review_id=r.id "
+                        f"WHERE e.claim_id=? AND e.source_node_id IN ({placeholders}) "
+                        "AND e.direction=? AND r.verdict=? LIMIT 1",
+                        (claim_id, *source_ids, direction, verdict),
+                    ).fetchone()
+                    if reviewed is None:
+                        raise ValueError(
+                            "source evidence requires a direction-matched reviewed claim-evidence "
+                            "candidate with a verified citation anchor before claim promotion"
+                        )
         now = self._now()
         metadata = {**claim["metadata"], "evidence_refs": refs, "reviewer_id": reviewer_id}
         with self.connection:
@@ -644,8 +676,21 @@ class ResearchKnowledgeStore:
                   "review_state": "separate_review_pending_human_confirmation",
                   "reviewer_independence": "role_separated_not_independent_model",
                   "does_not_promote_claim": True}
-        metadata = {**claim["metadata"], "claim_review": review}
         now = self._now()
+        review_state = (
+            "reviewed_insufficient_evidence"
+            if verdict == "insufficient"
+            else "reviewed_pending_human_confirmation"
+        )
+        metadata = {
+            **claim["metadata"],
+            "claim_review": review,
+            "research_claim_review_status": "completed",
+            "research_claim_review_verdict": verdict,
+            "research_claim_review_reviewer_id": reviewer_id,
+            "research_claim_reviewed_at": now,
+            "review_state": review_state,
+        }
         with self.connection:
             self.connection.execute(
                 "UPDATE knowledge_nodes SET metadata_json=?,updated_at=? WHERE id=?",

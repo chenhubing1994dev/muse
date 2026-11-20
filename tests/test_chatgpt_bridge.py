@@ -152,5 +152,91 @@ class ChatGPTBridgeTests(unittest.TestCase):
         self.assertFalse(result["ok"])
 
 
+    def test_task_status_is_read_only_and_does_not_expose_payload_or_event_payloads(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "tasks.sqlite3"
+            with TaskQueue(database) as queue:
+                task = queue.enqueue("safe title", {"goal": "PRIVATE REQUEST", "secret": "DO_NOT_PRINT", "approval_required": True}, idempotency_key="test:status")
+                queue.record_event(task["id"], "ticket.created", actor="commander", payload={"secret": "EVENT_SECRET"})
+            args = SimpleNamespace(task_id=task["id"], database=str(database), events_limit=10)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = chatgpt_bridge.command_task_status(args)
+            result = json.loads(output.getvalue())
+            self.assertEqual(code, 0)
+            self.assertEqual(result["ticket"]["status"], "queued")
+            self.assertTrue(result["ticket"]["approval_required"])
+            self.assertEqual(result["execution"], "not_started")
+            self.assertNotIn("PRIVATE REQUEST", output.getvalue())
+            self.assertNotIn("DO_NOT_PRINT", output.getvalue())
+            self.assertNotIn("EVENT_SECRET", output.getvalue())
+
+    def test_task_status_includes_safe_workflow_stage_summary_without_checkpoint_payload(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "tasks.sqlite3"
+            with TaskQueue(database) as queue:
+                task = queue.enqueue("workflow title", {"goal": "PRIVATE REQUEST"})
+                queue.claim_next(worker_id="status-worker", task_id=task["id"], lease_seconds=600)
+                queue.record_workflow_event(
+                    task["id"], "workflow.bound", actor="commander",
+                    payload={
+                        "workflow_id": "workflow-safe-id",
+                        "profile": {"name": "team"},
+                        "contract": {"goal": "PRIVATE WORKFLOW GOAL"},
+                        "step_ids": ["research-1"],
+                    }, expected_revision=0, expected_worker_id="status-worker",
+                )
+                queue.record_workflow_event(
+                    task["id"], "workflow.stage_changed", actor="status-worker",
+                    payload={
+                        "stage": "research", "step_id": "research-1", "attempt": 1,
+                        "checkpoint": {"secret": "CHECKPOINT_SECRET"},
+                        "next_action": "PRIVATE NEXT ACTION",
+                    }, expected_revision=1, expected_worker_id="status-worker",
+                )
+            args = SimpleNamespace(task_id=task["id"], database=str(database), events_limit=10)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = chatgpt_bridge.command_task_status(args)
+            result = json.loads(output.getvalue())
+            self.assertEqual(code, 0)
+            self.assertEqual(result["workflow"]["status"], "active")
+            self.assertEqual(result["workflow"]["stage"], "research")
+            self.assertEqual(result["workflow"]["step_id"], "research-1")
+            self.assertEqual(result["workflow"]["attempt"], 1)
+            self.assertEqual(result["workflow"]["event_count"], 2)
+            self.assertEqual(result["workflow"]["last_event_type"], "workflow.stage_changed")
+            self.assertNotIn("PRIVATE REQUEST", output.getvalue())
+            self.assertNotIn("PRIVATE WORKFLOW GOAL", output.getvalue())
+            self.assertNotIn("CHECKPOINT_SECRET", output.getvalue())
+            self.assertNotIn("PRIVATE NEXT ACTION", output.getvalue())
+
+    def test_task_list_uses_payload_free_existing_queue_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "tasks.sqlite3"
+            with TaskQueue(database) as queue:
+                queue.enqueue("visible title", {"secret": "DO_NOT_PRINT"}, idempotency_key="test:list")
+            args = SimpleNamespace(database=str(database), limit=10)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = chatgpt_bridge.command_task_list(args)
+            result = json.loads(output.getvalue())
+            self.assertEqual(code, 0)
+            self.assertEqual(result["counts"]["queued"], 1)
+            self.assertNotIn("DO_NOT_PRINT", output.getvalue())
+
+    def test_task_status_reports_missing_ticket_without_mutating_queue(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "tasks.sqlite3"
+            args = SimpleNamespace(task_id="missing-ticket", database=str(database), events_limit=10)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = chatgpt_bridge.command_task_status(args)
+            self.assertEqual(code, 2)
+            self.assertEqual(json.loads(output.getvalue())["error"], "task_not_found")
+            with TaskQueue(database) as queue:
+                self.assertEqual(sum(queue.snapshot(limit=10)["counts"].values()), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

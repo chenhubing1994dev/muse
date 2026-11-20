@@ -99,7 +99,9 @@ class BusinessOpportunityTests(unittest.TestCase):
             def __init__(self): self.received=None
             def build_from_prompt(self,title,prompt,**kwargs):
                 self.received=(title,prompt,kwargs)
-                return {"validated":True,"initiative_id":"stub-product","version_id":"stub-version","mp4_sha256":"a"*64,"package_sha256":"b"*64,"quality_gate":{"status":"passed"}}
+                return {"validated":True,"initiative_id":"stub-product","version_id":"stub-version","relative_path":"data/products/stub-product/stub-version","mp4_sha256":"a"*64,"package_sha256":"b"*64,"manifest_sha256":"c"*64,"quality_gate":{"status":"passed"}}
+            def verify_path(self,products_root,initiative_id,version_id):
+                return {"validated":True,"initiative_id":initiative_id,"version_id":version_id,"relative_path":"data/products/stub-product/stub-version","mp4_sha256":"a"*64,"package_sha256":"b"*64,"manifest_sha256":"c"*64}
         tts_packages=Path(self.tmp.name)/".muse-canto-tts-py314"/"canto_tts"
         tts_packages.mkdir(parents=True)
         tts_model=Path(self.tmp.name)/"data"/"models"/"canto-tts-nano"

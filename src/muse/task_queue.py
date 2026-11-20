@@ -880,6 +880,14 @@ class TaskQueue:
             if row is None:
                 raise ValueError("task is not waiting for approval")
             payload = json.loads(row["payload_json"])
+            if (
+                payload.get("kind") == "contextual_inquiry_review"
+                and payload.get("requires_context_reentry") is True
+                and payload.get("case_context_attached") is not True
+            ):
+                raise PermissionError(
+                    "contextual inquiry review cannot be approved until its case context is attached"
+                )
             payload["_approved"] = True
             payload["_approval"] = {"approved_by": approved_by.strip(), "approved_at": self._now()}
             cursor = self._connection.execute(

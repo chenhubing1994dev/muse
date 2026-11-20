@@ -204,7 +204,15 @@ class PublicSourceReader:
         structured_extract: dict[str, Any] | None = None
         structured_extract_error: str | None = None
         if "html" in content_type or "xhtml" in content_type:
-            source_metadata = extract_html_source_metadata(decoded, final_url)
+            metadata_bytes = decoded.encode("utf-8", errors="replace")
+            metadata_truncated = len(metadata_bytes) > 1_000_000
+            metadata_html = (
+                metadata_bytes[:1_000_000].decode("utf-8", errors="ignore")
+                if metadata_truncated else decoded
+            )
+            source_metadata = extract_html_source_metadata(metadata_html, final_url)
+            if metadata_truncated:
+                source_metadata["metadata_input_truncated"] = True
             if self.structured_parser is not None:
                 try:
                     structured_extract = self.structured_parser.extract(

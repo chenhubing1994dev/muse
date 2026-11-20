@@ -7,7 +7,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from muse.autonomous_research import AutonomousResearchEngine, RESEARCH_TOPICS
+from muse.autonomous_research import (
+    AutonomousResearchEngine, RESEARCH_TOPICS, _build_research_reminder_message,
+)
 from muse.reminders import ReminderStore
 from muse.research_knowledge import ResearchKnowledgeStore
 from muse.philosophy import PhilosophyStore
@@ -728,6 +730,20 @@ class AutonomousResearchTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             AutonomousResearchEngine._validate_synthesis(invalid, 2)
 
+    def test_research_reminder_message_is_bounded_and_keeps_actionable_fields(self):
+        message = _build_research_reminder_message(
+            "初步成果，证据待补充", 80, 2,
+            "问题" * 1200,
+            "data/research/reports/creator-review.md",
+            "假设" * 3000,
+        )
+        self.assertLessEqual(len(message), 2000)
+        self.assertIn("研究问题：", message)
+        self.assertIn("报告文件：data/research/reports/creator-review.md", message)
+        self.assertIn("象征性灵感（待验证假设）：", message)
+        self.assertIn("未审核前不要当作事实", message)
+        self.assertIn("…", message)
+
     def test_idle_cycle_researches_both_sides_persists_hypothesis_and_notifies_locally(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1201,6 +1217,56 @@ class AutonomousResearchTests(unittest.TestCase):
             self.assertNotIn("研究问题", topic["support_query"])
             self.assertNotIn("验证方法", topic["support_query"])
             self.assertNotIn("反证条件", topic["counter_query"])
+
+    def test_creator_inbox_preserves_full_brief_and_builds_domain_specific_queries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            summary = (
+                "明确问题：Muse 是否能通过单变量标题实验提升长视频观看时长份额？"
+                "可测试假设：对 12 条视频并发比较具体承诺型与好奇缺口型标题。"
+                "潜在价值：减少混杂因素并形成可复用的创作规律。"
+                "研究领域：数字内容实验设计、因果推断、在线平台A/B测试、创作者分析、贝叶斯决策与统计功效。"
+                "分类标签：creative-experiment、youtube-ab、watch-time-share。"
+                "支持证据搜索方向：官方实验文档与随机对照研究。"
+                "反证搜索方向：低功效、受众变化、CTR 与观看时长背离。"
+                "可执行实验：每个变体至少 1000 次有效展示，最长 14 天。"
+                "明确证伪条件：胜出不超过 5/12 或中位提升不大于 0。"
+                + "补充说明：" + ("每个实验均保存视频 ID、版本、分流、展示量、观察窗口、指标和混杂因素。" * 8)
+            )
+            tags = ["creative-experiment", "youtube-ab", "watch-time-share"]
+            domains = ["数字内容实验设计", "因果推断", "在线平台A/B测试", "创作者分析", "贝叶斯决策与统计功效"]
+            with ResearchKnowledgeStore(root / "knowledge.sqlite3") as knowledge:
+                candidate = knowledge.upsert_node(
+                    "claim", "单变量创作实验卡", summary=summary,
+                    external_ref="creator-inbox-structured-query-fixture",
+                    metadata={
+                        "origin": "creator_inspiration_inbox",
+                        "epistemic_status": "creator_inspired_hypothesis_only",
+                        "review_state": "not_researched",
+                        "allow_external_research": True,
+                        "research_question": "Muse 是否能通过 YouTube 长视频单变量标题框架实验提升观看时长份额？",
+                        "research_domains": domains,
+                        "tags": tags,
+                    },
+                    status="proposed",
+                )
+            engine = AutonomousResearchEngine(
+                evidence_db=root / "evidence.sqlite3",
+                knowledge_db=root / "knowledge.sqlite3",
+                progress_db=root / "progress.sqlite3",
+                reminder_db=root / "reminders.sqlite3",
+                search=FakeSearch(), reader=FakeReader(), resource_aware=False,
+            )
+            topic = engine._next_topic(preferred_key="creator-hypothesis-review:" + candidate["id"])
+            self.assertEqual(topic["creator_inspiration_node_id"], candidate["id"])
+            self.assertEqual(topic["hypothesis"], summary)
+            self.assertEqual(topic["creator_tags"], tags)
+            self.assertEqual(topic["creator_research_domains"], domains)
+            self.assertIn("YouTube title A/B testing", topic["support_query"])
+            self.assertIn("watch-time share", topic["support_query"])
+            self.assertIn("digital content experimentation", topic["support_query"])
+            self.assertIn("counterevidence", topic["counter_query"])
+            self.assertIn("statistical power", topic["counter_query"])
 
     def test_symbolic_candidate_is_researched_individually_and_kept_unpromoted(self):
         with tempfile.TemporaryDirectory() as directory:

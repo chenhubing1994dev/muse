@@ -147,6 +147,26 @@ def _relevance_score(query: str, title: str, snippet: str) -> int:
     return max(0, min(100, round(100 * (0.7 * title_overlap + 0.3 * snippet_overlap))))
 
 
+def _passes_query_relevance_gate(query: str, title: str, snippet: str) -> bool:
+    """Reject obvious lexical collisions for YouTube title A/B research without grading credibility."""
+    normalized_query = query.casefold()
+    if not (
+        "youtube" in normalized_query
+        and ("title" in normalized_query or "thumbnail" in normalized_query)
+        and ("a/b" in normalized_query or "ab test" in normalized_query or "testing" in normalized_query)
+    ):
+        return True
+    content = f"{title} {snippet}".casefold()
+    platform_anchors = ("youtube", "video", "creator", "thumbnail", "channel")
+    experiment_anchors = (
+        "title", "thumbnail", "a/b", "ab test", "experiment", "randomized",
+        "watch-time", "watch time", "ctr", "variant", "test and compare",
+    )
+    return any(anchor in content for anchor in platform_anchors) and any(
+        anchor in content for anchor in experiment_anchors
+    )
+
+
 def _freshness_bonus(published_at: Any, *, now: datetime | None = None) -> int:
     """Small ranking bonus for dated recent results; never a credibility score."""
     raw = str(published_at or "").strip()
@@ -294,7 +314,10 @@ class ResearchPipeline:
                             "relevance_score": _relevance_score(
                                 query, str(item.get("title", "")), str(item.get("snippet", ""))
                             ),
-                            "relevance_method": "title_snippet_token_overlap_v1",
+                            "relevance_gate_passed": _passes_query_relevance_gate(
+                                query, str(item.get("title", "")), str(item.get("snippet", ""))
+                            ),
+                            "relevance_method": "title_snippet_token_overlap_v1_domain_anchor_gate_v1",
                         }
                         for item in future.result()
                     ]
@@ -353,6 +376,7 @@ class ResearchPipeline:
                             "published_at": str(source.get("published_at", ""))[:80],
                             "source_kind": str(source.get("source_kind", "web_source_unspecified"))[:120],
                             "relevance_score": source.get("relevance_score", 0),
+                            "relevance_gate_passed": source.get("relevance_gate_passed", True),
                             "relevance_method": source.get("relevance_method", "unscored"),
                         }]},
                     )
@@ -372,10 +396,16 @@ class ResearchPipeline:
                 queue = per_query[query]
                 if not queue or len(candidates) >= max_sources:
                     continue
+                eligible_indices = [
+                    index for index, item in enumerate(queue)
+                    if item.get("relevance_gate_passed", True)
+                ]
+                if not eligible_indices:
+                    continue
                 selected_index = next(
-                    (index for index, item in enumerate(queue)
-                     if (urlsplit(item["url"]).hostname or "").casefold() not in seen_hosts),
-                    0,
+                    (index for index in eligible_indices
+                     if (urlsplit(queue[index]["url"]).hostname or "").casefold() not in seen_hosts),
+                    eligible_indices[0],
                 )
                 item = queue.pop(selected_index)
                 candidates.append(item)

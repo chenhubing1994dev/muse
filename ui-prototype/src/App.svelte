@@ -3,6 +3,7 @@
   import { filterCommands, isCommandPaletteShortcut } from "../command-palette.js";
   import { USER_GUIDE_STEPS, getGuideProgress, getGuideStep } from "../user-guide.js";
   import { filterQueueTasks } from "../queue-filter.js";
+  import { resolveProductAttempt } from "./lib/video-trace.js";
   import { scoreIdea, toInspirationBrief } from "../value-studio.js";
   import "./design/muse.css";
   import "./design/bridge.css";
@@ -34,6 +35,7 @@
     type InitiativeTimeline,
     type InitiativeTimelineEvent,
     type VideoAttemptSummary,
+    type VideoRecipeTrace,
     type VideoEngineStatus,
     type GpuResourceStatus,
     type QueueSnapshot,
@@ -115,6 +117,10 @@
   let knowledgeNodeBusy = false;
   let knowledgeNodeMessage = "";
   let videoAttemptSummary: VideoAttemptSummary | null = null;
+  let selectedRecipeTraceAttemptId: string | null = null;
+  let recipeTrace: VideoRecipeTrace | null = null;
+  let recipeTraceBusy = false;
+  let recipeTraceMessage = "";
   let videoEngineStatus: VideoEngineStatus | null = null;
   let gpuResourceStatus: GpuResourceStatus | null = null;
   let pairingCode = "";
@@ -773,6 +779,29 @@
       knowledgeNodeBusy = false;
     }
   }
+
+  async function toggleVideoRecipeTrace(attemptId: string): Promise<void> {
+    if (!client || recipeTraceBusy) return;
+    if (selectedRecipeTraceAttemptId === attemptId) {
+      selectedRecipeTraceAttemptId = null;
+      recipeTrace = null;
+      recipeTraceMessage = "";
+      return;
+    }
+    selectedRecipeTraceAttemptId = attemptId;
+    recipeTrace = null;
+    recipeTraceMessage = "";
+    recipeTraceBusy = true;
+    try {
+      const response = await client.videoRecipeTrace(attemptId);
+      recipeTrace = response.trace;
+    } catch (error) {
+      recipeTraceMessage = error instanceof Error ? error.message : "配方追溯读取失败";
+    } finally {
+      recipeTraceBusy = false;
+    }
+  }
+
 
   async function toggleInitiativeTimeline(product: ProductRecord): Promise<void> {
     if (!client || timelineBusy) return;
@@ -1850,6 +1879,27 @@
                     <div class="video-attempt-row">
                       <span>{attempt.status === "succeeded" ? "已交付" : attempt.status === "failed" ? "失败" : attempt.status === "running" ? "运行中" : "排队"} · {attempt.mode === "prompt_to_video" ? "AI 生成" : "素材合成"} · {attempt.attempt_id.slice(0, 8)}</span>
                       <small>{#if attempt.initiative_id}项目 {attempt.initiative_id.slice(0, 8)}{/if}{#if attempt.evolution_cycle_id} · 周期 {attempt.evolution_cycle_id.slice(0, 14)}{/if}{#if attempt.product_id} · 产品 {attempt.product_id.slice(0, 8)}{/if}{#if attempt.failure_code} · {attempt.failure_code}{/if}</small>
+                      <button type="button" class="radar-scan" onclick={() => toggleVideoRecipeTrace(attempt.attempt_id)} disabled={recipeTraceBusy} aria-expanded={selectedRecipeTraceAttemptId === attempt.attempt_id}>{selectedRecipeTraceAttemptId === attempt.attempt_id ? "收起配方追溯" : "查看配方追溯"}</button>
+                      {#if selectedRecipeTraceAttemptId === attempt.attempt_id}
+                        <section class="video-recipe-trace" aria-label="视频配方来源追溯">
+                          {#if recipeTraceBusy}
+                            <small>正在读取候选、审批、Attempt 与产品指纹…</small>
+                          {:else if recipeTraceMessage}
+                            <small role="status">{recipeTraceMessage}</small>
+                          {:else if recipeTrace}
+                            <div class="video-recipe-trace-grid">
+                              <span><b>候选配方</b><small>{recipeTrace.candidate.candidate_id ?? "未关联"}</small></span>
+                              <span><b>配方 SHA-256</b><small>{recipeTrace.candidate.recipe_sha256?.slice(0, 20) ?? "未记录"}</small></span>
+                              <span><b>人工审批</b><small>{recipeTrace.approval.human_decision_verified ? "已核验" : "未核验"}{#if recipeTrace.approval.decision_actor} · {recipeTrace.approval.decision_actor}{/if}</small></span>
+                              <span><b>审批任务绑定</b><small>{recipeTrace.approval.attempt_matches_ticket === true ? "当前 Attempt 一致" : recipeTrace.approval.attempt_matches_ticket === false ? "Attempt 不匹配" : "旧记录未提供"}</small></span>
+                              <span><b>产品 Manifest</b><small>{recipeTrace.product.status}{#if recipeTrace.product.manifest_sha256} · {recipeTrace.product.manifest_sha256.slice(0, 20)}{/if}</small></span>
+                              <span><b>整链一致性</b><small>{recipeTrace.chain_consistent ? "通过" : "待核验 / 不一致"}</small></span>
+                              <span><b>发布权限</b><small>未授权 · {recipeTrace.release_review.status}</small></span>
+                            </div>
+                            <small>只读追溯：不启动生成、不修改账本、不触发发布。发布仍须独立人工审核。</small>
+                          {/if}
+                        </section>
+                      {/if}
                     </div>
                   {/each}
                 </div>
@@ -1859,6 +1909,7 @@
           {#if products.length}
             <div class="feedback-list">
               {#each products as product (product.id)}
+                {@const recipeTraceLink = resolveProductAttempt(product, videoAttemptSummary?.attempts ?? [])}
                 <div class="artifact-row">
                   <span>
                     <b>{product.kind === "video_creator" ? "🎬 " : "◇ "}{product.name}</b>                  <small>{product.kind === "video_creator" ? "视频成片" : "离线原型"} · {product.version} · {product.status} · {(product.size_bytes / 1024).toFixed(1)} KB · {relativeTime(product.modified_at)}</small>
@@ -1936,6 +1987,11 @@
                     {/if}
                   </span>                <div class="product-actions">
                   <button type="button" class="radar-scan" onclick={() => toggleInitiativeTimeline(product)} disabled={timelineBusy} aria-expanded={selectedTimelineId === timelineInitiativeId(product)}>{selectedTimelineId === timelineInitiativeId(product) ? "收起时间线" : "创作时间线"}</button>
+                  {#if product.kind === "video_creator" && recipeTraceLink.status === "matched" && recipeTraceLink.attemptId}
+                    <button type="button" class="radar-scan" onclick={() => toggleVideoRecipeTrace(recipeTraceLink.attemptId!)} disabled={recipeTraceBusy} aria-expanded={selectedRecipeTraceAttemptId === recipeTraceLink.attemptId}>{selectedRecipeTraceAttemptId === recipeTraceLink.attemptId ? "收起配方追溯" : "配方追溯"}</button>
+                  {:else if product.kind === "video_creator"}
+                    <small class="quality-gate-line">{recipeTraceLink.status === "ambiguous" ? "存在多条匹配任务，已停止关联；需核对 Attempt 账本" : videoAttemptSummary ? "未找到对应的唯一视频任务，旧作品不猜测关联" : "视频任务账本暂不可用，配方追溯入口未启用"}</small>
+                  {/if}
                   <button type="button" class="radar-scan" onclick={() => previewProduct(product)}>预览</button>
                   {#if product.kind === "video_creator" && product.subtitle_review?.status === "pending_human_review"}
                     <button type="button" class="radar-scan" onclick={() => toggleSubtitleReview(product)} aria-expanded={selectedSubtitleReviewProductId === product.id}>逐条字幕审校</button>
@@ -1953,8 +2009,27 @@
               {#if client}
                 <InitiativePerformancePanel client={client} initiativeId={timelineInitiativeId(product)} />
               {/if}
-              {#if selectedSubtitleReviewProductId === product.id}
-                <section class="product-review-form subtitle-review-workbench" aria-label="粤语字幕逐条人工审校">
+              {#if product.kind === "video_creator" && recipeTraceLink.status === "matched" && recipeTraceLink.attemptId && selectedRecipeTraceAttemptId === recipeTraceLink.attemptId}
+                <section class="video-recipe-trace" aria-label="产品配方来源追溯">
+                  {#if recipeTraceBusy}
+                    <small>正在读取候选、审批、Attempt 与产品指纹…</small>
+                  {:else if recipeTraceMessage}
+                    <small role="status">{recipeTraceMessage}</small>
+                  {:else if recipeTrace}
+                    <div class="video-recipe-trace-grid">
+                      <span><b>候选配方</b><small>{recipeTrace.candidate.candidate_id ?? "未关联"}</small></span>
+                      <span><b>配方 SHA-256</b><small>{recipeTrace.candidate.recipe_sha256?.slice(0, 20) ?? "未记录"}</small></span>
+                      <span><b>人工审批</b><small>{recipeTrace.approval.human_decision_verified ? "已核验" : "未核验"}{#if recipeTrace.approval.decision_actor} · {recipeTrace.approval.decision_actor}{/if}</small></span>
+                      <span><b>审批任务绑定</b><small>{recipeTrace.approval.attempt_matches_ticket === true ? "当前 Attempt 一致" : recipeTrace.approval.attempt_matches_ticket === false ? "Attempt 不匹配" : "旧记录未提供"}</small></span>
+                      <span><b>产品 Manifest</b><small>{recipeTrace.product.status}{#if recipeTrace.product.manifest_sha256} · {recipeTrace.product.manifest_sha256.slice(0, 20)}{/if}</small></span>
+                      <span><b>整链一致性</b><small>{recipeTrace.chain_consistent ? "通过" : "待核验 / 不一致"}</small></span>
+                      <span><b>发布权限</b><small>未授权 · {recipeTrace.release_review.status}</small></span>
+                    </div>
+                    <small>只读追溯：不启动生成、不修改账本、不触发发布。can_publish=false，发布仍须独立人工审核。</small>
+                  {/if}
+                </section>
+              {/if}
+              {#if selectedSubtitleReviewProductId === product.id}                <section class="product-review-form subtitle-review-workbench" aria-label="粤语字幕逐条人工审校">
                   <b>粤语旁白 · 逐条字幕审校</b>
                   <small>请先打开原片并听完每条旁白。机器识别结果和 CER 只作参考，不能代替人工听审。</small>
                   <div class="product-actions">

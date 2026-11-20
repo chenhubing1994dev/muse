@@ -1,6 +1,6 @@
 """Narrow local bridge entry point for ChatGPT -> WebCodex Runner -> Muse.
 
-This CLI exposes local classification, approval-gated ticket intake, and explicit local conversation-history import.
+This CLI exposes local classification, approval-gated ticket intake, read-only Ticket observation, and explicit local conversation-history import.
 It does not execute tools, invoke Ruflo, or bypass Muse's Commander policy.
 """
 from __future__ import annotations
@@ -332,6 +332,83 @@ def command_approve(args: argparse.Namespace) -> int:
     return 0
 
 
+def _safe_workflow_status(queue: TaskQueue, task_id: str) -> dict[str, Any] | None:
+    """Project the existing workflow ledger into a payload-free status summary."""
+    events = queue.workflow_events(task_id, limit=500)
+    bound = next((event for event in events if event["event_type"] == "workflow.bound"), None)
+    if bound is None:
+        return None
+    stage_event = next(
+        (event for event in reversed(events) if event["event_type"] == "workflow.stage_changed"),
+        None,
+    )
+    stage_payload = stage_event["payload"] if stage_event else {}
+    stage = stage_payload.get("stage", "plan")
+    step_id = stage_payload.get("step_id")
+    attempt = stage_payload.get("attempt", 0)
+    if not isinstance(stage, str) or len(stage) > 48:
+        stage = "unknown"
+    if not isinstance(step_id, str) or len(step_id) > 128:
+        step_id = None
+    if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 0:
+        attempt = 0
+    latest = events[-1] if events else bound
+    return {
+        "status": queue.workflow_status(task_id),
+        "revision": queue.workflow_revision(task_id),
+        "stage": stage,
+        "step_id": step_id,
+        "attempt": attempt,
+        "event_count": len(events),
+        "last_event_type": latest["event_type"],
+        "updated_at": latest["created_at"],
+    }
+
+
+def command_task_status(args: argparse.Namespace) -> int:
+    """Read one Commander Ticket without exposing its payload or event contents."""
+    if not isinstance(args.task_id, str) or not args.task_id.strip() or len(args.task_id) > 128:
+        _json({"ok": False, "status": "failed", "error": "invalid_task_id"})
+        return 2
+    if isinstance(args.events_limit, bool) or not isinstance(args.events_limit, int) or not 1 <= args.events_limit <= 100:
+        _json({"ok": False, "status": "failed", "error": "events_limit_must_be_1_to_100"})
+        return 2
+    with TaskQueue(args.database) as queue:
+        task = queue.get(args.task_id)
+        if task is None:
+            _json({"ok": False, "status": "failed", "error": "task_not_found", "task_id": args.task_id})
+            return 2
+        events = queue.events(args.task_id, limit=args.events_limit)
+        workflow = _safe_workflow_status(queue, args.task_id)
+    approval = task.get("payload", {}).get("_approval", {})
+    safe_events = [{
+        "event_id": item["event_id"], "event_type": item["event_type"],
+        "actor": item["actor"], "created_at": item["created_at"],
+    } for item in events]
+    _json({
+        "ok": True, "status": "completed", "ticket": {
+            "task_id": task["id"], "title": task["title"], "status": task["status"],
+            "created_at": task["created_at"], "updated_at": task["updated_at"],
+            "attempts": task["attempts"], "priority": task["priority"],
+            "recovery_policy": task["recovery_policy"],
+            "approval_required": bool(task.get("payload", {}).get("approval_required")),
+            "approved_by": approval.get("approved_by") if isinstance(approval, dict) else None,
+            "lease_owner": task["lease_owner"], "lease_expires_at": task["lease_expires_at"],
+        }, "events": safe_events, "event_count": len(safe_events),
+        "workflow": workflow,
+        "execution": "not_started", "read_only": True,
+    })
+    return 0
+
+
+def command_task_list(args: argparse.Namespace) -> int:
+    """Read the existing Commander queue's payload-free operational snapshot."""
+    with TaskQueue(args.database) as queue:
+        snapshot = queue.snapshot(limit=args.limit)
+    _json({"ok": True, "status": "completed", **snapshot, "execution": "not_started", "read_only": True})
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="ChatGPT -> WebCodex Runner -> Muse local bridge (no autonomous execution)"
@@ -367,6 +444,17 @@ def build_parser() -> argparse.ArgumentParser:
     approve.add_argument("--approved-by", required=True)
     approve.add_argument("--database", default=str(DEFAULT_DATABASE))
     approve.set_defaults(handler=command_approve)
+
+    task_status = sub.add_parser("task-status", help="read one Commander Ticket and safe lifecycle metadata")
+    task_status.add_argument("--task-id", required=True)
+    task_status.add_argument("--database", default=str(DEFAULT_DATABASE))
+    task_status.add_argument("--events-limit", type=int, default=20)
+    task_status.set_defaults(handler=command_task_status)
+
+    task_list = sub.add_parser("task-list", help="read a payload-free Commander queue snapshot")
+    task_list.add_argument("--database", default=str(DEFAULT_DATABASE))
+    task_list.add_argument("--limit", type=int, default=20)
+    task_list.set_defaults(handler=command_task_list)
     import_export = sub.add_parser(
         "import-chatgpt-export",
         help="import a user-supplied ChatGPT data export into Muse local conversation memory",

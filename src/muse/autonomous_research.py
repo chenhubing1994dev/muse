@@ -53,6 +53,49 @@ from muse.ego_browser import EgoBrowserAdapter
 from muse.browser_research import BrowserAugmentedSearchAdapter, HybridSourceReader
 
 
+def _compact_reminder_field(value: Any, limit: int) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    if limit <= 1:
+        return "…"[:limit]
+    return text[:limit - 1].rstrip() + "…"
+
+
+def _build_research_reminder_message(
+    evidence_label: str,
+    evidence_coverage_score: int,
+    readable: int,
+    question: str,
+    report_path: str | None,
+    hypothesis: str,
+) -> str:
+    """Keep the actionable research handoff within ReminderStore's 2,000-char limit."""
+    prefix = (
+        f"状态：{evidence_label}。检索覆盖启发式指数 {evidence_coverage_score}/90；"
+        f"已读取 {readable} 个公开来源。"
+    )
+    report_location = report_path or "报告保存失败，请检查本机报告目录"
+    suffix = "低覆盖结果也会保留，供后续补充和迭代；未审核前不要当作事实。"
+    fixed_length = len(
+        prefix + "\n研究问题：\n报告文件：\n象征性灵感（待验证假设）：\n" + suffix
+    )
+    available = max(0, 2000 - fixed_length)
+    question_limit = min(500, available // 3)
+    path_limit = min(500, available // 3)
+    hypothesis_limit = max(0, available - question_limit - path_limit)
+    message = (
+        prefix
+        + "\n研究问题：" + _compact_reminder_field(question, question_limit)
+        + "\n报告文件：" + _compact_reminder_field(report_location, path_limit)
+        + "\n象征性灵感（待验证假设）：" + _compact_reminder_field(hypothesis, hypothesis_limit)
+        + "\n" + suffix
+    )
+    if len(message) > 2000:
+        raise AssertionError("research reminder message budget calculation exceeded 2,000 characters")
+    return message
+
+
 DYNAMIC_RESEARCH_GAPS = (
     {
         "key": "research-gap:repeated-failure",
@@ -475,17 +518,25 @@ class AutonomousResearchEngine:
                     {"title": "Appraisal of Shawn Carlson’s Renowned Astrology Tests", "url": "https://journalofscientificexploration.org/index.php/jse/article/view/99", "snippet": "Critical appraisal of the empirical astrology test, statistical analysis, falsifiability, limitations, competing interpretations and alternative explanations.", "source_kind": "research_article_critical_appraisal", "engine": "curated_counter_reference"}                ],
             })
         for candidate in creator_candidates:
-            hypothesis = candidate.get("summary", "")[:500]
+            hypothesis = candidate.get("summary", "")[:2000]
             metadata = candidate.get("metadata", {})
             is_inbox = metadata.get("origin") == "creator_inspiration_inbox"
             question_match = re.search(
-                r"(?:研究问题|research question)\s*[:：]\s*(.+?)(?=(?:验证方法|反证条件|证伪条件|test|falsifier)\s*[:：]|$)",
+                r"(?:明确问题|研究问题|research question)\s*[:：]\s*(.+?)(?=(?:可测试假设|验证方法|反证条件|证伪条件|潜在价值|研究领域|分类标签|支持证据搜索方向|反证搜索方向|可执行实验|明确证伪条件|test|falsifier)\s*[:：]|$)",
                 hypothesis, flags=re.IGNORECASE | re.DOTALL,
             )
-            question_seed = question_match.group(1) if question_match else candidate.get("title", "")
+            explicit_question = metadata.get("research_question")
+            question_seed = (
+                explicit_question if isinstance(explicit_question, str) and explicit_question.strip()
+                else question_match.group(1) if question_match else candidate.get("title", "")
+            )
             question_seed = " ".join(str(question_seed).split())[:150]
             phrase_terms = [
                 translated for source_phrase, translated in (
+                    ("YouTube", "YouTube title A/B testing"),
+                    ("标题框架", "title framing"),
+                    ("观看时长份额", "watch-time share"),
+                    ("并发测试", "concurrent randomized experiments"),
                     ("微型作品", "interactive learning artifact"),
                     ("关键概念", "concept comprehension"),
                     ("延迟记忆", "delayed retention"),
@@ -504,10 +555,15 @@ class AutonomousResearchEngine:
                 "自主研究": ("autonomous research",),
                 "创意 AI": ("generative AI workflow", "verification"),
                 "视频生成": ("video storytelling", "audience retention"),
+                "数字内容实验设计": ("digital content experimentation", "creative A/B testing"),
+                "因果推断": ("causal inference", "randomized experiments"),
+                "在线平台A/B测试": ("online platform A/B testing", "YouTube title experiments"),
+                "创作者分析": ("creator analytics", "audience retention"),
+                "贝叶斯决策与统计功效": ("Bayesian decision theory", "statistical power"),
             }
             domain_terms = []
             if isinstance(raw_domains, list):
-                for domain in ("多模态创作", "学习科学", "知识图谱", "自主研究", "创意 AI", "视频生成"):
+                for domain in domain_map:
                     if domain in raw_domains:
                         domain_terms.extend(domain_map[domain])
                 domain_terms.extend(
@@ -519,7 +575,16 @@ class AutonomousResearchEngine:
             domain_set = {
                 item for item in raw_domains if isinstance(item, str)
             } if isinstance(raw_domains, list) else set()
-            if {"多模态创作", "学习科学"}.issubset(domain_set):
+            if {"数字内容实验设计", "在线平台A/B测试"}.issubset(domain_set):
+                support_query = (
+                    "YouTube title A/B testing watch-time share randomized experiments "
+                    "digital content experimentation"
+                )
+                counter_query = (
+                    "YouTube title A/B testing counterevidence low statistical power "
+                    "audience selection bias CTR watch-time divergence"
+                )
+            elif {"多模态创作", "学习科学"}.issubset(domain_set):
                 # Short English domain queries are more reliable with scholarly metadata APIs.
                 support_query = "interactive video lecture learning comprehension retention"
                 counter_query = "multimedia learning cognitive load limitations"
@@ -2997,9 +3062,16 @@ class AutonomousResearchEngine:
                             f"{cycle_id}:{initiative['id']}".encode("utf-8")
                         ).hexdigest()[:32]
                         existing_attempt = initiatives.get_video_attempt(attempt_id)
+                        recipe_sha256 = (
+                            creator_brief.get("video", {}).get("recipe_sha256")
+                            if isinstance(creator_brief, dict) and isinstance(creator_brief.get("video"), dict)
+                            else None
+                        )
+                        if existing_attempt is not None and existing_attempt.get("recipe_sha256") != recipe_sha256:
+                            raise ValueError("existing autonomous video attempt has a different recipe fingerprint")
                         video_task = existing_attempt or initiatives.start_video_attempt(
                             attempt_id, mode="prompt_to_video", initiative_id=initiative["id"],
-                            evolution_cycle_id=cycle_id,
+                            evolution_cycle_id=cycle_id, recipe_sha256=recipe_sha256,
                         )
                         video_task = {"attempt_id": video_task["attempt_id"], "status": video_task["status"],
                                       "mode": video_task["mode"], "gpu_started": video_task["status"] == "running"}
@@ -3114,10 +3186,10 @@ class AutonomousResearchEngine:
         with ReminderStore(self.reminder_db) as reminders:
             reminders.add(
                 ("Muse 自主研究成果待阅：" if high_value else "Muse 初步研究成果待阅：") + topic["title"],
-                f"状态：{evidence_label}。检索覆盖启发式指数 {evidence_coverage_score}/90；已读取 {readable} 个公开来源。\\n"
-                f"研究问题：{topic['question']}\\n报告文件：{report_path or '报告保存失败，请检查本机报告目录'}\\n"
-                f"象征性灵感（待验证假设）：{topic['hypothesis']}\\n"
-                "低覆盖结果也会保留，供后续补充和迭代；未审核前不要当作事实。",
+                _build_research_reminder_message(
+                    evidence_label, evidence_coverage_score, readable,
+                    topic["question"], report_path, topic["hypothesis"],
+                ),
                 due_at=fetched_at, source="muse-autonomous-research", dedupe_key="autonomous-research:" + digest,
             )
         final_status = "completed" if readable else "no_readable_sources"

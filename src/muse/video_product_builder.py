@@ -127,6 +127,59 @@ def _allocate_wan_scene_durations(
 def _safe_json(value: Any) -> bytes:
     return (json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n").encode("utf-8")
 
+def _validate_recipe_sha256(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+        raise ValueError("recipe_sha256 must be a lowercase SHA-256 digest")
+    return value
+
+def _resolve_recipe_sha256(
+    workspace: str | Path, creator_initiative_id: str | None, supplied: str | None,
+) -> str | None:
+    requested = _validate_recipe_sha256(supplied)
+    if creator_initiative_id is None:
+        return requested
+    database = Path(workspace) / "data" / "initiatives" / "muse.sqlite3"
+    if database.is_symlink() or not database.is_file():
+        return requested
+    from muse.initiative_engine import InitiativeStore
+
+    with InitiativeStore(database) as store:
+        initiative = store.get_by_id(creator_initiative_id)
+        active_attempts = store.connection.execute(
+            """SELECT recipe_sha256 FROM initiative_video_attempts
+               WHERE initiative_id=? AND status IN ('queued','running')
+               ORDER BY created_at DESC LIMIT 8""",
+            (creator_initiative_id,),
+        ).fetchall()
+    if initiative is None:
+        return requested
+    try:
+        concept = json.loads(initiative["concept"])
+    except (TypeError, json.JSONDecodeError):
+        concept = {}
+    brief = concept.get("creator_brief") if isinstance(concept, dict) else None
+    video = brief.get("video") if isinstance(brief, dict) else None
+    brief_hash = _validate_recipe_sha256(video.get("recipe_sha256")) if isinstance(video, dict) and video.get("recipe_sha256") is not None else None
+
+    if active_attempts:
+        active_hashes = {row["recipe_sha256"] for row in active_attempts}
+        if len(active_hashes) != 1:
+            raise ValueError("active video attempts for this initiative have conflicting recipe fingerprints")
+        active_hash = _validate_recipe_sha256(next(iter(active_hashes)))
+        if requested is not None and requested != active_hash:
+            raise ValueError("requested recipe fingerprint does not match the active video attempt")
+        if brief_hash is not None and brief_hash != active_hash:
+            raise ValueError("creator brief recipe fingerprint does not match the active video attempt")
+        return active_hash
+    if requested is not None and brief_hash is not None and requested != brief_hash:
+        raise ValueError("requested recipe fingerprint does not match the creator brief")
+    return requested if requested is not None else brief_hash
+
+
+
+
 
 def _revalidate_claim_grounded_contract(workspace: Path, contract: dict[str, Any]) -> None:
     """Rebuild a publishable contract from the live local ResearchKnowledgeStore."""
@@ -640,8 +693,10 @@ class VideoProductBuilder:
         narration_asr_model_dir: str | Path | None = None,
         narration_evidence_contract: dict[str, Any] | None = None,
         creator_initiative_id: str | None = None, evolution_cycle_id: str | None = None,
+        recipe_sha256: str | None = None,
     ) -> dict[str, Any]:
         """Generate 2-20 independent local Wan shots, concatenate, then package once."""
+        recipe_sha256 = _resolve_recipe_sha256(self.workspace, creator_initiative_id, recipe_sha256)
         if not isinstance(title, str) or not title.strip() or len(title.strip()) > 160:
             raise ValueError("title must contain 1-160 characters")
         if not isinstance(scenes, list) or not 2 <= len(scenes) <= 20:
@@ -804,6 +859,8 @@ class VideoProductBuilder:
                 "steps": steps, "bytes": combined.stat().st_size, "has_audio": False,
                 "scene_count": len(scene_records),
             }
+            if recipe_sha256 is not None:
+                aggregate["recipe_sha256"] = recipe_sha256
             combined_prompt = ("多镜头分镜：" + "；".join(item["prompt"] for item in effective_scenes))[:2000]
             package_args = {
                 "scene_asset_paths": clip_paths,
@@ -848,8 +905,10 @@ class VideoProductBuilder:
         narration_script: str | None = None, narration_model_dir: str | Path | None = None,
         narration_asr_model_dir: str | Path | None = None,
         narration_evidence_contract: dict[str, Any] | None = None,
+        recipe_sha256: str | None = None,
     ) -> dict[str, Any]:
         """Generate one local Wan 2.1 clip and optionally package verified Cantonese narration."""
+        recipe_sha256 = _resolve_recipe_sha256(self.workspace, creator_initiative_id, recipe_sha256)
         if not isinstance(title, str) or not title.strip() or len(title.strip()) > 160:
             raise ValueError("title must contain 1-160 characters")
         if not isinstance(prompt, str) or not prompt.strip() or len(prompt.strip()) > 2000:
@@ -896,6 +955,8 @@ class VideoProductBuilder:
         }
         if narration_evidence_contract is not None:
             fingerprint_data["narration_evidence_contract"] = narration_evidence_contract
+        if recipe_sha256 is not None:
+            fingerprint_data["recipe_sha256"] = recipe_sha256
         fingerprint = hashlib.sha256(_safe_json(fingerprint_data)).hexdigest()
         version = fingerprint[:20]
         _, products_root = self._roots()
@@ -928,6 +989,8 @@ class VideoProductBuilder:
             )
             if generated.get("status") != "completed" or not base_rendered.is_file():
                 raise VideoProductError("local Wan generation did not return a completed MP4")
+            if recipe_sha256 is not None:
+                generated["recipe_sha256"] = recipe_sha256
             if narration_script is not None:
                 return self.package_generated_clip_with_cantonese_narration(
                     title.strip(), prompt.strip(), base_rendered,
@@ -995,6 +1058,11 @@ class VideoProductBuilder:
                 "title": title.strip(), "status": "testing", "generated_at": datetime.now(timezone.utc).isoformat(),
                 "input_sha256": fingerprint, "files": files, "video_metadata": video_metadata,
                 "quality_gate": quality_gate,
+                **({"recipe_provenance": {
+                    "schema_version": 1,
+                    "recipe_sha256": video_metadata["recipe_sha256"],
+                    "relationship": "recipe_reference",
+                }} if video_metadata.get("recipe_sha256") else {}),
                 "source_assets": [], "audio_asset": None,
                 "execution": {"arbitrary_code_executed": False, "network_access": False,
                               "local_tools_invoked": ["comfyui", "wan21"] + (["node", "remotion", "ffmpeg"] if motion_profile != "none" else []), "ai_generation": "completed"},
@@ -1243,8 +1311,11 @@ class VideoProductBuilder:
         metadata_keys = {
             "status", "prompt_id", "model", "seed", "aspect_ratio", "fps",
             "duration_seconds", "frames", "width", "height", "steps", "bytes", "has_audio",
+            "recipe_sha256",
         }
         metadata = {key: generation_metadata[key] for key in metadata_keys if key in generation_metadata}
+        if "recipe_sha256" in metadata:
+            metadata["recipe_sha256"] = _validate_recipe_sha256(metadata["recipe_sha256"])
         try:
             metadata_bytes = _safe_json(metadata)
         except (TypeError, ValueError):
@@ -1442,6 +1513,11 @@ class VideoProductBuilder:
                 "input_sha256": fingerprint, "files": files, "video_metadata": video_metadata,
                 "quality_gate": quality_gate,
                 "generated_clip": {"name": source.name, "bytes": source_size, "sha256": source_sha256},
+                **({"recipe_provenance": {
+                    "schema_version": 1,
+                    "recipe_sha256": metadata["recipe_sha256"],
+                    "relationship": "recipe_reference",
+                }} if metadata.get("recipe_sha256") else {}),
                 "scene_assets": scene_asset_facts,
                 "subtitles": subtitle_fact, "narration_asr": asr_fact,
                 "narration_timeline": narration_timeline,
@@ -1855,6 +1931,7 @@ class VideoProductBuilder:
                 **({"subtitle_review": result["subtitle_review"]} if result.get("subtitle_review") else {}),
                 "product_id": result["initiative_id"],
                 "version_id": result["version_id"],
+                **({"recipe_sha256": result["recipe_sha256"]} if result.get("recipe_sha256") else {}),
             }
             if evolution_cycle_id:
                 artifact_metadata["evolution_cycle_id"] = evolution_cycle_id
@@ -1886,6 +1963,7 @@ class VideoProductBuilder:
                                 "mp4_sha256": result["mp4_sha256"],
                                 "package_sha256": result["package_sha256"],
                                 "manifest_sha256": result["manifest_sha256"],
+                                **({"recipe_sha256": result["recipe_sha256"]} if result.get("recipe_sha256") else {}),
                                 "storyboard_sha256": result["storyboard_sha256"],
                                 "readme_sha256": result["readme_sha256"],
                                 "source_asset_hashes": source_hashes,
@@ -1957,6 +2035,15 @@ class VideoProductBuilder:
         if manifest_path.is_symlink() or not manifest_path.is_file():
             raise VideoProductError("video product manifest is missing")
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        recipe_provenance = manifest.get("recipe_provenance")
+        if recipe_provenance is not None and (
+            not isinstance(recipe_provenance, dict)
+            or recipe_provenance.get("schema_version") != 1
+            or recipe_provenance.get("relationship") != "recipe_reference"
+            or not isinstance(recipe_provenance.get("recipe_sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", recipe_provenance["recipe_sha256"])
+        ):
+            raise VideoProductError("video recipe provenance is invalid")
         legacy_expected = {"README.md", "storyboard.json", "video.mp4", "product.zip"}
         qa_expected = legacy_expected | {"qa-report.json"}
         subtitle_expected = qa_expected | {"subtitles.srt"}
@@ -2165,6 +2252,7 @@ class VideoProductBuilder:
             "background_music": background_music_fact,
             "package_sha256": files["product.zip"], "mp4_sha256": files["video.mp4"],
             "manifest_sha256": _hash_file(manifest_path),
+            "recipe_sha256": recipe_provenance.get("recipe_sha256") if recipe_provenance else None,
             "storyboard_sha256": files["storyboard.json"], "readme_sha256": files["README.md"],
             "validation_summary": {"validated": True, "checks": ["mp4_container", "sha256", "zip_crc", "zip_members", "zip_content_hashes"]},            "created": False, "validated": True,
         }

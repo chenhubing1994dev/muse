@@ -551,7 +551,17 @@ export interface VideoAttemptMetrics {
 export interface VideoAttemptSummary {
   api_version: number; metrics: VideoAttemptMetrics;
   attempts: Array<{ attempt_id: string; mode: string; status: string; created_at: string; started_at: string | null; finished_at: string | null; initiative_id: string | null; evolution_cycle_id: string | null; product_id: string | null; version_id: string | null; failure_code: string | null; error_type: string | null }>;
-}export interface VideoEngineStatus {
+}
+export interface VideoRecipeTrace {
+  read_only: true;
+  attempt: { attempt_id: string; status: string; mode: string; approval_task_id: string | null; failure_code: string | null };
+  candidate: { candidate_id: string | null; recipe_sha256: string | null; creator_brief_sha256: string | null; brief_fingerprint_matches_attempt: boolean; mapping_status: string | null };
+  approval: { ticket_id: string | null; status: string; human_decision_verified: boolean; decision_actor: string | null; brief_matches_creator_brief?: boolean; attempt_matches_ticket?: boolean };
+  product: { status: string; product_id?: string; version_id?: string; manifest_sha256?: string; manifest_matches_attempt?: boolean; recipe_matches_attempt?: boolean; mp4_sha256?: string; package_sha256?: string; quality_gate?: Record<string, unknown> };
+  release_review: { status: string; can_publish: false; editorial_and_fact_review?: string; visual_and_model_rights_review?: string; privacy_and_person_release_review?: string; account_authorization?: string; official_publish_api?: string };
+  chain_consistent: boolean; execution: string; publishing: "not_performed";
+}
+export interface VideoEngineStatus {
   ffmpeg_available: boolean; ffprobe_available: boolean; ffmpeg_version: string | null;
   hardware_encoders: string[];
   comfyui: { status: string; reason?: string };
@@ -790,6 +800,7 @@ export interface ApiClient {
   celestialCatalog(): Promise<CelestialCatalogResponse>;
   castYijing(payload: { mode?: "seeded_cast" | "manual_lines" | "trigram_pair"; seed?: string; line_values?: number[]; lower_bits?: string; upper_bits?: string; goal?: string; frameworks?: string[] }): Promise<YijingInquiryResponse>;
   videoAttempts(): Promise<VideoAttemptSummary>;
+  videoRecipeTrace(attemptId: string): Promise<{ api_version: number; trace: VideoRecipeTrace }>;
   videoEngines(): Promise<{ api_version: number } & VideoEngineStatus>;
   gpuResources(): Promise<GpuResourceStatus>;
   daemonStatus(): Promise<DaemonStatus | null>;

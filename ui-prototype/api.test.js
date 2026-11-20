@@ -282,6 +282,26 @@ test("video attempt metrics use the authenticated read-only dashboard endpoint",
   assert.equal(calls[0].options.redirect, "error");
 });
 
+test("video recipe trace uses the authenticated read-only endpoint and validates attempt ids", async () => {
+  const calls = [];
+  const trace = { read_only: true, chain_consistent: true, publishing: "not_performed" };
+  const client = createApiClient({
+    baseUrl: "http://127.0.0.1:8765", token,
+    fetchImpl: async (url, options) => {
+      calls.push({ url: String(url), options });
+      return { ok: true, json: async () => ({ api_version: 1, trace }) };
+    },
+  });
+  const result = await client.videoRecipeTrace("attempt_01");
+  assert.equal(result.trace.chain_consistent, true);
+  assert.equal(calls[0].url, "http://127.0.0.1:8765/api/v1/video-recipe-traces/attempt_01");
+  assert.equal(calls[0].options.headers.Authorization, "Bearer " + token);
+  assert.equal(calls[0].options.method, "GET");
+  assert.equal(calls[0].options.cache, "no-store");
+  assert.equal(calls[0].options.redirect, "error");
+  assert.throws(() => client.videoRecipeTrace("../bad"), /视频任务编号无效/);
+});
+
 test("feedback listing validates bounds and improvement proposals use the authenticated API", async () => {  const calls = [];
   const client = createApiClient({
     baseUrl: "http://localhost:8765", token,

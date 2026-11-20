@@ -203,13 +203,39 @@ class ResearchKnowledgeStoreTests(unittest.TestCase):
                     store.transition_claim(claim["id"], "supported", evidence_refs=(), reviewer_id="critic")
                 with self.assertRaisesRegex(ValueError, "stored source or experiment"):
                     store.transition_claim(claim["id"], "supported", evidence_refs=("https://missing",), reviewer_id="critic")
-                source = store.upsert_node("source", "Evidence", external_ref="https://example.com/e")
+                source = store.upsert_node(
+                    "source", "Evidence", external_ref="https://example.com/e",
+                    metadata={"structured_extract": {
+                        "content_trust": "untrusted_page_derived",
+                        "verification_status": "not_independently_verified",
+                        "instruction_authority": False, "promotion_eligible": False,
+                    }},
+                )
+                with self.assertRaisesRegex(ValueError, "reviewed claim-evidence candidate"):
+                    store.transition_claim(
+                        claim["id"], "supported", evidence_refs=("https://example.com/e",),
+                        reviewer_id="independent-reviewer",
+                    )
+                candidate = store.record_claim_evidence(
+                    claim["id"], source["id"], direction="support_search_candidate",
+                )
+                store.record_claim_evidence_review(
+                    candidate["id"], reviewer_id="evidence-reviewer", verdict="supports",
+                    quality="moderate", independence="unassessed",
+                    rationale="A separately reviewed citation supports the claim.",
+                    citation_anchor={
+                        "verified": True, "source_url": "https://example.com/e",
+                        "source_sha256": "a" * 64, "excerpt": "support evidence",
+                        "start_char": 0, "end_char": 16, "excerpt_sha256": "b" * 64,
+                        "fetched_at": "2026-11-20T00:00:00+00:00", "content_type": "text/html",
+                    },
+                )
                 updated = store.transition_claim(
                     claim["id"], "supported", evidence_refs=("https://example.com/e",), reviewer_id="independent-reviewer"
                 )
                 self.assertEqual(updated["status"], "supported")
                 self.assertEqual(updated["metadata"]["reviewer_id"], "independent-reviewer")
-                self.assertEqual(store.stats()["edges"], 1)
+                self.assertEqual(store.stats()["edges"], 2)
                 self.assertEqual(store.lint(), [])
 
     def test_claim_reviewer_must_be_independent_and_evidence_must_be_a_source(self):
@@ -222,11 +248,80 @@ class ResearchKnowledgeStoreTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "source or experiment"):
                     store.transition_claim(claim["id"], "supported", evidence_refs=("idea:1",), reviewer_id="critic")
                 source = store.upsert_node("source", "Paper", external_ref="https://example.com/paper")
+                candidate = store.record_claim_evidence(
+                    claim["id"], source["id"], direction="counter_search_candidate",
+                )
+                store.record_claim_evidence_review(
+                    candidate["id"], reviewer_id="evidence-reviewer", verdict="refutes",
+                    quality="low", independence="unassessed",
+                    rationale="A reviewed citation contradicts the claim.",
+                    citation_anchor={
+                        "verified": True, "source_url": "https://example.com/paper",
+                        "source_sha256": "c" * 64, "excerpt": "counter evidence",
+                        "start_char": 0, "end_char": 16, "excerpt_sha256": "d" * 64,
+                        "fetched_at": "2026-11-20T00:00:00+00:00", "content_type": "text/html",
+                    },
+                )
                 updated = store.transition_claim(
                     claim["id"], "refuted", evidence_refs=("https://example.com/paper",), reviewer_id="critic"
                 )
                 self.assertEqual(updated["status"], "refuted")
-                self.assertEqual(store.stats()["edges"], 1)
+                self.assertEqual(store.stats()["edges"], 2)
+
+    def test_claim_promotion_rejects_review_verdict_from_wrong_search_direction(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with ResearchKnowledgeStore(Path(directory) / "knowledge.sqlite3") as store:
+                claim = store.upsert_node("claim", "A claim requiring supporting evidence")
+                source = store.upsert_node("source", "Paper", external_ref="https://example.com/wrong-direction")
+                candidate = store.record_claim_evidence(
+                    claim["id"], source["id"], direction="counter_search_candidate",
+                )
+                store.record_claim_evidence_review(
+                    candidate["id"], reviewer_id="evidence-reviewer", verdict="supports",
+                    quality="moderate", independence="unassessed",
+                    rationale="The review verdict conflicts with the search direction.",
+                    citation_anchor={
+                        "verified": True, "source_url": "https://example.com/wrong-direction",
+                        "source_sha256": "e" * 64, "excerpt": "support evidence",
+                        "start_char": 0, "end_char": 16, "excerpt_sha256": "f" * 64,
+                        "fetched_at": "2026-11-20T00:00:00+00:00", "content_type": "text/html",
+                    },
+                )
+                with self.assertRaisesRegex(ValueError, "direction-matched reviewed claim-evidence"):
+                    store.transition_claim(
+                        claim["id"], "supported", evidence_refs=("https://example.com/wrong-direction",),
+                        reviewer_id="final-reviewer",
+                    )
+
+    def test_contested_claim_requires_both_reviewed_source_directions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with ResearchKnowledgeStore(Path(directory) / "knowledge.sqlite3") as store:
+                claim = store.upsert_node("claim", "A disputed claim")
+                source_specs = (
+                    ("https://support.example/paper", "support_search_candidate", "supports", "support evidence", "a", "b"),
+                    ("https://counter.example/check", "counter_search_candidate", "refutes", "counter evidence", "c", "d"),
+                )
+                refs = []
+                for url, direction, verdict, excerpt, source_hash, excerpt_hash in source_specs:
+                    source = store.upsert_node("source", verdict, external_ref=url)
+                    refs.append(url)
+                    evidence = store.record_claim_evidence(claim["id"], source["id"], direction=direction)
+                    store.record_claim_evidence_review(
+                        evidence["id"], reviewer_id=f"reviewer-{verdict}", verdict=verdict,
+                        quality="moderate", independence="unassessed",
+                        rationale=f"Reviewed {verdict} citation.",
+                        citation_anchor={
+                            "verified": True, "source_url": url,
+                            "source_sha256": source_hash * 64, "excerpt": excerpt,
+                            "start_char": 0, "end_char": len(excerpt),
+                            "excerpt_sha256": excerpt_hash * 64,
+                            "fetched_at": "2026-11-20T00:00:00+00:00", "content_type": "text/html",
+                        },
+                    )
+                updated = store.transition_claim(
+                    claim["id"], "contested", evidence_refs=refs, reviewer_id="final-reviewer",
+                )
+                self.assertEqual(updated["status"], "contested")
 
     def test_lint_surfaces_contradictory_claim_links(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -451,6 +546,40 @@ class ResearchKnowledgeStoreTests(unittest.TestCase):
                     {edge["edge_type"] for edge in store.list_edges(node_id=claim["id"])},
                     {"relates"},
                 )
+
+    def test_claim_review_records_completion_without_promoting_proposed_claim(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with ResearchKnowledgeStore(Path(directory) / "knowledge.sqlite3") as store:
+                claim = store.upsert_node(
+                    "claim", "Creator experiment hypothesis",
+                    metadata={"review_state": "researched_needs_independent_review"},
+                )
+                source = store.upsert_node(
+                    "source", "Unrelated source",
+                    external_ref="https://example.org/unrelated",
+                )
+                store.record_claim_evidence(
+                    claim["id"], source["id"], direction="support_search_candidate",
+                    evidence_type="retrieved_web_source", search_query="creator title A/B test",
+                )
+                reviewed = store.record_claim_review(
+                    claim["id"], reviewer_id="external_web_audit",
+                    assessment={
+                        "verdict": "insufficient",
+                        "rationale": "The source does not study title variants or watch-time share.",
+                    },
+                    evidence_refs=(source["id"],),
+                    confidence_level="unassessed",
+                )
+                self.assertEqual(reviewed["status"], "proposed")
+                self.assertEqual(reviewed["metadata"]["research_claim_review_status"], "completed")
+                self.assertEqual(reviewed["metadata"]["research_claim_review_verdict"], "insufficient")
+                self.assertEqual(reviewed["metadata"]["review_state"], "reviewed_insufficient_evidence")
+                self.assertTrue(reviewed["metadata"]["claim_review"]["does_not_promote_claim"])
+                dossier = store.claim_dossier(claim["id"])
+                self.assertEqual(dossier["claim_status"], "proposed")
+                self.assertEqual(dossier["confidence"]["level"], "unassessed")
+                self.assertEqual(dossier["confidence_history"][-1]["verdict"], "insufficient")
 
     def test_evidence_reviews_and_source_lineage_are_append_only_and_visible(self):
         with tempfile.TemporaryDirectory() as directory:

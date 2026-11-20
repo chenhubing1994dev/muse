@@ -145,6 +145,7 @@ class InitiativeStore:
                 version_id TEXT,
                 mp4_sha256 TEXT,
                 package_sha256 TEXT,
+                manifest_sha256 TEXT,
                 failure_code TEXT,
                 error_type TEXT,
                 created_at TEXT NOT NULL,
@@ -222,7 +223,8 @@ class InitiativeStore:
             ("worker_id", "TEXT"), ("lease_expires_at", "REAL"),
             ("attempt_count", "INTEGER NOT NULL DEFAULT 0"),
             ("cancel_requested", "INTEGER NOT NULL DEFAULT 0"),
-            ("approval_task_id", "TEXT"),
+            ("approval_task_id", "TEXT"), ("manifest_sha256", "TEXT"),
+            ("recipe_sha256", "TEXT"),
         ):
             if column not in attempt_columns:
                 self.connection.execute(f"ALTER TABLE initiative_video_attempts ADD COLUMN {column} {declaration}")
@@ -779,7 +781,7 @@ class InitiativeStore:
         if not isinstance(attempt_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", attempt_id):
             raise ValueError("attempt_id must be 1-64 safe identifier characters")
 
-    def start_video_attempt(self, attempt_id, *, mode, initiative_id=None, evolution_cycle_id=None, approval_task_id=None):
+    def start_video_attempt(self, attempt_id, *, mode, initiative_id=None, evolution_cycle_id=None, approval_task_id=None, recipe_sha256=None):
         self._validate_video_attempt_id(attempt_id)
         if approval_task_id is not None and (
             not isinstance(approval_task_id, str) or not approval_task_id.strip() or len(approval_task_id) > 128
@@ -787,6 +789,10 @@ class InitiativeStore:
             raise ValueError("approval_task_id must be non-empty bounded text")
         if mode not in {"prompt_to_video", "local_assets"}:
             raise ValueError("unsupported video attempt mode")
+        if recipe_sha256 is not None and (
+            not isinstance(recipe_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", recipe_sha256)
+        ):
+            raise ValueError("recipe_sha256 must be a SHA-256 digest")
         if initiative_id is not None:
             if not isinstance(initiative_id, str) or not re.fullmatch(r"[0-9a-f]{32}", initiative_id):
                 raise ValueError("initiative_id must be a 32-character lowercase UUID hex string")
@@ -801,13 +807,13 @@ class InitiativeStore:
         try:
             self.connection.execute(
                 """INSERT INTO initiative_video_attempts
-                (attempt_id,mode,status,initiative_id,evolution_cycle_id,approval_task_id,created_at)
-                VALUES(?,?,'queued',?,?,?,?)""",
-                (attempt_id, mode, initiative_id, evolution_cycle_id or "", approval_task_id, now),
+                (attempt_id,mode,status,initiative_id,evolution_cycle_id,approval_task_id,recipe_sha256,created_at)
+                VALUES(?,?,'queued',?,?,?,?,?)""",
+                (attempt_id, mode, initiative_id, evolution_cycle_id or "", approval_task_id, recipe_sha256, now),
             )
             self.connection.execute(
-                "INSERT INTO initiative_video_attempt_events(attempt_id,event_type,created_at) VALUES(?,?,?)",
-                (attempt_id, "queued", now),
+                "INSERT INTO initiative_video_attempt_events(attempt_id,event_type,details_json,created_at) VALUES(?,?,?,?)",
+                (attempt_id, "queued", json.dumps({"recipe_sha256": recipe_sha256} if recipe_sha256 else {}, separators=(",", ":")), now),
             )
             self.connection.commit()
         except sqlite3.IntegrityError as exc:
@@ -842,7 +848,7 @@ class InitiativeStore:
 
     def complete_video_attempt(
         self, attempt_id, *, initiative_id=None, product_id, version_id,
-        mp4_sha256, package_sha256,
+        mp4_sha256, package_sha256, manifest_sha256=None,
     ):
         self._validate_video_attempt_id(attempt_id)
         for value, field in ((product_id, "product_id"), (version_id, "version_id")):
@@ -851,6 +857,10 @@ class InitiativeStore:
         for value, field in ((mp4_sha256, "mp4_sha256"), (package_sha256, "package_sha256")):
             if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
                 raise ValueError(f"{field} must be a SHA-256 digest")
+        if manifest_sha256 is not None and (
+            not isinstance(manifest_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", manifest_sha256)
+        ):
+            raise ValueError("manifest_sha256 must be a SHA-256 digest")
         if initiative_id is not None:
             if not isinstance(initiative_id, str) or not re.fullmatch(r"[0-9a-f]{32}", initiative_id):
                 raise ValueError("initiative_id must be a 32-character lowercase UUID hex string")
@@ -864,8 +874,11 @@ class InitiativeStore:
         if initiative_id is not None and row["initiative_id"] not in {None, initiative_id}:
             raise ValueError("video attempt cannot be reassigned to another initiative")
         resolved_initiative_id = initiative_id or row["initiative_id"]
-        expected = (resolved_initiative_id, product_id, version_id, mp4_sha256, package_sha256)
-        actual = (row["initiative_id"], row["product_id"], row["version_id"], row["mp4_sha256"], row["package_sha256"])
+        expected = (resolved_initiative_id, product_id, version_id, mp4_sha256, package_sha256, manifest_sha256)
+        actual = (
+            row["initiative_id"], row["product_id"], row["version_id"],
+            row["mp4_sha256"], row["package_sha256"], row["manifest_sha256"],
+        )
         if row["status"] == "succeeded":
             if actual == expected:
                 return dict(row)
@@ -875,14 +888,18 @@ class InitiativeStore:
         now = self._now()
         self.connection.execute(
             """UPDATE initiative_video_attempts SET status='succeeded',initiative_id=?,
-            product_id=?,version_id=?,mp4_sha256=?,package_sha256=?,finished_at=?,
+            product_id=?,version_id=?,mp4_sha256=?,package_sha256=?,manifest_sha256=?,finished_at=?,
             worker_id=NULL,lease_expires_at=NULL
             WHERE attempt_id=? AND status IN ('queued','running')""",
             (*expected, now, attempt_id),
         )
         self.connection.execute(
             "INSERT INTO initiative_video_attempt_events(attempt_id,event_type,details_json,created_at) VALUES(?,?,?,?)",
-            (attempt_id, "succeeded", json.dumps({"product_id": product_id, "version_id": version_id}, separators=(",", ":")), now),
+            (attempt_id, "succeeded", json.dumps({
+                "product_id": product_id, "version_id": version_id,
+                "manifest_sha256": manifest_sha256,
+                "recipe_sha256": row["recipe_sha256"],
+            }, separators=(",", ":")), now),
         )
         self.connection.commit()
         return dict(self.connection.execute(
