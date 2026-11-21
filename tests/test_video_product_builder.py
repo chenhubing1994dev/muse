@@ -819,6 +819,110 @@ class VideoProductBuilderTests(unittest.TestCase):
         self.assertEqual(result["narration_synthesis"]["sample_rate"], 48000)
         self.assertFalse(observed["temporary_audio"].exists())
 
+    def test_cantonese_narration_wrapper_preserves_structured_segments_and_prosody_evidence(self):
+        import wave
+        from muse.cantonese_tts import _synthesize_segments_with_engine
+        from muse.narration_prosody_bridge import build_cantonese_narration_prosody_plan
+
+        source = self.root / "structured-narration-source.mp4"
+        source.write_bytes(bytes.fromhex("000000186674797069736f6d66697874757265"))
+        generated = {
+            "style": "yujie_canto",
+            "segments": [
+                {"text": "第一段。", "emotion": "calm", "voice": {
+                    "speed_scale": 1.0, "pitch_semitones": 0.0, "breath_hint": True,
+                }, "pause_after_ms": 200},
+                {"text": "第二段。", "emotion": "warm", "voice": {
+                    "speed_scale": 0.9, "pitch_semitones": 1.0, "breath_hint": False,
+                }},
+                {"text": "第三段。", "emotion": "calm", "voice": {
+                    "speed_scale": 1.1, "pitch_semitones": -1.0, "breath_hint": True,
+                }},
+            ],
+        }
+        plan = build_cantonese_narration_prosody_plan(generated)
+        from muse.narration_prosody_bridge import build_cantonese_tts_segments
+        payload = build_cantonese_tts_segments(plan)
+        script = "\n".join(item["text"] for item in payload)
+        observed = {}
+
+        class FakeTTS:
+            def synthesize(self, text, path, **kwargs):
+                with wave.open(path, "wb") as audio:
+                    audio.setnchannels(1)
+                    audio.setsampwidth(2)
+                    audio.setframerate(48_000)
+                    audio.writeframes(bytes([0, 0]) * 480)
+
+        def fake_synthesize(segments, output, *, model_dir, packages_dir, quality):
+            observed["segments"] = segments
+            result = _synthesize_segments_with_engine(
+                segments, output, engine=FakeTTS(), quality="duration_filter",
+            )
+            observed["temporary_audio"] = output
+            return result
+
+        def fake_package(title, prompt, clip, **kwargs):
+            observed["package_kwargs"] = kwargs
+            self.assertTrue(kwargs["narration_path"].is_file())
+            return {"validated": True, "relative_path": "data/products/structured-narration"}
+
+        with (
+            patch("muse.cantonese_tts.synthesize_cantonese_segment_payload_with_runtime", side_effect=fake_synthesize),
+            patch.object(self.builder, "package_generated_clip", side_effect=fake_package),
+        ):
+            result = self.builder.package_generated_clip_with_cantonese_narration(
+                "结构化粤语旁白", "source-grounded prompt", source,
+                narration_script=script, narration_prosody_plan=plan,
+                model_dir=self.root / "model", generation_metadata={"status": "completed"},
+            )
+
+        record = observed["package_kwargs"]["narration_prosody"]
+        self.assertEqual(observed["segments"], payload)
+        self.assertEqual(observed["package_kwargs"]["narration_script"], script)
+        self.assertEqual(record["schema"], "muse.narration.prosody.runtime.v1")
+        self.assertFalse(record["audio_effects_verified"])
+        self.assertTrue(record["waveform_pause_accounting_verified"])
+        self.assertTrue(record["waveform_pause_verified"])
+        self.assertTrue(record["human_listening_review_required"])
+        self.assertIn("emotion", record["segments"][0]["unsupported_controls"])
+        self.assertIn("rate_scale", record["segments"][0]["unsupported_controls"])
+        self.assertEqual(record["runtime"]["audio_sha256"], result["narration_synthesis"]["audio_sha256"])
+        self.assertEqual(record["runtime"]["applied_controls"], ["pause_after"])
+        self.assertEqual(result["narration_synthesis"]["segment_count"], 3)
+        self.assertFalse(observed["temporary_audio"].exists())
+
+    def test_package_generated_clip_rejects_prosody_evidence_bound_to_another_audio(self):
+        audio = self.root / "narration-unbound.wav"
+        audio.write_bytes(b"RIFF" + b"audio-fixture")
+        source = self.root / "data" / "video_sources" / "demo" / "02.mp4"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(bytes.fromhex("000000186674797069736f6d66697874757265"))
+        record = {
+            "schema": "muse.narration.prosody.runtime.v1",
+            "backend": "canto-tts-nano",
+            "backend_capabilities": ["pause_after"],
+            "audio_effects_verified": False,
+            "waveform_pause_accounting_verified": True,
+            "waveform_pause_verified": False,
+            "human_listening_review_required": True,
+            "segments": [{"index": 0}],
+            "runtime": {
+                "audio_sha256": "0" * 64,
+                "segment_count": 1,
+                "inserted_pause_frames": 0,
+                "backend_capabilities": ["pause_after"],
+                "applied_controls": [],
+            },
+        }
+        with self.assertRaisesRegex(VideoProductError, "bind the actual narration WAV"):
+            self.builder.package_generated_clip(
+                "未绑定旁白", "source-grounded prompt", source,
+                generation_metadata={"status": "completed"},
+                narration_path=audio, narration_script="测试旁白。",
+                narration_prosody=record,
+            )
+
     def test_prompt_builder_preflight_failure_prevents_wan_render(self):
         with (
             patch("muse.cantonese_tts.preflight_cantonese_tts_runtime", side_effect=RuntimeError("TTS runtime unavailable")),

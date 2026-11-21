@@ -45,6 +45,16 @@ class VideoPromptStudioAdapterTests(unittest.TestCase):
         self.assertEqual(result["commander_submission"], "not_submitted")
         self.assertFalse(result["checkpoint_persistence_available"])
         self.assertFalse(result["execution_eligible"])
+        handoff = result["worker_handoff"]
+        self.assertEqual(handoff["status"], "ready_for_review")
+        self.assertEqual(handoff["contract"], "creator_brief.video")
+        self.assertEqual(handoff["creator_brief_video"]["aspect_ratio"], "9:16")
+        self.assertEqual(
+            [set(scene) for scene in handoff["creator_brief_video"]["scenes"]],
+            [{"prompt", "duration_seconds"}, {"prompt", "duration_seconds"}],
+        )
+        self.assertEqual(handoff["execution"], "not_started")
+        self.assertEqual(handoff["commander_submission"], "not_submitted")
 
     def test_story_bible_continuity_and_audio_sidecar_are_preserved(self):
         bible = {
@@ -84,6 +94,61 @@ class VideoPromptStudioAdapterTests(unittest.TestCase):
         self.assertEqual(result["composition"]["audio_plan"]["cues"][0]["narration"], "雨还未停，归途仍远。")
         self.assertIn("角色锁定 traveler", result["composition"]["master_prompt"])
         self.assertEqual(result["video_studio"]["pipeline"]["pipeline_id"], "documentary_montage")
+        self.assertEqual(result["worker_handoff"]["status"], "blocked")
+        self.assertIn("audio_plan_requires_audio_pipeline_mapping", result["worker_handoff"]["blockers"])
+
+    def test_single_scene_handoff_uses_worker_prompt_mode_and_preserves_negative_prompt(self):
+        spec = sample_spec()
+        spec["scenes"] = spec["scenes"][:1]
+        spec["scenes"][0]["negative_prompt"] = "避免额外人物"
+        spec["negative_prompt"] = "不要画面文字"
+        result = compose_video_studio_package(spec, "animated_explainer")
+        handoff = result["worker_handoff"]
+
+        self.assertEqual(handoff["status"], "ready_for_review")
+        self.assertEqual(handoff["worker_mode"], "single_prompt")
+        candidate = handoff["creator_brief_video"]
+        self.assertNotIn("scenes", candidate)
+        self.assertEqual(candidate["duration_seconds"], 3.0)
+        self.assertEqual(candidate["negative_prompt"], "不要画面文字\n避免额外人物")
+
+    def test_worker_handoff_blocks_tempo_grid_until_audio_pipeline_is_mapped(self):
+        spec = sample_spec()
+        spec["tempo_bpm"] = 120
+        spec["align_scene_cuts_to_beats"] = True
+        # The composer validates the beat grid, but the current Worker contract
+        # has no soundtrack/beat-sidecar input and must not imply audio sync.
+        result = compose_video_studio_package(spec, "animated_explainer")
+
+        self.assertEqual(result["worker_handoff"]["status"], "blocked")
+        self.assertIn("audio_plan_requires_audio_pipeline_mapping", result["worker_handoff"]["blockers"])
+
+    def test_worker_handoff_blocks_forward_dependencies(self):
+        spec = sample_spec()
+        spec["scenes"][0]["depends_on"] = ["ending"]
+        spec["scenes"][1].pop("depends_on", None)
+        result = compose_video_studio_package(spec, "animated_explainer")
+
+        self.assertEqual(result["worker_handoff"]["status"], "blocked")
+        self.assertIn("scene_dependency_order_not_worker_safe:opening", result["worker_handoff"]["blockers"])
+
+    def test_worker_handoff_blocks_per_scene_negative_prompt_instead_of_dropping_it(self):
+        spec = sample_spec()
+        spec["scenes"][0]["negative_prompt"] = "避免额外人物"
+        result = compose_video_studio_package(spec, "animated_explainer")
+        handoff = result["worker_handoff"]
+
+        self.assertEqual(handoff["status"], "blocked")
+        self.assertIsNone(handoff["creator_brief_video"])
+        self.assertIn("per_scene_negative_prompt_not_supported:opening", handoff["blockers"])
+
+    def test_worker_handoff_blocks_wan_scene_duration_outside_one_to_five_seconds(self):
+        spec = sample_spec()
+        spec["scenes"][0]["duration_seconds"] = 6
+        result = compose_video_studio_package(spec, "animated_explainer")
+
+        self.assertEqual(result["worker_handoff"]["status"], "blocked")
+        self.assertIn("scene_duration_out_of_worker_range:opening", result["worker_handoff"]["blockers"])
 
     def test_cli_compose_outputs_one_combined_plan_only_package(self):
         with tempfile.TemporaryDirectory() as directory:

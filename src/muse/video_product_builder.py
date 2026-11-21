@@ -42,6 +42,101 @@ def _hash_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _compile_cantonese_narration_payload(
+    narration_script: str, narration_prosody_plan: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    if not isinstance(narration_script, str) or not narration_script.strip():
+        raise ValueError("narration_script is required for a structured prosody plan")
+    if not isinstance(narration_prosody_plan, Mapping):
+        raise ValueError("narration_prosody_plan must be a mapping")
+    from muse.narration_prosody_bridge import build_cantonese_tts_segments
+    payload = build_cantonese_tts_segments(narration_prosody_plan)
+    expected_script = "\n".join(item["text"] for item in payload)
+    if expected_script != narration_script:
+        raise VideoProductError("structured narration segment text does not match narration_script")
+    return payload
+
+
+def _build_cantonese_narration_prosody_record(
+    narration_script: str, plan: Mapping[str, Any], synthesis: Mapping[str, Any],
+) -> dict[str, Any]:
+    payload = _compile_cantonese_narration_payload(narration_script, plan)
+    plan_segments = plan.get("segments")
+    runtime_segments = synthesis.get("segment_metadata")
+    audio_sha256 = synthesis.get("audio_sha256")
+    backend_capabilities = synthesis.get("backend_capabilities")
+    applied_controls = synthesis.get("applied_controls")
+    unsupported_controls = synthesis.get("unsupported_controls")
+    if (synthesis.get("status") != "completed"
+            or not isinstance(plan_segments, list) or len(plan_segments) != len(payload)
+            or not isinstance(runtime_segments, list) or len(runtime_segments) != len(payload)
+            or not isinstance(audio_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", audio_sha256)
+            or backend_capabilities != ["pause_after"]
+            or not isinstance(applied_controls, list) or set(applied_controls) - {"pause_after"}
+            or not isinstance(unsupported_controls, list)
+            or synthesis.get("segment_count") != len(payload)):
+        raise VideoProductError("structured narration runtime returned incomplete or inconsistent evidence")
+
+    segment_records: list[dict[str, Any]] = []
+    total_pause_frames = 0
+    for index, (planned, item, actual) in enumerate(zip(plan_segments, payload, runtime_segments)):
+        if not isinstance(planned, Mapping) or not isinstance(actual, Mapping):
+            raise VideoProductError("structured narration segment evidence must contain mappings")
+        text_sha256 = hashlib.sha256(item["text"].encode("utf-8")).hexdigest()
+        pause_after_ms = int(item.get("pause_after_ms", 0))
+        pause_frames = 48_000 * pause_after_ms // 1000
+        if (actual.get("index") != index or actual.get("text_sha256") != text_sha256
+                or actual.get("pause_after_ms") != pause_after_ms
+                or actual.get("inserted_pause_frames") != pause_frames):
+            raise VideoProductError(f"structured narration runtime evidence does not match segment {index}")
+        requested = planned.get("requested_controls")
+        unsupported = planned.get("unsupported_controls")
+        planned_supported = planned.get("applied_controls")
+        if (not isinstance(requested, list) or not isinstance(unsupported, list)
+                or not isinstance(planned_supported, Mapping)):
+            raise VideoProductError(f"structured narration plan controls are invalid for segment {index}")
+        segment_records.append({
+            "index": index,
+            "text_sha256": text_sha256,
+            "requested_controls": list(requested),
+            "planned_supported_controls": sorted(planned_supported),
+            "unsupported_controls": list(unsupported),
+            "pause_after_ms": pause_after_ms,
+            "inserted_pause_frames": pause_frames,
+        })
+        total_pause_frames += pause_frames
+
+    if synthesis.get("inserted_pause_frames") != total_pause_frames:
+        raise VideoProductError("structured narration total pause frames do not match per-segment evidence")
+    record = {
+        "schema": "muse.narration.prosody.runtime.v1",
+        "backend": "canto-tts-nano",
+        "backend_capabilities": list(backend_capabilities),
+        "audio_effects_verified": False,
+        "backend_runtime_validation": "passed",
+        "waveform_pause_accounting_verified": True,
+        "waveform_pause_verified": total_pause_frames > 0,
+        "human_listening_review_required": True,
+        "requires_acoustic_review": True,
+        "script_sha256": hashlib.sha256(narration_script.encode("utf-8")).hexdigest(),
+        "segments": segment_records,
+        "runtime": {
+            "audio_sha256": audio_sha256,
+            "sample_rate": synthesis.get("sample_rate"),
+            "channels": synthesis.get("channels"),
+            "frames": synthesis.get("frames"),
+            "duration_seconds": synthesis.get("duration_seconds"),
+            "segment_count": synthesis.get("segment_count"),
+            "inserted_pause_frames": total_pause_frames,
+            "inserted_pause_seconds": synthesis.get("inserted_pause_seconds"),
+            "backend_capabilities": list(backend_capabilities),
+            "applied_controls": list(applied_controls),
+            "unsupported_controls": list(unsupported_controls),
+        },
+    }
+    return record
+
+
 def _probe_media_duration_seconds(path: Path, ffprobe_path: str, *, stream_type: str) -> float:
     """Read one media stream's duration; fail closed when ffprobe cannot prove it."""
     if stream_type not in {"video", "audio"}:
@@ -796,6 +891,7 @@ class VideoProductBuilder:
         self, title: str, scenes: list[dict[str, Any]], *, negative_prompt: str = "",
         aspect_ratio: str = "16:9", steps: int = 8, timeout_seconds: int = 1800,
         motion_profile: str = "none", narration_script: str | None = None,
+        narration_prosody_plan: Mapping[str, Any] | None = None,
         narration_model_dir: str | Path | None = None,
         narration_asr_model_dir: str | Path | None = None,
         narration_evidence_contract: dict[str, Any] | None = None,
@@ -852,8 +948,13 @@ class VideoProductBuilder:
             preflight_cantonese_tts_runtime(self.workspace / ".muse-canto-tts-py314", narration_model_dir)
             if narration_asr_model_dir is not None and sys.version_info[:2] != (3, 14):
                 raise VideoProductError("Cantonese ASR currently requires the Python 3.14 main runtime")
+            if narration_prosody_plan is not None:
+                _compile_cantonese_narration_payload(narration_script, narration_prosody_plan)
         elif narration_model_dir is not None or narration_asr_model_dir is not None:
             raise ValueError("narration model paths require narration_script")
+        elif narration_prosody_plan is not None:
+            raise ValueError("narration_prosody_plan requires narration_script")
+
         if narration_evidence_contract is not None:
             if narration_script is None:
                 raise ValueError("narration_evidence_contract requires narration_script")
@@ -902,17 +1003,29 @@ class VideoProductBuilder:
         with staging_context as temporary_dir:
             staging = Path(temporary_dir)
             effective_scenes = normalized
-            narration_audio: Path | None = None
             narration_synthesis: dict[str, Any] | None = None
+            narration_prosody_record: dict[str, Any] | None = None
             narration_asr: dict[str, Any] | None = None
             subtitle_path: Path | None = None
+            narration_audio: Path | None = None
             if narration_script is not None:
-                from muse.cantonese_tts import synthesize_cantonese_segments_with_runtime
                 narration_audio = staging / "voiceover.wav"
-                narration_synthesis = synthesize_cantonese_segments_with_runtime(
-                    narration_script, narration_audio, model_dir=narration_model_dir,
-                    packages_dir=self.workspace / ".muse-canto-tts-py314", quality="duration_filter",
-                )
+                if narration_prosody_plan is not None:
+                    from muse.cantonese_tts import synthesize_cantonese_segment_payload_with_runtime
+                    payload = _compile_cantonese_narration_payload(narration_script, narration_prosody_plan)
+                    narration_synthesis = synthesize_cantonese_segment_payload_with_runtime(
+                        payload, narration_audio, model_dir=narration_model_dir,
+                        packages_dir=self.workspace / ".muse-canto-tts-py314", quality="duration_filter",
+                    )
+                    narration_prosody_record = _build_cantonese_narration_prosody_record(
+                        narration_script, narration_prosody_plan, narration_synthesis,
+                    )
+                else:
+                    from muse.cantonese_tts import synthesize_cantonese_segments_with_runtime
+                    narration_synthesis = synthesize_cantonese_segments_with_runtime(
+                        narration_script, narration_audio, model_dir=narration_model_dir,
+                        packages_dir=self.workspace / ".muse-canto-tts-py314", quality="duration_filter",
+                    )
                 if narration_synthesis.get("status") != "completed" or not narration_audio.is_file():
                     raise VideoProductError("Cantonese TTS did not produce a validated WAV; Wan generation was not started")
                 narration_duration = _probe_media_duration_seconds(narration_audio, ffprobe, stream_type="audio")
@@ -1072,6 +1185,7 @@ class VideoProductBuilder:
                 "scene_records": scene_records, "motion_profile": motion_profile,
                 "creator_initiative_id": creator_initiative_id, "evolution_cycle_id": evolution_cycle_id,
                 "narration_evidence_contract": narration_evidence_contract,
+                "narration_prosody": narration_prosody_record,
             }
             if narration_audio is not None:
                 packaged = self.package_generated_clip(
@@ -1083,8 +1197,12 @@ class VideoProductBuilder:
                     key: narration_synthesis[key] for key in (
                         "status", "engine", "model_repo", "model_revision", "license",
                         "language", "sample_rate", "channels", "frames", "duration_seconds", "bytes",
+                        "segment_count", "inserted_pause_frames", "inserted_pause_seconds",
+                        "audio_sha256", "applied_controls", "backend_capabilities", "unsupported_controls",
                     ) if key in narration_synthesis
                 }
+                if narration_prosody_record is not None:
+                    packaged["narration_prosody"] = narration_prosody_record
                 if narration_asr is not None:
                     packaged["narration_asr"] = narration_asr
             else:
@@ -1106,7 +1224,9 @@ class VideoProductBuilder:
         steps: int = 8, seed: int | None = None, timeout_seconds: int = 1800,
         motion_profile: str = "none",
         creator_initiative_id: str | None = None, evolution_cycle_id: str | None = None,
-        narration_script: str | None = None, narration_model_dir: str | Path | None = None,
+        narration_script: str | None = None,
+        narration_prosody_plan: Mapping[str, Any] | None = None,
+        narration_model_dir: str | Path | None = None,
         narration_asr_model_dir: str | Path | None = None,
         narration_evidence_contract: dict[str, Any] | None = None,
         recipe_sha256: str | None = None,
@@ -1137,6 +1257,11 @@ class VideoProductBuilder:
             raise ValueError("narration_script must contain 1-20000 characters")
         if narration_script is not None and narration_model_dir is None:
             raise ValueError("narration_model_dir is required when narration_script is provided")
+        if narration_prosody_plan is not None:
+            if narration_script is None:
+                raise ValueError("narration_prosody_plan requires narration_script")
+            _compile_cantonese_narration_payload(narration_script, narration_prosody_plan)
+
         if narration_script is None and (narration_model_dir is not None or narration_asr_model_dir is not None):
             raise ValueError("narration model paths require narration_script")
         if narration_evidence_contract is not None and narration_script is None:
@@ -1156,6 +1281,7 @@ class VideoProductBuilder:
             "builder_version": self.BUILDER_VERSION, "prompt": prompt.strip(),
             "settings": settings, "motion_profile": motion_profile,
             "narration_script": narration_script,
+            "narration_prosody_plan": narration_prosody_plan,
         }
         if narration_evidence_contract is not None:
             fingerprint_data["narration_evidence_contract"] = narration_evidence_contract
@@ -1199,6 +1325,7 @@ class VideoProductBuilder:
                 return self.package_generated_clip_with_cantonese_narration(
                     title.strip(), prompt.strip(), base_rendered,
                     narration_script=narration_script, model_dir=narration_model_dir,
+                    narration_prosody_plan=narration_prosody_plan,
                     asr_model_dir=narration_asr_model_dir,
                     negative_prompt=negative_prompt, generation_metadata=generated,
                     motion_profile=motion_profile, creator_initiative_id=creator_initiative_id,
@@ -1288,6 +1415,7 @@ class VideoProductBuilder:
         narration_path: str | Path | None = None, narration_script: str | None = None,
         subtitle_path: str | Path | None = None, narration_asr: dict[str, Any] | None = None,
         narration_evidence_contract: dict[str, Any] | None = None,
+        narration_prosody: dict[str, Any] | None = None,
         background_music_path: str | Path | None = None, motion_profile: str = "none",
         creator_initiative_id: str | None = None, evolution_cycle_id: str | None = None,
     ) -> dict[str, Any]:
@@ -1448,6 +1576,34 @@ class VideoProductBuilder:
             {"name": narration.name, "bytes": narration.stat().st_size, "sha256": _hash_file(narration)}
             if narration else None
         )
+        if narration_prosody is not None:
+            runtime_prosody = narration_prosody.get("runtime") if isinstance(narration_prosody, dict) else None
+            prosody_segments = narration_prosody.get("segments") if isinstance(narration_prosody, dict) else None
+            pause_frames = runtime_prosody.get("inserted_pause_frames") if isinstance(runtime_prosody, dict) else None
+            expected_applied = ["pause_after"] if isinstance(pause_frames, int) and not isinstance(pause_frames, bool) and pause_frames > 0 else []
+            if (narration is None or narration_script is None
+                    or narration_prosody.get("schema") != "muse.narration.prosody.runtime.v1"
+                    or not isinstance(runtime_prosody, dict)
+                    or runtime_prosody.get("audio_sha256") != narration_fact["sha256"]
+                    or not isinstance(prosody_segments, list) or not 1 <= len(prosody_segments) <= 16
+                    or runtime_prosody.get("segment_count") != len(prosody_segments)
+                    or narration_prosody.get("backend_capabilities") != ["pause_after"]
+                    or runtime_prosody.get("backend_capabilities") != ["pause_after"]
+                    or runtime_prosody.get("applied_controls") != expected_applied
+                    or not isinstance(pause_frames, int) or isinstance(pause_frames, bool) or pause_frames < 0
+                    or narration_prosody.get("audio_effects_verified") is not False
+                    or narration_prosody.get("waveform_pause_accounting_verified") is not True
+                    or narration_prosody.get("waveform_pause_verified") is not (pause_frames > 0)
+                    or narration_prosody.get("human_listening_review_required") is not True):
+                raise VideoProductError("narration prosody evidence must bind the actual narration WAV and preserve review status")
+
+            try:
+                prosody_bytes = _safe_json(narration_prosody)
+            except (TypeError, ValueError):
+                raise VideoProductError("narration prosody evidence is not bounded JSON") from None
+            if len(prosody_bytes) > 64 * 1024:
+                raise VideoProductError("narration prosody evidence exceeds 64 KiB")
+
         background_music = Path(background_music_path).expanduser() if background_music_path is not None else None
         if background_music is not None:
             if narration is None:
@@ -1533,6 +1689,8 @@ class VideoProductBuilder:
             "negative_prompt": negative_prompt, "generation_metadata": metadata,
             "scene_records": normalized_scenes, "generated_clip_sha256": source_sha256,
             "narration_asset": narration_fact, "narration_script": narration_script,
+            "narration_prosody": narration_prosody,
+
             "motion_profile": motion_profile, "subtitle_asset": subtitle_fact,
             "narration_asr": asr_fact, "background_music_asset": background_music_fact,
             "scene_assets": scene_asset_facts,
@@ -1688,6 +1846,7 @@ class VideoProductBuilder:
                 "settings": settings, "source_video_sha256": source_sha256, "motion": motion,
                 "narration": ({
                     "script": narration_script, "audio": narration_fact, "language": "zh-HK",
+                    **({"prosody": narration_prosody} if narration_prosody is not None else {}),
                     **({"timeline": narration_timeline} if narration_timeline is not None else {}),
                     "loudness_normalization": {"method": "ffmpeg_loudnorm", "target_lufs": -16, "true_peak_db": -1.5, "lra": 11},
                     **({"subtitles": subtitle_fact, "asr": asr_fact} if subtitles else {}),
@@ -1771,6 +1930,7 @@ class VideoProductBuilder:
                     "script": narration_script, "language": "zh-HK",
                     "loudness_normalization": {"method": "ffmpeg_loudnorm", "target_lufs": -16, "true_peak_db": -1.5, "lra": 11},
                     "audio_file": "narration/voiceover" + narration.suffix.casefold(),
+                    **({"prosody": narration_prosody} if narration_prosody is not None else {}),
                     **({"subtitles_file": "subtitles.srt"} if subtitles else {}),
                     **({"asr_status": asr_fact["status"]} if asr_fact else {}),
                     **({"background_music_file": background_music_member} if background_music_member else {}),
@@ -1799,25 +1959,42 @@ class VideoProductBuilder:
     def package_generated_clip_with_cantonese_narration(
         self, title: str, prompt: str, source_path: str | Path, *,
         narration_script: str, model_dir: str | Path,
+        narration_prosody_plan: Mapping[str, Any] | None = None,
         asr_model_dir: str | Path | None = None, **package_options: Any,
     ) -> dict[str, Any]:
         """Synthesize Cantonese narration and optionally verify it with local ASR subtitles.
 
-        Both models must already be provisioned locally. ASR is opt-in until the
-        pinned model and voice have passed transcript and human listening review.
+        Structured plans preserve segment boundaries through the TTS runtime.
+        Legacy text-only callers remain supported, but do not claim prosody control.
         """
         if not isinstance(narration_script, str) or not narration_script.strip() or len(narration_script) > 20_000:
             raise ValueError("narration_script must contain 1-20000 characters")
-        if any(key in package_options for key in ("narration_path", "narration_script", "subtitle_path", "narration_asr")):
+        if any(key in package_options for key in (
+            "narration_path", "narration_script", "subtitle_path", "narration_asr", "narration_prosody",
+        )):
             raise ValueError("narration and ASR assets are managed by the Cantonese narration wrapper")
-        from muse.cantonese_tts import synthesize_cantonese_segments_with_runtime
-
+        payload = (
+            _compile_cantonese_narration_payload(narration_script, narration_prosody_plan)
+            if narration_prosody_plan is not None else None
+        )
         with tempfile.TemporaryDirectory(prefix=".muse-cantonese-", dir=self.workspace) as temporary_dir:
             audio_path = Path(temporary_dir) / "voiceover.wav"
-            synthesis = synthesize_cantonese_segments_with_runtime(
-                narration_script, audio_path, model_dir=model_dir,
-                packages_dir=self.workspace / ".muse-canto-tts-py314", quality="duration_filter",
-            )
+            if payload is not None:
+                from muse.cantonese_tts import synthesize_cantonese_segment_payload_with_runtime
+                synthesis = synthesize_cantonese_segment_payload_with_runtime(
+                    payload, audio_path, model_dir=model_dir,
+                    packages_dir=self.workspace / ".muse-canto-tts-py314", quality="duration_filter",
+                )
+                narration_prosody = _build_cantonese_narration_prosody_record(
+                    narration_script, narration_prosody_plan, synthesis,
+                )
+            else:
+                from muse.cantonese_tts import synthesize_cantonese_segments_with_runtime
+                synthesis = synthesize_cantonese_segments_with_runtime(
+                    narration_script, audio_path, model_dir=model_dir,
+                    packages_dir=self.workspace / ".muse-canto-tts-py314", quality="duration_filter",
+                )
+                narration_prosody = None
             asr_result = None
             subtitle_path = None
             if asr_model_dir is not None:
@@ -1835,18 +2012,24 @@ class VideoProductBuilder:
                     )
             packaged = self.package_generated_clip(
                 title, prompt, source_path, narration_path=audio_path,
-                narration_script=narration_script, subtitle_path=subtitle_path,
-                narration_asr=asr_result, **package_options,
+                narration_script=narration_script, narration_prosody=narration_prosody,
+                subtitle_path=subtitle_path, narration_asr=asr_result, **package_options,
             )
         packaged["narration_synthesis"] = {
             key: synthesis[key] for key in (
                 "status", "engine", "model_repo", "model_revision", "license",
                 "language", "sample_rate", "channels", "frames", "duration_seconds", "bytes",
+                "segment_count", "inserted_pause_frames", "inserted_pause_seconds",
+                "audio_sha256", "applied_controls", "backend_capabilities", "unsupported_controls",
             ) if key in synthesis
         }
+        if narration_prosody is not None:
+            packaged["narration_prosody"] = narration_prosody
         if asr_result is not None:
             packaged["narration_asr"] = asr_result
         return packaged
+
+
 
     def package_approved_subtitle_revision(
         self, initiative_id: str, version: str, review_document: dict[str, Any],

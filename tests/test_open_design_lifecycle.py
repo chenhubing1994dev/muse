@@ -42,6 +42,7 @@ class OpenDesignLifecycleTests(unittest.TestCase):
         adapter.close()
         self.assertEqual(client.close_calls, 1)
         self.assertIsNone(adapter._write_client)
+        self.assertIsNone(adapter._read_client)
 
     def test_close_attempts_both_clients_even_when_first_close_fails(self) -> None:
         first = CloseableClient(RuntimeError("first close failed"))

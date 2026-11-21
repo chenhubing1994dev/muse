@@ -190,6 +190,7 @@ class OpenDesignAdapter:
                 if first_error is None:
                     first_error = exc
         self._write_client = None
+        self._read_client = None
         if first_error is not None:
             raise first_error
 

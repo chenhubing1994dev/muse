@@ -281,6 +281,8 @@ class VideoTaskWorker:
                 narration_model_dir = None
                 narration_asr_model_dir = None
                 pending_evidence_contract = None
+                narration_prosody_plan = None
+
                 narration = video.get("narration")
                 if isinstance(narration, dict) and narration.get("enabled") is True:
                     if narration.get("language", "zh-HK") != "zh-HK":
@@ -315,7 +317,9 @@ class VideoTaskWorker:
                         title.strip(), research_text, inspiration, style, segments=segments,
                         **generator_options,
                     )
-                    narration_script = "\n".join(segment["text"] for segment in generated_script["segments"])
+                    from muse.narration_prosody_bridge import build_cantonese_narration_prosody_plan
+                    narration_prosody_plan = build_cantonese_narration_prosody_plan(generated_script)
+                    narration_script = "\n".join(segment["text"].strip() for segment in generated_script["segments"])
                     if claim_grounded:
                         knowledge_db = self.workspace / "data" / "research" / "knowledge.sqlite3"
                         if not knowledge_db.is_file():
@@ -364,6 +368,7 @@ class VideoTaskWorker:
                 if narration_script is not None:
                     build_options.update({
                         "narration_script": narration_script,
+                        "narration_prosody_plan": narration_prosody_plan,
                         "narration_model_dir": narration_model_dir,
                         "narration_asr_model_dir": narration_asr_model_dir,
                     })

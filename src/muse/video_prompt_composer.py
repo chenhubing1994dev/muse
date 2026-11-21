@@ -120,6 +120,11 @@ class VideoPromptSpec:
     master_constraints: tuple[str, ...] = ()
     source_refs: tuple[PromptSourceRef, ...] = ()
     model_family: str = "generic"
+    capture_profile: str = "cinematic"
+    tempo_bpm: int | None = None
+    beat_offset_seconds: float = 0.0
+    beat_alignment_tolerance_ms: int = 80
+    align_scene_cuts_to_beats: bool = False
 
     def __post_init__(self) -> None:
         _required_text(self.title, "title", 160)
@@ -137,13 +142,36 @@ class VideoPromptSpec:
             ("platform", 80), ("target_audience", 160), ("visual_style", 400),
             ("camera_language", 160), ("lighting", 160), ("audio_mood", 160),
             ("dialogue_language", 32), ("narration_language", 32),
-            ("negative_prompt", 1000), ("model_family", 80),
+            ("negative_prompt", 1000), ("model_family", 80), ("capture_profile", 32),
         ):
             _optional_text(getattr(self, name), name, maximum)
         if (not isinstance(self.master_constraints, (tuple, list)) or len(self.master_constraints) > 24
                 or any(not isinstance(item, str) or not item.strip() or len(item) > 240
                        for item in self.master_constraints)):
             raise ValueError("master_constraints must contain at most 24 short non-empty string rules")
+        if self.capture_profile not in {"cinematic", "phone_realism", "documentary"}:
+            raise ValueError("capture_profile must be cinematic, phone_realism or documentary")
+        if (self.tempo_bpm is not None
+                and (isinstance(self.tempo_bpm, bool) or not isinstance(self.tempo_bpm, int)
+                     or not 30 <= self.tempo_bpm <= 240)):
+            raise ValueError("tempo_bpm must be an integer from 30 to 240 or None")
+        if (isinstance(self.beat_offset_seconds, bool)
+                or not isinstance(self.beat_offset_seconds, (int, float))
+                or not isfinite(self.beat_offset_seconds) or self.beat_offset_seconds < 0):
+            raise ValueError("beat_offset_seconds must be a finite non-negative number")
+        if self.tempo_bpm is None:
+            if self.beat_offset_seconds != 0:
+                raise ValueError("beat_offset_seconds requires tempo_bpm")
+        elif self.beat_offset_seconds >= 60.0 / self.tempo_bpm:
+            raise ValueError("beat_offset_seconds must be smaller than one beat interval")
+        if (isinstance(self.beat_alignment_tolerance_ms, bool)
+                or not isinstance(self.beat_alignment_tolerance_ms, int)
+                or not 0 <= self.beat_alignment_tolerance_ms <= 250):
+            raise ValueError("beat_alignment_tolerance_ms must be an integer from 0 to 250")
+        if not isinstance(self.align_scene_cuts_to_beats, bool):
+            raise ValueError("align_scene_cuts_to_beats must be a boolean")
+        if self.align_scene_cuts_to_beats and self.tempo_bpm is None:
+            raise ValueError("align_scene_cuts_to_beats requires tempo_bpm")
         if (not isinstance(self.source_refs, (tuple, list)) or len(self.source_refs) > 40
                 or any(not isinstance(ref, PromptSourceRef) for ref in self.source_refs)):
             raise ValueError("source_refs must contain at most 40 PromptSourceRef records")
@@ -297,6 +325,21 @@ def _scene_continuity_lines(bible: Mapping[str, Any] | None, scene_id: str) -> l
     return lines
 
 
+def _capture_profile_guidance(profile: str) -> list[str]:
+    if profile == "phone_realism":
+        return [
+            "手机纪实质感锁定：保留克制、可信的手持微抖与自然对焦呼吸。",
+            "保留适度传感器噪点、曝光/白平衡轻微波动和平台压缩质感，不把瑕疵夸张化。",
+            "避免过度锐化、HDR 塑料感、影棚级磨皮和不真实的完美稳定镜头。",
+        ]
+    if profile == "documentary":
+        return [
+            "纪实拍摄锁定：优先自然光、可信的环境细节和克制运镜。",
+            "保留合理的现场感，不添加没有来源的戏剧化细节或虚构字幕。",
+        ]
+    return []
+
+
 def compile_video_prompt(
     spec: VideoPromptSpec,
     story_bible: Mapping[str, Any] | None = None,
@@ -314,8 +357,15 @@ def compile_video_prompt(
         f"整体摄影语言：{spec.camera_language or '服务于叙事，不做无意义运镜'}",
         f"整体光线：{spec.lighting or '保持镜头间光线方向与色温连续'}",
     ]
+    beat_interval = 60.0 / spec.tempo_bpm if spec.tempo_bpm is not None else None
+    if beat_interval is not None:
+        master_lines.append(
+            f"节奏锁定：{spec.tempo_bpm} BPM；节拍间隔 {beat_interval:.6f}s；"
+            f"首拍偏移 {spec.beat_offset_seconds:.3f}s；切点容差 ±{spec.beat_alignment_tolerance_ms}ms。"
+        )
     if bible is not None:
         master_lines.extend(_story_bible_master_lines(bible))
+    master_lines.extend(_capture_profile_guidance(spec.capture_profile))
     master_lines.extend(f"全片约束：{rule}" for rule in spec.master_constraints)
     master_prompt = "\n".join(master_lines)
 
@@ -323,20 +373,51 @@ def compile_video_prompt(
     clip_manifest: list[dict[str, Any]] = []
     audio_cues: list[dict[str, str]] = []
     cursor = 0.0
-    for scene in spec.scenes:
+    for scene_index, scene in enumerate(spec.scenes):
         bible_style = bible["style_guide"] if bible is not None else {}
         camera = scene.camera or spec.camera_language or bible_style.get("camera_language", "")
         lighting = scene.lighting or spec.lighting or bible_style.get("lighting", "")
         if len(camera) > 160:
             raise ValueError(f"scene {scene.scene_id} camera exceeds storyboard limit")
+        end = cursor + float(scene.duration_seconds)
+        beat_alignment = None
+        beat_prompt = ""
+        if beat_interval is not None:
+            start_beat_index = int(round((cursor - spec.beat_offset_seconds) / beat_interval))
+            end_beat_index = int(round((end - spec.beat_offset_seconds) / beat_interval))
+            start_error_ms = abs(cursor - (spec.beat_offset_seconds + start_beat_index * beat_interval)) * 1000
+            end_error_ms = abs(end - (spec.beat_offset_seconds + end_beat_index * beat_interval)) * 1000
+            end_on_beat = end_error_ms <= spec.beat_alignment_tolerance_ms
+            beat_alignment = {
+                "bpm": spec.tempo_bpm,
+                "beat_interval_seconds": round(beat_interval, 6),
+                "beat_offset_seconds": float(spec.beat_offset_seconds),
+                "start_beat_index": start_beat_index,
+                "start_error_ms": round(start_error_ms, 3),
+                "end_beat_index": end_beat_index,
+                "end_error_ms": round(end_error_ms, 3),
+                "end_on_beat": end_on_beat,
+            }
+            if (spec.align_scene_cuts_to_beats and scene_index < len(spec.scenes) - 1
+                    and not end_on_beat):
+                raise ValueError(
+                    f"scene {scene.scene_id} cut at {end:.3f}s is not aligned to the beat grid "
+                    f"within {spec.beat_alignment_tolerance_ms}ms"
+                )
+            beat_prompt = (
+                f"节拍网格锁定：{spec.tempo_bpm} BPM；本镜头从 beat {start_beat_index} "
+                f"到 beat {end_beat_index}；切点误差 {end_error_ms:.1f}ms。"
+            )
         prompt_parts = [
             f"全片统一意图：{spec.creative_intent}",
             f"视觉风格：{spec.visual_style or bible_style.get('visual_style', '遵循全片 Master Prompt')}",
             f"全局连续性约束：{'；'.join(spec.master_constraints)}" if spec.master_constraints else "",
+            *_capture_profile_guidance(spec.capture_profile),
             *_story_bible_clip_lock_lines(bible),
             *_scene_continuity_lines(bible, scene.scene_id),
             f"动作与叙事：{scene.action}",
             f"节拍：{scene.beat}" if scene.beat else "",
+            beat_prompt,
             f"摄影机：{camera}" if camera else "",
             f"光线：{lighting}" if lighting else "",
         ]
@@ -352,13 +433,13 @@ def compile_video_prompt(
             "negative_prompt": scene_negative,
             "depends_on": list(scene.depends_on),
         })
-        end = cursor + float(scene.duration_seconds)
         clip_manifest.append({
             "scene_id": scene.scene_id,
             "start_seconds": round(cursor, 3),
             "end_seconds": round(end, 3),
             "duration_seconds": float(scene.duration_seconds),
             "beat": scene.beat,
+            "beat_alignment": beat_alignment,
             "action": scene.action,
             "camera": camera,
             "depends_on": list(scene.depends_on),
@@ -395,6 +476,10 @@ def compile_video_prompt(
         "clip_manifest": clip_manifest,
         "audio_plan": {
             "audio_mood": spec.audio_mood or (bible["style_guide"]["audio_mood"] if bible else ""),
+            "tempo_bpm": spec.tempo_bpm,
+            "beat_offset_seconds": float(spec.beat_offset_seconds),
+            "beat_alignment_tolerance_ms": spec.beat_alignment_tolerance_ms,
+            "align_scene_cuts_to_beats": spec.align_scene_cuts_to_beats,
             "dialogue_language": spec.dialogue_language,
             "narration_language": spec.narration_language,
             "cues": audio_cues,
@@ -402,6 +487,7 @@ def compile_video_prompt(
         },
         "model_guidance": {
             "family": model_profile.family,
+            "capture_profile": spec.capture_profile,
             "style": model_profile.style,
             "notes": list(model_profile.notes),
             "provider_parameters_applied": [],

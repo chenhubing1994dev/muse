@@ -160,17 +160,48 @@ def split_cantonese_narration(
     return segments
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _normalize_cantonese_segment_payload(
+    segments: Any, *, max_segments: int = 64,
+) -> list[dict[str, object]]:
+    if not isinstance(segments, list) or not 1 <= len(segments) <= max_segments:
+        raise ValueError(f"segments must contain 1-{max_segments} items")
+    normalized: list[dict[str, object]] = []
+    for index, segment in enumerate(segments):
+        if not isinstance(segment, dict) or set(segment) - {"text", "pause_after_ms"}:
+            raise ValueError(f"segments[{index}] may contain only text and pause_after_ms")
+        text = segment.get("text")
+        if not isinstance(text, str) or not text.strip() or len(text.strip()) > 280:
+            raise ValueError(f"segments[{index}].text must contain 1-280 characters")
+        pause_ms = segment.get("pause_after_ms", 0)
+        if isinstance(pause_ms, bool) or not isinstance(pause_ms, int) or not 0 <= pause_ms <= 3000:
+            raise ValueError(f"segments[{index}].pause_after_ms must be an integer from 0 to 3000")
+        item: dict[str, object] = {"text": text.strip()}
+        if "pause_after_ms" in segment:
+            item["pause_after_ms"] = pause_ms
+        normalized.append(item)
+    return normalized
+
+
 def _synthesize_segments_with_engine(
     segments: list[dict[str, object]], output_path: str | Path, *,
     engine: Any, quality: str = "duration_filter",
 ) -> dict[str, object]:
-    """Synthesize all segments with one loaded engine and insert verified PCM silence."""
-    if not 1 <= len(segments) <= 64:
-        raise ValueError("segments must contain 1-64 items")
+    """Synthesize ordered text segments and insert verified trailing PCM silence."""
+    normalized = _normalize_cantonese_segment_payload(segments, max_segments=64)
     if quality not in {"single", "duration_filter"}:
         raise ValueError("quality must be single or duration_filter")
     output = Path(output_path).expanduser()
-    if output.suffix.casefold() != ".wav" or output.parent.is_symlink() or not output.parent.is_dir():
+    if (output.suffix.casefold() != ".wav"
+            or any(parent.is_symlink() for parent in (output.parent, *output.parent.parents))
+            or not output.parent.is_dir()):
         raise CantoneseTTSError("segmented TTS output must be a WAV in an existing regular directory")
     if output.is_symlink():
         raise CantoneseTTSError("refusing to overwrite a symlink output")
@@ -179,13 +210,10 @@ def _synthesize_segments_with_engine(
         combined_frames: list[bytes] = []
         reference: tuple[int, int, int] | None = None
         total_pause_frames = 0
-        for index, segment in enumerate(segments):
-            if (not isinstance(segment, dict) or not isinstance(segment.get("text"), str)
-                    or not segment["text"].strip() or len(segment["text"].strip()) > 280):
-                raise ValueError(f"segments[{index}].text must contain 1-280 characters")
-            pause_ms = segment.get("pause_after_ms", 0)
-            if isinstance(pause_ms, bool) or not isinstance(pause_ms, int) or not 0 <= pause_ms <= 3000:
-                raise ValueError(f"segments[{index}].pause_after_ms must be an integer from 0 to 3000")
+        segment_metadata: list[dict[str, object]] = []
+        for index, segment in enumerate(normalized):
+            text = str(segment["text"])
+            pause_ms = int(segment.get("pause_after_ms", 0))
             clip = staging / f"segment-{index:03d}.wav"
             try:
                 if quality == "duration_filter":
@@ -193,13 +221,15 @@ def _synthesize_segments_with_engine(
                         previous_tempdir = tempfile.tempdir
                         tempfile.tempdir = str(staging.resolve())
                         try:
-                            engine.synthesize(segment["text"].strip(), str(clip), quality="duration_filter", max_attempts=2)
+                            engine.synthesize(text, str(clip), quality="duration_filter", max_attempts=2)
                         finally:
                             tempfile.tempdir = previous_tempdir
                 else:
-                    engine.synthesize(segment["text"].strip(), str(clip))
+                    engine.synthesize(text, str(clip))
             except Exception as exc:
-                raise CantoneseTTSError(f"segmented Cantonese synthesis failed at segment {index}: {type(exc).__name__}") from exc
+                raise CantoneseTTSError(
+                    f"segmented Cantonese synthesis failed at segment {index}: {type(exc).__name__}"
+                ) from exc
             try:
                 with wave.open(str(clip), "rb") as audio:
                     params = audio.getparams()
@@ -219,6 +249,12 @@ def _synthesize_segments_with_engine(
             if silence_frames:
                 combined_frames.append(b"\x00" * silence_frames * params.nchannels * params.sampwidth)
                 total_pause_frames += silence_frames
+            segment_metadata.append({
+                "index": index,
+                "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                "pause_after_ms": pause_ms,
+                "inserted_pause_frames": silence_frames,
+            })
         temporary = staging / "combined.wav"
         channels, sample_width, sample_rate = reference
         try:
@@ -238,13 +274,15 @@ def _synthesize_segments_with_engine(
         "model_repo": MODEL_REPO, "model_revision": MODEL_REVISION,
         "license": MODEL_LICENSE, "language": "zh-HK",
         "sample_rate": SAMPLE_RATE, "channels": channels,
-        "segment_count": len(segments), "inserted_pause_frames": total_pause_frames,
+        "segment_count": len(normalized), "segment_metadata": segment_metadata,
+        "inserted_pause_frames": total_pause_frames,
         "inserted_pause_seconds": total_pause_frames / SAMPLE_RATE,
         "frames": frame_count, "duration_seconds": frame_count / SAMPLE_RATE,
         "bytes": output.stat().st_size, "output": str(output),
-        "applied_controls": ["segment_pause"] if total_pause_frames else [],
-        "backend_capabilities": ["segment_pause"],
-        "unsupported_controls": ["emotion", "rate_scale", "pitch_semitones", "breath_hint"],
+        "audio_sha256": _sha256_file(output),
+        "applied_controls": ["pause_after"] if total_pause_frames else [],
+        "backend_capabilities": ["pause_after"],
+        "unsupported_controls": ["emotion", "rate_scale", "pitch_semitones", "breath_hint", "pause_before_ms"],
     }
 
 
@@ -258,6 +296,96 @@ def _synthesize_cantonese_segments_local(
     return _synthesize_segments_with_engine(segments, output_path, engine=engine, quality=quality)
 
 
+def _synthesize_cantonese_segments_payload_with_runtime(
+    segments: list[dict[str, object]], output_path: str | Path, *,
+    model_dir: str | Path, packages_dir: str | Path, quality: str,
+) -> dict[str, object]:
+    normalized = _normalize_cantonese_segment_payload(segments, max_segments=64)
+    if quality not in {"single", "duration_filter"}:
+        raise ValueError("quality must be single or duration_filter")
+    packages, model = _validate_runtime_paths(packages_dir, model_dir)
+    preflight_cantonese_tts_runtime(packages, model)
+    output = Path(output_path).expanduser()
+    if (output.suffix.casefold() != ".wav"
+            or any(parent.is_symlink() for parent in (output.parent, *output.parent.parents))
+            or not output.parent.is_dir() or output.is_symlink()):
+        raise CantoneseTTSError("segmented TTS output must be a WAV in an existing regular directory")
+
+    with tempfile.TemporaryDirectory(prefix=".muse-canto-structured-", dir=output.parent) as temp_name:
+        staging = Path(temp_name)
+        temporary_output = staging / "voiceover.wav"
+        if sys.version_info[:2] == (3, 14):
+            result = _synthesize_cantonese_segments_local(
+                normalized, temporary_output, packages_dir=packages, model_dir=model, quality=quality,
+            )
+        else:
+            segments_path = staging / "segments.json"
+            segments_path.write_text(json.dumps(normalized, ensure_ascii=False), encoding="utf-8")
+            result = _run_python314_cli([
+                "--synthesize-segments", "--packages-dir", str(packages), "--model-dir", str(model),
+                "--segments-file", str(segments_path), "--output", str(temporary_output), "--quality", quality,
+            ], timeout=1800)
+
+        if (not isinstance(result, dict) or result.get("status") != "completed"
+                or not temporary_output.is_file() or temporary_output.is_symlink()):
+            raise CantoneseTTSError("isolated segmented Cantonese TTS did not produce a validated WAV")
+        try:
+            with wave.open(str(temporary_output), "rb") as audio:
+                channels = audio.getnchannels()
+                sample_rate = audio.getframerate()
+                frames = audio.getnframes()
+                sample_width = audio.getsampwidth()
+        except (wave.Error, OSError) as exc:
+            raise CantoneseTTSError("segmented TTS output is not a readable PCM WAV") from exc
+        if (sample_rate != SAMPLE_RATE or channels not in {1, 2}
+                or sample_width not in {2, 3, 4} or frames <= 0):
+            raise CantoneseTTSError("segmented TTS output has an unsupported WAV format")
+
+        expected_segments = [
+            {
+                "index": index,
+                "text_sha256": hashlib.sha256(str(segment["text"]).encode("utf-8")).hexdigest(),
+                "pause_after_ms": int(segment.get("pause_after_ms", 0)),
+                "inserted_pause_frames": SAMPLE_RATE * int(segment.get("pause_after_ms", 0)) // 1000,
+            }
+            for index, segment in enumerate(normalized)
+        ]
+        expected_pause_frames = sum(int(item["inserted_pause_frames"]) for item in expected_segments)
+        audio_sha256 = _sha256_file(temporary_output)
+        expected_applied = ["pause_after"] if expected_pause_frames else []
+        if (result.get("segment_count") != len(normalized)
+                or result.get("segment_metadata") != expected_segments
+                or result.get("inserted_pause_frames") != expected_pause_frames
+                or result.get("applied_controls") != expected_applied
+                or result.get("backend_capabilities") != ["pause_after"]
+                or result.get("audio_sha256") != audio_sha256
+                or result.get("sample_rate") != sample_rate
+                or result.get("channels") != channels
+                or result.get("frames") != frames):
+            raise CantoneseTTSError("segmented TTS runtime metadata does not match the produced WAV and requested segments")
+
+        os.replace(temporary_output, output)
+        verified = dict(result)
+        verified["output"] = str(output)
+        verified["audio_sha256"] = audio_sha256
+        return verified
+
+
+def synthesize_cantonese_segment_payload_with_runtime(
+    segments: list[dict[str, object]], output_path: str | Path, *,
+    model_dir: str | Path, packages_dir: str | Path, quality: str = "duration_filter",
+) -> dict[str, object]:
+    """Synthesize explicit ordered Cantonese segments without re-splitting their text.
+
+    Only text and pause_after_ms are accepted. Emotion, rate, pitch, breath and
+    leading-pause requests remain unsupported and must stay visible in the
+    caller's prosody plan rather than being silently treated as applied.
+    """
+    normalized = _normalize_cantonese_segment_payload(segments, max_segments=16)
+    return _synthesize_cantonese_segments_payload_with_runtime(
+        normalized, output_path, model_dir=model_dir, packages_dir=packages_dir, quality=quality,
+    )
+
 
 def synthesize_cantonese_segments_with_runtime(
     text: str, output_path: str | Path, *, model_dir: str | Path,
@@ -265,35 +393,15 @@ def synthesize_cantonese_segments_with_runtime(
     max_segment_chars: int = 180, sentence_pause_ms: int = 320,
     clause_pause_ms: int = 160,
 ) -> dict[str, object]:
-    """Synthesize punctuation-aware Cantonese segments and insert real PCM pauses."""
+    """Synthesize punctuation-aware Cantonese text and insert real PCM pauses."""
     segments = split_cantonese_narration(
         text, max_segment_chars=max_segment_chars,
         sentence_pause_ms=sentence_pause_ms, clause_pause_ms=clause_pause_ms,
     )
-    packages, model = _validate_runtime_paths(packages_dir, model_dir)
-    preflight_cantonese_tts_runtime(packages, model)
-    if sys.version_info[:2] == (3, 14):
-        return _synthesize_cantonese_segments_local(
-            segments, output_path, packages_dir=packages, model_dir=model, quality=quality,
-        )
-    output = Path(output_path).expanduser()
-    if output.parent.is_symlink() or not output.parent.is_dir() or output.suffix.casefold() != ".wav":
-        raise CantoneseTTSError("segmented TTS output must be a WAV in an existing regular directory")
-    descriptor, segments_name = tempfile.mkstemp(prefix=".muse-canto-segments-", suffix=".json", dir=output.parent)
-    segments_path = Path(segments_name)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
-            json.dump(segments, stream, ensure_ascii=False)
-        result = _run_python314_cli([
-            "--synthesize-segments", "--packages-dir", str(packages), "--model-dir", str(model),
-            "--segments-file", str(segments_path), "--output", str(output), "--quality", quality,
-        ], timeout=1800)
-    finally:
-        if segments_path.exists() and not segments_path.is_symlink():
-            segments_path.unlink()
-    if result.get("status") != "completed" or not output.is_file() or output.is_symlink():
-        raise CantoneseTTSError("isolated Python 3.14 segmented TTS did not produce a validated WAV")
-    return result
+    return _synthesize_cantonese_segments_payload_with_runtime(
+        segments, output_path, model_dir=model_dir, packages_dir=packages_dir, quality=quality,
+    )
+
 
 
 _RESULT_MARKER = "MUSE_CANTO_TTS_RESULT="

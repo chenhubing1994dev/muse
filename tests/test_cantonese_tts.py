@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sys
+import json
+
 import tempfile
 import types
 import unittest
@@ -11,6 +13,8 @@ from unittest.mock import patch
 from muse.cantonese_tts import MODEL_REVISION, CantoneseTTSError, synthesize_cantonese
 from muse import cantonese_tts
 from muse.cantonese_tts import _synthesize_segments_with_engine, split_cantonese_narration
+from muse.cantonese_tts import synthesize_cantonese_segment_payload_with_runtime
+
 
 class CantoneseTTSTests(unittest.TestCase):
     def setUp(self):
@@ -92,10 +96,105 @@ class CantoneseTTSTests(unittest.TestCase):
         with wave.open(str(self.output), "rb") as audio:
             frames = audio.readframes(audio.getnframes())
         self.assertEqual(result["inserted_pause_frames"], 12_000)
-        self.assertEqual(result["applied_controls"], ["segment_pause"])
+        self.assertEqual(result["applied_controls"], ["pause_after"])
+        self.assertEqual(result["backend_capabilities"], ["pause_after"])
+        self.assertEqual(result["segment_metadata"][0]["inserted_pause_frames"], 12_000)
         self.assertEqual(len(frames), (480 + 12_000 + 480) * 2)
         self.assertEqual(frames[960:960 + 24], b"\x00" * 24)
         self.assertEqual(frames[-960:], b"\x01\x00" * 480)
+
+    def test_structured_segment_runtime_preserves_boundaries_and_reports_actual_pause(self):
+        self_outer = self
+
+        class FakeTTS:
+            def __init__(self, *, checkpoint, backend):
+                self.checkpoint = checkpoint
+                self.backend = backend
+
+            def synthesize(self, text, path, **kwargs):
+                self_outer._wav(Path(path))
+
+        segments = [
+            {"text": "第一句。", "pause_after_ms": 250},
+            {"text": "第二句。"},
+        ]
+        with (
+            patch("muse.cantonese_tts.sys.version_info", (3, 14)),
+            patch("muse.cantonese_tts._validate_runtime_paths", return_value=(self.root, self.model)),
+            patch("muse.cantonese_tts.preflight_cantonese_tts_runtime", return_value={"status": "ready"}),
+            patch("muse.cantonese_tts._load_canto_engine", return_value=FakeTTS),
+        ):
+            result = synthesize_cantonese_segment_payload_with_runtime(
+                segments, self.output, model_dir=self.model, packages_dir=self.root, quality="single",
+            )
+
+        self.assertEqual(result["segment_count"], 2)
+        self.assertEqual([item["pause_after_ms"] for item in result["segment_metadata"]], [250, 0])
+        self.assertEqual(result["inserted_pause_frames"], 12_000)
+        self.assertEqual(result["applied_controls"], ["pause_after"])
+        self.assertEqual(result["backend_capabilities"], ["pause_after"])
+        self.assertIn("emotion", result["unsupported_controls"])
+        self.assertIn("pause_before_ms", result["unsupported_controls"])
+        self.assertEqual(result["audio_sha256"], cantonese_tts._sha256_file(self.output))
+        self.assertEqual(result["frames"], 12_960)
+        self.assertTrue(self.output.is_file())
+
+    def test_structured_segment_runtime_transports_ordered_payload_to_python314_child(self):
+        import json
+        observed = {}
+
+        class FakeTTS:
+            def synthesize(self, text, path, **kwargs):
+                with wave.open(path, "wb") as audio:
+                    audio.setnchannels(1)
+                    audio.setsampwidth(2)
+                    audio.setframerate(48_000)
+                    audio.writeframes(bytes([1, 0]) * 480)
+
+        def fake_child(arguments, *, timeout):
+            segments_path = Path(arguments[arguments.index("--segments-file") + 1])
+            output_path = Path(arguments[arguments.index("--output") + 1])
+            observed["segments"] = json.loads(segments_path.read_text(encoding="utf-8"))
+            return _synthesize_segments_with_engine(
+                observed["segments"], output_path, engine=FakeTTS(), quality="single",
+            )
+
+        segments = [
+            {"text": "甲。", "pause_after_ms": 80},
+            {"text": "乙。", "pause_after_ms": 0},
+            {"text": "丙。"},
+        ]
+        with (
+            patch("muse.cantonese_tts.sys.version_info", (3, 11)),
+            patch("muse.cantonese_tts._validate_runtime_paths", return_value=(self.root, self.model)),
+            patch("muse.cantonese_tts.preflight_cantonese_tts_runtime", return_value={"status": "ready"}),
+            patch("muse.cantonese_tts._run_python314_cli", side_effect=fake_child),
+        ):
+            result = synthesize_cantonese_segment_payload_with_runtime(
+                segments, self.output, model_dir=self.model, packages_dir=self.root, quality="single",
+            )
+
+        self.assertEqual(observed["segments"], segments)
+        self.assertEqual(result["segment_count"], 3)
+        self.assertEqual(result["inserted_pause_frames"], 3_840)
+        self.assertEqual(result["output"], str(self.output))
+        self.assertEqual(result["audio_sha256"], cantonese_tts._sha256_file(self.output))
+
+    def test_structured_segment_runtime_rejects_unimplemented_controls_and_invalid_pause(self):
+        invalid_payloads = [
+            [{"text": "你好", "emotion": "warm"}],
+            [{"text": "你好", "pause_before_ms": 120}],
+            [{"text": "你好", "pause_after_ms": True}],
+            [{"text": "你好", "pause_after_ms": 3001}],
+            [{"text": "段落"} for _ in range(17)],
+        ]
+        for payload in invalid_payloads:
+            with self.subTest(payload=payload):
+                with self.assertRaises(ValueError):
+                    synthesize_cantonese_segment_payload_with_runtime(
+                        payload, self.output, model_dir=self.model, packages_dir=self.root,
+                    )
+        self.assertFalse(self.output.exists())
 
     def test_segmented_engine_rejects_mismatched_clip_formats_without_delivery(self):
         class FakeTTS:

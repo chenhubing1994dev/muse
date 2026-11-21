@@ -3571,3 +3571,47 @@ eady_to_publish=false。
 - Python 3.14 的一次全量测试快照出现 54 个时区相关错误，原因是该解释器环境缺少 Windows `tzdata`；不作为当前项目代码回归基线。开发全量回归以 Python 3.11 结果为准。
 - 尚未打通的主链：VideoStudio DAG 仍为 preview-only，等待 InitiativeStore 原子 admission grant bind/one-shot consume/revoke 契约；旁白结构化 segments 仍被 Worker flatten，TTS runtime 仍是 text-based，当前已验证仅支持 `pause_after_ms`。未执行真实 GPU/Wan 渲染或自动发布。
 - B333 粤语旁白/韵律桥接最新专项：Python 3.14 经官方 psmux 运行 `test_prosody_contract`、`test_narration_pipeline`、`test_narration_prosody_bridge`、`test_narration_prosody_bridge_integrity`、`test_cantonese_tts`、`test_cantonese_tts_runtime`，**76/76 passed，0 failures，0 errors**；内层 Job `aa61c8b4b3c845d1acd1b2c129f870c8` exit 0。该结果验证规划/桥接与现有 TTS runtime 回归，不代表结构化 prosody payload 已被 runtime 消费。
+## 2026-11-22｜B334 视频提示词方法融合与节拍/拍摄档案
+
+- 参考 `apimodels/muse-video-prompts` 的方法总结（参考图身份锁、Master/Clip、BPM 卡点、手机真实感、系列连续性、长片分段），只吸收结构与方法，不复制创作者完整提示词；来源与许可边界记录于 `docs/VIDEO_PROMPT_FUSION.md`。
+- `VideoPromptSpec` 新增可选 `tempo_bpm`、`beat_offset_seconds`、`beat_alignment_tolerance_ms`、`align_scene_cuts_to_beats`。编译输出将 BPM/节拍网格同时写入 Master Prompt、每个 Clip、`clip_manifest` 与 `audio_plan`；启用严格卡点时，非末镜头切点超出容差会在生成前拒绝。
+- 新增 `capture_profile`（`cinematic` / `phone_realism` / `documentary`）；手机真实感的拍摄媒介约束会在 Master 和每个 Clip 重复，避免镜头拆分后丢失。
+- 新增/扩展测试覆盖节拍计算、偏拍拒绝、缺少 BPM、错误 BPM 类型、拍摄档案重复锁定与未知档案拒绝。Python 3.11 经官方 `scripts/muse_dev.py → psmux` 对 Composer、VideoPromptStudio、VideoWorkflow、PromptEngine **40/40 passed**，0 failures / 0 errors；4 个变更源码/测试文件 compileall 通过。psmux 内层 Job `0af2b3a18dcd44d682a79bca9cb90dce` exit 0，外层 WebCodex Job exit 0。
+- 本轮仅增强提示词编译与预览侧，没有把 VideoStudio preview-only 变成真实 dispatch；DAG admission grant、逐镜头 negative_prompt 穿透、结构化旁白 runtime 接线仍未完成。未启动 GPU/Wan 渲染、外部 Provider 或发布。
+
+
+
+## 2026-11-22｜B334 Open Design 证据完整性与可恢复执行回归
+
+- Open Design Artifact 持久化现在区分“元数据已写入”和“交付证据完整”：即使 Research Wiki 成功保存文件清单，只要 evidence 缺失、complete 不为 true、存在截断或 skipped files，Handler 都返回 status=incomplete，不允许 Worker 把 run 记为 succeeded。
+- Worker 将不完整 Artifact 归类为 execution failure，标记 retryable=false，并要求先检查原项目产物；修复源文件后创建新的审批任务与新 task ID。Research Wiki 暂时性存储故障仍归类 storage failure，可在修复数据库后重试原任务，避免重新提交已完成的生成。
+- 同一 Open Design Task ID 重放时，start_run requestId 和完整参数保持一致；稳定 requestId 用于同一逻辑运行幂等，不可把原任务重试误认为新建生成。
+- Open Design lifecycle、MCP、Software Crafting、Evidence Persistence 专项回归 121/121 passed；真实 Open Design 0.27.1 只读 Doctor 返回 22 tools、2 projects、4 agents、478 plugins，resources=0；allowed_agents=[]、generation_enabled=false。
+- 本次最新共享快照使用 Python 3.11，compileall 扫描 src/muse、tests、scripts 全部通过；unittest discover 2,261 tests / 0 failures / 0 errors / 1 skipped，耗时 208.279 秒，exit 0。Job wc_job_vvQsrCntJ-RFZ80V。
+- LM Studio API 1234/v1/models 返回 HTTP 200，OpenCode 项目本地配置指向 http://127.0.0.1:1234/v1、model muse-local/deep；但 lms ps 仍显示无模型加载。本轮未加载模型、未占用 GPU、未执行 Agent 生成；Agent allowlist 保持空。
+- 仍未完成的高优先级集成：VideoStudio DAG → Commander 持久 admission grant → Attempt/lease → Worker 的原子一次性授权链；结构化粤语 prosody segments → TTS runtime 的实际消费链。两项均存在明确模块/Session 所有权边界，当前不绕过 owner 直接改写。真实 GPU/ComfyUI/Wan 生成、非空 Artifact 读回、Research Wiki live 入库与浏览器视觉 QA 仍未验收。
+
+
+## 2026-11-22｜B335 Open Design adapter 生命周期引用释放
+
+- OpenDesignAdapter.close() 原本已幂等关闭 _write_client / _read_client，并保证一个 client 被两个字段引用时只关闭一次；但关闭后只清空 _write_client，仍保留 _read_client 强引用，导致已关闭的 MCP client 继续被 Adapter 持有。
+- 修复为清理流程结束时同时释放 _write_client 与 _read_client 引用。即使某个 client.close() 抛异常，仍会尝试关闭另一个 client、释放两个引用，再将第一个清理异常抛出；若处于 __exit__ 且已有主操作异常，原异常仍优先保留。
+- 扩展 lifecycle 回归，明确断言 close 后两个 client 字段都为 None。
+- Python 3.11 py_compile + Open Design lifecycle / adapter / evidence / MCP runtime / Software Crafting 专项回归：82/82 passed，4.510 秒，0 failures / 0 errors。
+- 当前另一个 Session 正在执行官方 scripts/muse_dev.py → psmux 全量回归（Job wc_job_qe3Tgg29MotrtfzD）；为避免共享 Runner 并发干扰，本 Session 不再启动重复全量测试，待该 Job 终态后对照最新共享快照。
+
+
+## 2026-11-22｜B336 生命周期修复后整仓回归
+
+- 在 B335 close 引用释放修复后的共享快照上，Python 3.11 compileall 扫描 src/muse、tests、scripts 全部通过；全仓 unittest discover **2,266 tests / 0 failures / 0 errors / 1 skipped**，耗时 208.646 秒，exit 0。Job wc_job_IPzCo5h-cMNIndKw。
+- 本次全量回归包含新增的 Open Design lifecycle 断言；专项回归 82/82 passed。未因另一个 Session 的 psmux 全量任务超时而复用其结果；本 Job 是独立原生 Python 3.11 执行，已观察到 terminal completed / exit 0。
+- 真实 Open Design 生成、LM Studio 模型加载、Agent allowlist、视频 GPU 渲染仍保持未启用状态；本轮只做代码与测试验证。
+
+
+## 2026-11-22｜B337 最新共享快照全量回归与跨链审计
+
+- 在 B335 Open Design Adapter 生命周期引用释放修复之后，另一专职 Session 通过官方 scripts/muse_dev.py → psmux 完成最新共享快照全量回归：Python 3.11 compileall 成功；unittest 2,268 tests / 0 failures / 0 errors / 1 skipped，耗时 205.694 秒，内层 psmux Job e23c2755202c483e9e0165e3681200aa 与外层 WebCodex Job wc_job_PolU-Owc3TQchuNk 均 exit 0。此结果取代 B336 的 2,266 项基线。
+- 本轮重新审计 VideoStudio：preview 已绑定 canonical storyboard SHA-256、DAG fingerprint、batch fingerprint，并能向既有 VideoStageCheckpoint Adapter 持久化 Attempt/worker/lease epoch/checkpoint 证据；但 preview 仍不提交 Commander Task。InitiativeStore 当前有 Attempt/lease/checkpoint 表与原子 claim/renew/release，却没有 DAG admission grant 的持久签发、撤销、过期和 one-shot consume API；Worker 现有人工审批只证明单个 Video Attempt，不等于 VideoStudio DAG grant。故两条路径仍未打通，execution_eligible=false 必须保持。
+- 发现现有 admission assessment 对 handler registry 仅验证 Mapping 中 capability 对应值 callable；它不是可信 handler identity / version / policy binding，也未绑定 resource budget 与审批事件。不可把 callable presence 升格为执行授权。后续需由 Commander/InitiativeStore owner 与 VideoStudio/Worker owner 共同落实同一持久契约，避免跨 Session 覆盖。
+- 旁白链重新确认：Worker 在 video_task_worker.py:318 将 generated_script.segments flatten 成纯文本；Builder 在 video_product_builder.py:912-915 调用 text-only synthesize_cantonese_segments_with_runtime()；当前结构化 prosody bridge 的完整性测试通过，但 payload 尚未进入 Runtime 消费路径，不能宣称情绪/语速/音高/呼吸等控制已生效。需要 TTS runtime owner 与 Worker/Builder owner 协同扩展明确的 structured-segment API，并对 unsupported controls 保持显式标记。
+- 本轮未修改其他 Session 拥有的 VideoStudio、InitiativeStore、Worker、Builder、TTS 文件；没有启动重复全量测试、没有加载 LM Studio 模型、没有开放 Agent allowlist、没有启动 GPU/ComfyUI/Wan 生成。

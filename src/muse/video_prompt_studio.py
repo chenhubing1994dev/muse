@@ -14,6 +14,79 @@ from muse.video_prompt_composer import compile_video_prompt, video_prompt_spec_f
 from muse.video_studio import PIPELINE_PROFILES, build_video_studio_preview
 
 
+def _build_worker_handoff_candidate(compiled: Mapping[str, Any]) -> dict[str, Any]:
+    """Translate a compiled storyboard into the current Worker contract without dispatching it."""
+    storyboard = compiled["storyboard"]
+    scenes = storyboard["scenes"]
+    blockers: list[str] = []
+    single_scene = len(scenes) == 1
+    if not 1 <= len(scenes) <= 20:
+        blockers.append("worker_requires_1_to_20_scenes")
+    total_duration = 0.0
+    previous_scene_ids: set[str] = set()
+    for scene in scenes:
+        scene_id = scene["id"]
+        duration = scene["duration_seconds"]
+        total_duration += float(duration)
+        if not 1 <= float(duration) <= 5:
+            blockers.append(f"scene_duration_out_of_worker_range:{scene_id}")
+        if scene.get("negative_prompt") and not single_scene:
+            blockers.append(f"per_scene_negative_prompt_not_supported:{scene_id}")
+        if any(dependency not in previous_scene_ids for dependency in scene.get("depends_on", [])):
+            blockers.append(f"scene_dependency_order_not_worker_safe:{scene_id}")
+        previous_scene_ids.add(scene_id)
+    if total_duration > 60:
+        blockers.append("worker_scene_total_exceeds_60_seconds")
+    audio_plan = compiled["audio_plan"]
+    if (audio_plan.get("audio_mood") or audio_plan.get("cues")
+            or audio_plan.get("tempo_bpm") is not None
+            or audio_plan.get("align_scene_cuts_to_beats")):
+        blockers.append("audio_plan_requires_audio_pipeline_mapping")
+    single_scene_negative = "\n".join(
+        item for item in (storyboard["negative_prompt"], scenes[0].get("negative_prompt", "") if single_scene else "")
+        if item
+    )
+    if len(single_scene_negative) > 1000:
+        blockers.append("combined_single_scene_negative_prompt_exceeds_1000_characters")
+    candidate = None
+    if not blockers and single_scene:
+        candidate = {
+            "title": storyboard["title"],
+            "prompt": scenes[0]["prompt"],
+            "negative_prompt": single_scene_negative,
+            "aspect_ratio": storyboard["aspect_ratio"],
+            "duration_seconds": float(scenes[0]["duration_seconds"]),
+            "steps": 8,
+        }
+    elif not blockers:
+        candidate = {
+            "title": storyboard["title"],
+            "prompt": compiled["master_prompt"],
+            "negative_prompt": storyboard["negative_prompt"],
+            "aspect_ratio": storyboard["aspect_ratio"],
+            "duration_seconds": round(total_duration, 3),
+            "steps": 8,
+            "scenes": [
+                {"prompt": scene["prompt"], "duration_seconds": float(scene["duration_seconds"])}
+                for scene in scenes
+            ],
+        }
+    return {
+        "status": "ready_for_review" if not blockers else "blocked",
+        "contract": "creator_brief.video",
+        "worker_mode": "single_prompt" if single_scene else "multi_scene",
+        "blockers": blockers,
+        "creator_brief_video": candidate,
+        "scene_mapping": [
+            {"source_scene_id": scene["id"], "worker_scene_id": f"shot_{index:03d}"}
+            for index, scene in enumerate(scenes, start=1)
+        ],
+        "execution": "not_started",
+        "commander_submission": "not_submitted",
+        "dispatch_authority": "Muse Commander",
+    }
+
+
 def compose_video_studio_package(
     prompt_spec_data: Mapping[str, Any],
     pipeline_id: str,
@@ -23,6 +96,7 @@ def compose_video_studio_package(
     spec = video_prompt_spec_from_dict(prompt_spec_data)
     compiled = compile_video_prompt(spec, story_bible)
     studio_preview = build_video_studio_preview(compiled["storyboard"], pipeline_id)
+    worker_handoff = _build_worker_handoff_candidate(compiled)
     return {
         "status": "preview_only",
         "title": compiled["storyboard"]["title"],
@@ -37,6 +111,7 @@ def compose_video_studio_package(
             "continuity_validation": compiled["continuity_validation"],
         },
         "video_studio": studio_preview,
+        "worker_handoff": worker_handoff,
         "execution": "not_started",
         "commander_submission": "not_submitted",
         "dispatch_authority": "Muse Commander",

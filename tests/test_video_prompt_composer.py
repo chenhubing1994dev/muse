@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 
 from muse.video_prompt_composer import (
     PromptSourceRef,
@@ -96,6 +97,51 @@ class VideoPromptComposerTests(unittest.TestCase):
         self.assertEqual(result["clip_manifest"][1]["start_seconds"], 3.0)
         self.assertEqual(result["clip_manifest"][1]["end_seconds"], 5.0)
         self.assertEqual(result["continuity_validation"]["continuity_scene_count"], 1)
+
+    def test_compiles_tempo_lock_and_beat_grid_into_master_clips_and_audio_plan(self) -> None:
+        spec = replace(
+            self.make_spec(), tempo_bpm=120, beat_offset_seconds=0.0,
+            beat_alignment_tolerance_ms=80, align_scene_cuts_to_beats=True,
+        )
+        result = compile_video_prompt(spec)
+        first = result["clip_manifest"][0]["beat_alignment"]
+        second = result["clip_manifest"][1]["beat_alignment"]
+
+        self.assertIn("节奏锁定：120 BPM", result["master_prompt"])
+        self.assertIn("节拍网格锁定", result["storyboard"]["scenes"][0]["prompt"])
+        self.assertEqual(first["end_beat_index"], 6)
+        self.assertTrue(first["end_on_beat"])
+        self.assertEqual(second["end_beat_index"], 10)
+        self.assertEqual(result["audio_plan"]["tempo_bpm"], 120)
+        self.assertTrue(result["audio_plan"]["align_scene_cuts_to_beats"])
+
+    def test_rejects_required_scene_cut_off_the_beat_grid(self) -> None:
+        original = self.make_spec()
+        scenes = (replace(original.scenes[0], duration_seconds=1.3), original.scenes[1])
+        spec = replace(
+            original, scenes=scenes, tempo_bpm=120,
+            align_scene_cuts_to_beats=True, beat_alignment_tolerance_ms=80,
+        )
+        with self.assertRaisesRegex(ValueError, "not aligned to the beat grid"):
+            compile_video_prompt(spec)
+
+    def test_beat_alignment_requires_tempo_and_rejects_boolean_bpm(self) -> None:
+        with self.assertRaisesRegex(ValueError, "requires tempo_bpm"):
+            replace(self.make_spec(), align_scene_cuts_to_beats=True)
+        with self.assertRaisesRegex(ValueError, "tempo_bpm"):
+            replace(self.make_spec(), tempo_bpm=True)
+
+    def test_phone_realism_capture_profile_is_repeated_in_master_and_each_clip(self) -> None:
+        result = compile_video_prompt(replace(self.make_spec(), capture_profile="phone_realism"))
+        self.assertIn("手机纪实质感锁定", result["master_prompt"])
+        for scene in result["storyboard"]["scenes"]:
+            self.assertIn("手持微抖", scene["prompt"])
+            self.assertIn("HDR", scene["prompt"])
+        self.assertEqual(result["model_guidance"]["capture_profile"], "phone_realism")
+
+    def test_rejects_unknown_capture_profile(self) -> None:
+        with self.assertRaisesRegex(ValueError, "capture_profile"):
+            replace(self.make_spec(), capture_profile="unreal_camera")
 
     def test_audio_is_a_separate_cantonese_sidecar(self) -> None:
         result = compile_video_prompt(self.make_spec(), sample_bible())
