@@ -14,7 +14,9 @@ from urllib.parse import urlparse
 
 from muse.intake import AdmissionPolicy, SourcePolicy, TriggerInput, TriggerStore
 from muse.model_client import LMStudioClient
+from muse.model_call_context import current_model_call_context, model_call_scope
 from muse.task_queue import TaskQueue
+
 
 @dataclass(frozen=True)
 class SourceEvent:
@@ -257,7 +259,6 @@ class IntakeRuntime:
         self.policy = policy
         self.task_database = Path(task_database)
         self.assessor = assessor
-
     def process(self, adapter: SourceAdapter) -> dict[str, list[dict[str, object]]]:
         results: list[dict[str, object]] = []
         for index, event in enumerate(adapter.fetch()):
@@ -289,7 +290,12 @@ class IntakeRuntime:
                     )
                 else:
                     source_policy = self.policy.sources[stored["source"]]
-                    assessed = self.assessor.assess(stored["payload"], source_policy.enabled_rules)
+                    if current_model_call_context() is not None:
+                        assessed = self.assessor.assess(stored["payload"], source_policy.enabled_rules)
+                    else:
+                        # Intake assessment happens before a TaskQueue ticket exists; record project-only usage.
+                        with model_call_scope(self.task_database, task_id=None, agent_id=None, project_id="muse"):
+                            assessed = self.assessor.assess(stored["payload"], source_policy.enabled_rules)
                     decision = self.store.decide(
                         received.trigger_id, self.policy, action="accept", scope="requested",
                         assessed_rules=assessed,
@@ -298,6 +304,7 @@ class IntakeRuntime:
             results.append(item)
         dispatched = self.dispatch_pending()
         return {"events": results, "dispatched": dispatched}
+
     def dispatch_pending(self, *, limit: int = 50) -> list[dict[str, str]]:
         """Deliver the durable outbox to TaskQueue using its idempotency key."""
         if not 1 <= limit <= 200:

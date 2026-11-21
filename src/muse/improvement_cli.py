@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Sequence
 
 from muse.improvement import ImprovementStore
+from muse.model_call_context import current_model_call_context, model_call_scope
 
 
 def _print(value: object) -> None:
@@ -117,7 +118,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                         workspace, improvement_store=store, task_queue=queue,
                         builder=builder, builder_model_id=model_config["model"],
                     )
-                    result = planner.prepare_ticket(args.proposal_id)
+                    if current_model_call_context() is not None:
+                        result = planner.prepare_ticket(args.proposal_id)
+                    else:
+                        with model_call_scope(args.task_db, task_id=None, agent_id=None, project_id="muse"):
+                            result = planner.prepare_ticket(args.proposal_id)
             else:
                 result = store.approve(args.proposal_id, approved_by=args.approved_by)
         except (ValueError, RuntimeError, PermissionError) as exc:

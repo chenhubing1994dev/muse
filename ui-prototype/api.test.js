@@ -121,6 +121,61 @@ test("initiative performance client authenticates GET and append-only POST with 
   assert.throws(() => client.recordInitiativePerformance(id, { idempotency_key: "x", platform: "youtube", source: "manual_entry", metrics: {} }), /幂等键无效/);
 });
 
+test("video contact sheet uses authenticated, cache-free product asset route", async () => {
+  const calls = [];
+  const image = new Blob(["verified-png"]);
+  const client = createApiClient({
+    baseUrl: "http://127.0.0.1:8765", token,
+    fetchImpl: async (url, options) => {
+      calls.push({ url: String(url), options });
+      return { ok: true, blob: async () => image };
+    },
+  });
+  const blob = await client.videoContactSheet("a".repeat(32), "b".repeat(20));
+  assert.equal(blob, image);
+  assert.equal(calls[0].url, "http://127.0.0.1:8765/api/v1/products/" + "a".repeat(32) + "/" + "b".repeat(20) + "/contact-sheet");
+  assert.equal(calls[0].options.headers.Authorization, "Bearer " + token);
+  assert.equal(calls[0].options.cache, "no-store");
+});
+
+test("visual review client reads and appends authenticated hash-bound review records", async () => {
+  const calls = [];
+  const id = "a".repeat(32);
+  const version = "b".repeat(20);
+  const record = { record_id: "c".repeat(32), decision: "approved" };
+  const client = createApiClient({
+    baseUrl: "http://127.0.0.1:8765", token,
+    fetchImpl: async (url, options) => {
+      calls.push({ url: String(url), options });
+      return {
+        ok: true,
+        json: async () => ({ api_version: 1, identity_assurance: "self_asserted_local_session", count: 1, reviews: [record], record, append_only: true, digital_signature: false }),
+      };
+    },
+  });
+  const history = await client.visualReviews(id, version);
+  const payload = {
+    decision: "approved", reviewer: "Local Editor", reviewer_role: "video_editor",
+    rationale: "Reviewed the complete video and sampled keyframes carefully.",
+    checklist: {
+      subject_framing: true, shot_continuity: true, visual_anomalies: true,
+      subtitle_visibility: true, full_video_playback: true,
+    },
+    confirmation: "RECORD-VISUAL-REVIEW",
+  };
+  const saved = await client.submitVisualReview(id, version, payload);
+  assert.equal(history.reviews[0], record);
+  assert.equal(saved.record, record);
+  assert.equal(calls[0].url, "http://127.0.0.1:8765/api/v1/products/" + id + "/" + version + "/visual-review");
+  assert.equal(calls[0].options.method, "GET");
+  assert.equal(calls[1].options.method, "POST");
+  assert.equal(calls[1].options.headers.Authorization, "Bearer " + token);
+  assert.equal(JSON.parse(calls[1].options.body).confirmation, "RECORD-VISUAL-REVIEW");
+  assert.equal(calls[1].options.cache, "no-store");
+  assert.throws(() => client.visualReviews("../bad", version), /产品编号无效/);
+  assert.throws(() => client.submitVisualReview(id, "bad", payload), /产品编号无效/);
+});
+
 test("SSE client sends bearer and cursor, parses redacted events, and returns the new cursor", async () => {
   const calls = [];
   const seen = [];
@@ -448,6 +503,54 @@ test("video product jobs and MP4 downloads use authenticated local endpoints", a
   assert.throws(() => client.videoJob("../bad"), /任务编号无效/);
 });
 
+test("visual review API reads append-only history and submits an explicitly confirmed decision", async () => {
+  const calls = [];
+  const identity = "a".repeat(32);
+  const version = "b".repeat(20);
+  const record = {
+    record_id: "c".repeat(32), decision: "approved",
+    reviewer: { label: "Local Editor", role: "video_editor", identity_assurance: "self_asserted_local_session" },
+    review_sha256: "d".repeat(64), evidence_status: "verified_human_review_digest_scope_bound",
+  };
+  const client = createApiClient({
+    baseUrl: "http://127.0.0.1:8765", token,
+    fetchImpl: async (url, options) => {
+      calls.push({ url: String(url), options });
+      return { ok: true, json: async () => String(url).endsWith("/visual-review") && options.method === "POST"
+        ? { api_version: 1, identity_assurance: "self_asserted_local_session", record, append_only: true, digital_signature: false }
+        : String(url).endsWith("/revision-brief")
+          ? { api_version: 1, active: false, brief: null, can_auto_modify_source: false, new_version_created: false }
+          : { api_version: 1, identity_assurance: "self_asserted_local_session", evidence: { video_sha256: "e".repeat(64), artifact_sha256: { "video.mp4": "e".repeat(64), "contact-sheet.png": "f".repeat(64) }, release_manifest_sha256: "1".repeat(64) }, count: 1, reviews: [record] } };
+    },
+  });
+  const history = await client.visualReviews(identity, version);
+  assert.equal(history.reviews[0].record_id, record.record_id);
+  const brief = await client.visualRevisionBrief(identity, version);
+  assert.equal(brief.active, false);
+  assert.equal(brief.can_auto_modify_source, false);
+  const payload = {
+    decision: "approved", reviewer: "Local Editor", reviewer_role: "video_editor",
+    rationale: "Reviewed the complete video and the contact sheet carefully.",
+    checklist: { subject_framing: true, shot_continuity: true, visual_anomalies: true, subtitle_visibility: true, full_video_playback: true },
+    confirmation: "RECORD-VISUAL-REVIEW",
+  };
+  const saved = await client.submitVisualReview(identity, version, payload);
+  assert.equal(saved.append_only, true);
+  assert.equal(saved.digital_signature, false);
+  assert.equal(calls[0].url, "http://127.0.0.1:8765/api/v1/products/" + identity + "/" + version + "/visual-review");
+  assert.equal(calls[0].options.method, "GET");
+  assert.equal(calls[0].options.headers.Authorization, "Bearer " + token);
+  assert.equal(calls[0].options.cache, "no-store");
+  assert.equal(calls[1].url, "http://127.0.0.1:8765/api/v1/products/" + identity + "/" + version + "/revision-brief");
+  assert.equal(calls[1].options.method, "GET");
+  assert.equal(calls[1].options.headers.Authorization, "Bearer " + token);
+  assert.equal(calls[1].options.cache, "no-store");
+  assert.equal(calls[2].options.method, "POST");
+  assert.deepEqual(JSON.parse(calls[2].options.body), payload);
+  assert.throws(() => client.visualReviews("../bad", version), /产品编号无效/);
+  assert.throws(() => client.visualRevisionBrief(identity, "../bad"), /产品编号无效/);
+});
+
 test("subtitle review workbench loads cue data and requires authenticated explicit approval POST", async () => {
   const calls = [];
   const identity = "0123456789abcdef0123456789abcdef";
@@ -509,6 +612,27 @@ test("MemPalace status uses an authenticated read-only local endpoint", async ()
   assert.equal(calls[0].options.method, "GET");
   assert.equal(calls[0].options.headers.Authorization, "Bearer " + token);
   assert.equal(calls[0].options.cache, "no-store");
+});
+
+test("contextual inquiry review APIs use authenticated no-store reads and validate identifiers", async () => {
+  const calls = [];
+  const expected = { api_version: 1, count: 1, reviews: [{ task_id: "a".repeat(32), created_at: "2026-11-21T10:00:00Z", updated_at: "2026-11-21T10:05:00Z" }] };
+  const client = createApiClient({
+    baseUrl: "http://127.0.0.1:8765", token,
+    fetchImpl: async (url, options) => {
+      calls.push({ url: String(url), options });
+      return { ok: true, json: async () => expected };
+    },
+  });
+  assert.deepEqual(await client.contextualInquiryReviews(20), expected);
+  assert.equal(calls[0].url, "http://127.0.0.1:8765/api/v1/contextual-inquiry-reviews?limit=20");
+  assert.equal(calls[0].options.headers.Authorization, "Bearer " + token);
+  assert.equal(calls[0].options.cache, "no-store");
+  await client.contextualInquiryReviewResult("a".repeat(32));
+  assert.equal(calls[1].url, "http://127.0.0.1:8765/api/v1/contextual-inquiry-reviews/" + "a".repeat(32));
+  assert.equal(calls[1].options.redirect, "error");
+  assert.throws(() => client.contextualInquiryReviews(101), RangeError);
+  assert.throws(() => client.contextualInquiryReviewResult("../bad"), /任务编号无效/);
 });
 
 test("overview preserves the safe queue and worker status payload", async () => {

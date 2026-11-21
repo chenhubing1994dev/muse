@@ -8,19 +8,83 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import logging
 import re
 import sys
+import threading
 import uuid
 from pathlib import Path
 from typing import Any, Callable
 
 from muse.initiative_engine import InitiativeStore
+from muse.video_checkpoint_adapter import cleanup_video_attempt_staging_directory
 
 
 def _runtime_is_paused(workspace: Path) -> bool:
     from muse.autonomous_runtime import RuntimeStateStore
     with RuntimeStateStore(workspace / "data" / "autonomy" / "runtime.sqlite3") as state:
         return state.status().get("state") in {"paused", "stopping"}
+
+class _VideoAttemptLeaseHeartbeat:
+    """Renew one exact Attempt lease from a separate SQLite connection."""
+
+    def __init__(
+        self, database: Path, attempt_id: str, worker_id: str, lease_epoch: int,
+        *, lease_seconds: int, interval_seconds: float,
+    ) -> None:
+        if (isinstance(interval_seconds, bool) or not isinstance(interval_seconds, (int, float))
+                or not 0.001 <= interval_seconds < lease_seconds):
+            raise ValueError("lease renewal interval must be positive and shorter than the lease")
+        self.database = database
+        self.attempt_id = attempt_id
+        self.worker_id = worker_id
+        self.lease_epoch = lease_epoch
+        self.lease_seconds = lease_seconds
+        self.interval_seconds = float(interval_seconds)
+        self._stop_event = threading.Event()
+        self._lease_lost = threading.Event()
+        self._error_type: str | None = None
+        self._thread: threading.Thread | None = None
+
+    @property
+    def lease_lost(self) -> bool:
+        return self._lease_lost.is_set()
+
+    @property
+    def error_type(self) -> str | None:
+        return self._error_type
+
+    def start(self) -> None:
+        if self._thread is not None:
+            raise RuntimeError("lease heartbeat has already been started")
+        self._thread = threading.Thread(
+            target=self._run, name=f"video-lease-{self.attempt_id[:8]}", daemon=True,
+        )
+        self._thread.start()
+
+    def _run(self) -> None:
+        while not self._stop_event.wait(self.interval_seconds):
+            try:
+                if self.database.is_symlink():
+                    raise ValueError("video Attempt database must not be a symlink")
+                with InitiativeStore(self.database) as store:
+                    store.renew_video_attempt_lease(
+                        self.attempt_id, worker_id=self.worker_id,
+                        lease_epoch=self.lease_epoch, lease_seconds=self.lease_seconds,
+                    )
+            except Exception as exc:
+                self._error_type = type(exc).__name__
+                self._lease_lost.set()
+                return
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        thread = self._thread
+        if thread is not None and thread.ident is not None and thread is not threading.current_thread():
+            thread.join(timeout=max(5.0, self.interval_seconds * 2))
+            if thread.is_alive():
+                self._error_type = self._error_type or "HeartbeatStopTimeout"
+                self._lease_lost.set()
 
 
 class VideoTaskWorker:
@@ -38,6 +102,8 @@ class VideoTaskWorker:
         self.pause_check = pause_check or (lambda: False)
         self.database = self.workspace / "data" / "initiatives" / "muse.sqlite3"
         self.task_database = self.workspace / "data" / "tasks" / "muse.sqlite3"
+        self.lease_seconds = 3600
+        self.lease_renew_interval_seconds = 60.0
 
     @staticmethod
     def _commander_approval_is_valid(store, queue, attempt) -> bool:
@@ -75,12 +141,18 @@ class VideoTaskWorker:
                 or hashlib.sha256(json.dumps(payload["video_brief"], sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest() != digest
                 or not isinstance(approved_by, str) or not approved_by.strip()):
             return False
-        return any(
-            event.get("event_type") == "human.decision"
-            and event.get("actor") == approved_by
-            and isinstance(event.get("payload"), dict)
-            and event["payload"].get("decision") == "approved"
-            for event in queue.events(task_id, limit=500)
+        decisions = [
+            event for event in queue.events(task_id, limit=500)
+            if event.get("event_type") == "human.decision"
+        ]
+        if not decisions:
+            return False
+        latest_decision = decisions[-1]
+        latest_payload = latest_decision.get("payload")
+        return (
+            latest_decision.get("actor") == approved_by
+            and isinstance(latest_payload, dict)
+            and latest_payload.get("decision") == "approved"
         )
 
     def _builder(self):
@@ -110,22 +182,46 @@ class VideoTaskWorker:
                         blocked += 1
                         continue
                     attempt = store.claim_next_video_attempt(
-                        self.worker_id, lease_seconds=3600, attempt_id=candidate["attempt_id"],
+                        self.worker_id, lease_seconds=self.lease_seconds, attempt_id=candidate["attempt_id"],
                     )
                     if attempt is not None:
                         break
             if attempt is None:
                 return {"status": "idle", "claimed": False, "approval_required": True, "approval_blocked": blocked}
             attempt_id = attempt["attempt_id"]
+            lease_worker_id = attempt["worker_id"]
+            lease_epoch = int(attempt["attempt_count"])
             if self.pause_check():
-                store.release_video_attempt(attempt_id, worker_id=self.worker_id, reason="runtime_paused")
+                try:
+                    store.release_video_attempt(
+                        attempt_id, worker_id=lease_worker_id, lease_epoch=lease_epoch,
+                        reason="runtime_paused",
+                    )
+                except ValueError:
+                    return {"status": "lease_lost", "claimed": False, "attempt_id": attempt_id, "release_recorded": False}
                 return {"status": "paused", "claimed": False, "attempt_id": attempt_id}
+            heartbeat = _VideoAttemptLeaseHeartbeat(
+                self.database, attempt_id, lease_worker_id, lease_epoch,
+                lease_seconds=self.lease_seconds,
+                interval_seconds=self.lease_renew_interval_seconds,
+            )
             try:
+                heartbeat.start()
                 with TaskQueue(self.task_database) as approvals:
                     if not self._commander_approval_is_valid(store, approvals, attempt):
-                        store.release_video_attempt(attempt_id, worker_id=self.worker_id, reason="commander_approval_invalidated")
+                        heartbeat.stop()
+                        if heartbeat.lease_lost:
+                            return {"status": "lease_lost", "attempt_id": attempt_id, "release_recorded": False}
+                        try:
+                            store.release_video_attempt(
+                                attempt_id, worker_id=lease_worker_id, lease_epoch=lease_epoch,
+                                reason="commander_approval_invalidated",
+                            )
+                        except ValueError:
+                            return {"status": "lease_lost", "claimed": False, "attempt_id": attempt_id, "release_recorded": False}
                         return {"status": "blocked_approval", "claimed": False, "attempt_id": attempt_id}
                 if attempt["mode"] != "prompt_to_video":
+
                     raise ValueError("video worker currently supports prompt_to_video attempts only")
                 initiative = store.get_by_id(attempt["initiative_id"])
                 if initiative is None:
@@ -273,14 +369,95 @@ class VideoTaskWorker:
                     })
                     if narration.get("claim_grounded") is True:
                         build_options["narration_evidence_contract"] = pending_evidence_contract
+                # A lease lost during long TTS/evidence preflight must not begin GPU work.
+                if heartbeat.lease_lost:
+                    return {
+                        "status": "lease_lost", "attempt_id": attempt_id,
+                        "error_type": heartbeat.error_type or "LeaseRenewalFailed",
+                        "failure_recorded": False,
+                    }
+                def scene_generation_guard(step_id: str) -> None:
+                    if heartbeat.lease_lost:
+                        raise RuntimeError(f"video attempt lease lost before {step_id} generation")
+                    with TaskQueue(self.task_database) as live_approvals:
+                        if not self._commander_approval_is_valid(store, live_approvals, attempt):
+                            raise PermissionError(
+                                f"Commander approval was revoked before {step_id} generation"
+                            )
+                    if heartbeat.lease_lost:
+                        raise RuntimeError(f"video attempt lease lost during {step_id} approval check")
+
                 if normalized_scenes is not None:
+                    build_options["scene_generation_guard"] = scene_generation_guard
                     build_options["scenes"] = normalized_scenes
-                    result = self._builder().build_from_scenes(title.strip(), **build_options)
+                    recipe_sha256 = attempt.get("recipe_sha256")
+                    if (narration_script is None and isinstance(recipe_sha256, str)
+                            and re.fullmatch(r"[0-9a-f]{64}", recipe_sha256)):
+                        from muse.video_checkpoint_adapter import (
+                            VideoSceneCheckpointSession,
+                            build_video_scene_checkpoint_plan,
+                            prepare_video_attempt_staging_directory,
+                        )
+                        from muse.video_product_builder import VideoProductBuilder
+
+                        build_options["recipe_sha256"] = recipe_sha256
+                        checkpoint_plan = build_video_scene_checkpoint_plan(
+                            title.strip(), normalized_scenes,
+                            negative_prompt=build_options["negative_prompt"],
+                            aspect_ratio=aspect_ratio, steps=steps,
+                            recipe_sha256=recipe_sha256,
+                            builder_version=str(VideoProductBuilder.BUILDER_VERSION),
+                        )
+                        attempt_staging = prepare_video_attempt_staging_directory(
+                            self.workspace, attempt_id,
+                        )
+                        epoch_staging = attempt_staging / f"epoch_{lease_epoch}"
+                        epoch_staging.mkdir(exist_ok=True)
+                        epoch_info = epoch_staging.lstat()
+                        if (epoch_staging.is_symlink()
+                                or bool(getattr(epoch_info, "st_file_attributes", 0) & 0x400)
+                                or not epoch_staging.is_dir()
+                                or epoch_staging.resolve(strict=True).parent != attempt_staging.resolve(strict=True)):
+                            raise ValueError("video attempt epoch staging must be a regular child directory")
+                        build_options["staging_directory"] = epoch_staging
+                        with TaskQueue(self.task_database) as checkpoint_queue:
+                            checkpoint_session = VideoSceneCheckpointSession(
+                                checkpoint_plan["batches"], store, checkpoint_queue,
+                                attempt_id=attempt_id, worker_id=lease_worker_id,
+                                lease_epoch=lease_epoch, workspace_root=self.workspace,
+                                expected_input_sha256=checkpoint_plan["expected_input_sha256"],
+                            )
+                            if checkpoint_session.same_epoch_rejected_steps:
+                                raise RuntimeError(
+                                    "same-epoch rejected scene checkpoints require a new retry lease: "
+                                    + ",".join(checkpoint_session.same_epoch_rejected_steps)
+                                )
+                            resume_map = {}
+                            for step_id in checkpoint_session.reusable_step_ids:
+                                saved = checkpoint_session.resume["reusable_steps"].get(step_id, {})
+                                metadata = saved.get("metadata") if isinstance(saved, dict) else None
+                                if not isinstance(metadata, dict) or not isinstance(metadata.get("artifact_relative_path"), str):
+                                    raise RuntimeError(f"verified checkpoint {step_id} lacks its artifact path")
+                                resume_map[step_id] = {
+                                    "artifact_relative_path": metadata["artifact_relative_path"],
+                                    "generation": checkpoint_session.resume_scene_metadata[step_id],
+                                }
+                            build_options.update({
+                                "resume_scene_metadata": resume_map,
+                                "reusable_step_ids": checkpoint_session.reusable_step_ids,
+                                "scene_checkpoint_callback": checkpoint_session.record,
+                            })
+                            result = self._builder().build_from_scenes(title.strip(), **build_options)
+                    else:
+                        # TTS may quantize scene durations after synthesis; do not bind
+                        # checkpoints to the pre-TTS scene digest.
+                        result = self._builder().build_from_scenes(title.strip(), **build_options)
                 else:
                     build_options.update({
                         "duration_seconds": float(duration),
                         "seed": int(hashlib.sha256(attempt_id.encode("utf-8")).hexdigest()[:8], 16),
                     })
+                    scene_generation_guard("shot_001")
                     result = self._builder().build_from_prompt(title.strip(), prompt.strip(), **build_options)
                 if result.get("validated") is not True:
                     raise RuntimeError("video product builder did not verify its output package")
@@ -301,11 +478,56 @@ class VideoTaskWorker:
                 ):
                     if verified.get(key) != result.get(key):
                         raise RuntimeError(f"video product changed after build: {key}")
+                heartbeat.stop()
+                if heartbeat.lease_lost:
+                    return {
+                        "status": "lease_lost", "attempt_id": attempt_id,
+                        "error_type": heartbeat.error_type or "LeaseRenewalFailed",
+                        "failure_recorded": False,
+                    }
+                if self.pause_check():
+                    try:
+                        store.release_video_attempt(
+                            attempt_id, worker_id=lease_worker_id, lease_epoch=lease_epoch,
+                            reason="runtime_paused_after_render",
+                        )
+                    except ValueError:
+                        return {"status": "lease_lost", "attempt_id": attempt_id, "release_recorded": False}
+                    return {"status": "paused", "attempt_id": attempt_id, "product_created": True}
+                with TaskQueue(self.task_database) as final_approvals:
+                    if not self._commander_approval_is_valid(store, final_approvals, attempt):
+                        try:
+                            store.release_video_attempt(
+                                attempt_id, worker_id=lease_worker_id, lease_epoch=lease_epoch,
+                                reason="commander_approval_invalidated_before_completion",
+                            )
+                        except ValueError:
+                            return {"status": "lease_lost", "attempt_id": attempt_id, "release_recorded": False}
+                        return {
+                            "status": "blocked_approval", "attempt_id": attempt_id,
+                            "product_created": True, "completion_recorded": False,
+                        }
                 completed = store.complete_video_attempt(
                     attempt_id, product_id=result["initiative_id"], version_id=result["version_id"],
                     mp4_sha256=result["mp4_sha256"], package_sha256=result["package_sha256"],
                     manifest_sha256=result["manifest_sha256"],
+                    worker_id=lease_worker_id, lease_epoch=lease_epoch,
                 )
+                # Cleanup is post-commit best-effort only. Preserve every resumable or
+                # non-terminal staging tree, and never reverse a committed success.
+                if completed.get("status") == "succeeded" and re.fullmatch(r"[0-9a-f]{32}", attempt_id):
+                    try:
+                        persisted_attempt = store.get_video_attempt(attempt_id)
+                        if (isinstance(persisted_attempt, dict)
+                                and persisted_attempt.get("status") == "succeeded"
+                                and all(re.fullmatch(r"[0-9a-f]{64}", str(persisted_attempt.get(field, "")))
+                                        for field in ("mp4_sha256", "package_sha256", "manifest_sha256"))):
+                            cleanup_video_attempt_staging_directory(self.workspace, attempt_id, store)
+                    except Exception:
+                        logging.getLogger(__name__).warning(
+                            "Could not clean verified video Attempt staging for %s; committed success is retained",
+                            attempt_id, exc_info=True,
+                        )
                 return {
                     "status": completed["status"], "attempt_id": attempt_id,
                     "product_id": completed["product_id"], "version_id": completed["version_id"],
@@ -317,13 +539,32 @@ class VideoTaskWorker:
                     ),
                 }
             except Exception as exc:
-                failed = store.fail_video_attempt(
-                    attempt_id, error_type=type(exc).__name__, failure_code="video.worker_execution_failed",
-                )
+                heartbeat.stop()
+                if heartbeat.lease_lost:
+                    return {
+                        "status": "lease_lost", "attempt_id": attempt_id,
+                        "error_type": heartbeat.error_type or type(exc).__name__,
+                        "failure_recorded": False,
+                    }
+                try:
+                    failed = store.fail_video_attempt(
+                        attempt_id, error_type=type(exc).__name__, failure_code="video.worker_execution_failed",
+                        worker_id=lease_worker_id, lease_epoch=lease_epoch,
+                    )
+                except ValueError:
+                    # A newer worker may have reclaimed the attempt while this renderer was running.
+                    # Never let the stale worker overwrite that newer lease with a failure record.
+                    return {
+                        "status": "lease_lost", "attempt_id": attempt_id,
+                        "error_type": type(exc).__name__, "failure_recorded": False,
+                    }
                 return {
                     "status": failed["status"], "attempt_id": attempt_id,
-                    "error_type": type(exc).__name__, "failure_code": failed["failure_code"],
+                    "error_type": type(exc).__name__, "error_message": str(exc)[:500],
+                    "failure_code": failed["failure_code"],
                 }
+            finally:
+                heartbeat.stop()
 
 
 def main(argv: list[str] | None = None) -> int:

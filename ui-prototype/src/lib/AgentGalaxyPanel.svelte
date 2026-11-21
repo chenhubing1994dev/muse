@@ -1,6 +1,8 @@
 <script lang="ts">
   import type {
     AgentRecord,
+    AgentOrgChartNode,
+    AgentOrgChartResponse,
     AgentStatus,
     ApiClient,
     GalaxyResponse,
@@ -12,6 +14,7 @@
   export let connected = false;
   export let agents: AgentRecord[] = [];
   export let registryConfigured = false;
+  export let orgChart: AgentOrgChartResponse | null = null;
   export let galaxy: GalaxyResponse | null = null;
 
   const statusLabels: Record<AgentStatus, string> = {
@@ -30,6 +33,54 @@
   $: galaxyLayout = layoutAgentGalaxy(galaxy, 620, 440);
   $: matchedIds = new Set((routePreview?.selected ?? []).map((item) => item.specialist_id));
   $: selectedSpecialist = (galaxy?.specialist_profiles ?? []).find((s) => s.specialist_id === selectedSpecialistId) ?? null;
+
+  interface OrgTreeRow { node: AgentOrgChartNode; depth: number; unresolvedParent: boolean; }
+
+  function buildOrgRows(chart: AgentOrgChartResponse | null): OrgTreeRow[] {
+    if (!chart) return [];
+    const byId = new Map(chart.nodes.map((node) => [node.agent_id, node]));
+    const children = new Map<string, AgentOrgChartNode[]>();
+    const roots: AgentOrgChartNode[] = [];
+    for (const node of chart.nodes) {
+      const parentId = node.reports_to;
+      if (parentId && byId.has(parentId)) {
+        const siblings = children.get(parentId) ?? [];
+        siblings.push(node);
+        children.set(parentId, siblings);
+      } else {
+        roots.push(node);
+      }
+    }
+    const sortNodes = (items: AgentOrgChartNode[]) => items.sort((a, b) =>
+      (a.display_name || a.agent_id).localeCompare(b.display_name || b.agent_id));
+    sortNodes(roots);
+    for (const items of children.values()) sortNodes(items);
+    const rows: OrgTreeRow[] = [];
+    const visited = new Set<string>();
+    const visit = (node: AgentOrgChartNode, depth: number, unresolvedParent = false) => {
+      if (visited.has(node.agent_id)) return;
+      visited.add(node.agent_id);
+      rows.push({ node, depth: Math.min(depth, 8), unresolvedParent });
+      for (const child of children.get(node.agent_id) ?? []) visit(child, depth + 1);
+    };
+    for (const root of roots) visit(root, 0, Boolean(root.reports_to && !byId.has(root.reports_to)));
+    for (const node of chart.nodes) {
+      if (!visited.has(node.agent_id)) visit(node, 0, true);
+    }
+    return rows;
+  }
+
+  function orgStatus(status: string): { label: string; tone: string } {
+    switch (status) {
+      case "online": return { label: "在线", tone: "online" };
+      case "busy": return { label: "执行中", tone: "busy" };
+      case "disabled": return { label: "已停用", tone: "disabled" };
+      case "blocked": return { label: "受阻", tone: "offline" };
+      default: return { label: "离线", tone: "offline" };
+    }
+  }
+
+  $: orgRows = buildOrgRows(orgChart);
 
   async function runRoutePreview(): Promise<void> {
     if (!client || !connected || !routeGoal.trim() || previewBusy) return;
@@ -222,6 +273,61 @@
     </div>
   </div>
 
+  <div class="worker-heading">
+    <b>数字员工组织树 · 职位与汇报关系</b>
+    <span>{orgChart ? `${orgChart.total} 名员工 · 展示 ${orgChart.nodes.length}` : "组织快照尚未读取"}</span>
+  </div>
+  {#if !registryConfigured}
+    <div class="empty-state compact">组织树等待 Agent Registry 接入。</div>
+  {:else if !orgChart}
+    <div class="empty-state compact">后端暂未提供组织树快照；现有 Agent 状态卡仍可查看。</div>
+  {:else if orgRows.length === 0}
+    <div class="empty-state compact">组织架构尚为空。登记 Agent 并设置职位与直属上级后，组织树会自动呈现。</div>
+  {:else}
+    {#if orgChart.truncated}
+      <p class="org-chart-warning" role="status">组织树快照已截断：当前显示 {orgChart.nodes.length} / {orgChart.total} 名员工；未加载的员工不会被误判为不存在。</p>
+    {/if}
+    {#if orgChart.unresolved_parent_count > 0}
+      <p class="org-chart-warning" role="status">有 {orgChart.unresolved_parent_count} 名员工的直属上级不在当前快照内，可能是截断或遗留孤立关系；请核对 Registry。</p>
+    {/if}
+    <div class="org-chart-list" aria-label="数字员工汇报关系树">
+      {#each orgRows as row (row.node.agent_id)}
+        {@const node = row.node}
+        {@const state = orgStatus(node.status)}
+        <article class="org-tree-row" style={`margin-left: ${row.depth * 18}px`}>
+          <div class="org-tree-main">
+            <span class="org-tree-branch" aria-hidden="true">{row.depth === 0 ? "◆" : "└"}</span>
+            <div class="org-tree-identity">
+              <strong>{node.display_name || node.agent_id}</strong>
+              <span>{node.title || node.role || "未设置职位"} · {node.role || "未分类角色"}</span>
+            </div>
+            <span class={`status-pill status-${state.tone}`}>{state.label}</span>
+          </div>
+          <div class="org-tree-meta">
+            <span>ID：{node.agent_id}</span>
+            {#if node.reports_to}
+              <span>直属上级：{node.reports_to}</span>
+            {:else}
+              <span>顶层员工</span>
+            {/if}
+            {#if row.unresolvedParent}
+              <span class="org-tree-unresolved">上级未出现在当前快照 / 关系需核对</span>
+            {/if}
+          </div>
+          <div class="capabilities">
+            {#if node.capabilities?.length}
+              {#each node.capabilities as capability}
+                <span class="capability">{capability}</span>
+              {/each}
+            {:else}
+              <span class="capability muted">未声明能力</span>
+            {/if}
+          </div>
+        </article>
+      {/each}
+    </div>
+  {/if}
+
   <!-- Live Registered Agents Section -->
   <div class="worker-heading">
     <b>实连 Agent 注册表（AgentRegistry）</b>
@@ -268,3 +374,74 @@
     </div>
   {/if}
 </section>
+
+<style>
+  .org-chart-list {
+    display: grid;
+    gap: 8px;
+    padding: 4px 0 14px;
+  }
+
+  .org-tree-row {
+    min-width: 0;
+    padding: 10px 12px;
+    border: 1px solid var(--hair);
+    border-radius: 8px;
+    background: rgba(4, 20, 35, 0.62);
+  }
+
+  .org-tree-main {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+
+  .org-tree-branch {
+    width: 16px;
+    color: var(--cyan);
+    font: 12px var(--font-data);
+  }
+
+  .org-tree-identity {
+    display: grid;
+    flex: 1;
+    min-width: 180px;
+    gap: 2px;
+  }
+
+  .org-tree-identity strong {
+    color: var(--ivory);
+    font-size: 13px;
+    font-weight: 600;
+  }
+
+  .org-tree-identity span,
+  .org-tree-meta {
+    color: var(--muted);
+    font-size: 10px;
+  }
+
+  .org-tree-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 14px;
+    margin: 7px 0 7px 26px;
+  }
+
+  .org-tree-unresolved,
+  .org-chart-warning {
+    color: var(--amber);
+  }
+
+  .org-chart-warning {
+    margin: 4px 0 8px;
+    font-size: 11px;
+  }
+
+  @media (max-width: 680px) {
+    .org-tree-row {
+      margin-left: 0 !important;
+    }
+  }
+</style>

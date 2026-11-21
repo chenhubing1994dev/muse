@@ -4,6 +4,7 @@ nothing about provider credentials; adapters can be added separately.
 """
 from __future__ import annotations
 
+import re
 import sqlite3
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -12,7 +13,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable
 from muse.resource_governor import ResourcePolicy, probe_host_resources
-
 
 AgentCall = Callable[[str], str]
 
@@ -29,14 +29,23 @@ class AgentRoleRegistry:
         self.connection = sqlite3.connect(self.database, timeout=10)
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA journal_mode=WAL")
-        self.connection.execute(
+        self.connection.executescript(
             """CREATE TABLE IF NOT EXISTS agent_role_policies (
                 role TEXT PRIMARY KEY,
                 allowed_capabilities_json TEXT NOT NULL,
                 trust_tier TEXT NOT NULL,
                 description TEXT NOT NULL,
                 updated_at TEXT NOT NULL
-            )"""
+            );
+            CREATE TABLE IF NOT EXISTS agent_role_scope_policies (
+                scope TEXT NOT NULL,
+                role TEXT NOT NULL,
+                allowed_capabilities_json TEXT NOT NULL,
+                trust_tier TEXT NOT NULL,
+                description TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (scope, role)
+            );"""
         )
         self.connection.commit()
 
@@ -78,10 +87,57 @@ class AgentRoleRegistry:
         self.connection.commit()
         return self.get(role)
 
-    def get(self, role: str) -> dict[str, object] | None:
+    @staticmethod
+    def _validate_scope(scope: str) -> str:
+        if (not isinstance(scope, str) or len(scope) > 64
+                or not re.fullmatch(r"[a-z][a-z0-9_]*(?:[.-][a-z0-9_]+)*", scope)):
+            raise ValueError("scope must be a lowercase bounded identifier")
+        return scope
+
+    def register_scoped(
+        self, scope: str, role: str, *, allowed_capabilities: Iterable[str] = (),
+        trust_tier: str = "standard", description: str = "",
+    ) -> dict[str, object]:
+        """Register an exact role policy inside one task scope, without changing global policy."""
         import json
+        scope = self._validate_scope(scope)
+        if not isinstance(role, str) or not role.strip() or len(role.strip()) > 128:
+            raise ValueError("role must be non-empty bounded text")
+        role = role.strip()
+        if not isinstance(trust_tier, str) or trust_tier not in ROLE_TRUST_TIERS:
+            raise ValueError("unsupported agent trust tier")
+        raw_capabilities = list(allowed_capabilities)
+        if any(not isinstance(item, str) or not item.strip() for item in raw_capabilities):
+            raise ValueError("allowed capabilities must be non-empty text")
+        capabilities = sorted({item.strip() for item in raw_capabilities})
+        if not isinstance(description, str):
+            raise ValueError("description must be text")
+        updated_at = datetime.now(timezone.utc).isoformat()
+        self.connection.execute(
+            """INSERT INTO agent_role_scope_policies
+               (scope, role, allowed_capabilities_json, trust_tier, description, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(scope, role) DO UPDATE SET
+                 allowed_capabilities_json=excluded.allowed_capabilities_json,
+                 trust_tier=excluded.trust_tier, description=excluded.description,
+                 updated_at=excluded.updated_at""",
+            (scope, role, json.dumps(capabilities), trust_tier, description.strip(), updated_at),
+        )
+        self.connection.commit()
+        policy = self.get_scoped(scope, role)
+        if policy is None:
+            raise RuntimeError("scoped role policy was not persisted")
+        return policy
+
+    def get_scoped(self, scope: str, role: str) -> dict[str, object] | None:
+        import json
+        scope = self._validate_scope(scope)
+        if not isinstance(role, str) or not role.strip() or len(role.strip()) > 128:
+            raise ValueError("role must be non-empty bounded text")
+        role = role.strip()
         row = self.connection.execute(
-            "SELECT * FROM agent_role_policies WHERE role=?", (role,)
+            "SELECT * FROM agent_role_scope_policies WHERE scope=? AND role=?",
+            (scope, role),
         ).fetchone()
         if row is None:
             return None
@@ -89,14 +145,33 @@ class AgentRoleRegistry:
         item["allowed_capabilities"] = json.loads(item.pop("allowed_capabilities_json"))
         return item
 
-    def authorize(self, role: str, requested_capabilities: Iterable[str] = ()) -> dict[str, object]:
-        policy = self.get(role)
+    def get(self, role: str) -> dict[str, object] | None:
+        """Return one global role policy using the same normalized shape as get_scoped."""
+        import json
+        if not isinstance(role, str) or not role.strip() or len(role.strip()) > 128:
+            raise ValueError("role must be non-empty bounded text")
+        row = self.connection.execute(
+            "SELECT * FROM agent_role_policies WHERE role=?", (role.strip(),),
+        ).fetchone()
+        if row is None:
+            return None
+        item = dict(row)
+        item["allowed_capabilities"] = json.loads(item.pop("allowed_capabilities_json"))
+        return item
+
+    def authorize(
+        self, role: str, requested_capabilities: Iterable[str] = (), *, scope: str | None = None,
+    ) -> dict[str, object]:
+        # An explicit scope is an isolated namespace: never fall back to the global role policy.
+        policy = self.get(role) if scope is None else self.get_scoped(scope, role)
         if policy is None:
-            raise PermissionError(f"agent role is not registered: {role}")
+            if scope is None:
+                raise PermissionError(f"agent role is not registered: {role}")
+            raise PermissionError(f"scoped agent role is not registered: {scope}/{role}")
         raw_requested = list(requested_capabilities)
         if any(not isinstance(item, str) or not item.strip() for item in raw_requested):
             raise ValueError("requested capabilities must be non-empty text")
-        requested = set(raw_requested)
+        requested = {item.strip() for item in raw_requested}
         allowed = set(policy["allowed_capabilities"])
         denied = sorted(requested - allowed)
         if denied:
@@ -104,7 +179,6 @@ class AgentRoleRegistry:
                 f"agent role {role!r} is not allowed to declare capabilities: {', '.join(denied)}"
             )
         return policy
-
 
 @dataclass(frozen=True)
 class AgentSpec:

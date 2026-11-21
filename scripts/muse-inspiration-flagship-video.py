@@ -34,9 +34,8 @@ from muse.video_product_builder import VideoProductBuilder
 from muse.video_publish_package import (
     VIRAL_MONETIZATION_PLATFORMS_16X9,
     VIRAL_MONETIZATION_PLATFORMS_9X16,
-    build_publish_package,
+    build_publish_package_with_optional_generated_contact_sheet,
 )
-
 
 LEMO_PYTHON = Path(r"C:\Users\Administrator\lemo-opuscar\.venv\Scripts\python.exe")
 PY314_EXEC = Path(r"C:\Users\Administrator\AppData\Local\Programs\Python\Python314\python.exe")
@@ -797,18 +796,18 @@ def render_aspect_deliverable(
         }
         (output_dir / "generation.json").write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
-        # 8. Build multi-platform publish handoff package (YouTube, Douyin, WeChat Channels, Bilibili, TikTok)
+        # 8. Build the product-scoped handoff package and optional visual-review evidence.
+        # Contact-sheet failure is recorded explicitly; it never blocks technical QA or
+        # gets represented as completed visual review. Package integrity errors still fail.
         platforms = VIRAL_MONETIZATION_PLATFORMS_9X16 if aspect_ratio == "9:16" else VIRAL_MONETIZATION_PLATFORMS_16X9
-        publish_pack = build_publish_package(
+        publish_pack = build_publish_package_with_optional_generated_contact_sheet(
             workspace,
             output_dir,
-            output_dir=output_dir / f"publish-package-{slug}",
             platforms=platforms,
         )
         guide_path = _write_publish_guide_cn(
             output_dir=output_dir,
-            title=blueprint["title"],
-            blueprint=blueprint,
+            title=blueprint["title"],            blueprint=blueprint,
             aspect_ratio=aspect_ratio,
             master_mp4=final_mp4,
             cover_jpg=cover_jpg,

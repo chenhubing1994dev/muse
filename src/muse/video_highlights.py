@@ -360,6 +360,8 @@ def build_vertical_clip_command(
     subtitles: str | Path | None = None,
     available_encoders: Sequence[str] = (),
     prefer_hardware: bool = True,
+    crop_center_x: float | None = None,
+    crop_center_keyframes: list[dict[str, object]] | None = None,
 ) -> list[str]:
     """Build a no-overwrite 1080x1920 clip command; source files stay untouched."""
     source_path, output_path = Path(source).expanduser(), Path(output).expanduser()
@@ -373,9 +375,24 @@ def build_vertical_clip_command(
         raise FileExistsError(output_path)
     if start < 0 or end <= start or end - start < 3 or end - start > 600:
         raise ValueError("clip range must be 3..600 seconds and increasing")
+    if crop_center_x is not None and crop_center_keyframes is not None:
+        raise ValueError("crop_center_x and crop_center_keyframes are mutually exclusive")
+    if crop_center_keyframes is not None:
+        from muse.video_face_framing import build_dynamic_crop_expression
+        crop_expression = build_dynamic_crop_expression(
+            crop_center_keyframes, duration_seconds=end - start,
+        )
+        crop_filter = f"crop=1080:1920:'{crop_expression}':0"
+    elif crop_center_x is not None:
+        crop_center = _finite_number(crop_center_x, "crop_center_x")
+        if not 0.0 <= crop_center <= 1.0:
+            raise ValueError("crop_center_x must be between 0 and 1")
+        crop_filter = f"crop=1080:1920:max(0\\,min(iw-1080\\,iw*{crop_center:.6f}-540)):0"
+    else:
+        crop_filter = "crop=1080:1920"
     filters = [
         "scale=1080:1920:force_original_aspect_ratio=increase",
-        "crop=1080:1920", "setsar=1", "format=yuv420p",
+        crop_filter, "setsar=1", "format=yuv420p",
     ]
     if subtitles is not None:
         subtitle_path = Path(subtitles).expanduser()
@@ -408,6 +425,8 @@ def render_vertical_clip(
     ffprobe_path: str = "ffprobe",
     subtitles: str | Path | None = None,
     available_encoders: Sequence[str] = (),
+    crop_center_x: float | None = None,
+    crop_center_keyframes: list[dict[str, object]] | None = None,
     runner: Callable = subprocess.run,
 ) -> dict[str, object]:
     target = Path(output).expanduser()
@@ -423,6 +442,8 @@ def render_vertical_clip(
         command = build_vertical_clip_command(
             source, output, start_seconds, end_seconds, ffmpeg_path=ffmpeg_path,
             subtitles=subtitles, available_encoders=available_encoders,
+            crop_center_x=crop_center_x,
+            crop_center_keyframes=crop_center_keyframes,
         )
         result = runner(command, capture_output=True, text=True, timeout=900, check=False)
         created = target.is_file()
@@ -445,6 +466,15 @@ def render_vertical_clip(
             "duration_seconds": round(duration, 3), "width": 1080, "height": 1920,
             "encoder": "h264_amf" if "h264_amf" in command else "libx264",
             "bytes": target.stat().st_size,
+            "framing": {
+                "mode": (
+                    "sampled_face_keyframes" if crop_center_keyframes is not None
+                    else "face_aware_clip_center" if crop_center_x is not None else "center_crop"
+                ),
+                "face_center_x": crop_center_x,
+                "crop_keyframes": crop_center_keyframes,
+                "continuous_tracking": False,
+            },
             "source_probe": {
                 "duration_seconds": source_duration,
                 "width": source_probe["video"].get("width"),
@@ -488,6 +518,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     render.add_argument("--index", type=int, default=0)
     render.add_argument("--subtitles")
     render.add_argument("--captions-from-analysis", action="store_true", help="write clip-relative SRT from saved Cantonese word timestamps")
+    framing_group = render.add_mutually_exclusive_group()
+    framing_group.add_argument("--face-aware-crop", action="store_true", help="use one stable local OpenCV frontal-face crop center")
+    framing_group.add_argument("--dynamic-face-crop", action="store_true", help="interpolate sampled local face positions into a time-varying crop")
     render.add_argument("--ffmpeg", default="ffmpeg")
     render.add_argument("--ffprobe", default="ffprobe")
     register = sub.add_parser("register", help="package a rendered clip in Muse's canonical video product and attempt ledgers")
@@ -534,13 +567,32 @@ def main(argv: Sequence[str] | None = None) -> int:
                 generated_srt = Path(args.output_mp4).with_suffix(".srt")
                 write_candidate_srt(payload["words"], candidate["start"], candidate["end"], generated_srt)
                 subtitle_path = str(generated_srt)
+            face_framing = None
+            crop_center_x = None
+            crop_center_keyframes = None
+            if args.face_aware_crop or args.dynamic_face_crop:
+                from muse.video_face_framing import detect_clip_face_center
+                face_framing = detect_clip_face_center(
+                    args.source, candidate["start"], candidate["end"],
+                )
+                if face_framing.get("status") == "detected":
+                    if args.dynamic_face_crop:
+                        crop_center_keyframes = (
+                            face_framing.get("stabilized_face_keyframes")
+                            or face_framing.get("face_keyframes")
+                        )
+                    else:
+                        crop_center_x = face_framing.get("face_center_x")
             from muse.media import discover_media_tools
             available_encoders = discover_media_tools().hardware_encoders
             result = render_vertical_clip(
                 args.source, args.output_mp4, candidate["start"], candidate["end"],
                 ffmpeg_path=args.ffmpeg, ffprobe_path=args.ffprobe, subtitles=subtitle_path,
-                available_encoders=available_encoders,
+                available_encoders=available_encoders, crop_center_x=crop_center_x,
+                crop_center_keyframes=crop_center_keyframes,
             )
+            if face_framing is not None:
+                result["face_framing"] = face_framing
             if result["status"] == "completed":
                 from muse.video_qa import inspect_video_file
                 qa = inspect_video_file(

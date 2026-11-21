@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onDestroy, onMount } from "svelte";
   import { filterCommands, isCommandPaletteShortcut } from "../command-palette.js";
   import { USER_GUIDE_STEPS, getGuideProgress, getGuideStep } from "../user-guide.js";
   import { filterQueueTasks } from "../queue-filter.js";
@@ -17,11 +17,13 @@
   import PrometheusCorePanel from "./lib/PrometheusCorePanel.svelte";
   import InitiativePerformancePanel from "./lib/InitiativePerformancePanel.svelte";
   import VideoReleaseReview from "./lib/VideoReleaseReview.svelte";
+  import VideoVisualReview from "./lib/VideoVisualReview.svelte";
   import MemPalacePanel from "./lib/MemPalacePanel.svelte";
   import {
     createApiClient,
     resolveDesktopConnection,
     type AgentRecord,
+    type AgentOrgChartResponse,
     type ApiClient,
     type CelestialCatalogResponse,
     type FeedbackRecord,
@@ -44,11 +46,14 @@
     type WorkflowRunRecord,
     type SelfImprovementStatus,
     type MemPalaceStatusResponse,
+    type ContextualInquiryReviewSummary,
+    type ContextualInquiryReviewResult,
   } from "./lib/api";
   const POLL_INTERVAL_MS = 5000;
 
   interface Snapshot {
     agents: AgentRecord[];
+    orgChart: AgentOrgChartResponse | null;
     registryConfigured: boolean;
     events: MuseEvent[];
     queue: QueueSnapshot | null;
@@ -67,6 +72,7 @@
   let message = "";
   let registryConfigured = false;
   let agents: AgentRecord[] = [];
+  let agentOrgChart: AgentOrgChartResponse | null = null;
   let events: MuseEvent[] = [];
   let updatedAt: number | null = null;
   let queueSnapshot: QueueSnapshot | null = null;
@@ -78,6 +84,11 @@
   let proposals: ImprovementProposal[] = [];
   let selfImprovementStatus: SelfImprovementStatus | null = null;
   let mempalaceStatus: MemPalaceStatusResponse | null = null;
+  let contextualReviewTickets: ContextualInquiryReviewSummary[] = [];
+  let selectedContextualReviewId: string | null = null;
+  let contextualReviewResult: ContextualInquiryReviewResult | null = null;
+  let contextualReviewBusy = false;
+  let contextualReviewMessage = "";
   let selectedProposal: ImprovementDetail | null = null;
   let proposalBusy = false;
   let feedbackCategory = "usability";
@@ -125,6 +136,19 @@
   let recipeTrace: VideoRecipeTrace | null = null;
   let recipeTraceBusy = false;
   let recipeTraceMessage = "";
+  let contactSheetUrl = "";
+  let contactSheetMessage = "";
+  let selectedVisualReviewProductId: string | null = null;
+  let visualReviewSheetUrl = "";
+  let visualReviewMessage = "";
+  let visualReviewBusy = false;
+  let visualReviewSubmitting = false;
+  let visualReviewRecords: import("./lib/api").VisualReviewRecord[] = [];
+  let visualRevisionBrief: import("./lib/api").VisualRevisionBrief | null = null;
+  onDestroy(() => {
+    if (visualReviewSheetUrl) URL.revokeObjectURL(visualReviewSheetUrl);
+    contextualReviewResult = null;
+  });
   let videoEngineStatus: VideoEngineStatus | null = null;
   let gpuResourceStatus: GpuResourceStatus | null = null;
   let pairingCode = "";
@@ -174,7 +198,7 @@
   let presetLowerBits = "";
   let reducedFx = false;
 
-  type ViewKey = "overview" | "tasks" | "agents" | "memory" | "knowledge" | "studio" | "evolve" | "runtime";
+  type ViewKey = "overview" | "tasks" | "agents" | "memory" | "knowledge" | "studio" | "evolve" | "runtime" | "reviews";
   const VIEWS: Array<{ key: ViewKey; label: string; icon: string; hint: string }> = [
     { key: "overview", label: "总览", icon: "core", hint: "调度阵、健康度与实时指标" },
     { key: "tasks", label: "任务中心", icon: "tasks", hint: "队列、Commander 工作流与执行节点" },
@@ -184,6 +208,7 @@
     { key: "studio", label: "创作台", icon: "studio", hint: "选题评分、影像工坊与成果库" },
     { key: "evolve", label: "进化", icon: "evolve", hint: "反馈回流、能力雷达与改进提案" },
     { key: "runtime", label: "运行时", icon: "flame", hint: "常驻引擎、创作流水线与事件流" },
+    { key: "reviews", label: "个案审查", icon: "lock", hint: "加密审查结果、人工复核与独立审批" },
   ];
   const ANCHOR_VIEW: Record<string, ViewKey> = {
     "#overview": "overview",
@@ -214,12 +239,15 @@
   }
 
   function setView(next: ViewKey): void {
+    if (next !== "reviews") closeContextualInquiryReview();
     view = next;
     document.querySelector(".stage")?.scrollTo({ top: 0, behavior: "smooth" });
   }
 
   function focusAnchor(selector: string): void {
-    view = ANCHOR_VIEW[selector] ?? "overview";
+    const next = ANCHOR_VIEW[selector] ?? "overview";
+    if (next !== "reviews") closeContextualInquiryReview();
+    view = next;
     window.setTimeout(() => {
       document.querySelector(selector)?.scrollIntoView({ behavior: "smooth", block: "start" });
     }, 60);
@@ -574,6 +602,7 @@
 
   function applySnapshot(snapshot: Snapshot): void {
     agents = snapshot.agents;
+    agentOrgChart = snapshot.orgChart;
     registryConfigured = snapshot.registryConfigured;
     events = snapshot.events;
     updatedAt = snapshot.updatedAt;
@@ -599,7 +628,7 @@
           if (!client) {
             client = createApiClient(await resolveDesktopConnection());
           }
-          const [health, agentResponse, overview, feedbackResponse, improvementResponse, selfImprovementResponse, inspirationResponse, artifactResponse, productResponse, engineResponse, videoAttemptResponse, gpuResourceResponse, daemonResponse, recipesResponse, jobsResponse, celestialResponse, prometheusResponse, graphResponse, galaxyResponse, mempalaceResponse] = await Promise.all([
+          const [health, agentResponse, overview, feedbackResponse, improvementResponse, selfImprovementResponse, inspirationResponse, artifactResponse, productResponse, engineResponse, videoAttemptResponse, gpuResourceResponse, daemonResponse, recipesResponse, jobsResponse, celestialResponse, prometheusResponse, graphResponse, galaxyResponse, mempalaceResponse, contextualReviewResponse] = await Promise.all([
             client.health(),
             client.agents(),
             client.overview(),
@@ -620,9 +649,11 @@
             client.knowledgeGraph({ limit: 160, nodeType: graphNodeTypeFilter, q: graphSearchQuery }).catch(() => null),
             client.galaxy().catch(() => null),
             client.mempalaceStatus().catch(() => null),
+            client.contextualInquiryReviews(100).catch(() => null),
           ]);
           lastSnapshot = {
             agents: Array.isArray(agentResponse.agents) ? agentResponse.agents : [],
+            orgChart: agentResponse.org_chart ?? null,
             registryConfigured: Boolean(agentResponse.registry_configured),
             events: Array.isArray(overview.recent_events) ? overview.recent_events : [],
             updatedAt: Date.now(),
@@ -635,6 +666,12 @@
           proposals = Array.isArray(improvementResponse.proposals) ? improvementResponse.proposals : [];
           selfImprovementStatus = selfImprovementResponse;
           if (mempalaceResponse) mempalaceStatus = mempalaceResponse;
+          if (contextualReviewResponse) {
+            contextualReviewTickets = Array.isArray(contextualReviewResponse.reviews) ? contextualReviewResponse.reviews : [];
+            if (selectedContextualReviewId && !contextualReviewTickets.some((item) => item.task_id === selectedContextualReviewId)) {
+              closeContextualInquiryReview();
+            }
+          }
           inspirations = Array.isArray(inspirationResponse.inspirations) ? inspirationResponse.inspirations : [];
           artifacts = Array.isArray(artifactResponse.artifacts) ? artifactResponse.artifacts : [];
           products = Array.isArray(productResponse?.products) ? productResponse.products : [];
@@ -687,6 +724,35 @@
       refreshBusy = false;
     }
   }
+  function closeContextualInquiryReview(): void {
+    selectedContextualReviewId = null;
+    contextualReviewResult = null;
+    contextualReviewMessage = "";
+    contextualReviewBusy = false;
+  }
+
+  async function openContextualInquiryReview(taskId: string): Promise<void> {
+    if (!client || !/^[0-9a-f]{32}$/.test(taskId) || contextualReviewBusy) return;
+    if (selectedContextualReviewId === taskId) {
+      closeContextualInquiryReview();
+      return;
+    }
+    selectedContextualReviewId = taskId;
+    contextualReviewResult = null;
+    contextualReviewMessage = "";
+    contextualReviewBusy = true;
+    try {
+      const response = await client.contextualInquiryReviewResult(taskId);
+      if (selectedContextualReviewId === taskId) contextualReviewResult = response.review;
+    } catch (error) {
+      if (selectedContextualReviewId === taskId) {
+        contextualReviewMessage = error instanceof Error ? error.message : "无法读取加密审查结果";
+      }
+    } finally {
+      if (selectedContextualReviewId === taskId) contextualReviewBusy = false;
+    }
+  }
+
   async function submitInspiration(): Promise<void> {
     if (!client || inspirationBusy || !inspirationContent.trim()) return;
     inspirationBusy = true;
@@ -790,15 +856,36 @@
       selectedRecipeTraceAttemptId = null;
       recipeTrace = null;
       recipeTraceMessage = "";
+      contactSheetMessage = "";
+      if (contactSheetUrl) URL.revokeObjectURL(contactSheetUrl);
+      contactSheetUrl = "";
       return;
     }
     selectedRecipeTraceAttemptId = attemptId;
     recipeTrace = null;
     recipeTraceMessage = "";
+    contactSheetMessage = "";
+    if (contactSheetUrl) URL.revokeObjectURL(contactSheetUrl);
+    contactSheetUrl = "";
     recipeTraceBusy = true;
     try {
       const response = await client.videoRecipeTrace(attemptId);
       recipeTrace = response.trace;
+      const contact = response.trace.release_review.checks?.visual_anomaly_review?.contact_sheet;
+      const initiativeId = response.trace.product.product_id;
+      const versionId = response.trace.product.version_id;
+      if (contact?.status === "available" && initiativeId && versionId) {
+        try {
+          const blob = await client.videoContactSheet(initiativeId, versionId);
+          const objectUrl = URL.createObjectURL(blob);
+          if (selectedRecipeTraceAttemptId === attemptId) contactSheetUrl = objectUrl;
+          else URL.revokeObjectURL(objectUrl);
+        } catch (error) {
+          contactSheetMessage = error instanceof Error ? error.message : "联系表读取失败";
+        }
+      } else {
+        contactSheetMessage = contact?.status === "not_provided" ? "此版本尚未生成联系表。" : "没有可核验的联系表证据。";
+      }
     } catch (error) {
       recipeTraceMessage = error instanceof Error ? error.message : "配方追溯读取失败";
     } finally {
@@ -922,6 +1009,73 @@
     }
   }
 
+  async function toggleProductVisualReview(product: ProductRecord): Promise<void> {
+    if (!client || product.kind !== "video_creator" || visualReviewBusy || visualReviewSubmitting) return;
+    if (selectedVisualReviewProductId === product.id) {
+      selectedVisualReviewProductId = null;
+      if (visualReviewSheetUrl) URL.revokeObjectURL(visualReviewSheetUrl);
+      visualReviewSheetUrl = "";
+      visualReviewMessage = "";
+      visualReviewRecords = [];
+      visualRevisionBrief = null;
+      return;
+    }
+    selectedVisualReviewProductId = product.id;
+    if (visualReviewSheetUrl) URL.revokeObjectURL(visualReviewSheetUrl);
+    visualReviewSheetUrl = "";
+    visualReviewMessage = "";
+    visualReviewRecords = [];
+    visualRevisionBrief = null;
+    visualReviewBusy = true;
+    try {
+      const blob = await client.videoContactSheet(product.initiative_id, product.version_id);
+      if (selectedVisualReviewProductId !== product.id) return;
+      visualReviewSheetUrl = URL.createObjectURL(blob);
+      const [history, revision] = await Promise.all([
+        client.visualReviews(product.initiative_id, product.version_id),
+        client.visualRevisionBrief(product.initiative_id, product.version_id),
+      ]);
+      if (selectedVisualReviewProductId !== product.id) return;
+      visualReviewRecords = history.reviews;
+      visualRevisionBrief = revision.brief;
+    } catch (error) {
+      visualReviewMessage = error instanceof Error
+        ? error.message
+        : "没有可核验的联系表；请先为该版本生成并打包联系表。";
+    } finally {
+      visualReviewBusy = false;
+    }
+  }
+
+  async function submitProductVisualReview(
+    product: ProductRecord,
+    payload: import("./lib/api").VisualReviewPayload,
+  ): Promise<void> {
+    if (!client || product.kind !== "video_creator" || visualReviewSubmitting || !visualReviewSheetUrl) return;
+    visualReviewSubmitting = true;
+    visualReviewMessage = "";
+    try {
+      const saved = await client.submitVisualReview(product.initiative_id, product.version_id, payload);
+      if (selectedVisualReviewProductId !== product.id) return;
+      try {
+        const [history, revision] = await Promise.all([
+          client.visualReviews(product.initiative_id, product.version_id),
+          client.visualRevisionBrief(product.initiative_id, product.version_id),
+        ]);
+        if (selectedVisualReviewProductId !== product.id) return;
+        visualReviewRecords = history.reviews;
+        visualRevisionBrief = revision.brief;
+        visualReviewMessage = "审核记录已追加并绑定当前视频及联系表哈希；身份为本机自报，发布权限没有改变。";
+      } catch {
+        visualReviewRecords = [...visualReviewRecords, saved.record];
+        visualReviewMessage = "审核记录已写入；历史列表暂时无法刷新。记录已绑定当前素材哈希，发布权限没有改变。";
+      }
+    } catch (error) {
+      visualReviewMessage = error instanceof Error ? error.message : "视觉审核记录提交失败";
+    } finally {
+      visualReviewSubmitting = false;
+    }
+  }
   function subtitleCueTime(seconds: number): string {
     const safe = Math.max(0, seconds);
     const minutes = Math.floor(safe / 60);
@@ -1342,6 +1496,7 @@
       <span>{item.label}</span>
       {#if item.key === "tasks" && pendingAttention > 0}<i aria-hidden="true"></i>{/if}
       {#if item.key === "evolve" && selfImprovementStatus && selfImprovementStatus.pending_human_review > 0}<i aria-hidden="true"></i>{/if}
+      {#if item.key === "reviews" && contextualReviewTickets.length > 0}<i aria-hidden="true"></i>{/if}
     </button>
   {/each}
   <div class="rail-sep" aria-hidden="true"></div>
@@ -1913,7 +2068,7 @@
                               <span><b>整链一致性</b><small>{recipeTrace.chain_consistent ? "通过" : "待核验 / 不一致"}</small></span>
                               <span><b>发布权限</b><small>未授权 · {recipeTrace.release_review.status}</small></span>
                             </div>
-                            <VideoReleaseReview review={recipeTrace.release_review} />
+                            <VideoReleaseReview review={recipeTrace.release_review} contactSheetUrl={contactSheetUrl} contactSheetMessage={contactSheetMessage} />
                             <small>只读追溯：不启动生成、不修改账本、不触发发布。发布仍须独立人工审核。</small>
                           {/if}
                         </section>
@@ -2011,6 +2166,11 @@
                     <small class="quality-gate-line">{recipeTraceLink.status === "ambiguous" ? "存在多条匹配任务，已停止关联；需核对 Attempt 账本" : videoAttemptSummary?.attempts_truncated ? "最近 200 条账本中未找到匹配；更早记录尚未核验" : videoAttemptSummary ? "未找到对应的唯一视频任务；不猜测关联" : "视频任务账本暂不可用，配方追溯入口未启用"}</small>
                   {/if}
                   <button type="button" class="radar-scan" onclick={() => previewProduct(product)}>预览</button>
+                  {#if product.kind === "video_creator"}
+                    <button type="button" class="radar-scan" onclick={() => toggleProductVisualReview(product)} disabled={visualReviewBusy || visualReviewSubmitting} aria-expanded={selectedVisualReviewProductId === product.id}>
+                      {selectedVisualReviewProductId === product.id ? "收起视觉审片" : "人工视觉审片"}
+                    </button>
+                  {/if}
                   {#if product.kind === "video_creator" && product.subtitle_review?.status === "pending_human_review"}
                     <button type="button" class="radar-scan" onclick={() => toggleSubtitleReview(product)} aria-expanded={selectedSubtitleReviewProductId === product.id}>逐条字幕审校</button>
                   {:else if product.kind === "video_creator" && product.subtitle_review?.status === "unavailable"}
@@ -2024,6 +2184,13 @@
                   <button type="button" class="radar-scan" onclick={() => downloadProduct(product)}>下载工程 ZIP</button>
                 </div>
               </div>
+              {#if product.kind === "video_creator" && selectedVisualReviewProductId === product.id}
+                <VideoVisualReview imageUrl={visualReviewSheetUrl} message={visualReviewMessage || (visualReviewBusy ? "正在读取联系表…" : "")} busy={visualReviewSubmitting} reviews={visualReviewRecords} revisionBrief={visualRevisionBrief} on:submit={(event) => submitProductVisualReview(product, event.detail)} />
+                <div class="product-actions">
+                  <button type="button" class="radar-scan" onclick={() => previewProduct(product)}>打开完整原片复核</button>
+                  <button type="button" class="radar-scan" onclick={() => { if (selectedTimelineId !== timelineInitiativeId(product)) toggleInitiativeTimeline(product); }}>打开审片反馈</button>
+                </div>
+              {/if}
               {#if client}
                 <InitiativePerformancePanel client={client} initiativeId={timelineInitiativeId(product)} />
               {/if}
@@ -2043,7 +2210,7 @@
                       <span><b>整链一致性</b><small>{recipeTrace.chain_consistent ? "通过" : "待核验 / 不一致"}</small></span>
                       <span><b>发布权限</b><small>未授权 · {recipeTrace.release_review.status}</small></span>
                     </div>
-                    <VideoReleaseReview review={recipeTrace.release_review} />
+                    <VideoReleaseReview review={recipeTrace.release_review} contactSheetUrl={contactSheetUrl} contactSheetMessage={contactSheetMessage} />
                     <small>只读追溯：不启动生成、不修改账本、不触发发布。can_publish=false，发布仍须独立人工审核。</small>
                   {/if}
                 </section>
@@ -2218,6 +2385,7 @@
       {connected}
       {agents}
       {registryConfigured}
+      orgChart={agentOrgChart}
       galaxy={galaxySnapshot}
     />
     {/if}
@@ -2470,6 +2638,86 @@
           </div>
         {/if}
       </section>
+    {/if}
+
+    {#if view === "reviews"}
+      <header class="view-head">
+        <div>
+          <h1>加密个案<em>人工复核</em></h1>
+          <p>只读取已完成 review-only 审查的密文结果。打开时才在内存中解密显示；此处不会批准任务、写入长期知识库或执行实验。</p>
+        </div>
+        <div class="view-head-meta">
+          <span class="chip is-quiet">{contextualReviewTickets.length} 项待复核</span>
+        </div>
+      </header>
+      <section class="card">
+        <div class="card-h">
+          <div><h2>待人工复核<em>队列</em></h2><p>列表仅显示任务编号和时间，不显示用户目标或个案原文。</p></div>
+          <button class="btn is-sm" type="button" onclick={refresh} disabled={!connected || refreshBusy}>刷新列表</button>
+        </div>
+        {#if contextualReviewTickets.length === 0}
+          <div class="empty"><b>暂无可复核的加密结果</b><span>只有经过独立 review-only 授权、专用 Worker 审查并完成密文提交的任务才会出现在这里。</span></div>
+        {:else}
+          <div class="rows">
+            {#each contextualReviewTickets as ticket (ticket.task_id)}
+              <div class="row">
+                <span>
+                  <b>个案 · {ticket.task_id.slice(0, 8)}</b>
+                  <small>创建 {ticket.created_at || "时间未知"} · 更新 {ticket.updated_at || "时间未知"}</small>
+                </span>
+                <button
+                  class="btn is-sm"
+                  type="button"
+                  onclick={() => openContextualInquiryReview(ticket.task_id)}
+                  disabled={contextualReviewBusy}
+                >{selectedContextualReviewId === ticket.task_id ? "收起结果" : "读取加密结果"}</button>
+              </div>
+            {/each}
+          </div>
+        {/if}
+      </section>
+      {#if selectedContextualReviewId}
+        <section class="card">
+          <div class="card-h">
+            <div><h2>审查结果<em>· {selectedContextualReviewId.slice(0, 8)}</em></h2><p>结果只在当前页面内存中展示；关闭或切换页面会清除展示状态。</p></div>
+            <button class="btn is-sm" type="button" onclick={closeContextualInquiryReview}>清除显示</button>
+          </div>
+          {#if contextualReviewBusy}
+            <div class="empty"><b>正在读取 DPAPI 加密结果…</b><span>读取过程不会修改任务状态。</span></div>
+          {:else if contextualReviewMessage}
+            <div class="notice is-bad" role="status">{contextualReviewMessage}</div>
+          {:else if contextualReviewResult}
+            <article class="proposal-detail">
+              <h3>审查摘要</h3>
+              <p>{contextualReviewResult.summary}</p>
+              <small>结果版本 {contextualReviewResult.schema_version} · 个案编号 {contextualReviewResult.inquiry_id}</small>
+            </article>
+            <div class="rows">
+              {#each contextualReviewResult.findings as finding (finding.finding_id)}
+                <article class="proposal-detail">
+                  <div class="card-h">
+                    <h3>{finding.statement}</h3>
+                    <span class="chip is-quiet">
+                      {finding.assessment === "support_candidate" ? "支持线索候选" : finding.assessment === "counter_candidate" ? "反向线索候选" : "尚未解决"}
+                    </span>
+                  </div>
+                  <p>{finding.rationale}</p>
+                  <small>观察引用 {finding.observation_refs.length} 项 · 假设引用 {finding.hypothesis_refs.length} 项</small>
+                </article>
+              {/each}
+            </div>
+            <article class="proposal-detail">
+              <h3>仍待查明</h3>
+              {#if contextualReviewResult.unknowns.length}
+                <ul>{#each contextualReviewResult.unknowns as item}<li>{item}</li>{/each}</ul>
+              {:else}
+                <p>本轮没有新增未知项；仍需人工核对来源与引用。</p>
+              {/if}
+              <small>候选判断不等于事实裁决。此页面没有批准、证据定案或知识入库操作。</small>
+            </article>
+          {/if}
+        </section>
+      {/if}
     {/if}
 
     <footer class="stage-foot">

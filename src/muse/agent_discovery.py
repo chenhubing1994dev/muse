@@ -61,8 +61,8 @@ def probe_configured_health_endpoints(
     seen: set[str] = set()
     healthy = unavailable = disabled = 0
     for item in config["agents"]:
-        if not isinstance(item, dict) or set(item) - {"agent_id", "health_url", "enabled"}:
-            raise ValueError("each configured agent must contain only agent_id, health_url and optional enabled")
+        if not isinstance(item, dict) or set(item) - {"agent_id", "health_url", "enabled", "model_family", "model_id"}:
+            raise ValueError("each configured agent must contain only agent_id, health_url, enabled and optional model_family/model_id")
         agent_id = item.get("agent_id")
         if not isinstance(agent_id, str) or not agent_id.strip() or len(agent_id) > 160 or agent_id in seen:
             raise ValueError("agent_id must be unique non-empty text of at most 160 characters")
@@ -71,6 +71,12 @@ def probe_configured_health_endpoints(
         enabled = item.get("enabled", True)
         if not isinstance(enabled, bool):
             raise ValueError("enabled must be boolean")
+        model_family = item.get("model_family")
+        if model_family is not None and (not isinstance(model_family, str) or not model_family.strip() or len(model_family.strip()) > 80):
+            raise ValueError("model_family must be non-empty text of at most 80 characters when provided")
+        model_id = item.get("model_id")
+        if model_id is not None and (not isinstance(model_id, str) or not model_id.strip() or len(model_id.strip()) > 160):
+            raise ValueError("model_id must be non-empty text of at most 160 characters when provided")
         if not enabled:
             disabled += 1
             continue
@@ -119,8 +125,8 @@ def discover_configured_agents(config_path: str | Path, registry: AgentRegistry,
     unavailable: list[dict[str, str]] = []
     seen: set[str] = set()
     for item in config["agents"]:
-        if not isinstance(item, dict) or set(item) - {"agent_id", "health_url", "enabled"}:
-            raise ValueError("each configured agent must contain only agent_id, health_url and optional enabled")
+        if not isinstance(item, dict) or set(item) - {"agent_id", "health_url", "enabled", "model_family", "model_id"}:
+            raise ValueError("each configured agent must contain only agent_id, health_url, enabled and optional model_family/model_id")
         agent_id = item.get("agent_id")
         if not isinstance(agent_id, str) or not agent_id.strip() or len(agent_id) > 160 or agent_id in seen:
             raise ValueError("agent_id must be unique non-empty text of at most 160 characters")
@@ -129,6 +135,12 @@ def discover_configured_agents(config_path: str | Path, registry: AgentRegistry,
         enabled = item.get("enabled", True)
         if not isinstance(enabled, bool):
             raise ValueError("enabled must be boolean")
+        model_family = item.get("model_family")
+        if model_family is not None and (not isinstance(model_family, str) or not model_family.strip() or len(model_family.strip()) > 80):
+            raise ValueError("model_family must be non-empty text of at most 80 characters when provided")
+        model_id = item.get("model_id")
+        if model_id is not None and (not isinstance(model_id, str) or not model_id.strip() or len(model_id.strip()) > 160):
+            raise ValueError("model_id must be non-empty text of at most 160 characters when provided")
         request = Request(url, headers={"Accept": "application/json", "User-Agent": "Muse-Agent-Discovery/1"}, method="GET")
         try:
             with opener.open(request, timeout=timeout_seconds) as response:
@@ -148,7 +160,9 @@ def discover_configured_agents(config_path: str | Path, registry: AgentRegistry,
                 raise ValueError("health response metadata is invalid")
             # Endpoint-provided capabilities are descriptive metadata only; they do not grant tool permissions.
             registry.register(agent_id, role=role, capabilities=capabilities,
-                              display_name=display_name, source="local:http-health", enabled=enabled)
+                              display_name=display_name, source="local:http-health", enabled=enabled,
+                              model_family=model_family.strip() if model_family is not None else None,
+                              model_id=model_id.strip() if model_id is not None else None)
             if enabled:
                 registry.heartbeat(agent_id)
             discovered.append(agent_id)

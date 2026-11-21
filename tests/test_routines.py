@@ -4,7 +4,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from muse.routines import RoutineStore, run_due_once, run_forever
+from muse.routines import (
+    RoutineStore, run_due_once, run_forever, routine_handler_with_context,
+)
 
 
 class StopAfterWait:
@@ -229,6 +231,172 @@ class RoutineSchedulerTests(unittest.TestCase):
             self.assertEqual(result, {"processed": 0, "errors": 0})
             with self.assertRaises(ValueError):
                 run_forever(db, {}, poll_seconds=0)
+
+
+    def test_cooperative_handler_observes_stop_and_keeps_routine_due_for_resume(self) -> None:
+        import threading
+
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "routines.sqlite3"
+            with RoutineStore(db) as store:
+                routine = store.add("cooperative", "research", interval_seconds=1800)
+            stop_event = threading.Event()
+            started = threading.Event()
+            outcomes = []
+
+            @routine_handler_with_context
+            def handler(_payload, *, execution_context):
+                started.set()
+                self.assertTrue(execution_context.stop_event.wait(3))
+                execution_context.raise_if_cancelled()
+
+            runner = threading.Thread(target=lambda: outcomes.append(
+                run_due_once(db, {"research": handler}, lease_seconds=3, stop_event=stop_event)
+            ))
+            runner.start()
+            self.assertTrue(started.wait(2))
+            stop_event.set()
+            runner.join(timeout=5)
+            self.assertFalse(runner.is_alive())
+            self.assertEqual(outcomes[0]["outcomes"][0]["status"], "cancelled")
+            with RoutineStore(db) as store:
+                saved = store.get(routine["id"])
+            self.assertEqual(saved["last_status"], "cancelled")
+            self.assertIsNone(saved["lease_token"])
+            self.assertLessEqual(saved["next_run_at"], RoutineStore._now().isoformat())
+
+    def test_foreground_loop_passes_stop_event_into_cooperative_routine(self) -> None:
+        import threading
+
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "routines.sqlite3"
+            with RoutineStore(db) as store:
+                routine = store.add("cooperative-loop", "research", interval_seconds=1800)
+            stop_event = threading.Event()
+            started = threading.Event()
+
+            @routine_handler_with_context
+            def handler(_payload, *, execution_context):
+                started.set()
+                self.assertTrue(execution_context.stop_event.wait(3))
+                execution_context.raise_if_cancelled()
+
+            results = []
+            runner = threading.Thread(target=lambda: results.append(
+                run_forever(db, {"research": handler}, stop_event=stop_event, poll_seconds=1)
+            ))
+            runner.start()
+            self.assertTrue(started.wait(2))
+            stop_event.set()
+            runner.join(timeout=5)
+            self.assertFalse(runner.is_alive())
+            self.assertEqual(results, [{"processed": 1, "errors": 0}])
+            with RoutineStore(db) as store:
+                self.assertEqual(store.get(routine["id"])["last_status"], "cancelled")
+
+    def test_stop_skips_already_claimed_routines_that_have_not_started(self) -> None:
+        import threading
+
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "routines.sqlite3"
+            with RoutineStore(db) as store:
+                store.add("a-first", "first", interval_seconds=1800)
+                second = store.add("b-second", "second", interval_seconds=1800)
+            stop_event = threading.Event()
+            calls = []
+
+            def first_handler(_payload):
+                calls.append("first")
+                stop_event.set()
+
+            def second_handler(_payload):
+                calls.append("second")
+
+            result = run_due_once(
+                db, {"first": first_handler, "second": second_handler},
+                max_routines=2, max_workers=1, stop_event=stop_event,
+            )
+            self.assertEqual(calls, ["first"])
+            self.assertEqual([item["status"] for item in result["outcomes"]], ["succeeded", "cancelled"])
+            with RoutineStore(db) as store:
+                saved = store.get(second["id"])
+            self.assertEqual(saved["last_status"], "cancelled")
+            self.assertLessEqual(saved["next_run_at"], RoutineStore._now().isoformat())
+
+
+    def test_parallel_handlers_inherit_existing_model_call_context(self) -> None:
+        import threading
+        from muse.model_call_context import model_call_scope, record_current_model_usage
+        from muse.usage_ledger import UsageLedger
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            routines_db = root / "routines.sqlite3"
+            usage_db = root / "tasks.sqlite3"
+            with RoutineStore(routines_db) as store:
+                store.add("usage-one", "parallel_usage", interval_seconds=1800)
+                store.add("usage-two", "parallel_usage", interval_seconds=1800)
+            barrier = threading.Barrier(2)
+
+            def handler(_payload):
+                barrier.wait(timeout=3)
+                self.assertTrue(record_current_model_usage(
+                    "lm-studio-local", "routine-context-model",
+                    {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7},
+                ))
+
+            with model_call_scope(usage_db, task_id="routine-task", agent_id="routine-agent", project_id="muse"):
+                result = run_due_once(
+                    routines_db, {"parallel_usage": handler}, max_routines=2, max_workers=2,
+                )
+            self.assertEqual(result["processed"], 2)
+            with UsageLedger(usage_db.with_name("model_usage.sqlite3")) as ledger:
+                events = ledger.list_events(limit=10)
+            self.assertEqual(len(events), 2)
+            self.assertTrue(all(event["task_id"] == "routine-task" for event in events))
+            self.assertTrue(all(event["agent_id"] == "routine-agent" for event in events))
+
+    def test_parallel_autonomy_routines_record_project_usage_without_outer_context(self) -> None:
+        from unittest.mock import patch
+        from muse.model_call_context import record_current_model_usage
+        from muse.routines import _autonomy_handler
+        from muse.usage_ledger import UsageLedger
+
+        class FakeClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def chat(self, *args, **kwargs):
+                record_current_model_usage(
+                    "lm-studio-local", "routine-autonomy-model",
+                    {"prompt_tokens": 9, "completion_tokens": 3, "total_tokens": 12},
+                )
+                return "{}"
+
+        def fake_propose(_backlog, _task_db, _plan_db, model_call):
+            model_call([{"role": "user", "content": "safe planning probe"}])
+            return {"status": "proposal_saved"}
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            routines_db = root / "routines.sqlite3"
+            task_db = root / "tasks.sqlite3"
+            with RoutineStore(routines_db) as store:
+                for name in ("autonomy-one", "autonomy-two"):
+                    store.add(name, "autonomy_plan", interval_seconds=1800, payload={"task_db": str(task_db)})
+            with (
+                patch("muse.model_client.LMStudioClient", FakeClient),
+                patch("muse.autonomy.propose_next_step", side_effect=fake_propose),
+            ):
+                result = run_due_once(
+                    routines_db, {"autonomy_plan": _autonomy_handler}, max_routines=2, max_workers=2,
+                )
+            self.assertEqual(result["processed"], 2)
+            with UsageLedger(task_db.with_name("model_usage.sqlite3")) as ledger:
+                events = ledger.list_events(limit=10)
+            self.assertEqual(len(events), 2)
+            self.assertTrue(all(event["project_id"] == "muse" for event in events))
+            self.assertTrue(all(event["task_id"] is None and event["agent_id"] is None for event in events))
 
 
 if __name__ == "__main__":

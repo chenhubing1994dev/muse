@@ -9,6 +9,7 @@ from muse.progress import new_evolution_cycle_id, record_evolution_cycle_event
 from muse.research_knowledge import ResearchKnowledgeStore
 from muse.video_product_builder import VideoProductBuilder
 from muse.subtitle_review import build_subtitle_review, parse_srt_cues
+from muse.video_publish_package import build_publish_package_with_optional_generated_contact_sheet
 
 SCENES = [
  { "id":"shot-01","file":"shot-01.mp4","duration":2.083333,"caption":"你敢信 AI 的每一句话？","prompt_id":None,"seed":None}, { "id":"shot-02","file":"shot-02.mp4","duration":2.083333,"caption":"流畅表达\n不等于真实。","prompt_id":None,"seed":None},
@@ -36,6 +37,18 @@ def run(command: list[str], cwd: Path, timeout: int = 900) -> subprocess.Complet
         detail = (result.stderr or result.stdout or "unknown process error")[-3000:]
         raise RuntimeError(f"command failed ({result.returncode}): {detail}")
     return result
+
+def attach_visual_review_handoff(workspace: Path, output_dir: Path, result: dict[str, Any]) -> dict[str, Any]:
+    """Persist a QA-passed generation and attach a truthful visual-review package."""
+    mp4 = result.get("mp4")
+    if result.get("status") != "completed" or not isinstance(mp4, dict) or mp4.get("full_decode") != "passed":
+        raise RuntimeError("visual-review handoff requires a completed, full-decode-passed master video")
+    generation_path = output_dir / "generation.json"
+    generation_path.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    package = build_publish_package_with_optional_generated_contact_sheet(workspace, output_dir)
+    result["publish_package"] = package
+    generation_path.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return package
 
 def write_ambient(path: Path, seconds: float, rate: int = 48000) -> None:
     frames = int(seconds * rate)
@@ -390,11 +403,13 @@ def build(workspace: Path, output_dir: Path, title: str = TITLE,
             "status_note": "testing; human listening and editorial review required before publication",
             "completed_at": datetime.now(timezone.utc).isoformat(),
         }
-        (output_dir/"generation.json").write_text(json.dumps(result,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
-        record_evolution_cycle_event(progress_db, cycle_id, "completed",
+        attach_visual_review_handoff(workspace, output_dir, result)
+        record_evolution_cycle_event(
+            progress_db, cycle_id, "completed",
             summary=("Research-backed Cantonese-narrated 9:16 short rendered, ASR checked, packaged and linked to Creator Initiative/Research Wiki."
                      if recipe_id == "cantonese_pilot_v2" else
-                     "Research-backed 9:16 short rendered, fully decoded, packaged and linked to Creator Initiative/Research Wiki."))
+                     "Research-backed 9:16 short rendered, fully decoded, packaged and linked to Creator Initiative/Research Wiki."),
+        )
         return result
     except Exception:
         record_evolution_cycle_event(progress_db,cycle_id,"failed",summary="High-value short production failed.",

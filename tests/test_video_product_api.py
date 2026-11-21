@@ -80,7 +80,11 @@ class VideoProductApiTests(unittest.TestCase):
 
     def test_video_job_endpoint_runs_async_and_publishes_product(self):
         with patch("muse.video_product_builder.discover_media_tools", return_value=self._inventory()), \
-             patch("muse.video_product_builder.assemble_video_from_folder", side_effect=self._render):
+             patch("muse.video_product_builder.assemble_video_from_folder", side_effect=self._render), \
+             patch("muse.video_visual_evidence.create_visual_review_evidence_pack", return_value={
+                 "status": "available", "evidence_type": "visual-review-evidence-v1",
+                 "can_publish": False, "human_review_required": True,
+             }):
             with urlopen(self._request("/api/v1/video-products", method="POST", payload={"source": "demo", "title": "异步视频任务", "audio_mode": "narration"})) as response:
                 self.assertEqual(response.status, 202)
                 job_id = json.loads(response.read())["job"]["id"]
@@ -93,6 +97,8 @@ class VideoProductApiTests(unittest.TestCase):
                 time.sleep(0.02)
         self.assertEqual(job["status"], "succeeded", job)
         self.assertEqual(job["product"]["kind"], "video_creator")
+        self.assertEqual(job["visual_review_evidence"]["status"], "available")
+        self.assertFalse(job["visual_review_evidence"]["can_publish"])
         manifest = json.loads((self.products / job["product"]["initiative_id"] / job["product"]["version_id"] / "manifest.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["video_metadata"]["audio_mode"], "narration")
 
@@ -122,6 +128,69 @@ class VideoProductApiTests(unittest.TestCase):
         storyboard = json.loads((product_dir / "storyboard.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["execution"]["ai_generation"], "completed")
         self.assertEqual(storyboard["prompt"], "一只狐狸穿过晨雾竹林")
+
+
+    def test_generic_video_product_contact_sheet_and_visual_review_flow(self):
+        import hashlib
+        from muse.video_human_review import CHECKLIST_KEYS
+        from muse.video_visual_evidence import create_visual_review_evidence_pack
+
+        initiative_id, version_id = "c" * 32, "d" * 20
+        product_dir = self.products / initiative_id / version_id
+        product_dir.mkdir(parents=True)
+        video = product_dir / "video.mp4"
+        video.write_bytes(bytes.fromhex("000000186674797069736f6d66697874757265"))
+        qa = {"schema_version": 1, "status": "passed", "path": "video.mp4",
+              "artifact_sha256": hashlib.sha256(video.read_bytes()).hexdigest()}
+        (product_dir / "qa-report.json").write_text(json.dumps(qa), encoding="utf-8")
+        (product_dir / "README.md").write_text("video product", encoding="utf-8")
+        (product_dir / "storyboard.json").write_text("{}", encoding="utf-8")
+        (product_dir / "product.zip").write_bytes(b"zip fixture")
+        names = ("README.md", "storyboard.json", "video.mp4", "product.zip", "qa-report.json")
+        manifest = {
+            "product_kind": "video_creator", "initiative_id": initiative_id,
+            "version_id": version_id, "title": "Generic product", "status": "testing",
+            "quality_gate": {"status": "passed", "passed": True, "ready_to_publish": False,
+                             "report": "qa-report.json"},
+            "files": {name: hashlib.sha256((product_dir / name).read_bytes()).hexdigest() for name in names},
+        }
+        (product_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+        def fake_contact_sheet(source, target, **kwargs):
+            target.write_bytes(
+                b"\x89PNG\r\n\x1a\n" + (13).to_bytes(4, "big") + b"IHDR"
+                + (640).to_bytes(4, "big") + (480).to_bytes(4, "big") + b"fixture"
+            )
+            return {"status": "completed", "width": 640, "height": 480, "image_decode": "passed"}
+
+        def verified(*_args, **_kwargs):
+            return {"validated": True, "quality_gate": {"status": "passed", "passed": True}}
+
+        with patch("muse.video_product_builder.VideoProductBuilder.verify_path", side_effect=verified):
+            pack = create_visual_review_evidence_pack(
+                self.products, initiative_id, version_id, contact_sheet_factory=fake_contact_sheet,
+            )
+            self.assertEqual(pack["status"], "available")
+            sheet_path = f"/api/v1/products/{initiative_id}/{version_id}/contact-sheet"
+            with urlopen(self._request(sheet_path)) as response:
+                self.assertEqual(response.headers.get_content_type(), "image/png")
+                self.assertTrue(response.read().startswith(b"\x89PNG"))
+            review_path = f"/api/v1/products/{initiative_id}/{version_id}/visual-review"
+            with urlopen(self._request(review_path)) as response:
+                self.assertEqual(json.loads(response.read())["count"], 0)
+            payload = {
+                "decision": "approved", "reviewer": "Local Editor", "reviewer_role": "video_editor",
+                "rationale": "Reviewed the complete video and contact sheet carefully.",
+                "checklist": {key: True for key in CHECKLIST_KEYS},
+                "confirmation": "RECORD-VISUAL-REVIEW",
+            }
+            with urlopen(self._request(review_path, method="POST", payload=payload)) as response:
+                self.assertEqual(response.status, 201)
+                self.assertEqual(json.loads(response.read())["record"]["decision"], "approved")
+            with urlopen(self._request(review_path)) as response:
+                history = json.loads(response.read())
+                self.assertEqual(history["count"], 1)
+                self.assertEqual(history["reviews"][0]["evidence_status"], "verified_human_review_digest_scope_bound")
 
     def test_video_job_rejects_missing_source_and_unauthorized_request(self):
         with self.assertRaises(HTTPError) as missing:

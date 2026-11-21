@@ -248,6 +248,69 @@ def build_video_recipe_trace(
                     "account_authorization": checklist.get("account_authorization", "unknown"),
                     "official_publish_api": checklist.get("official_publish_api", "unknown"),
                 }
+            review_ledger_path = root / "data" / "reviews" / "visual-content-reviews.sqlite3"
+            evidence_pack_dir = product_dir / "visual-review-evidence-v1"
+            if release.get("status") == "draft_only" or evidence_pack_dir.is_dir():
+                try:
+                    from muse.video_human_review import VisualReviewLedger, verify_visual_review_evidence
+                    from muse.video_publish_package import _review_record_status
+                    evidence = verify_visual_review_evidence(
+                        product_dir, attempt["product_id"], attempt["version_id"],
+                        product_dir / "video.mp4",
+                    )
+                    with VisualReviewLedger(
+                        "data/reviews/visual-content-reviews.sqlite3", workspace_root=root,
+                    ) as review_ledger:
+                        saved_reviews = review_ledger.list_reviews(
+                            attempt["product_id"], attempt["version_id"], limit=100,
+                        )
+                    if saved_reviews:
+                        latest = saved_reviews[-1]
+                        evidence_status = _review_record_status(
+                            latest, category="visual_content",
+                            initiative_id=attempt["product_id"],
+                            version_id=attempt["version_id"],
+                            video_sha256=evidence["video_sha256"],
+                            required_artifacts=evidence["artifact_sha256"],
+                            release_manifest_sha256=evidence["release_manifest_sha256"],
+                        )
+                        checks = dict(release.get("checks", {}))
+                        checks["visual_content_review"] = {
+                            "status": evidence_status,
+                            "evidence": "append-only visual review ledger",
+                            "record_id": latest.get("record_id"),
+                            "reviewer": latest.get("reviewer", {}).get("label"),
+                            "reviewed_at": latest.get("reviewed_at"),
+                            "review_sha256": latest.get("review_sha256"),
+                            "identity_assurance": "self_asserted_local_session",
+                        }
+                        visual_anomaly = checks.get("visual_anomaly_review")
+                        if isinstance(visual_anomaly, dict):
+                            visual_anomaly = dict(visual_anomaly)
+                            visual_anomaly["status"] = evidence_status
+                            visual_anomaly["human_review_record_id"] = latest.get("record_id")
+                            checks["visual_anomaly_review"] = visual_anomaly
+                        if release.get("status") == "draft_only":
+                            blockers = [
+                                name for name, item in checks.items()
+                                if not isinstance(item, dict)
+                                or item.get("status") not in {
+                                    "passed", "verified_human_review_digest_scope_bound",
+                                }
+                            ]
+                            release["blocking_items"] = blockers
+                            release["overall_status"] = (
+                                "blocked_pending_human_review" if blockers
+                                else "ready_for_separate_release_authorization"
+                            )
+                        else:
+                            release["blocking_items"] = ["release_package_not_prepared"]
+                            release["overall_status"] = "blocked_pending_release_package"
+                        release["checks"] = checks
+                        release["visual_content_review_live_overlay"] = True
+                except (OSError, ValueError, KeyError, TypeError, sqlite3.Error) as review_error:
+                    release["visual_content_review_live_overlay"] = "unavailable_or_mismatched"
+                    release["visual_content_review_error_type"] = type(review_error).__name__
         except (OSError, ValueError, KeyError, json.JSONDecodeError, VideoProductError):
             product = {"status": "unavailable_or_invalid"}
     elif attempt.get("status") == "failed":

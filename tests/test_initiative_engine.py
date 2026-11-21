@@ -438,10 +438,142 @@ class InitiativeStoreTests(unittest.TestCase):
             with InitiativeStore(Path(directory) / "initiatives.sqlite3") as store:
                 store.start_video_attempt("release-attempt", mode="prompt_to_video")
                 store.claim_next_video_attempt("worker-a", lease_seconds=15, now=1000)
-                released = store.release_video_attempt("release-attempt", worker_id="worker-a", reason="runtime_paused")
+                released = store.release_video_attempt("release-attempt", worker_id="worker-a", reason="runtime_paused", now=1001)
                 self.assertEqual(released["status"], "queued")
                 self.assertIsNone(released["worker_id"])
                 self.assertEqual(store.list_video_attempt_events("release-attempt")[-1]["event_type"], "queued")
+
+    def test_stale_same_worker_id_cannot_complete_fail_or_release_a_new_lease_epoch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with InitiativeStore(Path(directory) / "initiatives.sqlite3") as store:
+                store.start_video_attempt("fenced-attempt", mode="prompt_to_video")
+                first = store.claim_next_video_attempt("same-worker", lease_seconds=15, now=1000)
+                self.assertEqual(first["attempt_count"], 1)
+                second = store.claim_next_video_attempt("same-worker", lease_seconds=60, now=1016)
+                self.assertEqual(second["attempt_count"], 2)
+                artifact = {
+                    "product_id": "product", "version_id": "version",
+                    "mp4_sha256": "a" * 64, "package_sha256": "b" * 64,
+                }
+                with self.assertRaisesRegex(ValueError, "unexpired lease epoch"):
+                    store.complete_video_attempt(
+                        "fenced-attempt", **artifact, worker_id="same-worker", lease_epoch=1, now=1017,
+                    )
+                with self.assertRaisesRegex(ValueError, "unexpired lease epoch"):
+                    store.fail_video_attempt(
+                        "fenced-attempt", worker_id="same-worker", lease_epoch=1, now=1017,
+                    )
+                with self.assertRaisesRegex(ValueError, "unexpired lease epoch"):
+                    store.release_video_attempt(
+                        "fenced-attempt", worker_id="same-worker", lease_epoch=1, now=1017,
+                    )
+                current = store.get_video_attempt("fenced-attempt")
+                self.assertEqual(current["status"], "running")
+                self.assertEqual(current["attempt_count"], 2)
+                self.assertEqual(current["worker_id"], "same-worker")
+                failed = store.fail_video_attempt(
+                    "fenced-attempt", worker_id="same-worker", lease_epoch=2, now=1017,
+                )
+                self.assertEqual(failed["status"], "failed")
+
+    def test_expired_attempt_requeued_by_another_claim_cannot_be_terminalized_by_old_worker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with InitiativeStore(Path(directory) / "initiatives.sqlite3") as store:
+                store.start_video_attempt("other-first", mode="prompt_to_video", approval_task_id="approval-other-first")
+                store.start_video_attempt("expired-second", mode="prompt_to_video", approval_task_id="approval-expired-second")
+                old = store.claim_next_video_attempt(
+                    "worker-a", lease_seconds=15, now=1000, attempt_id="expired-second",
+                )
+                self.assertEqual(old["attempt_count"], 1)
+                other = store.claim_next_video_attempt(
+                    "worker-b", lease_seconds=60, now=1016, attempt_id="other-first",
+                )
+                self.assertEqual(other["attempt_id"], "other-first")
+                expired = store.get_video_attempt("expired-second")
+                self.assertEqual(expired["status"], "queued")
+                self.assertEqual(expired["attempt_count"], 1)
+                with self.assertRaisesRegex(ValueError, "prior worker lease"):
+                    store.complete_video_attempt(
+                        "expired-second", product_id="product", version_id="version",
+                        mp4_sha256="a" * 64, package_sha256="b" * 64,
+                        worker_id="worker-a", lease_epoch=1, now=1017,
+                    )
+                with self.assertRaisesRegex(ValueError, "prior worker lease"):
+                    store.fail_video_attempt(
+                        "expired-second", worker_id="worker-a", lease_epoch=1, now=1017,
+                    )
+                unchanged = store.get_video_attempt("expired-second")
+                self.assertEqual(unchanged["status"], "queued")
+                self.assertIsNone(unchanged["worker_id"])
+
+    def test_expired_running_video_attempt_cannot_complete_fail_or_release(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with InitiativeStore(Path(directory) / "initiatives.sqlite3") as store:
+                store.start_video_attempt("expired-running", mode="prompt_to_video")
+                claimed = store.claim_next_video_attempt("worker-a", lease_seconds=15, now=1000)
+                self.assertEqual(claimed["attempt_count"], 1)
+                artifact = {
+                    "product_id": "product", "version_id": "version",
+                    "mp4_sha256": "a" * 64, "package_sha256": "b" * 64,
+                }
+                with self.assertRaisesRegex(ValueError, "unexpired lease epoch"):
+                    store.complete_video_attempt(
+                        "expired-running", **artifact, worker_id="worker-a", lease_epoch=1, now=1016,
+                    )
+                with self.assertRaisesRegex(ValueError, "unexpired lease epoch"):
+                    store.fail_video_attempt(
+                        "expired-running", worker_id="worker-a", lease_epoch=1, now=1016,
+                    )
+                with self.assertRaisesRegex(ValueError, "unexpired lease epoch"):
+                    store.release_video_attempt(
+                        "expired-running", worker_id="worker-a", lease_epoch=1, now=1016,
+                    )
+                unchanged = store.get_video_attempt("expired-running")
+                self.assertEqual(unchanged["status"], "running")
+                self.assertEqual(unchanged["worker_id"], "worker-a")
+                self.assertEqual(unchanged["attempt_count"], 1)
+
+    def test_terminal_lease_check_uses_clock_after_waiting_for_write_lock(self):
+        import sqlite3
+        import threading
+        import time
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "initiatives.sqlite3"
+            with InitiativeStore(database) as store:
+                store.start_video_attempt("lock-delayed-terminal", mode="prompt_to_video")
+                store.claim_next_video_attempt("worker-a", lease_seconds=15, now=1000)
+                lock_connection = sqlite3.connect(database, timeout=5, check_same_thread=False)
+                lock_connection.execute("BEGIN IMMEDIATE")
+                lock_released = threading.Event()
+
+                def release_lock():
+                    time.sleep(0.05)
+                    lock_released.set()
+                    lock_connection.commit()
+
+                release_thread = threading.Thread(target=release_lock, daemon=True)
+                release_thread.start()
+
+                def clock_after_lock_wait():
+                    return 1016.0 if lock_released.is_set() else 1000.0
+
+                try:
+                    with patch("muse.initiative_engine.time.time", side_effect=clock_after_lock_wait):
+                        with self.assertRaisesRegex(ValueError, "unexpired lease epoch"):
+                            store.complete_video_attempt(
+                                "lock-delayed-terminal", product_id="product", version_id="version",
+                                mp4_sha256="a" * 64, package_sha256="b" * 64,
+                                worker_id="worker-a", lease_epoch=1,
+                            )
+                finally:
+                    release_thread.join(timeout=2)
+                    lock_connection.close()
+                self.assertFalse(release_thread.is_alive())
+                unchanged = store.get_video_attempt("lock-delayed-terminal")
+                self.assertEqual(unchanged["status"], "running")
+                self.assertEqual(unchanged["attempt_count"], 1)
 
     def test_video_attempt_can_be_cancelled_before_worker_claims_it(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -458,14 +590,392 @@ class InitiativeStoreTests(unittest.TestCase):
             with InitiativeStore(Path(directory) / "initiatives.sqlite3") as store:
                 store.start_video_attempt("retry-attempt", mode="prompt_to_video")
                 store.claim_next_video_attempt("worker-a", lease_seconds=15, now=1000)
-                store.fail_video_attempt("retry-attempt", failure_code="video.test_failure")
+                store.fail_video_attempt("retry-attempt", failure_code="video.test_failure", now=1001)
                 retried = store.retry_failed_video_attempt("retry-attempt", max_attempts=2)
                 self.assertEqual(retried["status"], "queued")
                 claimed = store.claim_next_video_attempt("worker-b", lease_seconds=15, now=1010)
                 self.assertEqual(claimed["attempt_count"], 2)
-                store.fail_video_attempt("retry-attempt", failure_code="video.second_failure")
+                store.fail_video_attempt("retry-attempt", failure_code="video.second_failure", now=1011)
                 with self.assertRaisesRegex(ValueError, "retry budget exhausted"):
                     store.retry_failed_video_attempt("retry-attempt", max_attempts=2)
+
+    def test_video_stage_checkpoints_are_idempotent_bound_to_approval_and_survive_retry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with InitiativeStore(Path(directory) / "initiatives.sqlite3") as store:
+                recipe_sha256 = "1" * 64
+                dag_sha256 = "2" * 64
+                output_sha256 = "3" * 64
+                store.start_video_attempt(
+                    "checkpoint-attempt", mode="prompt_to_video",
+                    approval_task_id="commander-approval-42", recipe_sha256=recipe_sha256,
+                )
+                store.mark_video_attempt_running("checkpoint-attempt")
+                first = store.record_video_stage_checkpoint(
+                    "checkpoint-attempt", worker_id="status-api", lease_epoch=1,
+                    batch_id="batch_001", batch_fingerprint="d" * 64,
+                    step_id="preflight", stage_id="preflight",
+                    dag_sha256=dag_sha256, checkpoint_key="video-studio:checkpoint-attempt:dag:001",
+                    input_sha256="a" * 64, output_sha256=output_sha256,
+                    metadata={"artifact": "preflight.json"},
+                )
+                repeated = store.record_video_stage_checkpoint(
+                    "checkpoint-attempt", worker_id="status-api", lease_epoch=1,
+                    batch_id="batch_001", batch_fingerprint="d" * 64,
+                    step_id="preflight", stage_id="preflight",
+                    dag_sha256=dag_sha256, checkpoint_key="video-studio:checkpoint-attempt:dag:001",
+                    input_sha256="a" * 64, output_sha256=output_sha256,
+                    metadata={"artifact": "preflight.json"},
+                )
+                self.assertEqual(first, repeated)
+                self.assertEqual(first["recipe_sha256"], recipe_sha256)
+                self.assertEqual(first["approval_task_id"], "commander-approval-42")
+                self.assertEqual(
+                    [item["stage_id"] for item in store.list_video_stage_checkpoints(
+                        "checkpoint-attempt", worker_id="status-api", lease_epoch=1, dag_sha256=dag_sha256,
+                    )],
+                    ["preflight"],
+                )
+                with self.assertRaisesRegex(ValueError, "idempotency key conflicts"):
+                    store.record_video_stage_checkpoint(
+                        "checkpoint-attempt", worker_id="status-api", lease_epoch=1,
+                        batch_id="batch_001", batch_fingerprint="d" * 64,
+                        step_id="preflight", stage_id="preflight",
+                        dag_sha256=dag_sha256, checkpoint_key="video-studio:checkpoint-attempt:dag:001",
+                        input_sha256="a" * 64, output_sha256="4" * 64,
+                        metadata={"artifact": "different.json"},
+                    )
+                with self.assertRaisesRegex(ValueError, "current owning worker"):
+                    store.record_video_stage_checkpoint(
+                        "checkpoint-attempt", worker_id="stale-worker", lease_epoch=1,
+                        batch_id="batch_001", batch_fingerprint="d" * 64,
+                        step_id="preflight", stage_id="preflight",
+                        dag_sha256=dag_sha256, checkpoint_key="video-studio:checkpoint-attempt:dag:001",
+                        input_sha256="b" * 64, output_sha256="5" * 64,
+                    )
+                store.fail_video_attempt("checkpoint-attempt", failure_code="video.test_failure")
+                store.retry_failed_video_attempt("checkpoint-attempt", max_attempts=2)
+                store.claim_next_video_attempt("checkpoint-worker-2", lease_seconds=120)
+                resumed = store.list_video_stage_checkpoints(
+                    "checkpoint-attempt", worker_id="checkpoint-worker-2", lease_epoch=2, dag_sha256=dag_sha256,
+                )
+                self.assertEqual([item["stage_id"] for item in resumed], ["preflight"])
+                self.assertEqual(resumed[0]["output_sha256"], output_sha256)
+                self.assertEqual(resumed[0]["lease_epoch"], 1)
+                with self.assertRaisesRegex(ValueError, "lease epoch"):
+                    store.record_video_stage_checkpoint(
+                        "checkpoint-attempt", worker_id="checkpoint-worker-2", lease_epoch=1,
+                        batch_id="batch_001", batch_fingerprint="d" * 64,
+                        step_id="preflight", stage_id="preflight",
+                        dag_sha256=dag_sha256, checkpoint_key="video-studio:checkpoint-attempt:dag:001",
+                        input_sha256="b" * 64, output_sha256="5" * 64,
+                    )
+                next_epoch = store.record_video_stage_checkpoint(
+                    "checkpoint-attempt", worker_id="checkpoint-worker-2", lease_epoch=2,
+                    batch_id="batch_001", batch_fingerprint="d" * 64,
+                    step_id="preflight", stage_id="preflight",
+                    dag_sha256=dag_sha256, checkpoint_key="video-studio:checkpoint-attempt:dag:001",
+                    input_sha256="b" * 64, output_sha256="5" * 64,
+                )
+                self.assertEqual(next_epoch["lease_epoch"], 2)
+                self.assertEqual(len(store.list_video_stage_checkpoints(
+                    "checkpoint-attempt", worker_id="checkpoint-worker-2", lease_epoch=2, dag_sha256=dag_sha256,
+                )), 2)
+                self.assertEqual(store.list_video_stage_checkpoints(
+                    "checkpoint-attempt", worker_id="checkpoint-worker-2", lease_epoch=2, dag_sha256="6" * 64,
+                ), [])
+                store.connection.execute(
+                    "UPDATE initiative_video_attempts SET recipe_sha256=? WHERE attempt_id=?",
+                    ("7" * 64, "checkpoint-attempt"),
+                )
+                store.connection.commit()
+                self.assertEqual(store.list_video_stage_checkpoints(
+                    "checkpoint-attempt", worker_id="checkpoint-worker-2", lease_epoch=2, dag_sha256=dag_sha256,
+                ), [])
+                store.connection.execute(
+                    "UPDATE initiative_video_attempts SET recipe_sha256=?,approval_task_id=? WHERE attempt_id=?",
+                    (recipe_sha256, "commander-approval-replaced", "checkpoint-attempt"),
+                )
+                store.connection.commit()
+                self.assertEqual(store.list_video_stage_checkpoints(
+                    "checkpoint-attempt", worker_id="checkpoint-worker-2", lease_epoch=2, dag_sha256=dag_sha256,
+                ), [])
+
+    def test_video_stage_checkpoint_reads_require_current_lease_and_can_filter_history(self):
+        import time
+
+        with tempfile.TemporaryDirectory() as directory:
+            with InitiativeStore(Path(directory) / "initiatives.sqlite3") as store:
+                store.start_video_attempt(
+                    "lease-read-attempt", mode="prompt_to_video",
+                    approval_task_id="commander-approval-read", recipe_sha256="1" * 64,
+                )
+                store.claim_next_video_attempt("same-worker", lease_seconds=120)
+                store.record_video_stage_checkpoint(
+                    "lease-read-attempt", worker_id="same-worker", lease_epoch=1,
+                    batch_id="batch_one", batch_fingerprint="2" * 64,
+                    step_id="shot_001", stage_id="motion_design",
+                    dag_sha256="3" * 64,
+                    checkpoint_key="video-studio:lease-read-attempt:dag:001",
+                    input_sha256="4" * 64, output_sha256="5" * 64,
+                )
+                store.fail_video_attempt("lease-read-attempt", failure_code="video.retry")
+                store.retry_failed_video_attempt("lease-read-attempt", max_attempts=2)
+                store.claim_next_video_attempt("same-worker", lease_seconds=120)
+                history = store.list_video_stage_checkpoints(
+                    "lease-read-attempt", worker_id="same-worker", lease_epoch=2,
+                    dag_sha256="3" * 64, batch_id="batch_one", step_id="shot_001",
+                )
+                self.assertEqual(len(history), 1)
+                self.assertEqual(history[0]["lease_epoch"], 1)
+                self.assertEqual(store.list_video_stage_checkpoints(
+                    "lease-read-attempt", worker_id="same-worker", lease_epoch=2,
+                    dag_sha256="3" * 64, batch_id="batch_other",
+                ), [])
+                with self.assertRaisesRegex(ValueError, "current owning worker"):
+                    store.list_video_stage_checkpoints(
+                        "lease-read-attempt", worker_id="stale-worker", lease_epoch=2, dag_sha256="3" * 64,
+                    )
+                with self.assertRaisesRegex(ValueError, "current owning worker"):
+                    store.list_video_stage_checkpoints(
+                        "lease-read-attempt", worker_id="same-worker", lease_epoch=1, dag_sha256="3" * 64,
+                    )
+                store.connection.execute(
+                    "UPDATE initiative_video_attempts SET lease_expires_at=? WHERE attempt_id=?",
+                    (time.time() - 1, "lease-read-attempt"),
+                )
+                store.connection.commit()
+                with self.assertRaisesRegex(ValueError, "unexpired lease epoch"):
+                    store.list_video_stage_checkpoints(
+                        "lease-read-attempt", worker_id="same-worker", lease_epoch=2, dag_sha256="3" * 64,
+                    )
+
+    def test_video_attempt_lease_renewal_preserves_epoch_and_rejects_stale_owners(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with InitiativeStore(Path(directory) / "initiatives.sqlite3") as store:
+                store.start_video_attempt("lease-renew-attempt", mode="prompt_to_video")
+                claimed = store.claim_next_video_attempt("lease-worker", lease_seconds=60, now=1000)
+                self.assertEqual(claimed["attempt_count"], 1)
+                self.assertEqual(claimed["lease_expires_at"], 1060)
+                renewed = store.renew_video_attempt_lease(
+                    "lease-renew-attempt", worker_id="lease-worker", lease_epoch=1,
+                    lease_seconds=120, now=1010,
+                )
+                self.assertEqual(renewed["attempt_count"], 1)
+                self.assertEqual(renewed["lease_expires_at"], 1130)
+                unchanged = store.renew_video_attempt_lease(
+                    "lease-renew-attempt", worker_id="lease-worker", lease_epoch=1,
+                    lease_seconds=15, now=1020,
+                )
+                self.assertEqual(unchanged["lease_expires_at"], 1130)
+                for worker_id, epoch, timestamp in (
+                    ("stale-worker", 1, 1030), ("lease-worker", 2, 1030),
+                    ("lease-worker", 1, 1130),
+                ):
+                    with self.subTest(worker_id=worker_id, epoch=epoch, timestamp=timestamp):
+                        with self.assertRaisesRegex(ValueError, "unexpired lease epoch"):
+                            store.renew_video_attempt_lease(
+                                "lease-renew-attempt", worker_id=worker_id, lease_epoch=epoch,
+                                lease_seconds=60, now=timestamp,
+                            )
+                self.assertEqual(store.get_video_attempt("lease-renew-attempt")["lease_expires_at"], 1130)
+
+    def test_video_stage_checkpoints_require_approval_task_and_recipe_bound_attempt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with InitiativeStore(Path(directory) / "initiatives.sqlite3") as store:
+                store.start_video_attempt("unbound-attempt", mode="prompt_to_video")
+                store.mark_video_attempt_running("unbound-attempt")
+                with self.assertRaisesRegex(ValueError, "approval task"):
+                    store.record_video_stage_checkpoint(
+                        "unbound-attempt", worker_id="status-api", lease_epoch=1,
+                        batch_id="batch_001", batch_fingerprint="d" * 64,
+                        step_id="preflight", stage_id="preflight",
+                        dag_sha256="2" * 64, checkpoint_key="video-studio:unbound-attempt:dag:001",
+                        input_sha256="a" * 64, output_sha256="3" * 64,
+                    )
+
+    def test_video_stage_checkpoint_migration_preserves_legacy_attempt_and_events(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "initiatives.sqlite3"
+            with InitiativeStore(database) as store:
+                store.start_video_attempt("legacy-checkpoint-attempt", mode="prompt_to_video")
+                before_attempt = store.get_video_attempt("legacy-checkpoint-attempt")
+                before_events = store.list_video_attempt_events("legacy-checkpoint-attempt")
+                store.connection.execute("DROP TRIGGER initiative_video_stage_checkpoints_no_update")
+                store.connection.execute("DROP TRIGGER initiative_video_stage_checkpoints_no_delete")
+                store.connection.execute("DROP INDEX idx_video_stage_checkpoints_timeline")
+                store.connection.execute("DROP TABLE initiative_video_stage_checkpoints")
+                store.connection.commit()
+            with InitiativeStore(database) as reopened:
+                self.assertEqual(reopened.get_video_attempt("legacy-checkpoint-attempt"), before_attempt)
+                self.assertEqual(reopened.list_video_attempt_events("legacy-checkpoint-attempt"), before_events)
+                columns = {row["name"] for row in reopened.connection.execute(
+                    "PRAGMA table_info(initiative_video_stage_checkpoints)"
+                )}
+                self.assertIn("output_sha256", columns)
+                triggers = {row["name"] for row in reopened.connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='trigger'"
+                )}
+                self.assertIn("initiative_video_stage_checkpoints_no_update", triggers)
+                self.assertIn("initiative_video_stage_checkpoints_no_delete", triggers)
+
+    def test_video_stage_checkpoint_migrates_stage_only_rows_to_legacy_batch_epoch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "initiatives.sqlite3"
+            with InitiativeStore(database) as store:
+                store.start_video_attempt(
+                    "stage-only-legacy-attempt", mode="prompt_to_video",
+                    approval_task_id="commander-approval-legacy", recipe_sha256="1" * 64,
+                )
+                store.mark_video_attempt_running("stage-only-legacy-attempt")
+                store.connection.execute("DROP TRIGGER initiative_video_stage_checkpoints_no_update")
+                store.connection.execute("DROP TRIGGER initiative_video_stage_checkpoints_no_delete")
+                store.connection.execute("DROP INDEX idx_video_stage_checkpoints_timeline")
+                store.connection.execute("DROP TABLE initiative_video_stage_checkpoints")
+                store.connection.execute("""CREATE TABLE initiative_video_stage_checkpoints(
+                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                    attempt_id TEXT NOT NULL REFERENCES initiative_video_attempts(attempt_id) ON DELETE RESTRICT,
+                    dag_sha256 TEXT NOT NULL CHECK(length(dag_sha256)=64),
+                    checkpoint_key TEXT NOT NULL, stage_id TEXT NOT NULL,
+                    input_sha256 TEXT NOT NULL CHECK(length(input_sha256)=64),
+                    output_sha256 TEXT NOT NULL CHECK(length(output_sha256)=64),
+                    recipe_sha256 TEXT NOT NULL CHECK(length(recipe_sha256)=64),
+                    approval_task_id TEXT NOT NULL, worker_id TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL,
+                    UNIQUE(attempt_id,dag_sha256,stage_id)
+                )""")
+                store.connection.execute(
+                    """INSERT INTO initiative_video_stage_checkpoints
+                    (attempt_id,dag_sha256,checkpoint_key,stage_id,input_sha256,output_sha256,
+                     recipe_sha256,approval_task_id,worker_id,metadata_json,created_at)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                    ("stage-only-legacy-attempt", "2" * 64,
+                     "video-studio:stage-only-legacy-attempt:dag:001", "preflight",
+                     "3" * 64, "4" * 64, "1" * 64, "commander-approval-legacy",
+                     "status-api", '{"legacy":true}', "2026-01-01T00:00:00+00:00"),
+                )
+                store.connection.commit()
+            with InitiativeStore(database) as migrated:
+                rows = migrated.list_video_stage_checkpoints(
+                    "stage-only-legacy-attempt", worker_id="status-api", lease_epoch=1, dag_sha256="2" * 64,
+                )
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0]["batch_id"], "legacy")
+                self.assertEqual(rows[0]["batch_fingerprint"], "2" * 64)
+                self.assertEqual(rows[0]["step_id"], "preflight")
+                self.assertEqual(rows[0]["lease_epoch"], 1)
+                self.assertEqual(rows[0]["metadata"], {"legacy": True})
+
+    def test_video_stage_checkpoint_rejects_expired_worker_lease(self):
+        import time
+
+        with tempfile.TemporaryDirectory() as directory:
+            with InitiativeStore(Path(directory) / "initiatives.sqlite3") as store:
+                store.start_video_attempt(
+                    "expired-checkpoint-attempt", mode="prompt_to_video",
+                    approval_task_id="commander-approval-expired", recipe_sha256="1" * 64,
+                )
+                store.claim_next_video_attempt("lease-worker", lease_seconds=120)
+                store.connection.execute(
+                    "UPDATE initiative_video_attempts SET lease_expires_at=? WHERE attempt_id=?",
+                    (time.time() - 1, "expired-checkpoint-attempt"),
+                )
+                store.connection.commit()
+                with self.assertRaisesRegex(ValueError, "unexpired lease"):
+                    store.record_video_stage_checkpoint(
+                        "expired-checkpoint-attempt", worker_id="lease-worker", lease_epoch=1,
+                        batch_id="batch_expired", batch_fingerprint="e" * 64,
+                        step_id="preflight", stage_id="preflight",
+                        dag_sha256="2" * 64,
+                        checkpoint_key="video-studio:expired-checkpoint-attempt:dag:001",
+                        input_sha256="3" * 64, output_sha256="4" * 64,
+                    )
+
+    def test_video_stage_checkpoint_rows_are_append_only_and_foreign_key_constrained(self):
+        import sqlite3
+
+        with tempfile.TemporaryDirectory() as directory:
+            with InitiativeStore(Path(directory) / "initiatives.sqlite3") as store:
+                store.start_video_attempt(
+                    "immutable-checkpoint-attempt", mode="prompt_to_video",
+                    approval_task_id="commander-approval-immutable", recipe_sha256="1" * 64,
+                )
+                store.mark_video_attempt_running("immutable-checkpoint-attempt")
+                checkpoint = store.record_video_stage_checkpoint(
+                    "immutable-checkpoint-attempt", worker_id="status-api", lease_epoch=1,
+                    batch_id="batch_immutable", batch_fingerprint="f" * 64,
+                    step_id="preflight", stage_id="preflight",
+                    dag_sha256="2" * 64,
+                    checkpoint_key="video-studio:immutable-checkpoint-attempt:dag:001",
+                    input_sha256="3" * 64, output_sha256="4" * 64,
+                )
+                with self.assertRaises(sqlite3.IntegrityError):
+                    store.connection.execute(
+                        "UPDATE initiative_video_stage_checkpoints SET output_sha256=? WHERE sequence=?",
+                        ("5" * 64, checkpoint["sequence"]),
+                    )
+                store.connection.rollback()
+                with self.assertRaises(sqlite3.IntegrityError):
+                    store.connection.execute(
+                        "DELETE FROM initiative_video_stage_checkpoints WHERE sequence=?",
+                        (checkpoint["sequence"],),
+                    )
+                store.connection.rollback()
+                with self.assertRaises(sqlite3.IntegrityError):
+                    store.connection.execute(
+                        """INSERT INTO initiative_video_stage_checkpoints
+                        (attempt_id,dag_sha256,batch_id,batch_fingerprint,step_id,stage_id,lease_epoch,
+                         checkpoint_key,input_sha256,output_sha256,recipe_sha256,approval_task_id,
+                         worker_id,metadata_json,created_at)
+                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        ("missing-parent", "6" * 64, "batch_missing", "6" * 64, "preflight",
+                         "preflight", 1, "video-studio:missing-parent:dag:001", "7" * 64,
+                         "8" * 64, "9" * 64, "commander-approval-missing", "worker", "{}",
+                         "2026-01-01T00:00:00+00:00"),
+                    )
+                store.connection.rollback()
+                self.assertEqual(len(store.list_video_stage_checkpoints(
+                    "immutable-checkpoint-attempt", worker_id="status-api", lease_epoch=1, dag_sha256="2" * 64,
+                )), 1)
+
+    def test_video_stage_checkpoint_concurrent_identical_writes_create_one_row(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Barrier
+
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "initiatives.sqlite3"
+            with InitiativeStore(database) as store:
+                store.start_video_attempt(
+                    "concurrent-checkpoint-attempt", mode="prompt_to_video",
+                    approval_task_id="commander-approval-concurrent", recipe_sha256="1" * 64,
+                )
+                store.mark_video_attempt_running("concurrent-checkpoint-attempt")
+            barrier = Barrier(2)
+
+            def write_checkpoint():
+                with InitiativeStore(database) as store:
+                    barrier.wait(timeout=5)
+                    return store.record_video_stage_checkpoint(
+                        "concurrent-checkpoint-attempt", worker_id="status-api", lease_epoch=1,
+                        batch_id="batch_concurrent", batch_fingerprint="a" * 64,
+                        step_id="shot_001", stage_id="motion_design",
+                        dag_sha256="2" * 64,
+                        checkpoint_key="video-studio:concurrent-checkpoint-attempt:dag:001",
+                        input_sha256="3" * 64, output_sha256="4" * 64,
+                        metadata={"artifact": "same.json"},
+                    )
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                first, second = list(executor.map(lambda _index: write_checkpoint(), range(2)))
+            self.assertEqual(first["sequence"], second["sequence"])
+            self.assertEqual(first["batch_id"], "batch_concurrent")
+            self.assertEqual(first["batch_fingerprint"], "a" * 64)
+            self.assertEqual(first["step_id"], "shot_001")
+            self.assertEqual(first["stage_id"], "motion_design")
+            self.assertEqual(first["lease_epoch"], 1)
+            with InitiativeStore(database) as store:
+                self.assertEqual(store.connection.execute(
+                    "SELECT COUNT(*) FROM initiative_video_stage_checkpoints"
+                ).fetchone()[0], 1)
 
 if __name__ == "__main__":
     unittest.main()

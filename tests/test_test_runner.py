@@ -150,5 +150,80 @@ class TestRunnerTests(unittest.TestCase):
         self.assertTrue(result.wasSuccessful())
 
 
+    def test_isolated_runner_interruption_terminates_owned_child_without_failure_record(self):
+        import tempfile
+        import threading
+        import time
+        from pathlib import Path
+        from muse.experiment_bridge import ExperimentBridge
+        from muse.research_knowledge import ResearchKnowledgeStore
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "test_slow.py").write_text(
+                chr(10).join(("import time,unittest", "class Slow(unittest.TestCase):", "    def test_sleep(self): time.sleep(10)", "")),
+                encoding="utf-8",
+            )
+            stop_event = threading.Event()
+            stopper = threading.Thread(target=lambda: (time.sleep(0.25), stop_event.set()), daemon=True)
+            progress = FakeProgress()
+            with ResearchKnowledgeStore(root / "knowledge.sqlite3") as knowledge:
+                bridge = ExperimentBridge(knowledge)
+                manifest = bridge.register_manifest(
+                    title="Interrupted isolated suite", kind="test",
+                    argv=("python", "-m", "unittest", "discover"), timeout_seconds=20,
+                )
+                stopper.start()
+                started = time.monotonic()
+                result = _run_isolated_suite(
+                    root, "test_slow.py", progress_events=progress, experiment_bridge=bridge,
+                    manifest_id=manifest["manifest_id"], budget_seconds=20, verbosity=0,
+                    stop_event=stop_event, run_id="interrupted-child-test",
+                )
+                stopper.join(timeout=2)
+                self.assertEqual(result["status"], "interrupted")
+                self.assertEqual(result["exit_code"], 130)
+                self.assertEqual(result["metrics"]["errors"], 0)
+                self.assertLess(time.monotonic() - started, 5)
+                self.assertEqual([event["event"] for event in progress.events], ["started", "interrupted"])
+                runs = [node for node in knowledge.list_nodes(node_type="experiment", limit=50)
+                        if node["external_ref"].startswith("experiment-run:")]
+                self.assertEqual(runs, [])
+
+    def test_isolated_runner_budget_terminates_descendant_holding_output_pipe(self):
+        import tempfile
+        import time
+        from pathlib import Path
+        from muse.experiment_bridge import ExperimentBridge
+        from muse.research_knowledge import ResearchKnowledgeStore
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "test_spawn.py").write_text(
+                chr(10).join((
+                    "import subprocess,sys,unittest",
+                    "class Spawn(unittest.TestCase):",
+                    "    def test_child(self): subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(10)'])",
+                    "",
+                )),
+                encoding="utf-8",
+            )
+            with ResearchKnowledgeStore(root / "knowledge.sqlite3") as knowledge:
+                bridge = ExperimentBridge(knowledge)
+                manifest = bridge.register_manifest(
+                    title="Descendant pipe timeout", kind="test",
+                    argv=("python", "-m", "unittest", "discover"), timeout_seconds=1,
+                    memory_budget_mb=512,
+                )
+                started = time.monotonic()
+                result = _run_isolated_suite(
+                    root, "test_spawn.py", progress_events=None, experiment_bridge=bridge,
+                    manifest_id=manifest["manifest_id"], budget_seconds=1, verbosity=0,
+                    memory_budget_mb=512, run_id="descendant-pipe-budget-test",
+                )
+                self.assertEqual(result["status"], "budget_exceeded")
+                self.assertEqual(result["exit_code"], 124)
+                self.assertLess(time.monotonic() - started, 5)
+
 if __name__ == "__main__":
     unittest.main()

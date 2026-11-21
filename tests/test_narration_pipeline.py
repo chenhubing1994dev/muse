@@ -16,6 +16,9 @@ from muse.narration_generator import (
     synth_params,
     synthesize_cantonese_styled,
 )
+
+from muse.narration_generator import _distribute
+
 from muse.narration_sync import NarrationSyncStore, wav_duration_seconds
 
 
@@ -42,6 +45,29 @@ def _segments(count: int = 3):
 
 
 class NarrationGeneratorTests(unittest.TestCase):
+    def test_distribute_preserves_source_order_and_balances_contiguous_buckets(self):
+        items = ["第一句。", "第二句。", "第三句。", "第四句。", "第五句。"]
+        buckets = _distribute(items, 3)
+        self.assertEqual(buckets, [
+            ["第一句。", "第二句。"],
+            ["第三句。", "第四句。"],
+            ["第五句。"],
+        ])
+        self.assertEqual([item for bucket in buckets for item in bucket], items)
+
+    def test_distribute_does_not_duplicate_when_bucket_count_exceeds_items(self):
+        items = ["第一句。", "第二句。"]
+        buckets = _distribute(items, 4)
+        self.assertEqual(buckets, [items[:1], items[1:], [], []])
+        self.assertEqual([item for bucket in buckets for item in bucket], items)
+
+    def test_distribute_handles_empty_items_and_rejects_invalid_count(self):
+        self.assertEqual(_distribute([], 3), [[], [], []])
+        for invalid in (0, -1, True, 1.5):
+            with self.subTest(count=invalid):
+                with self.assertRaises(ValueError):
+                    _distribute(["內容"], invalid)
+
 
     def test_explicit_claim_ids_are_preserved_per_segment(self):
         claim_a = "a" * 32

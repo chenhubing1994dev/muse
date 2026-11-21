@@ -19,8 +19,21 @@ from muse.orchestration import (
 from muse.agent_registry import AgentRegistry
 from muse.local_agent_adapter import LocalHTTPAgentAdapter
 from muse.prompt_engine import PromptTask, build_prompt
+from muse.model_capabilities import ModelCapabilityStore
 
 AgentCall = Callable[[str], str]
+
+_MODEL_BOOLEAN_CAPABILITIES = frozenset({"tool_calling", "structured_output", "vision", "audio", "video"})
+
+
+def _validate_required_model_capabilities(values: tuple[str, ...]) -> tuple[str, ...]:
+    if not isinstance(values, tuple):
+        raise ValueError("required_model_capabilities must be a tuple")
+    if (len(values) > len(_MODEL_BOOLEAN_CAPABILITIES)
+            or any(not isinstance(item, str) or item not in _MODEL_BOOLEAN_CAPABILITIES for item in values)
+            or len(set(values)) != len(values)):
+        raise ValueError("required_model_capabilities must contain unique supported boolean capability names")
+    return values
 
 
 @dataclass(frozen=True)
@@ -30,12 +43,15 @@ class AgentAdapterDescriptor:
     source: str = "local"
     enabled: bool = True
     model_family: str | None = None
+    model_id: str | None = None
 
     def __post_init__(self) -> None:
         if not self.adapter_id.strip() or not self.source.strip():
             raise ValueError("adapter_id and source must be non-empty")
         if self.model_family is not None and (not isinstance(self.model_family, str) or not self.model_family.strip()):
             raise ValueError("model_family must be non-empty text when provided")
+        if self.model_id is not None and (not isinstance(self.model_id, str) or not self.model_id.strip() or len(self.model_id.strip()) > 160):
+            raise ValueError("model_id must be non-empty text of at most 160 characters when provided")
         if any(not item.strip() for item in self.capabilities):
             raise ValueError("adapter capabilities must be non-empty strings")
 
@@ -201,17 +217,25 @@ class SpecialistRouter:
     """Score and dispatch only trusted adapters, optionally tracking durable Agent state."""
 
     def __init__(self, registry: SpecialistRegistry, orchestrator: MultiAgentOrchestrator,
-                 agent_registry: AgentRegistry | None = None) -> None:
+                 agent_registry: AgentRegistry | None = None,
+                 model_capability_store: ModelCapabilityStore | None = None) -> None:
         self.registry = registry
         self.orchestrator = orchestrator
         self.agent_registry = agent_registry
+        self.model_capability_store = model_capability_store
         self._calls: dict[str, AgentCall] = {}
         self._adapter_descriptors: dict[str, AgentAdapterDescriptor] = {}
 
-    def register(self, profile: SpecialistProfile, call: AgentCall, *, model_family: str | None = None) -> None:
-        """Bind a trusted callable; optionally declare its model family for prompt adaptation."""
+    def register(
+        self, profile: SpecialistProfile, call: AgentCall, *,
+        model_family: str | None = None, model_id: str | None = None,
+    ) -> None:
+        """Bind a trusted callable with optional operator-declared model identity."""
         self.register_adapter(
-            profile, AgentAdapterDescriptor(profile.specialist_id, frozenset(profile.capabilities), model_family=model_family), call
+            profile, AgentAdapterDescriptor(
+                profile.specialist_id, frozenset(profile.capabilities),
+                model_family=model_family, model_id=model_id,
+            ), call,
         )
 
     def register_adapter(
@@ -223,18 +247,31 @@ class SpecialistRouter:
             raise ValueError("adapter_id must match specialist_id")
         self.registry.register(profile)
         self._calls[descriptor.adapter_id] = call
+        if self.agent_registry is not None:
+            persisted = self.agent_registry.get(descriptor.adapter_id)
+            persisted_family = persisted.get("model_family") if persisted else None
+            persisted_model_id = persisted.get("model_id") if persisted else None
+            resolved_family = descriptor.model_family or (str(persisted_family) if persisted_family else None)
+            resolved_model_id = descriptor.model_id or (str(persisted_model_id) if persisted_model_id else None)
+            if resolved_family != descriptor.model_family or resolved_model_id != descriptor.model_id:
+                descriptor = AgentAdapterDescriptor(
+                    descriptor.adapter_id, descriptor.capabilities, descriptor.source,
+                    descriptor.enabled, resolved_family, resolved_model_id,
+                )
         self._adapter_descriptors[descriptor.adapter_id] = descriptor
         if self.agent_registry is not None:
             self.agent_registry.register(
                 descriptor.adapter_id, role=profile.role, display_name=profile.specialist_id,
-                capabilities=descriptor.capabilities, source=descriptor.source, enabled=profile.enabled and descriptor.enabled,
+                capabilities=descriptor.capabilities, source=descriptor.source,
+                enabled=profile.enabled and descriptor.enabled, model_family=descriptor.model_family,
+                model_id=descriptor.model_id,
             )
             if profile.enabled and descriptor.enabled:
                 self.agent_registry.heartbeat(descriptor.adapter_id)
 
     def register_local_http_agent(
         self, profile: SpecialistProfile, invoke_url: str, *, timeout_seconds: float = 20.0,
-        model_family: str | None = None,
+        model_family: str | None = None, model_id: str | None = None,
     ) -> None:
         """Bind one explicitly configured loopback Agent to the trusted router."""
         adapter = LocalHTTPAgentAdapter(
@@ -242,7 +279,8 @@ class SpecialistRouter:
         )
         descriptor = AgentAdapterDescriptor(
             profile.specialist_id, frozenset(profile.capabilities),
-            source="local:http-agent", enabled=profile.enabled, model_family=model_family,
+            source="local:http-agent", enabled=profile.enabled,
+            model_family=model_family, model_id=model_id,
         )
         self.register_adapter(profile, descriptor, adapter)
 
@@ -251,7 +289,8 @@ class SpecialistRouter:
             raise KeyError(f"unknown adapter: {adapter_id}")
         current = self._adapter_descriptors[adapter_id]
         self._adapter_descriptors[adapter_id] = AgentAdapterDescriptor(
-            current.adapter_id, current.capabilities, current.source, bool(enabled), current.model_family
+            current.adapter_id, current.capabilities, current.source, bool(enabled),
+            current.model_family, current.model_id,
         )
         if self.agent_registry is not None:
             self.agent_registry.set_enabled(adapter_id, enabled)
@@ -259,7 +298,47 @@ class SpecialistRouter:
     def adapter_catalog(self) -> tuple[AgentAdapterDescriptor, ...]:
         return tuple(self._adapter_descriptors[key] for key in sorted(self._adapter_descriptors))
 
-    def route(self, prompt: str, *, max_agents: int = 32) -> RoutingDecision:
+    def model_capability_profile(self, agent_id: str) -> dict[str, object] | None:
+        """Read the capability profile for an explicitly associated concrete model ID.
+
+        Returns None when no capability store or concrete model ID is configured.
+        A configured but unregistered model resolves to the store's all-unknown profile.
+        """
+        if self.model_capability_store is None:
+            return None
+        descriptor = self._adapter_descriptors.get(agent_id)
+        model_id = descriptor.model_id if descriptor is not None else None
+        model_family = descriptor.model_family if descriptor is not None else None
+        if model_id is None and self.agent_registry is not None:
+            persisted = self.agent_registry.get(agent_id)
+            if persisted is not None:
+                model_id = persisted.get("model_id")
+                model_family = model_family or persisted.get("model_family")
+        if not isinstance(model_id, str) or not model_id.strip():
+            return None
+        return self.model_capability_store.get_profile(
+            model_id, model_family=model_family if isinstance(model_family, str) else None,
+        )
+
+    def _model_capabilities_satisfied(self, agent_id: str, required: tuple[str, ...]) -> bool:
+        if not required:
+            return True
+        profile = self.model_capability_profile(agent_id)
+        capabilities = profile.get("capabilities") if isinstance(profile, dict) else None
+        if not isinstance(capabilities, dict):
+            return False
+        return all(
+            isinstance(capabilities.get(name), dict)
+            and capabilities[name].get("status") == "verified"
+            and capabilities[name].get("value") is True
+            for name in required
+        )
+
+    def route(
+        self, prompt: str, *, max_agents: int = 32,
+        required_model_capabilities: tuple[str, ...] = (),
+    ) -> RoutingDecision:
+        required_model_capabilities = _validate_required_model_capabilities(required_model_capabilities)
         if not isinstance(prompt, str) or not prompt.strip():
             raise ValueError("prompt must not be empty")
         if isinstance(max_agents, bool) or not isinstance(max_agents, int) or not 1 <= max_agents <= 32:
@@ -288,6 +367,8 @@ class SpecialistRouter:
                 continue
             required = set(profiles[item.specialist_id].capabilities)
             if not required.issubset(descriptor.capabilities):
+                continue
+            if not self._model_capabilities_satisfied(item.specialist_id, required_model_capabilities):
                 continue
             if self.agent_registry is not None:
                 state = self.agent_registry.get(item.specialist_id)
@@ -342,8 +423,13 @@ class SpecialistRouter:
                 self.agent_registry.heartbeat(agent_id)
         return invoke
 
-    def dispatch(self, prompt: str, *, max_agents: int = 32) -> DispatchResult:
-        decision = self.route(prompt, max_agents=max_agents)
+    def dispatch(
+        self, prompt: str, *, max_agents: int = 32,
+        required_model_capabilities: tuple[str, ...] = (),
+    ) -> DispatchResult:
+        decision = self.route(
+            prompt, max_agents=max_agents, required_model_capabilities=required_model_capabilities,
+        )
         if not decision.selected:
             raise LookupError("no enabled online specialist has a trusted adapter with all required capabilities")
         profiles = {profile.specialist_id: profile for profile in self.registry.list_all(enabled_only=True)}
@@ -355,25 +441,45 @@ class SpecialistRouter:
         result = self.orchestrator.run(prompt, specs)
         return DispatchResult(decision, result)
 
-    def dispatch_commander(self, goal: str, planner: object) -> CommanderDispatchResult:
+    def dispatch_commander(
+        self, goal: str, planner: object, *,
+        required_model_capabilities_by_step: dict[str, tuple[str, ...]] | None = None,
+    ) -> CommanderDispatchResult:
         """Plan a validated DAG and assign each step to the best live compatible adapter."""
         plan_method = getattr(planner, "plan", None)
         if not callable(plan_method):
             raise TypeError("planner must expose plan(goal)")
         plan = plan_method(goal)
+        steps = tuple(plan.steps)
+        step_ids = {step.step_id for step in steps}
+        if required_model_capabilities_by_step is None:
+            model_requirements = {}
+        elif (not isinstance(required_model_capabilities_by_step, dict)
+              or any(not isinstance(step_id, str) or step_id not in step_ids
+                     for step_id in required_model_capabilities_by_step)):
+            raise ValueError("required_model_capabilities_by_step must use known step IDs")
+        else:
+            model_requirements = {
+                step_id: _validate_required_model_capabilities(required)
+                for step_id, required in required_model_capabilities_by_step.items()
+            }
         profiles = {profile.specialist_id: profile for profile in self.registry.list_all(enabled_only=True)}
         selected: list[SpecialistMatch] = []
         assigned: set[str] = set()
         step_to_agent: dict[str, str] = {}
-        for step in plan.steps:
+        for step in steps:
             candidates = []
             target_role = {"researcher": "research", "architect": "architecture"}.get(step.role, step.role)
+            required_model = model_requirements.get(step.step_id, ())
             for agent_id, profile in profiles.items():
                 descriptor = self._adapter_descriptors.get(agent_id)
                 if (profile.role != target_role or descriptor is None or not descriptor.enabled
                         or agent_id not in self._calls or agent_id in assigned
                         or not set(profile.capabilities).issubset(descriptor.capabilities)
-                        or not set(step.required_capabilities).issubset(descriptor.capabilities)):                    continue
+                        or not set(step.required_capabilities).issubset(descriptor.capabilities)):
+                    continue
+                if not self._model_capabilities_satisfied(agent_id, required_model):
+                    continue
                 if self.agent_registry is not None:
                     state = self.agent_registry.get(agent_id)
                     if state is None or state["status"] != "online":
@@ -394,7 +500,7 @@ class SpecialistRouter:
             step_to_agent[step.step_id] = agent_id
             selected.append(SpecialistMatch(agent_id, profile.role, score, (), ()))
         specs = []
-        for step in plan.steps:
+        for step in steps:
             agent_id = step_to_agent[step.step_id]
             profile = profiles[agent_id]
             specs.append(AgentSpec(
@@ -410,10 +516,12 @@ class SpecialistRouter:
     def dispatch_pipeline(
         self, prompt: str, *,
         agent_ids: tuple[str, ...] = ("researcher", "architect", "developer", "reviewer"),
+        required_model_capabilities: tuple[str, ...] = (),
     ) -> DispatchResult:
         """Run the standard research → architecture → development → review DAG."""
         if not isinstance(prompt, str) or not prompt.strip():
             raise ValueError("prompt must not be empty")
+        required_model_capabilities = _validate_required_model_capabilities(required_model_capabilities)
         if (not isinstance(agent_ids, tuple) or not 2 <= len(agent_ids) <= 8
                 or any(not isinstance(item, str) or not item.strip() for item in agent_ids)
                 or len(set(agent_ids)) != len(agent_ids)):
@@ -427,6 +535,8 @@ class SpecialistRouter:
                 raise LookupError(f"pipeline Agent is not enabled with a trusted adapter: {agent_id}")
             if not set(profile.capabilities).issubset(descriptor.capabilities):
                 raise PermissionError(f"pipeline Agent lacks required capabilities: {agent_id}")
+            if not self._model_capabilities_satisfied(agent_id, required_model_capabilities):
+                raise PermissionError(f"pipeline Agent lacks verified model capabilities: {agent_id}")
             if self.agent_registry is not None:
                 state = self.agent_registry.get(agent_id)
                 if state is None or state["status"] != "online":

@@ -44,6 +44,68 @@ class AutonomousResearchTests(unittest.TestCase):
     def tearDown(self):
         self._bookmark_patch.stop()
 
+    def test_run_once_records_project_usage_and_preserves_outer_task_context(self):
+        from muse.model_call_context import (
+            current_model_call_context, model_call_scope, record_current_model_usage,
+        )
+        from muse.usage_ledger import UsageLedger
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            browser = Mock(spec=["doctor"])
+            browser.doctor.return_value = {"available": False, "status": "missing"}
+            engine = AutonomousResearchEngine(
+                evidence_db=root / "evidence.sqlite3",
+                knowledge_db=root / "knowledge.sqlite3",
+                progress_db=root / "tasks.sqlite3",
+                reminder_db=root / "reminders.sqlite3",
+                workspace=root, search=FakeSearch(), reader=FakeReader(),
+                ego_browser=browser, resource_aware=False,
+            )
+            expected = {"task_id": None, "agent_id": None}
+
+            def run_cycle(**_kwargs):
+                context = current_model_call_context()
+                self.assertIsNotNone(context)
+                self.assertEqual(context.task_id, expected["task_id"])
+                self.assertEqual(context.agent_id, expected["agent_id"])
+                self.assertEqual(context.project_id, "muse")
+                self.assertTrue(record_current_model_usage(
+                    "lm-studio-local", "research-local-model",
+                    {"prompt_tokens": 31, "completion_tokens": 9, "total_tokens": 40},
+                ))
+                return {"status": "completed", "report": {}}
+
+            with patch.object(engine, "_run_once_with_cycle", side_effect=run_cycle):
+                first = engine.run_once()
+                self.assertEqual(first["status"], "completed")
+                self.assertIsNone(current_model_call_context())
+
+                expected.update({"task_id": "outer-research-task", "agent_id": "outer-research-agent"})
+                with model_call_scope(
+                    root / "tasks.sqlite3", task_id=expected["task_id"],
+                    agent_id=expected["agent_id"], project_id="muse",
+                ):
+                    second = engine.run_once()
+                    self.assertEqual(second["status"], "completed")
+                    self.assertEqual(current_model_call_context().task_id, expected["task_id"])
+                self.assertIsNone(current_model_call_context())
+
+            with UsageLedger(root / "model_usage.sqlite3") as ledger:
+                events = ledger.list_events(limit=10)
+            self.assertEqual(len(events), 2)
+            unscoped, scoped = sorted(events, key=lambda event: event["task_id"] is not None)
+            self.assertIsNone(unscoped["task_id"])
+            self.assertIsNone(unscoped["agent_id"])
+            self.assertEqual(unscoped["attribution_status"], "partial")
+            self.assertEqual(unscoped["project_id"], "muse")
+            self.assertEqual(scoped["task_id"], "outer-research-task")
+            self.assertEqual(scoped["agent_id"], "outer-research-agent")
+            self.assertEqual(scoped["attribution_status"], "complete")
+            self.assertEqual(scoped["project_id"], "muse")
+            self.assertTrue(all(event["input_tokens"] == 31 for event in events))
+            self.assertTrue(all(event["output_tokens"] == 9 for event in events))
+
     def test_ego_lite_auto_attaches_to_existing_public_research_pipeline(self):
         from muse.browser_research import HybridSourceReader
 
@@ -1693,6 +1755,103 @@ class AutonomousResearchTests(unittest.TestCase):
             self.assertEqual(captured["cycle_id"], cycle_id)
             self.assertEqual(captured["resume_topic_key"], "rejected-review:decision-001")
             self.assertEqual(engine._interrupted_cycle_checkpoint(), (None, None))
+
+
+    def test_interrupted_cycle_event_resumes_same_cycle_and_topic_checkpoint(self):
+        from muse.progress import ProgressEventStore
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            progress_db = root / "tasks.sqlite3"
+            cycle_id = "cycle_" + "c" * 32
+            with ProgressEventStore(progress_db) as progress:
+                progress.record("evolution", cycle_id, "started", summary="Autonomous research cycle started")
+                progress.record("evolution", cycle_id, "progress", summary="topic_key:resume-this-topic")
+                progress.record("evolution", cycle_id, "interrupted", summary="Autonomous research cycle interrupted and resumable")
+            engine = AutonomousResearchEngine(
+                evidence_db=root / "evidence.sqlite3", knowledge_db=root / "knowledge.sqlite3",
+                progress_db=progress_db, reminder_db=root / "reminders.sqlite3",
+                workspace=root, search=FakeSearch(), reader=FakeReader(), resource_aware=False,
+            )
+            captured = {}
+            def resume_cycle(**kwargs):
+                captured.update(kwargs)
+                return {"status": "completed", "report": {}}
+            with patch.object(engine, "_run_once_with_cycle", side_effect=resume_cycle):
+                result = engine.run_once()
+            self.assertEqual(result["evolution_cycle_id"], cycle_id)
+            self.assertEqual(captured["cycle_id"], cycle_id)
+            self.assertEqual(captured["resume_topic_key"], "resume-this-topic")
+            self.assertEqual(engine._interrupted_cycle_checkpoint(), (None, None))
+
+    def test_stop_event_records_resumable_interrupted_cycle_not_cancelled(self):
+        from threading import Event
+        from muse.progress import ProgressEventStore
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            progress_db = root / "tasks.sqlite3"
+            engine = AutonomousResearchEngine(
+                evidence_db=root / "evidence.sqlite3", knowledge_db=root / "knowledge.sqlite3",
+                progress_db=progress_db, reminder_db=root / "reminders.sqlite3",
+                workspace=root, search=FakeSearch(), reader=FakeReader(), resource_aware=False,
+            )
+            stop_event = Event()
+            stop_event.set()
+            result = engine.run_once(stop_event=stop_event)
+            cycle_id = result["evolution_cycle_id"]
+            topic_key = result["topic_key"]
+            self.assertEqual(result["status"], "interrupted")
+            self.assertEqual(engine._interrupted_cycle_checkpoint(), (cycle_id, topic_key))
+            with ProgressEventStore(progress_db) as progress:
+                events = list(reversed(progress.list_events(category="evolution", subject_id=cycle_id, limit=10)))
+            self.assertEqual(events[-1]["event"], "interrupted")
+            self.assertNotIn("cancelled", [event["event"] for event in events])
+            resumed = engine.run_once()
+            self.assertEqual(resumed["evolution_cycle_id"], cycle_id)
+            self.assertEqual(resumed["topic_key"], topic_key)
+            self.assertEqual(engine._interrupted_cycle_checkpoint(), (None, None))
+
+    def test_stop_after_research_pipeline_preserves_topic_and_defers_knowledge_writes(self):
+        from threading import Event
+        from muse.progress import ProgressEventStore
+        from muse.research_knowledge import ResearchKnowledgeStore
+        from muse.research_pipeline import ResearchPipeline
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            progress_db = root / "tasks.sqlite3"
+            engine = AutonomousResearchEngine(
+                evidence_db=root / "evidence.sqlite3", knowledge_db=root / "knowledge.sqlite3",
+                progress_db=progress_db, reminder_db=root / "reminders.sqlite3",
+                workspace=root, search=FakeSearch(), reader=FakeReader(), resource_aware=False,
+            )
+            stop_event = Event()
+            original_run = ResearchPipeline.run
+            def run_then_request_stop(pipeline, *args, **kwargs):
+                result = original_run(pipeline, *args, **kwargs)
+                stop_event.set()
+                return result
+            with patch.object(ResearchPipeline, "run", new=run_then_request_stop):
+                interrupted = engine.run_once(stop_event=stop_event)
+            self.assertEqual(interrupted["status"], "interrupted")
+            cycle_id, topic_key = engine._interrupted_cycle_checkpoint()
+            self.assertEqual(cycle_id, interrupted["evolution_cycle_id"])
+            self.assertEqual(topic_key, interrupted["topic_key"])
+            with ResearchKnowledgeStore(root / "knowledge.sqlite3") as knowledge:
+                ideas = [item for item in knowledge.list_nodes(node_type="idea", limit=50)
+                         if item.get("metadata", {}).get("autonomous_topic_key") == topic_key]
+                self.assertEqual(ideas, [])
+            resumed = engine.run_once()
+            self.assertEqual(resumed["evolution_cycle_id"], cycle_id)
+            self.assertEqual(resumed["topic_key"], topic_key)
+            with ResearchKnowledgeStore(root / "knowledge.sqlite3") as knowledge:
+                ideas = [item for item in knowledge.list_nodes(node_type="idea", limit=50)
+                         if item.get("metadata", {}).get("autonomous_topic_key") == topic_key]
+                self.assertEqual(len(ideas), 1)
+            with ProgressEventStore(progress_db) as progress:
+                events = list(reversed(progress.list_events(category="evolution", subject_id=cycle_id, limit=20)))
+            self.assertEqual(events[-1]["event"], "completed")
 
     def test_two_completed_research_cycles_start_fresh_topics_and_persist_terminal_events(self):
         from muse.progress import ProgressEventStore

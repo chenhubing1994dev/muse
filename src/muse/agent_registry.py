@@ -74,6 +74,10 @@ class AgentRegistry:
             self.connection.execute("ALTER TABLE agents ADD COLUMN reported_source TEXT")
         if "reported_at" not in columns:
             self.connection.execute("ALTER TABLE agents ADD COLUMN reported_at TEXT")
+        if "model_family" not in columns:
+            self.connection.execute("ALTER TABLE agents ADD COLUMN model_family TEXT")
+        if "model_id" not in columns:
+            self.connection.execute("ALTER TABLE agents ADD COLUMN model_id TEXT")
         self.connection.execute("CREATE INDEX IF NOT EXISTS idx_agents_reports_to ON agents(reports_to)")
         self.connection.execute(
             """CREATE TABLE IF NOT EXISTS agent_org_events (
@@ -114,12 +118,17 @@ class AgentRegistry:
     def register(
         self, agent_id: str, *, role: str, capabilities: Iterable[str] = (),
         display_name: str | None = None, source: str = "local:injected", enabled: bool = True,
+        model_family: str | None = None, model_id: str | None = None,
         now: datetime | None = None,
     ) -> dict[str, object]:
         agent_id = self._text(agent_id, "agent_id")
         role = self._text(role, "role", 96)
         display_name = self._text(display_name or agent_id, "display_name", 160)
         source = self._text(source, "source", 256)
+        if model_family is not None:
+            model_family = self._text(model_family, "model_family", 80)
+        if model_id is not None:
+            model_id = self._text(model_id, "model_id", 160)
         raw_capabilities = tuple(capabilities)
         if any(not isinstance(item, str) or not item.strip() or len(item) > 128 for item in raw_capabilities):
             raise ValueError("capabilities must contain non-empty strings of at most 128 characters")
@@ -128,12 +137,15 @@ class AgentRegistry:
         timestamp = self._now(now).isoformat()
         self.connection.execute(
             """INSERT INTO agents (agent_id, role, display_name, capabilities_json, source, enabled,
-               registered_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               model_family, model_id, registered_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(agent_id) DO UPDATE SET role=excluded.role,
                display_name=excluded.display_name, capabilities_json=excluded.capabilities_json,
-               source=excluded.source, enabled=excluded.enabled, updated_at=excluded.updated_at""",
+               source=excluded.source, enabled=excluded.enabled,
+               model_family=COALESCE(excluded.model_family, agents.model_family),
+               model_id=COALESCE(excluded.model_id, agents.model_id),
+               updated_at=excluded.updated_at""",
             (agent_id, role, display_name, json.dumps(sorted(set(raw_capabilities)), ensure_ascii=False),
-             source, int(enabled), timestamp, timestamp),
+             source, int(enabled), model_family, model_id, timestamp, timestamp),
         )
         self.connection.commit()
         result = self.get(agent_id, now=now)
@@ -194,6 +206,32 @@ class AgentRegistry:
         cursor = self.connection.execute(
             "UPDATE agents SET enabled=?, updated_at=? WHERE agent_id=?",
             (int(enabled), self._now().isoformat(), agent_id),
+        )
+        self.connection.commit()
+        return cursor.rowcount == 1
+
+    @_serialized
+    def set_model_family(self, agent_id: str, model_family: str | None) -> bool:
+        """Explicitly set or clear an Agent model-family declaration."""
+        agent_id = self._text(agent_id, "agent_id")
+        if model_family is not None:
+            model_family = self._text(model_family, "model_family", 80)
+        cursor = self.connection.execute(
+            "UPDATE agents SET model_family=?, updated_at=? WHERE agent_id=?",
+            (model_family, self._now().isoformat(), agent_id),
+        )
+        self.connection.commit()
+        return cursor.rowcount == 1
+
+    @_serialized
+    def set_model_id(self, agent_id: str, model_id: str | None) -> bool:
+        """Explicitly set or clear the concrete model identifier configured for an Agent."""
+        agent_id = self._text(agent_id, "agent_id")
+        if model_id is not None:
+            model_id = self._text(model_id, "model_id", 160)
+        cursor = self.connection.execute(
+            "UPDATE agents SET model_id=?, updated_at=? WHERE agent_id=?",
+            (model_id, self._now().isoformat(), agent_id),
         )
         self.connection.commit()
         return cursor.rowcount == 1

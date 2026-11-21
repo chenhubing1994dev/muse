@@ -23,8 +23,12 @@ from muse.capability_radar import scan_capabilities
 from muse.autonomous_research import AutonomousResearchEngine
 from muse.evolution_executor import run_feedback_research_experiment
 from muse.research_knowledge import ResearchKnowledgeStore
-from muse.routines import RoutineStore, run_due_once
+from muse.routines import (
+    RoutineCancelled, RoutineExecutionContext, RoutineStore, routine_handler_with_context, run_due_once,
+)
 from muse.task_queue import TaskQueue
+from muse.model_call_context import current_model_call_context, model_call_scope
+
 from muse.watchdog import run_check
 from muse.worker import DEFAULT_HANDLERS, run_once
 
@@ -299,6 +303,7 @@ class AutonomousSupervisor:
         memory_db: str | Path = "data/memory/muse.sqlite3",
         workspace: str | Path | None = None,
         conversation_db: str | Path = "data/conversations/muse.sqlite3",
+        contextual_review_handler: Any | None = None,
     ) -> None:
         self.task_db = Path(task_db)
         self.routine_db = Path(routine_db)
@@ -309,6 +314,7 @@ class AutonomousSupervisor:
         self.memory_db = Path(memory_db)
         self.conversation_db = Path(conversation_db)
         self.workspace = Path(workspace or Path.cwd()).resolve()
+        self.contextual_review_handler = contextual_review_handler
         self._stop_event: threading.Event | None = None
         self.task_db.parent.mkdir(parents=True, exist_ok=True)
         with TaskQueue(self.task_db):
@@ -425,12 +431,21 @@ class AutonomousSupervisor:
         except Exception as exc:
             return None, None, {"status": "unavailable", "error_type": type(exc).__name__}, None
 
-    def _autonomous_research(self, payload: dict[str, Any]) -> dict[str, Any]:
+    @routine_handler_with_context
+    def _autonomous_research(
+        self, payload: dict[str, Any], *, execution_context: RoutineExecutionContext | None = None,
+    ) -> dict[str, Any]:
         """Run one bounded public-topic research cycle; never read personal memories."""
-        workspace = Path(payload.get("workspace", Path.cwd())).resolve()
+        workspace = Path(payload.get("workspace", self.workspace))
+        if not workspace.is_absolute():
+            workspace = self.workspace / workspace
+        workspace = workspace.resolve()
         reviewer_gate, reviewer_scope, reviewer_status, reviewer_store = self._build_feedback_reviewer(workspace)
+        evidence_db = Path(payload.get("evidence_db", workspace / "data/research/evidence.sqlite3"))
+        if not evidence_db.is_absolute():
+            evidence_db = workspace / evidence_db
         engine = AutonomousResearchEngine(
-            evidence_db=payload.get("evidence_db", "data/research/evidence.sqlite3"),
+            evidence_db=evidence_db,
             knowledge_db=self.knowledge_db, progress_db=self.task_db,
             reminder_db=self.reminder_db, improvement_db=self.improvement_db,
             memory_db=self.memory_db, conversation_db=self.conversation_db,
@@ -441,10 +456,19 @@ class AutonomousSupervisor:
             feedback_reviewer_status=reviewer_status,
         )
         try:
-            result = engine.run_once(stop_event=self._stop_event)
+            stop_event = execution_context.stop_event if execution_context is not None else self._stop_event
+            if current_model_call_context() is None:
+                # Routine executions have no TaskQueue ticket; retain project-level usage without inventing a task/Agent ID.
+                with model_call_scope(self.task_db, task_id=None, agent_id=None, project_id="muse"):
+                    result = engine.run_once(stop_event=stop_event)
+            else:
+                # Preserve a real caller task/Agent scope if this handler is ever nested under Worker execution.
+                result = engine.run_once(stop_event=stop_event)
         finally:
             if reviewer_store is not None:
                 reviewer_store.close()
+        if result.get("status") == "cancelled":
+            raise RoutineCancelled("autonomous research observed supervisor stop request")
         return {key: value for key, value in result.items() if key != "report"} | {
             "report_topic": result.get("report", {}).get("topic"),
             "feedback_reviewer_configuration": result.get("report", {}).get("feedback_reviewer_configuration", reviewer_status),
@@ -517,6 +541,45 @@ class AutonomousSupervisor:
                     return task["id"]
         return None
 
+
+    def _next_contextual_review_id(self) -> str | None:
+        """Select only a pending case with a matching explicit review-only audit."""
+        with TaskQueue(self.task_db) as queue:
+            tasks = queue.list_tasks(kind="contextual_inquiry_review", limit=200)
+            for task in sorted(tasks, key=lambda item: (item["created_at"], item["id"])):
+                if task.get("status") != "waiting_approval":
+                    continue
+                payload = task.get("payload")
+                payload = payload if isinstance(payload, dict) else {}
+                authorization = payload.get("_review_authorization")
+                if (
+                    payload.get("case_context_envelope_stored") is not True
+                    or payload.get("context_status") != "encrypted_pending_handler"
+                    or payload.get("case_context_attached") is not False
+                    or payload.get("requires_context_reentry") is not True
+                    or payload.get("long_term_storage_performed") is not False
+                    or task.get("recovery_policy") != "manual"
+                    or not isinstance(authorization, dict)
+                    or authorization.get("scope") != "review_only"
+                    or not isinstance(authorization.get("authorized_by"), str)
+                    or not authorization["authorized_by"].strip()
+                ):
+                    continue
+                authorization_event = next(
+                    (
+                        event for event in reversed(queue.events(task["id"]))
+                        if event["event_type"] == "contextual_inquiry.review_only_authorized"
+                    ),
+                    None,
+                )
+                if (
+                    authorization_event is not None
+                    and authorization_event["actor"] == authorization["authorized_by"]
+                    and authorization_event["payload"] == {"scope": "review_only"}
+                ):
+                    return task["id"]
+        return None
+
     def run_tick(self, *, stop_event: threading.Event | None = None) -> dict[str, Any]:
         event = stop_event if stop_event is not None else self._stop_event
         if event is not None and event.is_set():
@@ -526,6 +589,8 @@ class AutonomousSupervisor:
             max_routines=len(self.ROUTINES), max_workers=len(self.ROUTINES),
             stop_event=event,
         )
+        if event is not None and event.is_set():
+            return {"routines": routines, "task": None}
         # Never let the offline worker claim arbitrary ChatGPT/Ruflo tickets.
         local_task_id = self._next_local_workflow_id()
         task = run_once(
@@ -548,11 +613,31 @@ class AutonomousSupervisor:
                     "next_tick": bool(scheduled),
                     "topic_key": handler_result.get("preferred_topic_key"),
                 }
-        return {
+        result = {
             "routines": routines,
             "task": {"id": task["id"], "status": task["status"]} if task else None,
             "research_wakeup": research_wakeup,
         }
+        if self.contextual_review_handler is not None and not (event is not None and event.is_set()):
+            contextual_task_id = self._next_contextual_review_id()
+            if contextual_task_id is not None:
+                from muse.worker import run_contextual_inquiry_review_once
+                try:
+                    reviewed = run_contextual_inquiry_review_once(
+                        self.task_db, contextual_task_id, self.contextual_review_handler,
+                    )
+                except Exception as exc:
+                    result["contextual_review"] = {
+                        "id": contextual_task_id,
+                        "status": "manual_recovery_required",
+                        "error_type": type(exc).__name__,
+                    }
+                else:
+                    result["contextual_review"] = {
+                        "id": contextual_task_id,
+                        "status": reviewed["status"] if reviewed else "not_claimed",
+                    }
+        return result
 
     def _self_improvement_status(self) -> dict[str, Any]:
         """Expose the durable improvement backlog without triggering model or worker work."""
@@ -688,17 +773,35 @@ def enqueue_local_workflow(database: str | Path, title: str, steps: list[dict[st
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Run Muse's model-free local autonomous supervisor")
-    parser.add_argument("--task-db", default="data/tasks/muse.sqlite3")
-    parser.add_argument("--routine-db", default="data/routines/muse.sqlite3")
-    parser.add_argument("--state-db", default="data/autonomy/runtime.sqlite3")
-    parser.add_argument("--improvement-db", default="data/improvements/muse.sqlite3")
-    parser.add_argument("--knowledge-db", default="data/research/knowledge.sqlite3")
-    parser.add_argument("--reminder-db", default="data/reminders/muse.sqlite3")
+    project_root = Path(__file__).resolve().parents[2]
+    parser = argparse.ArgumentParser(
+        description="Run Muse local autonomy; contextual review uses an explicit loopback-model opt-in"
+    )
+    parser.add_argument("--task-db", default=str(project_root / "data/tasks/muse.sqlite3"))
+    parser.add_argument("--routine-db", default=str(project_root / "data/routines/muse.sqlite3"))
+    parser.add_argument("--state-db", default=str(project_root / "data/autonomy/runtime.sqlite3"))
+    parser.add_argument("--improvement-db", default=str(project_root / "data/improvements/muse.sqlite3"))
+    parser.add_argument("--knowledge-db", default=str(project_root / "data/research/knowledge.sqlite3"))
+    parser.add_argument("--reminder-db", default=str(project_root / "data/reminders/muse.sqlite3"))
     sub = parser.add_subparsers(dest="command", required=True)
-    run = sub.add_parser("run", help="start foreground supervisor; Ctrl+C or stop command ends it")
+    run = sub.add_parser(
+        "run", help="start foreground supervisor; contextual review is opt-in and loopback-only"
+    )
     run.add_argument("--poll-seconds", type=int, default=5)
-    sub.add_parser("once", help="run one deterministic maintenance/worker tick")
+    once = sub.add_parser("once", help="run one supervisor tick; local model review is opt-in")
+
+    def add_contextual_review_options(command_parser: argparse.ArgumentParser) -> None:
+        command_parser.add_argument(
+            "--enable-contextual-review", action="store_true",
+            help="explicitly enable review-only analysis through the configured local loopback model",
+        )
+        command_parser.add_argument(
+            "--contextual-review-timeout", type=float, default=90.0,
+            help="local contextual-review model timeout in seconds (1-180; default: 90)",
+        )
+
+    add_contextual_review_options(run)
+    add_contextual_review_options(once)
     sub.add_parser("research-once", help="run one bookmark-led autonomous research cycle")
     sub.add_parser("status", help="show runtime, queue and routine status")
     sub.add_parser("pause", help="pause work while retaining runtime heartbeat")
@@ -709,10 +812,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     enqueue.add_argument("--steps-json", required=True,
                          help='JSON list, e.g. [{"action":"queue_snapshot"},{"action":"knowledge_lint"}]')
     args = parser.parse_args(argv)
+    contextual_review_handler = None
+    if getattr(args, "enable_contextual_review", False):
+        try:
+            from muse.contextual_inquiry_local_review import build_local_contextual_review_handler
+            contextual_review_handler = build_local_contextual_review_handler(
+                project_root, timeout_seconds=args.contextual_review_timeout,
+            )
+        except (OSError, ValueError, RuntimeError) as exc:
+            parser.error(f"cannot enable local contextual review: {exc}")
     supervisor = AutonomousSupervisor(
         task_db=args.task_db, routine_db=args.routine_db, state_db=args.state_db,
         improvement_db=args.improvement_db, knowledge_db=args.knowledge_db,
         reminder_db=args.reminder_db,
+        memory_db=str(project_root / "data/memory/muse.sqlite3"),
+        conversation_db=str(project_root / "data/conversations/muse.sqlite3"),
+        workspace=project_root,
+        contextual_review_handler=contextual_review_handler,
     )
     try:
         if args.command == "status":
@@ -732,7 +848,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             supervisor.ensure_default_routines()
             print(json.dumps(supervisor.run_tick(), ensure_ascii=False, indent=2))
         elif args.command == "research-once":
-            print(json.dumps(supervisor._autonomous_research({"workspace": Path.cwd()}), ensure_ascii=False, indent=2))
+            print(json.dumps(supervisor._autonomous_research({"workspace": supervisor.workspace}), ensure_ascii=False, indent=2))
         elif args.command == "run":
             stats = supervisor.run_forever(poll_seconds=args.poll_seconds)
             print(json.dumps({"stopped": True, **stats}, ensure_ascii=False, indent=2))

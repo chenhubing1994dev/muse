@@ -171,6 +171,38 @@ class VerticalClipCommandTests(unittest.TestCase):
         self.assertIn("subtitles=filename=", ",".join(command))
         self.assertEqual(command[-1], str(self.output))
 
+    def test_optional_face_center_uses_a_clamped_crop_expression(self):
+        command = build_vertical_clip_command(
+            self.source, self.output, 0, 30, crop_center_x=0.75,
+        )
+        filters = command[command.index("-vf") + 1]
+        self.assertIn("crop=1080:1920:max(0\\,min(iw-1080\\,iw*0.750000-540)):0", filters)
+        with self.assertRaisesRegex(ValueError, "crop_center_x"):
+            build_vertical_clip_command(self.source, self.output, 0, 30, crop_center_x=1.5)
+
+    def test_dynamic_face_keyframes_generate_per_frame_crop_expression(self):
+        command = build_vertical_clip_command(
+            self.source, self.output, 0, 4,
+            crop_center_keyframes=[
+                {"time_seconds": 0.0, "center_x": 0.25},
+                {"time_seconds": 2.0, "center_x": 0.75},
+                {"time_seconds": 4.0, "center_x": 0.4},
+            ],
+        )
+        filters = command[command.index("-vf") + 1]
+        self.assertIn("crop=1080:1920:'max(0,min(iw-1080,iw*", filters)
+        self.assertIn("if(lt(t,2.000000)", filters)
+        self.assertIn("0.250000+(0.500000)*(t-0.000000)/2.000000", filters)
+        self.assertIn("0.750000+(-0.350000)*(t-2.000000)/2.000000", filters)
+        with self.assertRaisesRegex(ValueError, "mutually exclusive"):
+            build_vertical_clip_command(
+                self.source, self.output, 0, 4, crop_center_x=0.5,
+                crop_center_keyframes=[
+                    {"time_seconds": 0.0, "center_x": 0.5},
+                    {"time_seconds": 4.0, "center_x": 0.5},
+                ],
+            )
+
     def test_uses_software_fallback_and_rejects_overwrite(self):
         command = build_vertical_clip_command(self.source, self.output, 0, 30)
         self.assertIn("libx264", command)
@@ -272,11 +304,13 @@ class VerticalClipCommandTests(unittest.TestCase):
 
         result = render_vertical_clip(
             self.source, self.output, 0, 30, ffmpeg_path="ffmpeg",
-            ffprobe_path="ffprobe", runner=runner,
+            ffprobe_path="ffprobe", crop_center_x=0.75, runner=runner,
         )
         self.assertEqual(result["status"], "completed")
         self.assertEqual(result["source_probe"]["duration_seconds"], 60.0)
         self.assertEqual(result["output_probe"]["video_codec"], "h264")
+        self.assertEqual(result["framing"]["mode"], "face_aware_clip_center")
+        self.assertIn("iw*0.750000-540", calls[1][calls[1].index("-vf") + 1])
         self.assertEqual([command[0] for command in calls], ["ffprobe", "ffmpeg", "ffprobe"])
 
     def test_render_refuses_clip_range_beyond_probed_source_without_running_ffmpeg(self):

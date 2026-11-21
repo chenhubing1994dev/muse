@@ -19,6 +19,7 @@ from pathlib import Path
 from muse.media import discover_media_tools
 from muse.video_engines import inspect_video_engines
 from muse.video_product_builder import VideoProductBuilder
+from muse.video_publish_package import build_publish_package_with_optional_generated_contact_sheet
 from muse.wan_video import generate_wan21_t2v
 
 
@@ -61,6 +62,44 @@ def _sha256(path: Path) -> str:
             digest.update(chunk)
     return digest.hexdigest()
 
+
+def _attach_visual_review_handoff(
+    workspace: Path, output_dir: Path, summary: dict[str, object],
+    *, master_video: Path, cover: Path, product: dict[str, object],
+) -> dict[str, object]:
+    """Attach a product-scoped draft package after full MP4 decode has passed."""
+    if summary.get("status") != "completed" or not master_video.is_file() or not cover.is_file():
+        raise RuntimeError("visual-review handoff requires completed video and cover artifacts")
+    if summary.get("full_decode") != "passed":
+        raise RuntimeError("visual-review handoff requires successful full-decode evidence")
+    mp4 = {
+        "path": master_video.relative_to(workspace).as_posix(),
+        "bytes": master_video.stat().st_size, "sha256": _sha256(master_video),
+        "duration_seconds": summary["video"]["duration_seconds"],
+        "width": 1920, "height": 1080, "fps": 24, "full_decode": "passed",
+    }
+    cover_record = {"path": cover.relative_to(workspace).as_posix(), "sha256": _sha256(cover)}
+    summary["mp4"] = mp4
+    summary["cover"] = cover_record
+    summary["product"] = product
+    summary["visual_provenance"] = "locally generated Wan 2.1 teaser; scenes are illustrative capability visuals"
+    source_notes = {
+        "schema_version": 1,
+        "title": "PROMETHEUS teaser — original Muse product demonstration",
+        "publisher": "Muse local project",
+        "published_at": summary.get("completed_at"),
+        "doi": None, "pdf": None, "relevant_sections": {},
+        "editorial_boundary": "Original product demonstration. Visual scenes are illustrative; no external research claim or independent certification is asserted.",
+    }
+    (output_dir / "source-notes.json").write_text(
+        json.dumps(source_notes, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
+    )
+    generation_path = output_dir / "generation.json"
+    generation_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    package = build_publish_package_with_optional_generated_contact_sheet(workspace, output_dir)
+    summary["publish_package"] = package
+    generation_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return package
 
 def _write_ambient(path: Path, seconds: float = 16.0, sample_rate: int = 48000) -> None:
     """Create an original, quiet synthetic ambient bed; no external music asset."""
@@ -347,9 +386,12 @@ def build(workspace: Path, output_dir: Path) -> dict[str, object]:
         "completed_at": datetime.now(timezone.utc).isoformat(),
         "status_note": "testing; requires human review before publication",
     }
+    summary["full_decode"] = "passed"
+    _attach_visual_review_handoff(
+        workspace, output_dir, summary, master_video=final_path, cover=cover_path, product=product,
+    )
     (output_dir / "generation.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return summary
-
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Create the first local PROMETHEUS Muse teaser")

@@ -20,7 +20,51 @@ from pathlib import Path
 from muse.media import discover_media_tools
 from muse.video_engines import inspect_video_engines
 from muse.video_product_builder import VideoProductBuilder
+from muse.video_publish_package import build_publish_package_with_optional_generated_contact_sheet
 from muse.wan_video import generate_wan21_t2v
+
+
+def _attach_landscape_visual_review_handoff(
+    workspace: Path, output_dir: Path, result: dict[str, object],
+    *, master_video: Path, cover: Path, product: dict[str, object],
+) -> dict[str, object]:
+    """Create a verified, product-scoped visual-review handoff for the 16:9 master."""
+    landscape = result.get("landscape")
+    if (result.get("status") != "completed" or not isinstance(landscape, dict)
+            or landscape.get("full_decode") != "passed" or not master_video.is_file() or not cover.is_file()):
+        raise RuntimeError("visual-review handoff requires full-decode-passed video and cover artifacts")
+    mp4 = {
+        "path": master_video.relative_to(workspace).as_posix(),
+        "bytes": master_video.stat().st_size, "sha256": sha256(master_video),
+        "duration_seconds": result["landscape"]["duration_seconds"],
+        "width": 1920, "height": 1080, "fps": 24, "full_decode": "passed",    }
+    cover_record = {"path": cover.relative_to(workspace).as_posix(), "sha256": sha256(cover)}
+    source_notes = {
+        "schema_version": 1,
+        "title": "PROMETHEUS full film — original Muse product demonstration",
+        "publisher": "Muse local project", "published_at": result.get("completed_at"),
+        "doi": None, "pdf": None, "relevant_sections": {},
+        "editorial_boundary": "Original product demonstration. Dashboard footage is from the local Muse UI; generated scenes are illustrative and are not proof of future capabilities.",
+    }
+    (output_dir / "source-notes.json").write_text(
+        json.dumps(source_notes, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
+    )
+    generation = {
+        "status": "completed", "title": result.get("title"), "mp4": mp4,
+        "cover": cover_record, "product": product,
+        "visual_provenance": "local Wan 2.1 scenes plus actual Muse Dashboard capture",
+    }
+    generation_path = output_dir / "generation.json"
+    generation_path.write_text(json.dumps(generation, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    package = build_publish_package_with_optional_generated_contact_sheet(
+        workspace, output_dir,
+        output_dir=workspace / str(product["relative_path"]) / "publish-package-v1",
+        platforms=("youtube", "wechat_channels", "bilibili"),
+    )
+    result["product"] = product
+    result["publish_package"] = package
+    generation_path.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return package
 
 
 SCENES = [
@@ -435,25 +479,26 @@ def build(
         "landscape_product": landscape_product, "portrait_product": portrait_product,
         "landscape": {"path": str(final_path), "bytes": final_path.stat().st_size,
                       "sha256": sha256(final_path), "duration_seconds": round(duration, 3),
-                      "width": 1920, "height": 1080, "fps": 24, "audio": True},
+                      "width": 1920, "height": 1080, "fps": 24, "audio": True, "full_decode": "passed"},
         "portrait": {"path": str(vertical_path), "bytes": vertical_path.stat().st_size,
                      "sha256": sha256(vertical_path), "duration_seconds": round(vduration, 3),
-                     "width": 1080, "height": 1920, "fps": 24, "audio": True},
+                     "width": 1080, "height": 1920, "fps": 24, "audio": True, "full_decode": "passed"},
         "dashboard_capture_sha256": sha256(dashboard_image),
         "dashboard_video_capture_sha256": sha256(dashboard_clip),
         "bundle": {"path": str(bundle), "bytes": bundle.stat().st_size, "sha256": sha256(bundle),
                    "entries": len(files), "crc_valid": True},
-        "scenes": [{"id": scene["id"], "prompt_id": scene["prompt_id"],
-                    "seed": scene["seed"], "sha256": scene["sha256"]} for scene in visuals],
+        "scenes": [{"id": scene["id"], "prompt_id": scene["prompt_id"],                    "seed": scene["seed"], "sha256": scene["sha256"]} for scene in visuals],
         "engine_status": engines, "ffmpeg_version": inventory.ffmpeg_version,
         "hardware_encoders": list(inventory.hardware_encoders),
         "voiceover": "not used; local TTS not verified",
         "status_note": "testing; human review required before publication",
         "completed_at": datetime.now(timezone.utc).isoformat(),
     }
+    _attach_landscape_visual_review_handoff(
+        workspace, output_dir, result, master_video=final_path, cover=cover, product=landscape_product,
+    )
     (output_dir / "generation.json").write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return result
-
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Create the 60-90 second local PROMETHEUS Muse film")

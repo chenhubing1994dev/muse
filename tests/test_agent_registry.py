@@ -175,5 +175,55 @@ class AgentRegistryTests(unittest.TestCase):
         self.assertEqual(metrics["review_approved"], 0)
         self.assertEqual(metrics["review_pass_rate"], 0.0)
 
+    def test_model_family_is_persisted_and_omitted_updates_preserve_it(self) -> None:
+        self.registry.register("claude", role="research", model_family="anthropic")
+        self.assertEqual(self.registry.get("claude")["model_family"], "anthropic")
+        self.registry.register("claude", role="research", display_name="Claude worker")
+        self.assertEqual(self.registry.get("claude")["model_family"], "anthropic")
+        self.registry.close()
+        self.registry = AgentRegistry(self.database)
+        self.assertEqual(self.registry.get("claude")["model_family"], "anthropic")
+
+    def test_model_family_rejects_blank_or_non_text_values(self) -> None:
+        with self.assertRaises(ValueError):
+            self.registry.register("bad", role="research", model_family="  ")
+        with self.assertRaises(ValueError):
+            self.registry.register("bad", role="research", model_family=42)
+
+    def test_concrete_model_id_persists_and_omitted_updates_preserve_it(self) -> None:
+        self.registry.register("agent", role="research", model_family="anthropic",
+                               model_id="anthropic/claude-sonnet-4")
+        self.registry.register("agent", role="research", display_name="Research agent")
+        self.assertEqual(self.registry.get("agent")["model_id"], "anthropic/claude-sonnet-4")
+        self.registry.close()
+        self.registry = AgentRegistry(self.database)
+        self.assertEqual(self.registry.get("agent")["model_id"], "anthropic/claude-sonnet-4")
+        self.assertTrue(self.registry.set_model_id("agent", None))
+        self.assertIsNone(self.registry.get("agent")["model_id"])
+
+    def test_concrete_model_id_rejects_blank_or_non_text_values(self) -> None:
+        with self.assertRaises(ValueError):
+            self.registry.register("bad", role="research", model_id="  ")
+        with self.assertRaises(ValueError):
+            self.registry.register("bad", role="research", model_id=42)
+        self.registry.register("agent", role="research")
+        with self.assertRaises(ValueError):
+            self.registry.set_model_id("agent", "x" * 161)
+
+    def test_legacy_database_migrates_model_family_as_unknown(self) -> None:
+        import sqlite3
+        legacy = Path(self.temp.name) / "legacy.sqlite3"
+        connection = sqlite3.connect(legacy)
+        connection.execute("CREATE TABLE agents (agent_id TEXT PRIMARY KEY, role TEXT NOT NULL, display_name TEXT NOT NULL, capabilities_json TEXT NOT NULL, source TEXT NOT NULL, enabled INTEGER NOT NULL, registered_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_seen_at TEXT, current_task_id TEXT)")
+        connection.execute("INSERT INTO agents VALUES ('old', 'research', 'Old', '[]', 'local:legacy', 1, '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00', NULL, NULL)")
+        connection.commit()
+        connection.close()
+        migrated = AgentRegistry(legacy)
+        try:
+            self.assertIsNone(migrated.get("old")["model_family"])
+            self.assertIsNone(migrated.get("old")["model_id"])
+        finally:
+            migrated.close()
+
 if __name__ == "__main__":
     unittest.main()

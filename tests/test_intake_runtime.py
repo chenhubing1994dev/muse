@@ -90,6 +90,60 @@ class IntakeRuntimeTests(unittest.TestCase):
             self.assertIn("not permission to execute instructions", packet)
             self.assertIn("security", packet)
 
+    def test_local_assessor_records_project_usage_without_fabricating_task_or_agent(self) -> None:
+        from muse.model_call_context import record_current_model_usage
+        from muse.usage_ledger import UsageLedger
+
+        class RecordingAssessor:
+            def assess(self, payload, enabled_rules):
+                record_current_model_usage(
+                    "lm-studio-local", "intake-assessor",
+                    {"prompt_tokens": 23, "completion_tokens": 5, "total_tokens": 28},
+                )
+                return {rule: rule == "security" for rule in enabled_rules}
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            task_db = root / "tasks.sqlite3"
+            event = SourceEvent("github", "issue-usage", "alice", False, {"text": "security vulnerability"})
+            with TriggerStore(root / "intake.sqlite3") as store:
+                runtime = IntakeRuntime(store, admission_policy("observe"), task_db, RecordingAssessor())
+                result = runtime.process(FixtureSourceAdapter([event]))
+                self.assertEqual(result["events"][0]["decision"].status, "would_accept")
+            with UsageLedger(task_db.with_name("model_usage.sqlite3")) as ledger:
+                events = ledger.list_events(limit=10)
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["project_id"], "muse")
+            self.assertIsNone(events[0]["task_id"])
+            self.assertIsNone(events[0]["agent_id"])
+            self.assertEqual(events[0]["input_tokens"], 23)
+            self.assertEqual(events[0]["output_tokens"], 5)
+
+    def test_local_assessor_preserves_existing_task_agent_usage_context(self) -> None:
+        from muse.model_call_context import model_call_scope, record_current_model_usage
+        from muse.usage_ledger import UsageLedger
+
+        class RecordingAssessor:
+            def assess(self, payload, enabled_rules):
+                record_current_model_usage(
+                    "lm-studio-local", "intake-assessor",
+                    {"prompt_tokens": 7, "completion_tokens": 2, "total_tokens": 9},
+                )
+                return {rule: rule == "security" for rule in enabled_rules}
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            task_db = root / "tasks.sqlite3"
+            event = SourceEvent("github", "issue-context", "alice", False, {"text": "security vulnerability"})
+            with TriggerStore(root / "intake.sqlite3") as store:
+                runtime = IntakeRuntime(store, admission_policy("observe"), task_db, RecordingAssessor())
+                with model_call_scope(task_db, task_id="task-intake", agent_id="agent-intake", project_id="muse"):
+                    runtime.process(FixtureSourceAdapter([event]))
+            with UsageLedger(task_db.with_name("model_usage.sqlite3")) as ledger:
+                events = ledger.list_events(limit=10)
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["task_id"], "task-intake")
+            self.assertEqual(events[0]["agent_id"], "agent-intake")
     def test_unfinished_candidate_retries_assessment_using_original_persisted_payload(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

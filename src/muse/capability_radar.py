@@ -351,6 +351,7 @@ def scan_capabilities(
                 )
                 existing.append({
                     "id": previous["id"], "title": title, "status": previous["status"],
+                    "signal_key": signal["key"],
                     "priority": previous.get("priority", priority),
                     "confidence": previous.get("metadata", {}).get("confidence", confidence),
                     "knowledge_links": knowledge_links,
@@ -370,6 +371,7 @@ def scan_capabilities(
             sync_proposal_review_state(proposal)
             item = {
                 "id": proposal["id"], "title": proposal["title"], "status": proposal["status"],
+                "signal_key": signal["key"],
                 "priority": priority, "confidence": confidence, "impact": spec["impact"],
                 "evidence": evidence, "acceptance_criteria": spec["acceptance_criteria"],
                 "rollback_plan": spec["rollback_plan"], "knowledge_links": knowledge_links,
@@ -389,32 +391,43 @@ def scan_capabilities(
         # A telemetry failure must not undo a proposal or block the scheduled self-check.
         pass
 
-    return {
-        "scanned_at": checked_at.isoformat(),
-        "lookback_hours": lookback_hours,
-        "signals_seen": [
-            {
-                "key": item["key"],
-                "count": item["count"],
-                "priority": min(
-                    100,
-                    _SIGNAL_SPECS[item["key"]]["base_priority"]
-                    + min(max(item["count"] - 1, 0), 5) * 2,
+    from muse.value_forge import ValueForge
+
+    signals_seen = [
+        {
+            "key": item["key"],
+            "count": item["count"],
+            "priority": min(
+                100,
+                _SIGNAL_SPECS[item["key"]]["base_priority"]
+                + min(max(item["count"] - 1, 0), 5) * 2,
+            ),
+            "confidence": round(
+                min(
+                    0.95,
+                    _SIGNAL_SPECS[item["key"]]["base_confidence"]
+                    + min(item["count"], 5) * 0.025,
                 ),
-                "confidence": round(
-                    min(
-                        0.95,
-                        _SIGNAL_SPECS[item["key"]]["base_confidence"]
-                        + min(item["count"], 5) * 0.025,
-                    ),
-                    3,
-                ),
-            }
-            for item in signals
-        ],
+                3,
+            ),
+        }
+        for item in signals
+    ]
+    value_forge_result = ValueForge().evaluate_capability_radar_result({
+        "signals_seen": signals_seen,
         "created": created,
         "existing": existing,
         "trend": trend,
+    })
+
+    return {
+        "scanned_at": checked_at.isoformat(),
+        "lookback_hours": lookback_hours,
+        "signals_seen": signals_seen,
+        "created": created,
+        "existing": existing,
+        "trend": trend,
+        "value_forge": value_forge_result,
         "research_knowledge_signals": research_metrics,
         "research_followups": research_followups,
         "creator_video_failures": creator_video_failures,
@@ -422,7 +435,6 @@ def scan_capabilities(
         "knowledge_state_sync": knowledge_state_sync,
         "approval_required": True,
     }
-
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Generate ranked capability proposals from operational aggregates")

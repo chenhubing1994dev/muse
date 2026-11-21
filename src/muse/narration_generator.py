@@ -117,13 +117,21 @@ def _split_to_chunks(text: str, target: int) -> list[str]:
 
 
 def _distribute(items: list[str], count: int) -> list[list[str]]:
-    """Distribute items into ``count`` non-empty buckets, deterministically."""
-    buckets: list[list[str]] = [[] for _ in range(count)]
-    for index, item in enumerate(items):
-        buckets[index % count].append(item)
-    for bucket in buckets:
-        if not bucket:
-            bucket.append(items[len(buckets) % len(items)] if items else "")
+    """Split items into contiguous, balanced buckets without reordering or duplication."""
+    if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+        raise ValueError("count must be a positive integer")
+    if not items:
+        return [[] for _ in range(count)]
+
+    bucket_count = min(count, len(items))
+    base_size, remainder = divmod(len(items), bucket_count)
+    buckets: list[list[str]] = []
+    offset = 0
+    for index in range(bucket_count):
+        size = base_size + (1 if index < remainder else 0)
+        buckets.append(items[offset:offset + size])
+        offset += size
+    buckets.extend([] for _ in range(count - bucket_count))
     return buckets
 
 

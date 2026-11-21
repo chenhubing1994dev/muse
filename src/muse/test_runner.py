@@ -7,6 +7,7 @@ import json
 import os
 import platform
 import subprocess
+import signal
 import sys
 import time
 import unittest
@@ -116,11 +117,13 @@ def _run_isolated_suite(
     experiment_bridge: ExperimentBridge | None, manifest_id: str | None,
     budget_seconds: int, verbosity: int, memory_budget_mb: int = 4096,
     working_directory: Path | None = None, import_root: Path | None = None,
-    run_id: str | None = None,
+    run_id: str | None = None, stop_event: object | None = None,
 ) -> dict[str, object]:
-    """Run a bounded child process; enforce Windows Job Object limits when available."""
+    """Run a bounded child process; terminate only this runner-owned process tree on stop."""
     if run_id is not None and (not isinstance(run_id, str) or not run_id.strip() or len(run_id) > 160 or "\x00" in run_id):
         raise ValueError("run_id must be non-empty bounded text")
+    if stop_event is not None and not callable(getattr(stop_event, "is_set", None)):
+        raise TypeError("stop_event must expose a callable is_set() method")
     run_id = run_id or uuid.uuid4().hex
     started = time.monotonic()
     _record(progress_events, run_id, "started", summary="Isolated unittest process started.")
@@ -150,37 +153,81 @@ def _run_isolated_suite(
     stdout = stderr = ""
     status = "failed"
     exit_code = 1
-    try:
-        process = subprocess.Popen(
-            [sys.executable, "-c", child_script, str(start_directory), pattern, str(verbosity), source_root],
-            cwd=run_cwd, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, encoding="utf-8", errors="replace",
-            creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
-        )
+
+    def stop_requested() -> bool:
+        return bool(stop_event is not None and stop_event.is_set())
+
+    def terminate_owned_process(code: int) -> None:
+        nonlocal stdout, stderr
+        if process is None:
+            return
         if os.name == "nt":
-            # Windows experiments fail closed if OS-level limits cannot be attached.
-            job_limits = WindowsJobLimits(process, memory_limit_mb=memory_budget_mb)
-        stdout, stderr = process.communicate(timeout=budget_seconds)
-        exit_code = process.returncode if process.returncode >= 0 else 1
-        status = "succeeded" if exit_code == 0 else "failed"
-    except subprocess.TimeoutExpired:
-        if job_limits is not None:
+            if job_limits is not None:
+                try:
+                    job_limits.terminate(code)
+                except ProcessLimitError:
+                    pass
+            if process.poll() is None:
+                try:
+                    process.terminate()
+                except OSError:
+                    pass
+        else:
             try:
-                job_limits.terminate(124)
-            except ProcessLimitError:
-                pass
-        if process is not None:
-            try:
-                stdout, stderr = process.communicate(timeout=2)
-            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGTERM)
+            except OSError:
+                if process.poll() is None:
+                    process.terminate()
+        try:
+            stdout, stderr = process.communicate(timeout=2)
+        except subprocess.TimeoutExpired:
+            if os.name == "nt":
                 process.kill()
-                stdout, stderr = process.communicate()
+            else:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except OSError:
+                    process.kill()
+            stdout, stderr = process.communicate()
+
+    try:
+        if stop_requested():
+            status, exit_code = "interrupted", 130
+        else:
+            process = subprocess.Popen(
+                [sys.executable, "-c", child_script, str(start_directory), pattern, str(verbosity), source_root],
+                cwd=run_cwd, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, encoding="utf-8", errors="replace",
+                creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+                start_new_session=(os.name != "nt"),
+            )
+            if os.name == "nt":
+                # Windows experiments fail closed if OS-level limits cannot be attached.
+                job_limits = WindowsJobLimits(process, memory_limit_mb=memory_budget_mb)
+            deadline = started + budget_seconds
+            while True:
+                if stop_requested():
+                    terminate_owned_process(130)
+                    status, exit_code = "interrupted", 130
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(process.args, budget_seconds)
+                try:
+                    stdout, stderr = process.communicate(timeout=min(0.1, remaining))
+                except subprocess.TimeoutExpired:
+                    # A descendant may still hold stdout/stderr open after the root exits.
+                    # Keep enforcing the same deadline so the process group/Job Object is reaped.
+                    continue
+                exit_code = process.returncode if process.returncode >= 0 else 1
+                status = "succeeded" if exit_code == 0 else "failed"
+                break
+    except subprocess.TimeoutExpired:
+        terminate_owned_process(124)
         status = "budget_exceeded"
         exit_code = 124
     except ProcessLimitError:
-        if process is not None and process.poll() is None:
-            process.kill()
-            stdout, stderr = process.communicate()
+        terminate_owned_process(125)
         status = "failed"
         exit_code = 125
     finally:
@@ -203,8 +250,14 @@ def _run_isolated_suite(
         sys.stderr.write(stderr[-200000:])
     duration = time.monotonic() - started
     if payload is None:
-        payload = {"tests_run": 0, "failures": 0, "errors": 1, "skipped": 0, "success": False}
+        payload = {"tests_run": 0, "failures": 0,
+                   "errors": 0 if status == "interrupted" else 1,
+                   "skipped": 0, "success": False}
     metrics = {key: int(payload.get(key, 0)) for key in ("tests_run", "failures", "errors", "skipped")}
+    if status == "interrupted":
+        _record(progress_events, run_id, "interrupted", summary="Isolated unittest process interrupted by caller.")
+        return {"status": status, "exit_code": exit_code, "duration_seconds": round(duration, 3),
+                "metrics": metrics, "run_ref": None, "experiment_record_error": False}
     if status == "succeeded" and not payload.get("success"):
         status = "failed"
         exit_code = 1

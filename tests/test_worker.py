@@ -44,6 +44,73 @@ class WorkerTests(unittest.TestCase):
             with TaskQueue(database) as queue:
                 self.assertEqual(queue.get(task["id"])["status"], "succeeded")
 
+    def test_open_design_worker_marks_task_failed_when_evidence_persistence_fails(self) -> None:
+        class OpenDesignHandler:
+            def execute_task(self, payload, *, task_id):
+                return {
+                    "status": "completed", "run_id": "run-1",
+                    "artifact_evidence_persistence": {
+                        "status": "failed", "error_type": "OperationalError",
+                        "message": "database is locked",
+                    },
+                }
+
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "tasks.sqlite3"
+            with TaskQueue(database) as queue:
+                task = queue.enqueue("Open Design", {"kind": "open_design_run"})
+            result = run_once(
+                database, {"open_design_run": OpenDesignHandler()},
+                approval_required_kinds=set(),
+            )
+            self.assertEqual(result["id"], task["id"])
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(result["payload"]["_result"]["error_code"], "open_design.evidence_persistence_failed")
+            self.assertTrue(result["payload"]["_result"]["retryable"])
+
+    def test_open_design_worker_rejects_incomplete_artifact_evidence(self) -> None:
+        class OpenDesignHandler:
+            def execute_task(self, payload, *, task_id):
+                return {
+                    "status": "completed", "run_id": "run-1",
+                    "artifact_evidence_persistence": {
+                        "status": "incomplete", "error_type": "IncompleteArtifactEvidence",
+                        "message": "bundle truncated",
+                    },
+                }
+
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "tasks.sqlite3"
+            with TaskQueue(database) as queue:
+                queue.enqueue("Open Design", {"kind": "open_design_run"})
+            result = run_once(
+                database, {"open_design_run": OpenDesignHandler()},
+                approval_required_kinds=set(),
+            )
+            self.assertEqual(result["status"], "failed")
+            failure = result["payload"]["_result"]
+            self.assertEqual(failure["error_code"], "open_design.artifact_evidence_incomplete")
+            self.assertFalse(failure["retryable"])
+            self.assertIn("new task ID", failure["recovery_guidance"])
+
+    def test_open_design_worker_succeeds_only_after_evidence_is_persisted(self) -> None:
+        class OpenDesignHandler:
+            def execute_task(self, payload, *, task_id):
+                return {
+                    "status": "completed", "run_id": "run-1",
+                    "artifact_evidence_persistence": {"status": "persisted", "file_count": 1},
+                }
+
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "tasks.sqlite3"
+            with TaskQueue(database) as queue:
+                queue.enqueue("Open Design", {"kind": "open_design_run"})
+            result = run_once(
+                database, {"open_design_run": OpenDesignHandler()},
+                approval_required_kinds=set(),
+            )
+            self.assertEqual(result["status"], "succeeded")
+
     def test_worker_passes_live_lease_context_only_to_opted_in_handler(self) -> None:
         from muse.worker import WorkerExecutionContext
 
@@ -70,6 +137,200 @@ class WorkerTests(unittest.TestCase):
             self.assertTrue(handler.asserted is None)
             with self.assertRaises(PermissionError):
                 handler.context.assert_current_lease()
+
+
+    def test_worker_execution_context_submits_only_encrypted_review_result(self) -> None:
+        import hashlib
+        import json
+        from unittest.mock import patch
+        from muse.contextual_inquiry import ContextualInquiry, Hypothesis, Observation, SourceKind
+        from muse.contextual_inquiry_security import _serialize_contextual_inquiry
+        from muse.worker import WorkerExecutionContext
+
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "tasks.sqlite3"
+            inquiry = ContextualInquiry(
+                "worker-review-case", "Review one bounded case.",
+                observations=(Observation("obs-1", SourceKind.USER_QUOTE, "Private text.", "source:1"),),
+                hypotheses=(Hypothesis(
+                    "hyp-1", "A tentative claim.", ("obs-1",), confidence=0.4,
+                    falsification_condition="Independent evidence contradicts it.",
+                ),),
+            )
+            case_envelope = {
+                "version": 1, "protection": "windows-dpapi-current-user",
+                "ciphertext_b64": "Y2FzZS1jaXBoZXJ0ZXh0",
+            }
+            with TaskQueue(database) as queue:
+                task = queue.enqueue(
+                    "Contextual inquiry review",
+                    {
+                        "kind": "contextual_inquiry_review",
+                        "case_context_attached": False,
+                        "case_context_envelope_stored": True,
+                        "case_context_envelope": case_envelope,
+                        "context_status": "encrypted_pending_handler",
+                        "requires_context_reentry": True,
+                        "long_term_storage_performed": False,
+                    },
+                    require_approval=True,
+                    idempotency_key=(
+                        "contextual-inquiry-review:"
+                        + hashlib.sha256(inquiry.inquiry_id.encode("utf-8")).hexdigest()
+                    ),
+                )
+                authorized = queue.authorize_contextual_inquiry_review_only(
+                    task["id"], authorized_by="operator", expected_updated_at=task["updated_at"],
+                )
+                claimed = queue.claim_contextual_inquiry_review_only(
+                    task["id"], worker_id="review-worker",
+                    expected_updated_at=authorized["task"]["updated_at"],
+                )
+
+            result_plaintext = json.dumps(
+                {
+                    "schema_version": 1,
+                    "inquiry_id": inquiry.inquiry_id,
+                    "summary": "The result remains provisional.",
+                    "findings": [{
+                        "finding_id": "finding-1",
+                        "statement": "The observation remains a candidate.",
+                        "observation_refs": ["obs-1"],
+                        "hypothesis_refs": ["hyp-1"],
+                        "assessment": "unresolved",
+                        "rationale": "Independent corroboration is required.",
+                    }],
+                    "unknowns": ["Whether an independent source corroborates the claim."],
+                },
+                ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
+            ).encode("utf-8")
+            result_envelope = {
+                "version": 1, "protection": "windows-dpapi-current-user",
+                "ciphertext_b64": "cmV2aWV3LXJlc3VsdC1jaXBoZXJ0ZXh0",
+            }
+            case_plaintext = _serialize_contextual_inquiry(inquiry)
+            context = WorkerExecutionContext(
+                task_id=claimed["id"], worker_id="review-worker", database=str(database.resolve()),
+            )
+
+            def decrypt(envelope):
+                if envelope == case_envelope:
+                    return case_plaintext
+                if envelope == result_envelope:
+                    return result_plaintext
+                raise ValueError("unexpected test envelope")
+
+            with patch("muse.contextual_inquiry_security.unprotect_case_bytes", side_effect=decrypt):
+                completed = context.complete_contextual_inquiry_review_only(result_envelope)
+
+            self.assertEqual(completed["status"], "waiting_approval")
+            self.assertEqual(completed["payload"]["review_result_envelope"], result_envelope)
+            self.assertNotIn("_result", completed["payload"])
+            self.assertNotIn("_approved", completed["payload"])
+            self.assertNotIn(result_plaintext.decode("utf-8"), json.dumps(completed["payload"]))
+
+
+    def test_dedicated_review_worker_uses_review_only_claim_and_encrypted_completion(self) -> None:
+        import hashlib
+        import json
+        from unittest.mock import patch
+        from muse.contextual_inquiry import ContextualInquiry, Hypothesis, Observation, SourceKind
+        from muse.contextual_inquiry_bridge import build_workflow_contract
+        from muse.contextual_inquiry_security import _serialize_contextual_inquiry
+        from muse.worker import WorkerExecutionContext, run_contextual_inquiry_review_once
+
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "tasks.sqlite3"
+            inquiry = ContextualInquiry(
+                "dedicated-review-case", "Review one bounded case.",
+                observations=(Observation("obs-1", SourceKind.USER_QUOTE, "Private case text.", "source:1"),),
+                hypotheses=(Hypothesis(
+                    "hyp-1", "A tentative claim.", ("obs-1",), confidence=0.4,
+                    falsification_condition="Independent evidence contradicts it.",
+                ),),
+            )
+            case_envelope = {
+                "version": 1, "protection": "windows-dpapi-current-user",
+                "ciphertext_b64": "Y2FzZS1jaXBoZXJ0ZXh0",
+            }
+            result_plaintext = json.dumps(
+                {
+                    "schema_version": 1, "inquiry_id": inquiry.inquiry_id,
+                    "summary": "The result remains provisional.",
+                    "findings": [{
+                        "finding_id": "finding-1", "statement": "Candidate only.",
+                        "observation_refs": ["obs-1"], "hypothesis_refs": ["hyp-1"],
+                        "assessment": "unresolved", "rationale": "Needs independent corroboration.",
+                    }],
+                    "unknowns": ["Independent corroboration is unavailable."],
+                },
+                ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
+            ).encode("utf-8")
+            result_envelope = {
+                "version": 1, "protection": "windows-dpapi-current-user",
+                "ciphertext_b64": "cmV2aWV3LXJlc3VsdC1jaXBoZXJ0ZXh0",
+            }
+            case_plaintext = _serialize_contextual_inquiry(inquiry)
+            with TaskQueue(database) as queue:
+                task = queue.enqueue(
+                    "Contextual inquiry review",
+                    {
+                        "kind": "contextual_inquiry_review",
+                        "workflow_contract": build_workflow_contract(inquiry).to_dict(),
+                        "case_context_attached": False,
+                        "case_context_envelope_stored": True,
+                        "case_context_envelope": case_envelope,
+                        "context_status": "encrypted_pending_handler",
+                        "requires_context_reentry": True,
+                        "long_term_storage_performed": False,
+                    },
+                    require_approval=True, recovery_policy="manual",
+                    idempotency_key=(
+                        "contextual-inquiry-review:"
+                        + hashlib.sha256(inquiry.inquiry_id.encode("utf-8")).hexdigest()
+                    ),
+                )
+                queue.authorize_contextual_inquiry_review_only(
+                    task["id"], authorized_by="operator", expected_updated_at=task["updated_at"],
+                )
+
+            class ReviewHandler:
+                accepts_execution_context = True
+
+                def __init__(self):
+                    self.received_inquiry = None
+                    self.received_context = None
+
+                def execute_review(self, reviewed_inquiry, *, execution_context):
+                    self.received_inquiry = reviewed_inquiry
+                    self.received_context = execution_context
+                    return result_envelope
+
+            handler = ReviewHandler()
+
+            def decrypt(envelope):
+                if envelope == case_envelope:
+                    return case_plaintext
+                if envelope == result_envelope:
+                    return result_plaintext
+                raise ValueError("unexpected test envelope")
+
+            with (
+                patch("muse.contextual_inquiry_bridge.unprotect_case_bytes", side_effect=decrypt),
+                patch("muse.contextual_inquiry_security.unprotect_case_bytes", side_effect=decrypt),
+            ):
+                completed = run_contextual_inquiry_review_once(
+                    database, task["id"], handler, lease_seconds=30,
+                )
+
+            self.assertEqual(completed["status"], "waiting_approval")
+            self.assertIsInstance(handler.received_inquiry, ContextualInquiry)
+            self.assertIsInstance(handler.received_context, WorkerExecutionContext)
+            self.assertEqual(handler.received_context.task_id, task["id"])
+            self.assertEqual(completed["payload"]["review_result_envelope"], result_envelope)
+            self.assertNotIn("_result", completed["payload"])
+            self.assertNotIn("_approved", completed["payload"])
+            self.assertNotIn(result_plaintext.decode("utf-8"), json.dumps(completed["payload"]))
 
     def test_worker_does_not_pass_execution_context_to_legacy_handler(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -156,8 +417,11 @@ class WorkerTests(unittest.TestCase):
     def test_open_design_run_uses_existing_worker_approval_gate(self) -> None:
         class OpenDesignSpecialist:
             def execute_task(self, payload: dict, *, task_id: str) -> dict:
-                return {"status": "completed", "approved": payload.get("_approved") is True,
-                        "task_id": task_id}
+                return {
+                    "status": "completed", "approved": payload.get("_approved") is True,
+                    "task_id": task_id,
+                    "artifact_evidence_persistence": {"status": "persisted", "file_count": 1},
+                }
 
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "tasks.sqlite3"

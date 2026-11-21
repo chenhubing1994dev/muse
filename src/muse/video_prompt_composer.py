@@ -6,7 +6,7 @@ calls a model, downloads references, schedules work, or starts media generation.
 """
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from datetime import date
 from math import isfinite
 from urllib.parse import urlsplit
@@ -38,15 +38,23 @@ class PromptSourceRef:
     def __post_init__(self) -> None:
         for name in ("source_id", "author", "license", "category"):
             _required_text(getattr(self, name), name, 160)
-        parsed = urlsplit(self.source_url)
-        if parsed.scheme != "https" or not parsed.netloc:
-            raise ValueError("source_url must be an absolute HTTPS URL")
-        if self.completeness not in {"full", "excerpt"}:
+        if not isinstance(self.source_url, str) or len(self.source_url) > 2048:
+            raise ValueError("source_url must be an HTTPS URL of at most 2048 characters")
+        try:
+            parsed = urlsplit(self.source_url)
+        except ValueError:
+            raise ValueError("source_url must be a valid absolute HTTPS URL") from None
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+            raise ValueError("source_url must be an absolute HTTPS URL without embedded credentials")
+        if not isinstance(self.completeness, str) or self.completeness not in {"full", "excerpt"}:
             raise ValueError("completeness must be full or excerpt")
-        if len(self.method_tags) > 20 or any(not tag.strip() or len(tag) > 64 for tag in self.method_tags):
-            raise ValueError("method_tags must contain at most 20 short non-empty labels")
-        if len(self.summary) > 500:
-            raise ValueError("summary must be at most 500 characters")
+        if (not isinstance(self.method_tags, (tuple, list)) or len(self.method_tags) > 20
+                or any(not isinstance(tag, str) or not tag.strip() or len(tag) > 64 for tag in self.method_tags)):
+            raise ValueError("method_tags must contain at most 20 short non-empty string labels")
+        if not isinstance(self.summary, str) or len(self.summary) > 500:
+            raise ValueError("summary must be text of at most 500 characters")
+        if not isinstance(self.captured_at, str):
+            raise ValueError("captured_at must be an ISO date (YYYY-MM-DD)")
         if self.captured_at:
             try:
                 date.fromisoformat(self.captured_at)
@@ -84,8 +92,11 @@ class VideoPromptScene:
             ("music_cue", 240), ("negative_prompt", 1000),
         ):
             _optional_text(getattr(self, name), name, maximum)
-        if len(self.depends_on) > 12 or any(not item.strip() for item in self.depends_on):
-            raise ValueError("depends_on must contain at most 12 non-empty scene IDs")
+        if (not isinstance(self.depends_on, (tuple, list)) or len(self.depends_on) > 12
+                or any(not isinstance(item, str) or not item.strip() or len(item) > 40
+                       or not item.replace("_", "").replace("-", "").isalnum()
+                       or not item[0].islower() for item in self.depends_on)):
+            raise ValueError("depends_on must contain at most 12 valid lowercase scene IDs")
         if len(set(self.depends_on)) != len(self.depends_on):
             raise ValueError("depends_on cannot contain duplicates")
 
@@ -113,13 +124,14 @@ class VideoPromptSpec:
     def __post_init__(self) -> None:
         _required_text(self.title, "title", 160)
         _required_text(self.creative_intent, "creative_intent", 1200)
-        if not 1 <= len(self.scenes) <= MAX_SCENES:
-            raise ValueError(f"scenes must contain 1-{MAX_SCENES} entries")
+        if (not isinstance(self.scenes, (tuple, list)) or not 1 <= len(self.scenes) <= MAX_SCENES
+                or any(not isinstance(scene, VideoPromptScene) for scene in self.scenes)):
+            raise ValueError(f"scenes must contain 1-{MAX_SCENES} VideoPromptScene entries")
         if len({scene.scene_id for scene in self.scenes}) != len(self.scenes):
             raise ValueError("scene IDs must be unique")
-        if self.aspect_ratio not in {"16:9", "9:16", "1:1"}:
+        if not isinstance(self.aspect_ratio, str) or self.aspect_ratio not in {"16:9", "9:16", "1:1"}:
             raise ValueError("aspect_ratio must be 16:9, 9:16 or 1:1")
-        if isinstance(self.fps, bool) or self.fps not in {24, 25, 30, 50, 60}:
+        if isinstance(self.fps, bool) or not isinstance(self.fps, int) or self.fps not in {24, 25, 30, 50, 60}:
             raise ValueError("fps must be one of 24, 25, 30, 50 or 60")
         for name, maximum in (
             ("platform", 80), ("target_audience", 160), ("visual_style", 400),
@@ -128,14 +140,74 @@ class VideoPromptSpec:
             ("negative_prompt", 1000), ("model_family", 80),
         ):
             _optional_text(getattr(self, name), name, maximum)
-        if len(self.master_constraints) > 24 or any(not item.strip() or len(item) > 240 for item in self.master_constraints):
-            raise ValueError("master_constraints must contain at most 24 short non-empty rules")
-        if len(self.source_refs) > 40:
-            raise ValueError("source_refs must contain at most 40 attribution records")
+        if (not isinstance(self.master_constraints, (tuple, list)) or len(self.master_constraints) > 24
+                or any(not isinstance(item, str) or not item.strip() or len(item) > 240
+                       for item in self.master_constraints)):
+            raise ValueError("master_constraints must contain at most 24 short non-empty string rules")
+        if (not isinstance(self.source_refs, (tuple, list)) or len(self.source_refs) > 40
+                or any(not isinstance(ref, PromptSourceRef) for ref in self.source_refs)):
+            raise ValueError("source_refs must contain at most 40 PromptSourceRef records")
         ids = {scene.scene_id for scene in self.scenes}
         for scene in self.scenes:
             if scene.scene_id in scene.depends_on or set(scene.depends_on) - ids:
                 raise ValueError(f"scene {scene.scene_id} has self or unknown dependencies")
+
+
+def video_prompt_spec_from_dict(value: Mapping[str, Any]) -> VideoPromptSpec:
+    """Load a JSON-shaped director brief without silently accepting unknown fields."""
+    if not isinstance(value, Mapping):
+        raise ValueError("video prompt spec must be an object")
+    allowed = {item.name for item in fields(VideoPromptSpec)}
+    required = {"title", "creative_intent", "scenes"}
+    if set(value) - allowed or required - set(value):
+        raise ValueError("video prompt spec has missing or unsupported fields")
+    raw_scenes = value["scenes"]
+    if not isinstance(raw_scenes, list):
+        raise ValueError("scenes must be a JSON array")
+    scene_fields = {item.name for item in fields(VideoPromptScene)}
+    scenes = []
+    for index, raw in enumerate(raw_scenes, 1):
+        if not isinstance(raw, Mapping) or set(raw) - scene_fields:
+            raise ValueError(f"scene {index} has missing or unsupported fields")
+        scene_data = dict(raw)
+        dependencies = scene_data.get("depends_on", [])
+        if not isinstance(dependencies, list):
+            raise ValueError(f"scene {index} depends_on must be a JSON array")
+        scene_data["depends_on"] = tuple(dependencies)
+        try:
+            scenes.append(VideoPromptScene(**scene_data))
+        except TypeError as exc:
+            raise ValueError(f"scene {index} has invalid fields: {exc}") from None
+
+    raw_sources = value.get("source_refs", [])
+    if not isinstance(raw_sources, list):
+        raise ValueError("source_refs must be a JSON array")
+    source_fields = {item.name for item in fields(PromptSourceRef)}
+    sources = []
+    for index, raw in enumerate(raw_sources, 1):
+        if not isinstance(raw, Mapping) or set(raw) - source_fields:
+            raise ValueError(f"source_refs item {index} has missing or unsupported fields")
+        source_data = dict(raw)
+        tags = source_data.get("method_tags", [])
+        if not isinstance(tags, list):
+            raise ValueError(f"source_refs item {index} method_tags must be a JSON array")
+        source_data["method_tags"] = tuple(tags)
+        try:
+            sources.append(PromptSourceRef(**source_data))
+        except TypeError as exc:
+            raise ValueError(f"source_refs item {index} has invalid fields: {exc}") from None
+
+    constraints = value.get("master_constraints", [])
+    if not isinstance(constraints, list):
+        raise ValueError("master_constraints must be a JSON array")
+    data = dict(value)
+    data["scenes"] = tuple(scenes)
+    data["source_refs"] = tuple(sources)
+    data["master_constraints"] = tuple(constraints)
+    try:
+        return VideoPromptSpec(**data)
+    except TypeError as exc:
+        raise ValueError(f"video prompt spec has invalid fields: {exc}") from None
 
 
 def _required_text(value: Any, name: str, maximum: int) -> str:

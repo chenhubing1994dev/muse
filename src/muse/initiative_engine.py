@@ -11,6 +11,7 @@ import uuid
 import re
 import math
 import time
+from contextvars import ContextVar
 
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,6 +19,35 @@ from pathlib import Path
 STATUSES = {"proposed", "prioritized", "building", "testing", "shipped", "parked", "rejected"}
 KINDS = {"feature", "tool", "product", "research", "workflow", "creative_output"}
 CONTENT_PROFILE_FIELDS = frozenset({"topic", "hook_style", "narrative_structure", "editing_pace", "visual_style", "voice_language", "cta_style", "format"})
+
+_VIDEO_ATTEMPT_LEASE_CONTEXT: ContextVar[tuple[str, str, int] | None] = ContextVar(
+    "muse_video_attempt_lease", default=None,
+)
+
+
+def _bind_video_attempt_lease(attempt: dict | sqlite3.Row | None) -> None:
+    if not attempt or attempt.get("status") != "running":
+        return
+    attempt_id = attempt.get("attempt_id")
+    worker_id = attempt.get("worker_id")
+    epoch = attempt.get("attempt_count")
+    if (isinstance(attempt_id, str) and isinstance(worker_id, str)
+            and isinstance(epoch, int) and not isinstance(epoch, bool) and epoch > 0):
+        _VIDEO_ATTEMPT_LEASE_CONTEXT.set((attempt_id, worker_id, epoch))
+
+
+def _resolve_video_attempt_lease(attempt_id: str, worker_id: str | None, lease_epoch: int | None):
+    context = _VIDEO_ATTEMPT_LEASE_CONTEXT.get()
+    if context is not None and context[0] == attempt_id:
+        worker_id = context[1] if worker_id is None else worker_id
+        lease_epoch = context[2] if lease_epoch is None else lease_epoch
+    return worker_id, lease_epoch
+
+
+def _clear_video_attempt_lease(attempt_id: str) -> None:
+    context = _VIDEO_ATTEMPT_LEASE_CONTEXT.get()
+    if context is not None and context[0] == attempt_id:
+        _VIDEO_ATTEMPT_LEASE_CONTEXT.set(None)
 
 
 class InitiativeStore:
@@ -169,8 +199,37 @@ class InitiativeStore:
             CREATE TRIGGER IF NOT EXISTS initiative_video_attempt_events_no_delete
                 BEFORE DELETE ON initiative_video_attempt_events
                 BEGIN SELECT RAISE(ABORT,'video attempt events are append-only'); END;
+            CREATE TABLE IF NOT EXISTS initiative_video_stage_checkpoints(
+                sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                attempt_id TEXT NOT NULL REFERENCES initiative_video_attempts(attempt_id) ON DELETE RESTRICT,
+                dag_sha256 TEXT NOT NULL CHECK(length(dag_sha256)=64),
+                batch_id TEXT NOT NULL,
+                batch_fingerprint TEXT NOT NULL CHECK(length(batch_fingerprint)=64),
+                step_id TEXT NOT NULL,
+                stage_id TEXT NOT NULL,
+                lease_epoch INTEGER NOT NULL CHECK(lease_epoch>=1),
+                checkpoint_key TEXT NOT NULL,
+                input_sha256 TEXT NOT NULL CHECK(length(input_sha256)=64),
+                output_sha256 TEXT NOT NULL CHECK(length(output_sha256)=64),
+                recipe_sha256 TEXT NOT NULL CHECK(length(recipe_sha256)=64),
+                approval_task_id TEXT NOT NULL,
+                worker_id TEXT NOT NULL,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                UNIQUE(attempt_id,dag_sha256,batch_id,step_id,lease_epoch)
+            );
+            CREATE INDEX IF NOT EXISTS idx_video_stage_checkpoints_timeline
+                ON initiative_video_stage_checkpoints(attempt_id,dag_sha256,sequence);
+            CREATE TRIGGER IF NOT EXISTS initiative_video_stage_checkpoints_no_update
+                BEFORE UPDATE ON initiative_video_stage_checkpoints
+                BEGIN SELECT RAISE(ABORT,'video stage checkpoints are append-only'); END;
+            CREATE TRIGGER IF NOT EXISTS initiative_video_stage_checkpoints_no_delete
+                BEFORE DELETE ON initiative_video_stage_checkpoints
+                BEGIN SELECT RAISE(ABORT,'video stage checkpoints are append-only'); END;
         """)
-
+        self._migrate_video_stage_checkpoint_schema()
+        self.connection.execute("""CREATE INDEX IF NOT EXISTS idx_video_stage_checkpoints_step_history
+            ON initiative_video_stage_checkpoints(attempt_id,dag_sha256,batch_id,step_id,lease_epoch,sequence)""")
 
         self.connection.executescript("""
             CREATE TABLE IF NOT EXISTS initiative_performance_snapshots(
@@ -824,32 +883,273 @@ class InitiativeStore:
         ).fetchone())
     def mark_video_attempt_running(self, attempt_id):
         self._validate_video_attempt_id(attempt_id)
-        row = self.connection.execute(
-            "SELECT * FROM initiative_video_attempts WHERE attempt_id=?", (attempt_id,)
-        ).fetchone()
-        if row is None:
-            raise KeyError(attempt_id)
-        if row["status"] == "running":
-            return dict(row)
-        if row["status"] != "queued":
-            raise ValueError("only queued video attempts can start")
-        now = self._now()
-        self.connection.execute(
-            "UPDATE initiative_video_attempts SET status='running',started_at=?,worker_id='status-api',lease_expires_at=?,attempt_count=attempt_count+1 WHERE attempt_id=? AND status='queued'",
-            (now, time.time() + 3600, attempt_id),
-        )
-        self.connection.execute(
-            "INSERT INTO initiative_video_attempt_events(attempt_id,event_type,details_json,created_at) VALUES(?,?,?,?)",
-            (attempt_id, "started", json.dumps({"worker_id": "status-api"}), now),
-        )
-        self.connection.commit()
-        return dict(self.connection.execute(            "SELECT * FROM initiative_video_attempts WHERE attempt_id=?", (attempt_id,)
-        ).fetchone())
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.connection.execute(
+                "SELECT * FROM initiative_video_attempts WHERE attempt_id=?", (attempt_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(attempt_id)
+            if row["status"] == "running":
+                self.connection.commit()
+                running = dict(row)
+                _bind_video_attempt_lease(running)
+                return running
+            if row["status"] != "queued":
+                raise ValueError("only queued video attempts can start")
+            current = time.time()
+            now = self._now()
+            cursor = self.connection.execute(
+                "UPDATE initiative_video_attempts SET status='running',started_at=?,worker_id='status-api',lease_expires_at=?,attempt_count=attempt_count+1 WHERE attempt_id=? AND status='queued'",
+                (now, current + 3600, attempt_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("video Attempt ownership changed before start")
+            self.connection.execute(
+                "INSERT INTO initiative_video_attempt_events(attempt_id,event_type,details_json,created_at) VALUES(?,?,?,?)",
+                (attempt_id, "started", json.dumps({"worker_id": "status-api"}), now),
+            )
+            self.connection.commit()
+            running = dict(self.connection.execute(
+                "SELECT * FROM initiative_video_attempts WHERE attempt_id=?", (attempt_id,)
+            ).fetchone())
+            _bind_video_attempt_lease(running)
+            return running
+        except Exception:
+            self.connection.rollback()
+            raise
+    def _migrate_video_stage_checkpoint_schema(self):
+        """Upgrade stage-only checkpoint rows to append-only batch/step/epoch evidence."""
+        columns = {
+            row["name"] for row in self.connection.execute(
+                "PRAGMA table_info(initiative_video_stage_checkpoints)"
+            )
+        }
+        required = {"batch_id", "batch_fingerprint", "step_id", "lease_epoch"}
+        if required.issubset(columns):
+            return
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            self.connection.execute("DROP TRIGGER IF EXISTS initiative_video_stage_checkpoints_no_update")
+            self.connection.execute("DROP TRIGGER IF EXISTS initiative_video_stage_checkpoints_no_delete")
+            self.connection.execute("DROP INDEX IF EXISTS idx_video_stage_checkpoints_timeline")
+            self.connection.execute("DROP INDEX IF EXISTS idx_video_stage_checkpoints_step_history")
+            self.connection.execute("DROP TABLE IF EXISTS initiative_video_stage_checkpoints_migrating")
+            self.connection.execute("""CREATE TABLE initiative_video_stage_checkpoints_migrating(
+                sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                attempt_id TEXT NOT NULL REFERENCES initiative_video_attempts(attempt_id) ON DELETE RESTRICT,
+                dag_sha256 TEXT NOT NULL CHECK(length(dag_sha256)=64),
+                batch_id TEXT NOT NULL,
+                batch_fingerprint TEXT NOT NULL CHECK(length(batch_fingerprint)=64),
+                step_id TEXT NOT NULL,
+                stage_id TEXT NOT NULL,
+                lease_epoch INTEGER NOT NULL CHECK(lease_epoch>=1),
+                checkpoint_key TEXT NOT NULL,
+                input_sha256 TEXT NOT NULL CHECK(length(input_sha256)=64),
+                output_sha256 TEXT NOT NULL CHECK(length(output_sha256)=64),
+                recipe_sha256 TEXT NOT NULL CHECK(length(recipe_sha256)=64),
+                approval_task_id TEXT NOT NULL,
+                worker_id TEXT NOT NULL,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                UNIQUE(attempt_id,dag_sha256,batch_id,step_id,lease_epoch)
+            )""")
+            self.connection.execute("""INSERT INTO initiative_video_stage_checkpoints_migrating
+                (sequence,attempt_id,dag_sha256,batch_id,batch_fingerprint,step_id,stage_id,lease_epoch,
+                 checkpoint_key,input_sha256,output_sha256,recipe_sha256,approval_task_id,worker_id,
+                 metadata_json,created_at)
+                SELECT sequence,attempt_id,dag_sha256,'legacy',dag_sha256,stage_id,stage_id,1,
+                       checkpoint_key,input_sha256,output_sha256,recipe_sha256,approval_task_id,worker_id,
+                       metadata_json,created_at
+                FROM initiative_video_stage_checkpoints""")
+            self.connection.execute("DROP TABLE initiative_video_stage_checkpoints")
+            self.connection.execute(
+                "ALTER TABLE initiative_video_stage_checkpoints_migrating RENAME TO initiative_video_stage_checkpoints"
+            )
+            self.connection.execute("""CREATE INDEX idx_video_stage_checkpoints_timeline
+                ON initiative_video_stage_checkpoints(attempt_id,dag_sha256,sequence)""")
+            self.connection.execute("""CREATE INDEX idx_video_stage_checkpoints_step_history
+                ON initiative_video_stage_checkpoints(attempt_id,dag_sha256,batch_id,step_id,lease_epoch,sequence)""")
+            self.connection.execute("""CREATE TRIGGER initiative_video_stage_checkpoints_no_update
+                BEFORE UPDATE ON initiative_video_stage_checkpoints
+                BEGIN SELECT RAISE(ABORT,'video stage checkpoints are append-only'); END""")
+            self.connection.execute("""CREATE TRIGGER initiative_video_stage_checkpoints_no_delete
+                BEFORE DELETE ON initiative_video_stage_checkpoints
+                BEGIN SELECT RAISE(ABORT,'video stage checkpoints are append-only'); END""")
+            violations = self.connection.execute("PRAGMA foreign_key_check(initiative_video_stage_checkpoints)").fetchall()
+            if violations:
+                raise sqlite3.IntegrityError("checkpoint migration produced foreign-key violations")
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
 
+    @staticmethod
+    def _validate_video_stage_digest(value, field):
+        if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+            raise ValueError(f"{field} must be a lowercase SHA-256 digest")
+
+    def record_video_stage_checkpoint(
+        self, attempt_id, *, worker_id, lease_epoch, dag_sha256, batch_id,
+        batch_fingerprint, step_id, stage_id, checkpoint_key, input_sha256,
+        output_sha256, metadata=None,
+    ):
+        """Append verified batch-step evidence under the exact current Attempt lease epoch."""
+        self._validate_video_attempt_id(attempt_id)
+        if not isinstance(worker_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", worker_id):
+            raise ValueError("worker_id must be 1-64 safe identifier characters")
+        if isinstance(lease_epoch, bool) or not isinstance(lease_epoch, int) or lease_epoch < 1:
+            raise ValueError("lease_epoch must be a positive integer")
+        if not isinstance(batch_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", batch_id):
+            raise ValueError("batch_id must be a 1-128 character safe identifier")
+        if not isinstance(step_id, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.:-]{0,127}", step_id):
+            raise ValueError("step_id must be a 1-128 character safe identifier")
+        if not isinstance(stage_id, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", stage_id):
+            raise ValueError("stage_id must be a stable lowercase stage identifier")
+        from .video_studio import load_video_stage_specs
+        if stage_id not in load_video_stage_specs():
+            raise ValueError("unknown video stage_id")
+        for value, field in (
+            (dag_sha256, "dag_sha256"), (batch_fingerprint, "batch_fingerprint"),
+            (input_sha256, "input_sha256"), (output_sha256, "output_sha256"),
+        ):
+            self._validate_video_stage_digest(value, field)
+        if not isinstance(checkpoint_key, str) or not re.fullmatch(r"[A-Za-z0-9:_-]{1,256}", checkpoint_key):
+            raise ValueError("checkpoint_key must be 1-256 safe identifier characters")
+        if not checkpoint_key.startswith(f"video-studio:{attempt_id}:"):
+            raise ValueError("checkpoint_key must be bound to its parent attempt_id")
+        if metadata is None:
+            metadata = {}
+        if not isinstance(metadata, dict):
+            raise ValueError("metadata must be a JSON object")
+        try:
+            metadata_json = json.dumps(metadata, ensure_ascii=True, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("metadata must be finite JSON data") from exc
+        if len(metadata_json.encode("utf-8")) > 4096:
+            raise ValueError("metadata must not exceed 4 KiB")
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            attempt = self.connection.execute(
+                "SELECT * FROM initiative_video_attempts WHERE attempt_id=?", (attempt_id,)
+            ).fetchone()
+            if attempt is None:
+                raise KeyError(attempt_id)
+            if not attempt["approval_task_id"]:
+                raise ValueError("video stage checkpoint requires an approval task")
+            if not attempt["recipe_sha256"]:
+                raise ValueError("video stage checkpoint requires a recipe SHA-256 digest")
+            if int(attempt["attempt_count"]) != lease_epoch:
+                raise ValueError("checkpoint lease epoch does not match current Attempt attempt_count")
+            if (attempt["status"] != "running" or attempt["worker_id"] != worker_id
+                    or attempt["lease_expires_at"] is None or float(attempt["lease_expires_at"]) <= time.time()):
+                raise ValueError("only the current owning worker with an unexpired lease can write checkpoints")
+            values = {
+                "attempt_id": attempt_id, "dag_sha256": dag_sha256,
+                "batch_id": batch_id, "batch_fingerprint": batch_fingerprint,
+                "step_id": step_id, "stage_id": stage_id, "lease_epoch": lease_epoch,
+                "checkpoint_key": checkpoint_key, "input_sha256": input_sha256,
+                "output_sha256": output_sha256, "recipe_sha256": attempt["recipe_sha256"],
+                "approval_task_id": attempt["approval_task_id"], "worker_id": worker_id,
+                "metadata_json": metadata_json,
+            }
+            existing = self.connection.execute(
+                """SELECT * FROM initiative_video_stage_checkpoints
+                WHERE attempt_id=? AND dag_sha256=? AND batch_id=? AND step_id=? AND lease_epoch=?""",
+                (attempt_id, dag_sha256, batch_id, step_id, lease_epoch),
+            ).fetchone()
+            if existing is not None:
+                comparable = {key: existing[key] for key in values}
+                if comparable != values:
+                    raise ValueError("video stage checkpoint idempotency key conflicts")
+                self.connection.commit()
+                result = dict(existing)
+            else:
+                now = self._now()
+                self.connection.execute(
+                    """INSERT INTO initiative_video_stage_checkpoints
+                    (attempt_id,dag_sha256,batch_id,batch_fingerprint,step_id,stage_id,lease_epoch,
+                     checkpoint_key,input_sha256,output_sha256,recipe_sha256,approval_task_id,
+                     worker_id,metadata_json,created_at)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (attempt_id, dag_sha256, batch_id, batch_fingerprint, step_id, stage_id, lease_epoch,
+                     checkpoint_key, input_sha256, output_sha256, attempt["recipe_sha256"],
+                     attempt["approval_task_id"], worker_id, metadata_json, now),
+                )
+                self.connection.commit()
+                result = dict(self.connection.execute(
+                    """SELECT * FROM initiative_video_stage_checkpoints
+                    WHERE attempt_id=? AND dag_sha256=? AND batch_id=? AND step_id=? AND lease_epoch=?""",
+                    (attempt_id, dag_sha256, batch_id, step_id, lease_epoch),
+                ).fetchone())
+            result["metadata"] = json.loads(result.pop("metadata_json"))
+            return result
+        except Exception:
+            self.connection.rollback()
+            raise
+
+    def list_video_stage_checkpoints(
+        self, attempt_id, *, worker_id, lease_epoch, dag_sha256,
+        batch_id=None, batch_fingerprint=None, step_id=None,
+    ):
+        """Read historical step evidence only while holding the current valid Attempt lease."""
+        self._validate_video_attempt_id(attempt_id)
+        self._validate_video_stage_digest(dag_sha256, "dag_sha256")
+        if not isinstance(worker_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", worker_id):
+            raise ValueError("worker_id must be 1-64 safe identifier characters")
+        if isinstance(lease_epoch, bool) or not isinstance(lease_epoch, int) or lease_epoch < 1:
+            raise ValueError("lease_epoch must be a positive integer")
+        filters = (("batch_id", batch_id), ("batch_fingerprint", batch_fingerprint), ("step_id", step_id))
+        for field, value in filters:
+            if value is not None and (not isinstance(value, str) or not value or len(value) > 128):
+                raise ValueError(f"{field} must be non-empty bounded text")
+        if batch_fingerprint is not None:
+            self._validate_video_stage_digest(batch_fingerprint, "batch_fingerprint")
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            attempt = self.connection.execute(
+                """SELECT status,worker_id,lease_expires_at,attempt_count,recipe_sha256,approval_task_id
+                   FROM initiative_video_attempts WHERE attempt_id=?""",
+                (attempt_id,),
+            ).fetchone()
+            if attempt is None:
+                raise KeyError(attempt_id)
+            if (attempt["status"] != "running" or attempt["worker_id"] != worker_id
+                    or int(attempt["attempt_count"] or 0) != lease_epoch
+                    or attempt["lease_expires_at"] is None
+                    or float(attempt["lease_expires_at"]) <= time.time()):
+                raise ValueError("checkpoint read requires the current owning worker and an unexpired lease epoch")
+            if not attempt["recipe_sha256"] or not attempt["approval_task_id"]:
+                self.connection.commit()
+                return []
+            clauses = ["attempt_id=?", "dag_sha256=?", "recipe_sha256=?", "approval_task_id=?"]
+            values = [attempt_id, dag_sha256, attempt["recipe_sha256"], attempt["approval_task_id"]]
+            for field, value in filters:
+                if value is not None:
+                    clauses.append(f"{field}=?")
+                    values.append(value)
+            rows = self.connection.execute(
+                "SELECT * FROM initiative_video_stage_checkpoints WHERE "
+                + " AND ".join(clauses) + " ORDER BY sequence",
+                values,
+            ).fetchall()
+            items = []
+            for row in rows:
+                item = dict(row)
+                item["metadata"] = json.loads(item.pop("metadata_json"))
+                items.append(item)
+            self.connection.commit()
+            return items
+        except Exception:
+            self.connection.rollback()
+            raise
     def complete_video_attempt(
         self, attempt_id, *, initiative_id=None, product_id, version_id,
         mp4_sha256, package_sha256, manifest_sha256=None,
+        worker_id=None, lease_epoch=None, now=None,
     ):
+        """Complete only a queued Attempt or the exact current unexpired worker lease."""
+        worker_id, lease_epoch = _resolve_video_attempt_lease(attempt_id, worker_id, lease_epoch)
         self._validate_video_attempt_id(attempt_id)
         for value, field in ((product_id, "product_id"), (version_id, "version_id")):
             if not isinstance(value, str) or not value or len(value) > 128:
@@ -861,94 +1161,166 @@ class InitiativeStore:
             not isinstance(manifest_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", manifest_sha256)
         ):
             raise ValueError("manifest_sha256 must be a SHA-256 digest")
-        if initiative_id is not None:
-            if not isinstance(initiative_id, str) or not re.fullmatch(r"[0-9a-f]{32}", initiative_id):
-                raise ValueError("initiative_id must be a 32-character lowercase UUID hex string")
-            if self.connection.execute("SELECT 1 FROM creator_initiatives WHERE id=?", (initiative_id,)).fetchone() is None:
-                raise KeyError(initiative_id)
-        row = self.connection.execute(
-            "SELECT * FROM initiative_video_attempts WHERE attempt_id=?", (attempt_id,)
-        ).fetchone()
-        if row is None:
-            raise KeyError(attempt_id)
-        if initiative_id is not None and row["initiative_id"] not in {None, initiative_id}:
-            raise ValueError("video attempt cannot be reassigned to another initiative")
-        resolved_initiative_id = initiative_id or row["initiative_id"]
-        expected = (resolved_initiative_id, product_id, version_id, mp4_sha256, package_sha256, manifest_sha256)
-        actual = (
-            row["initiative_id"], row["product_id"], row["version_id"],
-            row["mp4_sha256"], row["package_sha256"], row["manifest_sha256"],
-        )
-        if row["status"] == "succeeded":
-            if actual == expected:
-                return dict(row)
-            raise ValueError("video attempt already completed with different artifact data")
-        if row["status"] not in {"queued", "running"}:
-            raise ValueError("video attempt is already terminal")
-        now = self._now()
-        self.connection.execute(
-            """UPDATE initiative_video_attempts SET status='succeeded',initiative_id=?,
-            product_id=?,version_id=?,mp4_sha256=?,package_sha256=?,manifest_sha256=?,finished_at=?,
-            worker_id=NULL,lease_expires_at=NULL
-            WHERE attempt_id=? AND status IN ('queued','running')""",
-            (*expected, now, attempt_id),
-        )
-        self.connection.execute(
-            "INSERT INTO initiative_video_attempt_events(attempt_id,event_type,details_json,created_at) VALUES(?,?,?,?)",
-            (attempt_id, "succeeded", json.dumps({
-                "product_id": product_id, "version_id": version_id,
-                "manifest_sha256": manifest_sha256,
-                "recipe_sha256": row["recipe_sha256"],
-            }, separators=(",", ":")), now),
-        )
-        self.connection.commit()
-        return dict(self.connection.execute(
-            "SELECT * FROM initiative_video_attempts WHERE attempt_id=?", (attempt_id,)
-        ).fetchone())
+        if worker_id is not None and (
+            not isinstance(worker_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", worker_id)
+        ):
+            raise ValueError("worker_id must be 1-64 safe identifier characters")
+        if lease_epoch is not None and (
+            isinstance(lease_epoch, bool) or not isinstance(lease_epoch, int) or lease_epoch < 1
+        ):
+            raise ValueError("lease_epoch must be a positive integer")
+        current_override = None if now is None else float(now)
+        if current_override is not None and (not math.isfinite(current_override) or current_override < 0):
+            raise ValueError("now must be a finite non-negative timestamp")
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            current = time.time() if current_override is None else current_override
+            row = self.connection.execute(
+                "SELECT * FROM initiative_video_attempts WHERE attempt_id=?", (attempt_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(attempt_id)
+            if initiative_id is not None:
+                if not isinstance(initiative_id, str) or not re.fullmatch(r"[0-9a-f]{32}", initiative_id):
+                    raise ValueError("initiative_id must be a 32-character lowercase UUID hex string")
+                if self.connection.execute("SELECT 1 FROM creator_initiatives WHERE id=?", (initiative_id,)).fetchone() is None:
+                    raise KeyError(initiative_id)
+                if row["initiative_id"] not in {None, initiative_id}:
+                    raise ValueError("video attempt cannot be reassigned to another initiative")
+            resolved_initiative_id = initiative_id or row["initiative_id"]
+            expected = (resolved_initiative_id, product_id, version_id, mp4_sha256, package_sha256, manifest_sha256)
+            actual = (
+                row["initiative_id"], row["product_id"], row["version_id"],
+                row["mp4_sha256"], row["package_sha256"], row["manifest_sha256"],
+            )
+            if row["status"] == "succeeded":
+                if actual == expected:
+                    self.connection.commit()
+                    return dict(row)
+                raise ValueError("video attempt already completed with different artifact data")
+            if row["status"] not in {"queued", "running"}:
+                raise ValueError("video attempt is already terminal")
+            if row["status"] == "queued" and int(row["attempt_count"] or 0) > 0:
+                raise ValueError("queued video Attempt with a prior worker lease must be reclaimed before terminal transition")
+            now_text = self._now()
+            if row["status"] == "running":
+                if (worker_id is None or lease_epoch is None or row["worker_id"] != worker_id
+                        or int(row["attempt_count"] or 0) != lease_epoch
+                        or row["lease_expires_at"] is None or float(row["lease_expires_at"]) <= current):
+                    raise ValueError("video Attempt completion requires the current owning worker and an unexpired lease epoch")
+                cursor = self.connection.execute(
+                    """UPDATE initiative_video_attempts SET status='succeeded',initiative_id=?,
+                    product_id=?,version_id=?,mp4_sha256=?,package_sha256=?,manifest_sha256=?,finished_at=?,
+                    worker_id=NULL,lease_expires_at=NULL
+                    WHERE attempt_id=? AND status='running' AND worker_id=? AND attempt_count=? AND lease_expires_at>?""",
+                    (*expected, now_text, attempt_id, worker_id, lease_epoch, current),
+                )
+            else:
+                cursor = self.connection.execute(
+                    """UPDATE initiative_video_attempts SET status='succeeded',initiative_id=?,
+                    product_id=?,version_id=?,mp4_sha256=?,package_sha256=?,manifest_sha256=?,finished_at=?,
+                    worker_id=NULL,lease_expires_at=NULL WHERE attempt_id=? AND status='queued'""",
+                    (*expected, now_text, attempt_id),
+                )
+            if cursor.rowcount != 1:
+                raise ValueError("video Attempt ownership changed before completion")
+            self.connection.execute(
+                "INSERT INTO initiative_video_attempt_events(attempt_id,event_type,details_json,created_at) VALUES(?,?,?,?)",
+                (attempt_id, "succeeded", json.dumps({
+                    "product_id": product_id, "version_id": version_id,
+                    "manifest_sha256": manifest_sha256,
+                    "recipe_sha256": row["recipe_sha256"],
+                }, separators=(",", ":")), now_text),
+            )
+            self.connection.commit()
+            return dict(self.connection.execute(
+                "SELECT * FROM initiative_video_attempts WHERE attempt_id=?", (attempt_id,)
+            ).fetchone())
+        except Exception:
+            self.connection.rollback()
+            raise
 
     def fail_video_attempt(
+
         self, attempt_id, *, error_type="RuntimeError",
         failure_code="video.product_job_failed", initiative_id=None,
+        worker_id=None, lease_epoch=None, now=None,
     ):
+        """Fail only a queued Attempt or the exact current unexpired worker lease."""
+        worker_id, lease_epoch = _resolve_video_attempt_lease(attempt_id, worker_id, lease_epoch)
         self._validate_video_attempt_id(attempt_id)
         if not isinstance(error_type, str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,79}", error_type):
             raise ValueError("error_type must be a bounded exception class name")
         if not isinstance(failure_code, str) or not re.fullmatch(r"[a-z][a-z0-9_.-]{0,79}", failure_code):
             raise ValueError("failure_code must be a stable lowercase classification")
-        if initiative_id is not None:
-            if not isinstance(initiative_id, str) or not re.fullmatch(r"[0-9a-f]{32}", initiative_id):
-                raise ValueError("initiative_id must be a 32-character lowercase UUID hex string")
-            if self.connection.execute("SELECT 1 FROM creator_initiatives WHERE id=?", (initiative_id,)).fetchone() is None:
-                raise KeyError(initiative_id)
-        row = self.connection.execute(
-            "SELECT * FROM initiative_video_attempts WHERE attempt_id=?", (attempt_id,)
-        ).fetchone()
-        if row is None:
-            raise KeyError(attempt_id)
-        if initiative_id is not None and row["initiative_id"] not in {None, initiative_id}:
-            raise ValueError("video attempt cannot be reassigned to another initiative")
-        resolved_initiative_id = initiative_id or row["initiative_id"]
-        if row["status"] == "failed":
-            if row["failure_code"] == failure_code and row["error_type"] == error_type and row["initiative_id"] == resolved_initiative_id:
-                return dict(row)
-            raise ValueError("video attempt already failed with different failure data")
-        if row["status"] not in {"queued", "running"}:
-            raise ValueError("video attempt is already terminal")
-        now = self._now()
-        self.connection.execute(
-            """UPDATE initiative_video_attempts SET status='failed',failure_code=?,
-            error_type=?,finished_at=?,worker_id=NULL,lease_expires_at=NULL
-            WHERE attempt_id=? AND status IN ('queued','running')""",
-            (failure_code, error_type, now, attempt_id),
-        )
-        self.connection.execute(
-            "INSERT INTO initiative_video_attempt_events(attempt_id,event_type,details_json,created_at) VALUES(?,?,?,?)",
-            (attempt_id, "failed", json.dumps({"failure_code": failure_code, "error_type": error_type}, separators=(",", ":")), now),
-        )
-        self.connection.commit()
-        return dict(self.connection.execute(
-            "SELECT * FROM initiative_video_attempts WHERE attempt_id=?", (attempt_id,)
-        ).fetchone())
+        if worker_id is not None and (
+            not isinstance(worker_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", worker_id)
+        ):
+            raise ValueError("worker_id must be 1-64 safe identifier characters")
+        if lease_epoch is not None and (
+            isinstance(lease_epoch, bool) or not isinstance(lease_epoch, int) or lease_epoch < 1
+        ):
+            raise ValueError("lease_epoch must be a positive integer")
+        current_override = None if now is None else float(now)
+        if current_override is not None and (not math.isfinite(current_override) or current_override < 0):
+            raise ValueError("now must be a finite non-negative timestamp")
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            current = time.time() if current_override is None else current_override
+            row = self.connection.execute(
+                "SELECT * FROM initiative_video_attempts WHERE attempt_id=?", (attempt_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(attempt_id)
+            if initiative_id is not None:
+                if not isinstance(initiative_id, str) or not re.fullmatch(r"[0-9a-f]{32}", initiative_id):
+                    raise ValueError("initiative_id must be a 32-character lowercase UUID hex string")
+                if self.connection.execute("SELECT 1 FROM creator_initiatives WHERE id=?", (initiative_id,)).fetchone() is None:
+                    raise KeyError(initiative_id)
+                if row["initiative_id"] not in {None, initiative_id}:
+                    raise ValueError("video attempt cannot be reassigned to another initiative")
+            resolved_initiative_id = initiative_id or row["initiative_id"]
+            if row["status"] == "failed":
+                if row["failure_code"] == failure_code and row["error_type"] == error_type and row["initiative_id"] == resolved_initiative_id:
+                    self.connection.commit()
+                    return dict(row)
+                raise ValueError("video attempt already failed with different failure data")
+            if row["status"] not in {"queued", "running"}:
+                raise ValueError("video attempt is already terminal")
+            if row["status"] == "queued" and int(row["attempt_count"] or 0) > 0:
+                raise ValueError("queued video Attempt with a prior worker lease must be reclaimed before terminal transition")
+            now_text = self._now()
+            if row["status"] == "running":
+                if (worker_id is None or lease_epoch is None or row["worker_id"] != worker_id
+                        or int(row["attempt_count"] or 0) != lease_epoch
+                        or row["lease_expires_at"] is None or float(row["lease_expires_at"]) <= current):
+                    raise ValueError("video Attempt failure requires the current owning worker and an unexpired lease epoch")
+                cursor = self.connection.execute(
+                    """UPDATE initiative_video_attempts SET status='failed',failure_code=?,
+                    error_type=?,finished_at=?,worker_id=NULL,lease_expires_at=NULL
+                    WHERE attempt_id=? AND status='running' AND worker_id=? AND attempt_count=? AND lease_expires_at>?""",
+                    (failure_code, error_type, now_text, attempt_id, worker_id, lease_epoch, current),
+                )
+            else:
+                cursor = self.connection.execute(
+                    """UPDATE initiative_video_attempts SET status='failed',failure_code=?,
+                    error_type=?,finished_at=?,worker_id=NULL,lease_expires_at=NULL
+                    WHERE attempt_id=? AND status='queued'""",
+                    (failure_code, error_type, now_text, attempt_id),
+                )
+            if cursor.rowcount != 1:
+                raise ValueError("video Attempt ownership changed before failure was recorded")
+            self.connection.execute(
+                "INSERT INTO initiative_video_attempt_events(attempt_id,event_type,details_json,created_at) VALUES(?,?,?,?)",
+                (attempt_id, "failed", json.dumps({"failure_code": failure_code, "error_type": error_type}, separators=(",", ":")), now_text),
+            )
+            self.connection.commit()
+            return dict(self.connection.execute(
+                "SELECT * FROM initiative_video_attempts WHERE attempt_id=?", (attempt_id,)
+            ).fetchone())
+        except Exception:
+            self.connection.rollback()
+            raise
 
     def claim_next_video_attempt(self, worker_id, *, lease_seconds=3600, now=None, attempt_id=None):
         """Atomically claim one queued attempt; recover only expired worker leases."""
@@ -958,11 +1330,12 @@ class InitiativeStore:
             raise ValueError("lease_seconds must be between 15 and 3600")
         if attempt_id is not None:
             self._validate_video_attempt_id(attempt_id)
-        current = time.time() if now is None else float(now)
-        if current < 0:
-            raise ValueError("now must be non-negative")
+        current_override = None if now is None else float(now)
+        if current_override is not None and (not math.isfinite(current_override) or current_override < 0):
+            raise ValueError("now must be a finite non-negative timestamp")
         self.connection.execute("BEGIN IMMEDIATE")
         try:
+            current = time.time() if current_override is None else current_override
             expired = self.connection.execute(
                 "SELECT attempt_id FROM initiative_video_attempts WHERE status='running' AND lease_expires_at IS NOT NULL AND lease_expires_at<=?",
                 (current,),
@@ -1003,29 +1376,92 @@ class InitiativeStore:
         except Exception:
             self.connection.rollback()
             raise
-        return self.get_video_attempt(row["attempt_id"])
+        claimed = self.get_video_attempt(row["attempt_id"])
+        _bind_video_attempt_lease(claimed)
+        return claimed
 
-    def release_video_attempt(self, attempt_id, *, worker_id, reason="worker_yielded"):
+    def renew_video_attempt_lease(
+        self, attempt_id, *, worker_id, lease_epoch, lease_seconds=3600, now=None,
+    ):
+        """Extend only the current unexpired Attempt lease without changing its fencing epoch."""
         self._validate_video_attempt_id(attempt_id)
         if not isinstance(worker_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", worker_id):
             raise ValueError("worker_id must be 1-64 safe identifier characters")
-        if not isinstance(reason, str) or not re.fullmatch(r"[a-z][a-z0-9_.-]{0,79}", reason):
-            raise ValueError("reason must be a stable lowercase release code")
+        if isinstance(lease_epoch, bool) or not isinstance(lease_epoch, int) or lease_epoch < 1:
+            raise ValueError("lease_epoch must be a positive integer")
+        if isinstance(lease_seconds, bool) or not isinstance(lease_seconds, int) or not 15 <= lease_seconds <= 3600:
+            raise ValueError("lease_seconds must be between 15 and 3600")
+        current_override = None if now is None else float(now)
+        if current_override is not None and (not math.isfinite(current_override) or current_override < 0):
+            raise ValueError("now must be a finite non-negative timestamp")
         self.connection.execute("BEGIN IMMEDIATE")
         try:
-            row = self.connection.execute("SELECT * FROM initiative_video_attempts WHERE attempt_id=?", (attempt_id,)).fetchone()
+            current = time.time() if current_override is None else current_override
+            row = self.connection.execute(
+                "SELECT status,worker_id,attempt_count,lease_expires_at FROM initiative_video_attempts WHERE attempt_id=?",
+                (attempt_id,),
+            ).fetchone()
             if row is None:
                 raise KeyError(attempt_id)
-            if row["status"] != "running" or row["worker_id"] != worker_id:
-                raise ValueError("only the current owning worker can release a running attempt")
-            now = self._now()
-            self.connection.execute(
-                "UPDATE initiative_video_attempts SET status='queued',worker_id=NULL,lease_expires_at=NULL,started_at=NULL WHERE attempt_id=? AND status='running' AND worker_id=?",
-                (attempt_id, worker_id),
+            if (row["status"] != "running" or row["worker_id"] != worker_id
+                    or int(row["attempt_count"] or 0) != lease_epoch
+                    or row["lease_expires_at"] is None
+                    or float(row["lease_expires_at"]) <= current):
+                raise ValueError("only the current owning worker with an unexpired lease epoch can renew")
+            renewed_expiry = max(float(row["lease_expires_at"]), current + lease_seconds)
+            cursor = self.connection.execute(
+                """UPDATE initiative_video_attempts SET lease_expires_at=?
+                   WHERE attempt_id=? AND status='running' AND worker_id=? AND attempt_count=?
+                   AND lease_expires_at>?""",
+                (renewed_expiry, attempt_id, worker_id, lease_epoch, current),
             )
+            if cursor.rowcount != 1:
+                raise ValueError("video Attempt lease changed while renewal was being committed")
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
+        return self.get_video_attempt(attempt_id)
+
+    def release_video_attempt(
+        self, attempt_id, *, worker_id, lease_epoch=None, reason="worker_yielded", now=None,
+    ):
+        """Release only the current owning worker's unexpired lease epoch."""
+        worker_id, lease_epoch = _resolve_video_attempt_lease(attempt_id, worker_id, lease_epoch)
+        self._validate_video_attempt_id(attempt_id)
+        if not isinstance(worker_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", worker_id):
+            raise ValueError("worker_id must be 1-64 safe identifier characters")
+        if isinstance(lease_epoch, bool) or not isinstance(lease_epoch, int) or lease_epoch < 1:
+            raise ValueError("lease_epoch must be a positive integer")
+        if not isinstance(reason, str) or not re.fullmatch(r"[a-z][a-z0-9_.-]{0,79}", reason):
+            raise ValueError("reason must be a stable lowercase release code")
+        current_override = None if now is None else float(now)
+        if current_override is not None and (not math.isfinite(current_override) or current_override < 0):
+            raise ValueError("now must be a finite non-negative timestamp")
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            current = time.time() if current_override is None else current_override
+            row = self.connection.execute(
+                "SELECT * FROM initiative_video_attempts WHERE attempt_id=?", (attempt_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(attempt_id)
+            if (row["status"] != "running" or row["worker_id"] != worker_id
+                    or int(row["attempt_count"] or 0) != lease_epoch
+                    or row["lease_expires_at"] is None or float(row["lease_expires_at"]) <= current):
+                raise ValueError("only the current owning worker with an unexpired lease epoch can release")
+            now_text = self._now()
+            cursor = self.connection.execute(
+                """UPDATE initiative_video_attempts SET status='queued',worker_id=NULL,
+                lease_expires_at=NULL,started_at=NULL WHERE attempt_id=? AND status='running'
+                AND worker_id=? AND attempt_count=? AND lease_expires_at>?""",
+                (attempt_id, worker_id, lease_epoch, current),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("video Attempt ownership changed before release")
             self.connection.execute(
                 "INSERT INTO initiative_video_attempt_events(attempt_id,event_type,details_json,created_at) VALUES(?,?,?,?)",
-                (attempt_id, "queued", json.dumps({"reason": reason, "worker_id": worker_id}), now),
+                (attempt_id, "queued", json.dumps({"reason": reason, "worker_id": worker_id, "lease_epoch": lease_epoch}), now_text),
             )
             self.connection.commit()
         except Exception:

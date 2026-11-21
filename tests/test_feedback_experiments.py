@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import shutil
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -140,6 +141,74 @@ class FeedbackResearchExperimentTests(unittest.TestCase):
                 self.assertEqual(failures[0]["metadata"]["epistemic_status"], "engineering_failure_not_claim_refutation")
                 self.assertEqual(knowledge.get_node(plan_id)["metadata"]["execution_state"], "failed")
 
+
+    def test_interrupted_feedback_experiment_is_resumable_and_not_recorded_as_failure(self):
+        import threading
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = self._workspace(root)
+            stop_event = threading.Event()
+            stop_event.set()
+            with ResearchKnowledgeStore(root / "knowledge.sqlite3") as knowledge:
+                plan_id = self._plan(knowledge)
+                with patch("muse.test_runner._run_isolated_suite", return_value={
+                    "status": "interrupted", "exit_code": 130, "duration_seconds": 0.1,
+                    "metrics": {"tests_run": 0, "failures": 0, "errors": 0, "skipped": 0},
+                    "run_ref": None, "experiment_record_error": False,
+                }) as runner:
+                    result = run_feedback_research_experiment(
+                        workspace, knowledge, root / "progress.sqlite3",
+                        proposal_id="proposal-1", feedback_id="feedback-1", plan_node_id=plan_id,
+                        stop_event=stop_event,
+                    )
+                self.assertEqual(result["status"], "interrupted")
+                self.assertIsNone(result["run_ref"])
+                self.assertIs(runner.call_args.kwargs["stop_event"], stop_event)
+                self.assertEqual(knowledge.list_nodes(node_type="failure", limit=20), [])
+                runs = [node for node in knowledge.list_nodes(node_type="experiment", limit=50)
+                        if node["external_ref"].startswith("experiment-run:")]
+                self.assertEqual(runs, [])
+
+    def test_real_feedback_experiment_stops_its_launched_child_and_remains_retryable(self):
+        import subprocess
+        import threading
+        import time
+        from muse.research_knowledge import ResearchKnowledgeStore
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = Path(__file__).resolve().parents[1]
+            stop_event = threading.Event()
+            stopper_threads = []
+            original_popen = subprocess.Popen
+
+            def launch_then_schedule_stop(*args, **kwargs):
+                process = original_popen(*args, **kwargs)
+                stopper = threading.Thread(
+                    target=lambda: (time.sleep(0.25), stop_event.set()), daemon=True,
+                )
+                stopper.start()
+                stopper_threads.append(stopper)
+                return process
+
+            with ResearchKnowledgeStore(root / "knowledge.sqlite3") as knowledge:
+                plan_id = self._plan(knowledge)
+                with patch("muse.test_runner.subprocess.Popen", side_effect=launch_then_schedule_stop):
+                    result = run_feedback_research_experiment(
+                        workspace, knowledge, root / "progress.sqlite3",
+                        proposal_id="proposal-1", feedback_id="feedback-1", plan_node_id=plan_id,
+                        stop_event=stop_event,
+                    )
+                for stopper in stopper_threads:
+                    stopper.join(timeout=2)
+                self.assertEqual(result["status"], "interrupted")
+                self.assertIsNone(result["run_ref"])
+                self.assertTrue(result["manifest_id"])
+                self.assertEqual(knowledge.list_nodes(node_type="failure", limit=20), [])
+                runs = [node for node in knowledge.list_nodes(node_type="experiment", limit=100)
+                        if node["external_ref"].startswith("experiment-run:")]
+                self.assertEqual(runs, [])
 
     def test_distinct_reviewer_reviews_engineering_result_once_without_claim_promotion(self):
         import json
@@ -297,9 +366,14 @@ class FeedbackResearchExperimentTests(unittest.TestCase):
                     reviews.close()
 
     def test_real_test_runner_executes_allowlisted_suite_and_persists_linked_result(self):
-        workspace = Path(__file__).resolve().parents[1]
+        source_workspace = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            workspace = root / "immutable-source-snapshot"
+            workspace.mkdir()
+            ignore = shutil.ignore_patterns("__pycache__", "*.pyc")
+            shutil.copytree(source_workspace / "src", workspace / "src", ignore=ignore)
+            shutil.copytree(source_workspace / "tests", workspace / "tests", ignore=ignore)
             with ResearchKnowledgeStore(root / "knowledge.sqlite3") as knowledge:
                 plan_id = self._plan(knowledge)
                 first = run_feedback_research_experiment(
@@ -311,6 +385,7 @@ class FeedbackResearchExperimentTests(unittest.TestCase):
                     proposal_id="proposal-1", feedback_id="feedback-1", plan_node_id=plan_id,
                 )
                 self.assertEqual(first["status"], "succeeded")
+
                 self.assertGreater(first["metrics"]["tests_run"], 0)
                 self.assertEqual(first["run_ref"], second["run_ref"])
                 self.assertTrue(second["reused"])

@@ -260,6 +260,90 @@ def deserialize_contextual_inquiry(plaintext: bytes) -> Any:
     return inquiry
 
 
+
+
+def deserialize_contextual_inquiry_review_result(plaintext: bytes, inquiry: Any) -> dict[str, Any]:
+    """Validate a canonical, inquiry-bound review result without persisting plaintext.
+
+    Findings are deliberately limited to candidate assessments. This schema cannot
+    assert that a claim is verified, supported, or refuted.
+    """
+    import json
+
+    from muse.contextual_inquiry import ContextualInquiry
+
+    if not isinstance(inquiry, ContextualInquiry):
+        raise TypeError("inquiry must be a ContextualInquiry")
+    if not isinstance(plaintext, bytes) or not plaintext or len(plaintext) > MAX_PLAINTEXT_BYTES:
+        raise ValueError("review result is empty or exceeds the size limit")
+    try:
+        data = json.loads(
+            plaintext.decode("utf-8"),
+            parse_constant=lambda value: (_ for _ in ()).throw(ValueError("invalid JSON constant")),
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise CaseProtectionError("decrypted review result is not valid JSON") from exc
+
+    if not isinstance(data, dict) or set(data) != {
+        "schema_version", "inquiry_id", "summary", "findings", "unknowns",
+    }:
+        raise CaseProtectionError("decrypted review result has an unsupported schema")
+    if type(data["schema_version"]) is not int or data["schema_version"] != 1:
+        raise CaseProtectionError("unsupported contextual inquiry review-result schema version")
+    if data["inquiry_id"] != inquiry.inquiry_id:
+        raise CaseProtectionError("review result does not match the encrypted inquiry")
+    if not isinstance(data["summary"], str) or not data["summary"].strip() or len(data["summary"]) > 4000:
+        raise CaseProtectionError("review result summary is invalid")
+    if not isinstance(data["findings"], list) or not 1 <= len(data["findings"]) <= 100:
+        raise CaseProtectionError("review result findings must contain between 1 and 100 entries")
+    if not isinstance(data["unknowns"], list) or len(data["unknowns"]) > 100:
+        raise CaseProtectionError("review result unknowns are invalid")
+    if any(not isinstance(item, str) or not item.strip() or len(item) > 2000 for item in data["unknowns"]):
+        raise CaseProtectionError("review result contains an invalid unknown")
+
+    observation_ids = {item.observation_id for item in inquiry.observations}
+    hypothesis_ids = {item.hypothesis_id for item in inquiry.hypotheses}
+    finding_ids: set[str] = set()
+    allowed_assessments = {"support_candidate", "counter_candidate", "unresolved"}
+    for finding in data["findings"]:
+        if not isinstance(finding, dict) or set(finding) != {
+            "finding_id", "statement", "observation_refs", "hypothesis_refs", "assessment", "rationale",
+        }:
+            raise CaseProtectionError("review result contains an unsupported finding shape")
+        finding_id = finding["finding_id"]
+        if (
+            not isinstance(finding_id, str) or not finding_id.strip() or len(finding_id) > 80
+            or finding_id in finding_ids
+        ):
+            raise CaseProtectionError("review result finding identifier is invalid or duplicated")
+        finding_ids.add(finding_id)
+        if not isinstance(finding["statement"], str) or not finding["statement"].strip() or len(finding["statement"]) > 2000:
+            raise CaseProtectionError("review result finding statement is invalid")
+        if not isinstance(finding["rationale"], str) or not finding["rationale"].strip() or len(finding["rationale"]) > 4000:
+            raise CaseProtectionError("review result finding rationale is invalid")
+        assessment = finding["assessment"]
+        if not isinstance(assessment, str) or assessment not in allowed_assessments:
+            raise CaseProtectionError("review result assessment cannot promote evidence to a verdict")
+        for field, known in (("observation_refs", observation_ids), ("hypothesis_refs", hypothesis_ids)):
+            refs = finding[field]
+            if (
+                not isinstance(refs, list) or len(refs) > 100
+                or any(not isinstance(ref, str) or ref not in known for ref in refs)
+                or len(set(refs)) != len(refs)
+            ):
+                raise CaseProtectionError(f"review result contains invalid {field}")
+
+    try:
+        canonical = json.dumps(
+            data, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise CaseProtectionError("review result cannot be canonicalized safely") from exc
+    if canonical != plaintext:
+        raise CaseProtectionError("review result is not in canonical form")
+    return data
+
+
 def unprotect_case_bytes(envelope: dict[str, Any]) -> bytes:
     """Validate and decrypt one exact envelope under the current Windows user."""
     if not isinstance(envelope, dict) or set(envelope) != {

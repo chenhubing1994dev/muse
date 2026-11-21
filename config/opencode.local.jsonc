@@ -1,0 +1,24 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "autoupdate": false,
+  "model": "muse-local/deep",
+  "provider": {
+    "muse-local": {
+      "name": "Muse Local LM Studio",
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {
+        "baseURL": "http://127.0.0.1:1234/v1"
+      },
+      "models": {
+        "deep": {
+          "name": "DeepSeek V4 Pro Qwen3.5 9B UNCENSORED Heretic (local)",
+          "tool_call": true,
+          "limit": {
+            "context": 262144,
+            "output": 16384
+          }
+        }
+      }
+    }
+  }
+}

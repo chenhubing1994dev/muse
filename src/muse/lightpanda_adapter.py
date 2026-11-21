@@ -146,10 +146,11 @@ class LightpandaBrowserAdapter:
         if public_only is not True:
             raise ValueError("Lightpanda adapter currently supports public-only capture")
         self._validate_limits(max_chars, max_links)
-        _validate_public_url(url)
+        # Reject unsafe output targets before performing DNS/network work.
         output = self._output_path(output_directory)
         if output.exists():
             raise FileExistsError("Lightpanda evidence directory already exists; refusing to overwrite")
+        _validate_public_url(url)
         if not self.cdp_url:
             raise LightpandaUnavailableError("Lightpanda is disabled; configure MUSE_LIGHTPANDA_CDP_URL with a loopback CDP endpoint")
         if not self.doctor()["available"]:

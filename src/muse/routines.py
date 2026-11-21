@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextvars import copy_context
+from dataclasses import dataclass
 
 import argparse
 import json
@@ -11,8 +13,40 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Sequence
+from muse.model_call_context import current_model_call_context, model_call_scope
 
 RoutineHandler = Callable[[dict[str, Any]], Any]
+
+
+class RoutineCancelled(Exception):
+    """A cooperative routine handler observed a supervisor stop request."""
+
+
+class RoutineLeaseLost(Exception):
+    """A cooperative routine handler observed that its lease was lost."""
+
+
+@dataclass(frozen=True)
+class RoutineExecutionContext:
+    """Opt-in cooperative cancellation and lease-health signal for handlers."""
+
+    stop_event: Any
+    lease_lost_event: threading.Event
+
+    def is_cancelled(self) -> bool:
+        return self.stop_event.is_set() or self.lease_lost_event.is_set()
+
+    def raise_if_cancelled(self) -> None:
+        if self.lease_lost_event.is_set():
+            raise RoutineLeaseLost("routine lease was lost during handler execution")
+        if self.stop_event.is_set():
+            raise RoutineCancelled("routine observed supervisor stop request")
+
+
+def routine_handler_with_context(handler: RoutineHandler) -> RoutineHandler:
+    """Mark one handler as explicitly accepting ``execution_context``."""
+    setattr(handler, "accepts_execution_context", True)
+    return handler
 
 
 class RoutineStore:
@@ -178,15 +212,15 @@ class RoutineStore:
         return self.get(routine_id) if cursor.rowcount == 1 else None
 
     def finish(self, routine_id: str, *, status: str, lease_token: str) -> dict[str, Any]:
-        if status not in {"succeeded", "failed"}:
-            raise ValueError("status must be succeeded or failed")
+        if status not in {"succeeded", "failed", "cancelled"}:
+            raise ValueError("status must be succeeded, failed, or cancelled")
         if not isinstance(lease_token, str) or not lease_token:
             raise ValueError("lease_token is required to finish a routine")
         now = self._now()
         row = self.connection.execute("SELECT interval_seconds FROM routines WHERE id=?", (routine_id,)).fetchone()
         if row is None:
             raise KeyError(routine_id)
-        next_run = now + timedelta(seconds=row["interval_seconds"])
+        next_run = now if status == "cancelled" else now + timedelta(seconds=row["interval_seconds"])
         cursor = self.connection.execute(
             "UPDATE routines SET last_run_at=?, last_status=?, next_run_at=?, lease_until=NULL, lease_token=NULL, updated_at=? "
             "WHERE id=? AND lease_token=? AND lease_until>?",
@@ -210,6 +244,7 @@ def run_due_once(
     if isinstance(max_workers, bool) or not isinstance(max_workers, int) or not 1 <= max_workers <= max_routines:
         raise ValueError("max_workers must be between 1 and max_routines")
 
+    cooperative_stop_event = stop_event if stop_event is not None else threading.Event()
     claimed = []
     for _ in range(max_routines):
         if stop_event is not None and stop_event.is_set():
@@ -225,8 +260,11 @@ def run_due_once(
         heartbeat_stop = threading.Event()
         heartbeat_lost = threading.Event()
         heartbeat_thread = None
+        finish_allowed = True
         if handler is None:
             status, error = "failed", "no handler registered for routine kind"
+        elif cooperative_stop_event.is_set():
+            status, error = "cancelled", "supervisor stop requested before routine started"
         else:
             def keep_lease_alive() -> None:
                 interval = max(1.0, lease_seconds / 3)
@@ -246,43 +284,73 @@ def run_due_once(
 
             heartbeat_thread = threading.Thread(target=keep_lease_alive, daemon=True)
             heartbeat_thread.start()
+            execution_context = RoutineExecutionContext(
+                stop_event=cooperative_stop_event, lease_lost_event=heartbeat_lost,
+            )
             try:
-                handler(routine["payload"])
+                accepts_context = getattr(
+                    getattr(handler, "__func__", handler), "accepts_execution_context", False,
+                ) is True
+                if accepts_context:
+                    handler(routine["payload"], execution_context=execution_context)
+                else:
+                    handler(routine["payload"])
                 status, error = "succeeded", ""
+            except RoutineCancelled as exc:
+                status, error = "cancelled", str(exc)
+            except RoutineLeaseLost as exc:
+                status, error, finish_allowed = "lease_lost", str(exc), False
             except Exception as exc:
                 status, error = "failed", f"{type(exc).__name__}: {exc}"
             finally:
                 heartbeat_stop.set()
                 heartbeat_thread.join(timeout=max(1.0, lease_seconds))
-        try:
-            with RoutineStore(database) as store:
-                finished = store.finish(
-                    routine["id"], status=status, lease_token=routine["lease_token"]
-                )
-            outcome_status = status
-            next_run_at = finished["next_run_at"]
-        except RuntimeError as exc:
-            outcome_status = "lease_lost"
-            error = str(exc)
-            next_run_at = None
+        if finish_allowed:
+            try:
+                with RoutineStore(database) as store:
+                    finished = store.finish(
+                        routine["id"], status=status, lease_token=routine["lease_token"]
+                    )
+                outcome_status = status
+                next_run_at = finished["next_run_at"]
+            except RuntimeError as exc:
+                outcome_status = "lease_lost"
+                error = str(exc)
+                next_run_at = None
+        else:
+            outcome_status, next_run_at = status, None
         return {
             "id": routine["id"], "name": routine["name"],
             "status": outcome_status, "error": error,
             "heartbeat_lost": heartbeat_lost.is_set(),
             "next_run_at": next_run_at,
         }
-
-    if len(claimed) <= 1 or max_workers == 1:
-        outcomes = [execute(item) for item in claimed]
-    else:
+    def execute_batch() -> list[dict[str, Any]]:
+        if len(claimed) <= 1 or max_workers == 1:
+            return [execute(item) for item in claimed]
         indexed = {}
         with ThreadPoolExecutor(max_workers=min(max_workers, len(claimed)),
                                 thread_name_prefix="muse-routine") as pool:
-            futures = {pool.submit(execute, item): index for index, item in enumerate(claimed)}
+            futures = {
+                pool.submit(copy_context().run, execute, item): index
+                for index, item in enumerate(claimed)
+            }
             for future in as_completed(futures):
                 indexed[futures[future]] = future.result()
-        outcomes = [indexed[index] for index in range(len(claimed))]
+        return [indexed[index] for index in range(len(claimed))]
+
+    usage_databases = {
+        str(Path((routine.get("payload") or {}).get("task_db") or "data/tasks/muse.sqlite3").resolve())
+        for routine in claimed if routine.get("kind") == "autonomy_plan"
+    }
+    if claimed and current_model_call_context() is None and len(usage_databases) == 1:
+        # One shared scope/ledger per batch serializes concurrent SQLite appends via ModelCallContext's lock.
+        with model_call_scope(next(iter(usage_databases)), task_id=None, agent_id=None, project_id="muse"):
+            outcomes = execute_batch()
+    else:
+        outcomes = execute_batch()
     return {"processed": len(outcomes), "outcomes": outcomes}
+
 
 def run_forever(database: str | Path, handlers: dict[str, RoutineHandler], *,
                 stop_event: Any | None = None, poll_seconds: int = 15) -> dict[str, int]:
@@ -292,7 +360,7 @@ def run_forever(database: str | Path, handlers: dict[str, RoutineHandler], *,
     processed = errors = 0
     while not stop.is_set():
         try:
-            result = run_due_once(database, handlers)
+            result = run_due_once(database, handlers, stop_event=stop)
             processed += result["processed"]
         except Exception:
             errors += 1
@@ -304,13 +372,23 @@ def run_forever(database: str | Path, handlers: dict[str, RoutineHandler], *,
 def _autonomy_handler(payload: dict[str, Any]) -> dict[str, Any]:
     from muse.autonomy import propose_next_step
     from muse.model_client import LMStudioClient
+
+    task_database = payload.get("task_db") or "data/tasks/muse.sqlite3"
     client = LMStudioClient(payload.get("base_url", "http://127.0.0.1:1234/v1"), model=payload.get("model"), timeout=90)
-    return propose_next_step(
-        payload.get("backlog", "docs/CAPABILITY_BACKLOG.md"),
-        payload.get("task_db", "data/tasks/muse.sqlite3"),
-        payload.get("plan_db", "data/autonomy/plans.sqlite3"),
-        lambda messages: client.chat(messages, temperature=0.2, max_tokens=900),
-    )
+
+    def run_plan() -> dict[str, Any]:
+        return propose_next_step(
+            payload.get("backlog", "docs/CAPABILITY_BACKLOG.md"),
+            task_database,
+            payload.get("plan_db", "data/autonomy/plans.sqlite3"),
+            lambda messages: client.chat(messages, temperature=0.2, max_tokens=900),
+        )
+
+    if current_model_call_context() is not None:
+        return run_plan()
+    with model_call_scope(task_database, task_id=None, agent_id=None, project_id="muse"):
+        return run_plan()
+
 
 
 def main(argv: Sequence[str] | None = None) -> int:

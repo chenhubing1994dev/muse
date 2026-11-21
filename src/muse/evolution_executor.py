@@ -112,6 +112,7 @@ def run_feedback_research_experiment(
     evolution_cycle_id: str | None = None,
     experiment_key: str = "feedback_research_lifecycle",
     review_gate: Any | None = None, reviewer_scope: str | None = None,
+    stop_event: Any | None = None,
 ) -> dict[str, Any]:
     """Run one fixed read-only feedback-workflow regression suite in a source-only snapshot.
 
@@ -523,7 +524,12 @@ def run_feedback_research_experiment(
                 budget_seconds=spec["timeout_seconds"], verbosity=0,
                 memory_budget_mb=spec["memory_budget_mb"],
                 working_directory=sandbox, import_root=sandbox / "src", run_id=run_id,
+                stop_event=stop_event,
             )
+    if isinstance(result, dict) and result.get("status") == "interrupted":
+        return {"status": "interrupted", "run_ref": None, "manifest_id": manifest["manifest_id"],
+                "evolution_cycle_id": evolution_cycle_id, "metrics": result.get("metrics", {}),
+                "duration_seconds": result.get("duration_seconds", 0), "reused": False}
     if (not isinstance(result, dict) or result.get("experiment_record_error")
             or result.get("run_ref") != run_ref):
         raise RuntimeError("isolated feedback experiment did not persist its idempotent ExperimentBridge run")

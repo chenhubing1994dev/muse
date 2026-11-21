@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from muse.autonomy import AutonomyPlanStore, propose_next_step, run_planner_loop, validate_plan
+from muse.autonomy import AutonomyPlanStore, main, propose_next_step, run_planner_loop, validate_plan
 from muse.task_queue import TaskQueue
 
 
@@ -166,6 +166,48 @@ class AutonomyPlannerTests(unittest.TestCase):
                 propose_next_step(root / "missing.md", root / "missing.sqlite3", root / "plans.sqlite3", lambda _: "{}")
             self.assertFalse((root / "missing.sqlite3").exists())
             self.assertFalse((root / "plans.sqlite3").exists())
+
+
+    def test_cli_planner_records_project_usage_without_task_or_agent(self) -> None:
+        import io
+        from contextlib import redirect_stdout
+        from unittest.mock import patch
+        from muse.model_call_context import record_current_model_usage
+        from muse.usage_ledger import UsageLedger
+
+        class FakeClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def chat(self, *args, **kwargs):
+                record_current_model_usage(
+                    "lm-studio-local", "autonomy-cli-model",
+                    {"prompt_tokens": 17, "completion_tokens": 6, "total_tokens": 23},
+                )
+                return json.dumps(VALID)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            backlog = root / "BACKLOG.md"
+            backlog.write_text("# P0\n- Complete worker recovery\n", encoding="utf-8")
+            task_db = root / "tasks.sqlite3"
+            with TaskQueue(task_db):
+                pass
+            output = io.StringIO()
+            with patch("muse.autonomy.LMStudioClient", FakeClient), redirect_stdout(output):
+                self.assertEqual(main([
+                    "--backlog", str(backlog), "--task-db", str(task_db),
+                    "--plan-db", str(root / "plans.sqlite3"),
+                ]), 0)
+            self.assertEqual(json.loads(output.getvalue())["status"], "proposal_saved")
+            with UsageLedger(task_db.with_name("model_usage.sqlite3")) as ledger:
+                events = ledger.list_events(limit=10)
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["project_id"], "muse")
+            self.assertIsNone(events[0]["task_id"])
+            self.assertIsNone(events[0]["agent_id"])
+            self.assertEqual(events[0]["input_tokens"], 17)
+            self.assertEqual(events[0]["output_tokens"], 6)
 
 
 if __name__ == "__main__":

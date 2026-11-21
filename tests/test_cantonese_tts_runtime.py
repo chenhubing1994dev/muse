@@ -37,7 +37,8 @@ class CantoneseTTSRuntimeBridgeTests(unittest.TestCase):
             stdout=_RESULT_MARKER + json.dumps({"status": "ready", "python_version": "3.14"}) + "\n",
             stderr="",
         )
-        with patch("muse.cantonese_tts._python314_command", return_value=["py", "-3.14"]), \
+        with patch("muse.cantonese_tts.sys.version_info", (3, 11)), \
+             patch("muse.cantonese_tts._python314_command", return_value=["py", "-3.14"]), \
              patch("muse.cantonese_tts.subprocess.run", return_value=completed) as run:
             result = preflight_cantonese_tts_runtime(self.packages, self.model)
         self.assertEqual(result["status"], "ready")
@@ -69,7 +70,8 @@ class CantoneseTTSRuntimeBridgeTests(unittest.TestCase):
             )
 
         output = self.output_dir / "voiceover.wav"
-        with patch("muse.cantonese_tts._python314_command", return_value=["py", "-3.14"]), \
+        with patch("muse.cantonese_tts.sys.version_info", (3, 11)), \
+             patch("muse.cantonese_tts._python314_command", return_value=["py", "-3.14"]), \
              patch("muse.cantonese_tts.subprocess.run", side_effect=fake_run) as run:
             result = synthesize_cantonese_with_runtime(
                 "係㗎，呢段係測試旁白。", output,
@@ -87,6 +89,7 @@ class CantoneseTTSRuntimeBridgeTests(unittest.TestCase):
             stderr="",
         )
         with (
+            patch("muse.cantonese_tts.sys.version_info", (3, 11)),
             patch("muse.cantonese_tts._python314_command", return_value=["py", "-3.14"]),
             patch("muse.cantonese_tts.subprocess.run", return_value=completed) as run,
         ):

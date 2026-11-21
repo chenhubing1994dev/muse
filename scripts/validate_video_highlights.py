@@ -20,6 +20,8 @@ if str(SOURCE) not in sys.path:
 def run_real_ffmpeg_smoke() -> bool:
     from muse.media import discover_media_tools
     from muse.video_highlights import analyze_video_audio, main as clips_cli, render_vertical_clip
+    from muse.video_face_framing import stabilize_face_keyframes
+    from muse.video_contact_sheet import create_contact_sheet
     from muse.video_qa import inspect_video_file
     from muse.initiative_engine import InitiativeStore
     from muse.video_product_builder import VideoProductBuilder
@@ -36,11 +38,23 @@ def run_real_ffmpeg_smoke() -> bool:
         created = subprocess.run([
             ffmpeg, "-hide_banner", "-loglevel", "error",
             "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=24",
-            "-f", "lavfi", "-i", "sine=frequency=3000:sample_rate=48000",            "-t", "8", "-c:v", "mpeg4", "-q:v", "5", "-c:a", "aac",
+            "-f", "lavfi", "-i", "sine=frequency=3000:sample_rate=48000",
+            "-t", "8", "-c:v", "mpeg4", "-q:v", "5", "-c:a", "aac",
             "-shortest", "-n", str(source),
         ], capture_output=True, text=True, timeout=60, check=False)
         if created.returncode != 0 or not source.is_file():
             raise RuntimeError("could not create synthetic FFmpeg fixture: " + (created.stderr or "")[-1000:])
+        contact_sheet = root / "contact-sheet.png"
+        contact_result = create_contact_sheet(
+            source, contact_sheet, samples=12, columns=4, thumbnail_width=160,
+            ffmpeg_path=ffmpeg, ffprobe_path=ffprobe,
+        )
+        if (contact_result.get("status") != "completed"
+                or contact_result.get("image_decode") != "passed"
+                or contact_result.get("samples_requested") != 12
+                or not contact_sheet.is_file()):
+            raise RuntimeError("real FFmpeg contact sheet generation failed: " + json.dumps(contact_result, ensure_ascii=False))
+        print("MUSE_CONTACT_SHEET_REAL_FFMPEG_OK", contact_result["width"], contact_result["height"])
         analysis = analyze_video_audio(source, ffmpeg_path=ffmpeg, ffprobe_path=ffprobe)
         if analysis["analysis_mode"] != "audio_only" or analysis["window_count"] < 5:
             raise RuntimeError("real FFmpeg audio-only analysis returned incomplete windows")
@@ -79,10 +93,57 @@ def run_real_ffmpeg_smoke() -> bool:
         cli_output = root / "cli-captioned.mp4"
         cli_status = clips_cli([
             "render", str(source), str(analysis_json), str(cli_output),
-            "--captions-from-analysis", "--ffmpeg", ffmpeg, "--ffprobe", ffprobe,
+            "--captions-from-analysis", "--face-aware-crop",
+            "--ffmpeg", ffmpeg, "--ffprobe", ffprobe,
         ])
         if cli_status != 0 or not cli_output.is_file():
             raise RuntimeError("ranked-candidate CLI render/QA flow failed")
+
+        dynamic_cli_output = root / "cli-dynamic-face.mp4"
+        dynamic_cli_status = clips_cli([
+            "render", str(source), str(analysis_json), str(dynamic_cli_output),
+            "--dynamic-face-crop", "--ffmpeg", ffmpeg, "--ffprobe", ffprobe,
+        ])
+        if dynamic_cli_status != 0 or not dynamic_cli_output.is_file():
+            raise RuntimeError("dynamic face crop CLI did not safely render/fallback")
+
+        face_centered_output = root / "face-centered.mp4"
+        face_centered = render_vertical_clip(
+            source, face_centered_output, 0, 5, ffmpeg_path=ffmpeg,
+            ffprobe_path=ffprobe, crop_center_x=0.72,
+        )
+        if (face_centered.get("status") != "completed"
+                or face_centered.get("framing", {}).get("mode") != "face_aware_clip_center"):
+            raise RuntimeError("real FFmpeg face-aware crop expression failed: " + json.dumps(face_centered, ensure_ascii=False))
+        face_centered_qa = inspect_video_file(
+            face_centered_output, ffprobe_path=ffprobe, ffmpeg_path=ffmpeg,
+            expected_width=1080, expected_height=1920, require_audio=True,
+        )
+        if face_centered_qa.get("status") != "passed":
+            raise RuntimeError("real FFmpeg face-aware crop output failed Muse full-decode QA")
+
+        dynamic_keyframes, stabilization = stabilize_face_keyframes([
+            {"time_seconds": 0.0, "center_x": 0.35},
+            {"time_seconds": 2.5, "center_x": 0.65},
+            {"time_seconds": 5.0, "center_x": 0.45},
+        ])
+        if not stabilization.get("applied") or stabilization.get("output_keyframes") != 3:
+            raise RuntimeError("face crop stabilization did not produce a bounded trajectory")
+        dynamic_output = root / "dynamic-face.mp4"
+        dynamic_render = render_vertical_clip(
+            source, dynamic_output, 0, 5, ffmpeg_path=ffmpeg, ffprobe_path=ffprobe,
+            crop_center_keyframes=dynamic_keyframes,
+        )
+        if (dynamic_render.get("status") != "completed"
+                or dynamic_render.get("framing", {}).get("mode") != "sampled_face_keyframes"
+                or dynamic_render.get("framing", {}).get("crop_keyframes") != dynamic_keyframes):
+            raise RuntimeError("real FFmpeg dynamic crop expression failed: " + json.dumps(dynamic_render, ensure_ascii=False))
+        dynamic_qa = inspect_video_file(
+            dynamic_output, ffprobe_path=ffprobe, ffmpeg_path=ffmpeg,
+            expected_width=1080, expected_height=1920, require_audio=True,
+        )
+        if dynamic_qa.get("status") != "passed":
+            raise RuntimeError("real FFmpeg dynamic crop output failed Muse full-decode QA")
         register_status = clips_cli([
             "register", str(source), str(cli_output), str(analysis_json),
             "Muse NeonClipping Adapter Smoke", "--workspace", str(root),
@@ -109,7 +170,7 @@ def run_real_ffmpeg_smoke() -> bool:
 
 
 def main() -> int:
-    for name in ("video_highlights.py", "clip_product_adapter.py", "video_product_builder.py"):
+    for name in ("video_highlights.py", "video_face_framing.py", "clip_product_adapter.py", "video_product_builder.py"):
         compile((SOURCE / "muse" / name).read_text(encoding="utf-8"), f"src/muse/{name}", "exec")
     project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8-sig"))
     entry = project["project"]["scripts"].get("muse-video-clips")
@@ -119,6 +180,7 @@ def main() -> int:
     suite = unittest.TestSuite()
     for module_name, test_name in (
         ("test_video_highlights", "test_video_highlights.py"),
+        ("test_video_face_framing", "test_video_face_framing.py"),
         ("test_clip_product_adapter", "test_clip_product_adapter.py"),
     ):
         test_path = ROOT / "tests" / test_name

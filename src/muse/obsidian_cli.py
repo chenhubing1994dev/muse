@@ -60,7 +60,8 @@ def _validate_note_path(value: str) -> str:
         or (len(raw) >= 2 and raw[1] == ":")
         or any(part in {"", ".", ".."} for part in raw.split("/"))
         or any(ord(char) < 32 for char in raw)
-    ):        raise ValueError("note path must be a safe relative path inside the selected Vault")
+    ):
+        raise ValueError("note path must be a safe relative path inside the selected Vault")
     return path.as_posix()
 
 

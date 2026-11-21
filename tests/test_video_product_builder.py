@@ -12,7 +12,7 @@ from unittest.mock import patch
 from muse.initiative_engine import InitiativeStore
 from muse.video_product_builder import (
     VideoProductBuilder, VideoProductError, _default_scene_motion_directives, _quality_gate_summary,
-    _resolve_recipe_sha256,
+    _resolve_recipe_sha256, _probe_video_stream_metadata,
 )
 
 
@@ -41,6 +41,56 @@ class VideoProductBuilderTests(unittest.TestCase):
                 "duration_seconds": 8.0, "width": 1920, "height": 1080, "fps": 30.0,
                 "has_audio": kwargs.get("audio_path") is not None, "encoder": "h264_amf", "bytes": output.stat().st_size,
                 "audio_mode": kwargs.get("audio_mode")}
+
+    def test_ffprobe_video_stream_metadata_parses_rational_rate_and_decoded_frame_count(self):
+        output = SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"streams": [{
+                "codec_type": "video", "width": 512, "height": 288,
+                "avg_frame_rate": "24000/1001", "r_frame_rate": "24/1",
+                "nb_read_frames": "13", "nb_frames": "13",
+            }]}),
+            stderr="",
+        )
+        with patch("muse.video_product_builder.subprocess.run", return_value=output) as run:
+            metadata = _probe_video_stream_metadata(self.root / "fixture.mp4", "ffprobe")
+
+        self.assertEqual(metadata[:2], (512, 288))
+        self.assertAlmostEqual(metadata[2], 24000 / 1001, places=8)
+        self.assertEqual(metadata[3], 13)
+        self.assertIn("-count_frames", run.call_args.args[0])
+
+    def test_checkpoint_callback_is_blocked_when_ffprobe_stream_metadata_disagrees(self):
+        staging = self.root / "data" / "video_attempt_staging" / ("e" * 32)
+        staging.mkdir(parents=True)
+        callbacks = []
+
+        def fake_generate(_prompt, output_path, **_kwargs):
+            output_path.write_bytes(bytes.fromhex("000000186674797069736f6d66697874757265"))
+            return {
+                "status": "completed", "prompt_id": "wan-mismatch", "model": "Wan 2.1 T2V 1.3B",
+                "width": 512, "height": 288, "fps": 12.0, "frames": 13,
+            }
+
+        with (
+            patch("muse.video_product_builder.discover_media_tools", return_value=self._inventory()),
+            patch("muse.video_product_builder._probe_media_duration_seconds", return_value=1.0),
+            patch("muse.video_product_builder._probe_video_stream_metadata", return_value=(640, 288, 12.0, 13)),
+            patch("muse.wan_video.generate_wan21_t2v", side_effect=fake_generate),
+        ):
+            with self.assertRaisesRegex(VideoProductError, "FFprobe stream metadata"):
+                self.builder.build_from_scenes(
+                    "FFprobe mismatch",
+                    [{"prompt": "第一镜", "duration_seconds": 1, "seed": 1},
+                     {"prompt": "第二镜", "duration_seconds": 1, "seed": 2}],
+                    staging_directory=staging,
+                    resume_scene_metadata={},
+                    reusable_step_ids=(),
+                    scene_checkpoint_callback=lambda *args: callbacks.append(args),
+                )
+
+        self.assertEqual(callbacks, [])
+        self.assertTrue((staging / "shot_01.mp4").is_file())
 
     def test_final_video_metadata_reports_post_production_duration_and_preserves_source_facts(self):
         from muse.video_product_builder import _finalize_video_metadata
@@ -358,7 +408,7 @@ class VideoProductBuilderTests(unittest.TestCase):
         with (
             patch("muse.video_product_builder.discover_media_tools", return_value=self._inventory()),
             patch("muse.cantonese_tts.preflight_cantonese_tts_runtime", return_value={"status": "ready"}),
-            patch("muse.cantonese_tts.synthesize_cantonese_with_runtime", side_effect=fake_synthesize),
+            patch("muse.cantonese_tts.synthesize_cantonese_segments_with_runtime", side_effect=fake_synthesize),
             patch("muse.video_product_builder._probe_media_duration_seconds",
                   side_effect=[3.0, 1.75, 1.4166667, 3.1666667, 3.0]),
             patch("muse.video_product_builder.subprocess.run", side_effect=fake_concat),
@@ -388,7 +438,7 @@ class VideoProductBuilderTests(unittest.TestCase):
         with (
             patch("muse.video_product_builder.discover_media_tools", return_value=self._inventory()),
             patch("muse.cantonese_tts.preflight_cantonese_tts_runtime", return_value={"status": "ready"}),
-            patch("muse.cantonese_tts.synthesize_cantonese_with_runtime", side_effect=fake_synthesize),
+            patch("muse.cantonese_tts.synthesize_cantonese_segments_with_runtime", side_effect=fake_synthesize),
             patch("muse.video_product_builder._probe_media_duration_seconds", return_value=11.0),
             patch("muse.wan_video.generate_wan21_t2v") as generate,
         ):
@@ -442,6 +492,191 @@ class VideoProductBuilderTests(unittest.TestCase):
         self.assertEqual([scene["seed"] for scene in package.call_args.kwargs["scene_records"]], [101, 202])
         self.assertEqual([scene["duration_seconds"] for scene in package.call_args.kwargs["scene_records"]], [1.0, 2.0])
 
+    def test_build_from_scenes_resumes_verified_shot_and_keeps_attempt_staging(self):
+        attempt_id = "a" * 32
+        attempt_staging = self.root / "data" / "video_attempt_staging" / attempt_id
+        old_epoch_staging = attempt_staging / "epoch_1"
+        staging = attempt_staging / "epoch_2"
+        old_epoch_staging.mkdir(parents=True)
+        staging.mkdir()
+        first_shot = old_epoch_staging / "shot_01.mp4"
+        first_shot.write_bytes(bytes.fromhex("000000186674797069736f6d66697874757265"))
+        generation = {
+            "status": "completed", "prompt_id": "wan-reused", "model": "Wan 2.1 T2V 1.3B",
+            "width": 512, "height": 288, "fps": 12.0, "frames": 13,
+        }
+        generated_calls = []
+        checkpoint_calls = []
+
+        def fake_generate(prompt, output_path, **kwargs):
+            generated_calls.append(prompt)
+            output_path.write_bytes(bytes.fromhex("000000186674797069736f6d66697874757265"))
+            return {
+                "status": "completed", "prompt_id": "wan-new", "model": "Wan 2.1 T2V 1.3B",
+                "width": 512, "height": 288, "fps": 12, "frames": 13,
+            }
+
+        def fake_concat(args, **kwargs):
+            Path(args[-1]).write_bytes(bytes.fromhex("000000186674797069736f6d66697874757265"))
+            return SimpleNamespace(returncode=0, stderr="")
+
+        with (
+            patch("muse.video_product_builder.discover_media_tools", return_value=self._inventory()),
+            patch("muse.video_product_builder._probe_media_duration_seconds", side_effect=[1.0, 2.0, 3.0]),
+            patch("muse.video_product_builder._probe_video_stream_metadata", return_value=(512, 288, 12.0, 13)),
+            patch("muse.video_product_builder.subprocess.run", side_effect=fake_concat),
+            patch("muse.wan_video.generate_wan21_t2v", side_effect=fake_generate) as generate,
+            patch.object(self.builder, "package_generated_clip", return_value={"validated": True}),
+        ):
+            result = self.builder.build_from_scenes(
+                "断点续作测试",
+                [{"prompt": "第一镜", "duration_seconds": 1, "seed": 11},
+                 {"prompt": "第二镜", "duration_seconds": 2, "seed": 22}],
+                staging_directory=staging,
+                resume_scene_metadata={
+                    "shot_001": {
+                        "artifact_relative_path": first_shot.relative_to(self.root).as_posix(),
+                        "generation": generation,
+                    },
+                },
+                reusable_step_ids=("shot_001",),
+                scene_checkpoint_callback=lambda *args: checkpoint_calls.append(args),
+            )
+
+        self.assertEqual(generated_calls, ["第二镜"])
+        generate.assert_called_once()
+        self.assertEqual(len(checkpoint_calls), 1)
+        self.assertEqual(checkpoint_calls[0][0], "shot_002")
+        self.assertTrue(checkpoint_calls[0][1].is_file())
+        self.assertEqual(checkpoint_calls[0][2]["status"], "completed")
+        scenes = result["scene_generation"]["scenes"]
+        self.assertEqual([item["generation_status"] for item in scenes], ["reused", "generated"])
+        self.assertTrue(staging.is_dir())
+        self.assertTrue(old_epoch_staging.is_dir())
+        self.assertTrue(first_shot.is_file())
+        self.assertTrue((staging / "shot_02.mp4").is_file())
+        self.assertTrue((staging / "combined.mp4").is_file())
+
+    def test_scene_generation_guard_stops_before_dispatching_the_next_shot(self):
+        attempt_id = "c" * 32
+        staging = self.root / "data" / "video_attempt_staging" / attempt_id
+        staging.mkdir(parents=True)
+        generated = []
+        checkpoints = []
+        guarded = []
+
+        def fake_generate(prompt, output_path, **kwargs):
+            generated.append(prompt)
+            output_path.write_bytes(bytes.fromhex("000000186674797069736f6d66697874757265"))
+            return {
+                "status": "completed", "prompt_id": "guarded-shot", "model": "Wan 2.1 T2V 1.3B",
+                "width": 512, "height": 288, "fps": 12, "frames": 13,
+            }
+
+        def guard(step_id):
+            guarded.append(step_id)
+            if step_id == "shot_002":
+                raise PermissionError("Commander approval revoked")
+
+        with (
+            patch("muse.video_product_builder.discover_media_tools", return_value=self._inventory()),
+            patch("muse.video_product_builder._probe_media_duration_seconds", return_value=1.0),
+            patch("muse.video_product_builder._probe_video_stream_metadata", return_value=(512, 288, 12.0, 13)),
+            patch("muse.wan_video.generate_wan21_t2v", side_effect=fake_generate),
+        ):
+            with self.assertRaisesRegex(PermissionError, "approval revoked"):
+                self.builder.build_from_scenes(
+                    "审批撤销测试",
+                    [{"prompt": "第一镜", "duration_seconds": 1, "seed": 1},
+                     {"prompt": "第二镜", "duration_seconds": 1, "seed": 2}],
+                    staging_directory=staging,
+                    resume_scene_metadata={},
+                    reusable_step_ids=(),
+                    scene_checkpoint_callback=lambda *args: checkpoints.append(args),
+                    scene_generation_guard=guard,
+                )
+
+        self.assertEqual(guarded, ["shot_001", "shot_002"])
+        self.assertEqual(generated, ["第一镜"])
+        self.assertEqual(len(checkpoints), 1)
+        self.assertEqual(checkpoints[0][0], "shot_001")
+
+    def test_build_from_scenes_preserves_completed_checkpoint_when_later_scene_fails(self):
+        attempt_id = "b" * 32
+        staging = self.root / "data" / "video_attempt_staging" / attempt_id
+        staging.mkdir(parents=True)
+        checkpoint_calls = []
+        generated = 0
+
+        def fake_generate(prompt, output_path, **kwargs):
+            nonlocal generated
+            generated += 1
+            if generated == 2:
+                return {"status": "failed"}
+            output_path.write_bytes(bytes.fromhex("000000186674797069736f6d66697874757265"))
+            return {
+                "status": "completed", "prompt_id": "wan-first", "model": "Wan 2.1 T2V 1.3B",
+                "width": 512, "height": 288, "fps": 12, "frames": 13,
+            }
+
+        with (
+            patch("muse.video_product_builder.discover_media_tools", return_value=self._inventory()),
+            patch("muse.video_product_builder._probe_media_duration_seconds", return_value=1.0),
+            patch("muse.video_product_builder._probe_video_stream_metadata", return_value=(512, 288, 12.0, 13)),
+            patch("muse.wan_video.generate_wan21_t2v", side_effect=fake_generate),
+            patch.object(self.builder, "package_generated_clip") as package,
+        ):
+            with self.assertRaisesRegex(VideoProductError, "scene 2.*partial delivery"):
+                self.builder.build_from_scenes(
+                    "失败后保留检查点",
+                    [{"prompt": "第一镜", "duration_seconds": 1, "seed": 1},
+                     {"prompt": "第二镜", "duration_seconds": 1, "seed": 2}],
+                    staging_directory=staging,
+                    resume_scene_metadata={},
+                    reusable_step_ids=(),
+                    scene_checkpoint_callback=lambda *args: checkpoint_calls.append(args),
+                )
+
+        package.assert_not_called()
+        self.assertEqual(len(checkpoint_calls), 1)
+        self.assertEqual(checkpoint_calls[0][0], "shot_001")
+        self.assertTrue((staging / "shot_01.mp4").is_file())
+        self.assertTrue(staging.is_dir())
+
+    def test_build_from_scenes_rejects_checkpoint_artifact_from_another_attempt(self):
+        attempt_id = "c" * 32
+        other_attempt_id = "d" * 32
+        staging = self.root / "data" / "video_attempt_staging" / attempt_id
+        other_staging = self.root / "data" / "video_attempt_staging" / other_attempt_id
+        staging.mkdir(parents=True)
+        other_staging.mkdir(parents=True)
+        foreign_shot = other_staging / "shot_01.mp4"
+        foreign_shot.write_bytes(bytes.fromhex("000000186674797069736f6d66697874757265"))
+
+        with (
+            patch("muse.video_product_builder.discover_media_tools", return_value=self._inventory()),
+            patch("muse.wan_video.generate_wan21_t2v") as generate,
+        ):
+            with self.assertRaisesRegex(VideoProductError, "outside this Attempt staging"):
+                self.builder.build_from_scenes(
+                    "跨 Attempt 检查",
+                    [{"prompt": "第一镜", "duration_seconds": 1, "seed": 1},
+                     {"prompt": "第二镜", "duration_seconds": 1, "seed": 2}],
+                    staging_directory=staging,
+                    resume_scene_metadata={
+                        "shot_001": {
+                            "artifact_relative_path": foreign_shot.relative_to(self.root).as_posix(),
+                            "generation": {
+                                "status": "completed", "width": 512, "height": 288,
+                                "fps": 12.0, "frames": 13,
+                            },
+                        },
+                    },
+                    reusable_step_ids=("shot_001",),
+                    scene_checkpoint_callback=lambda *_args: None,
+                )
+        generate.assert_not_called()
+
     def test_build_from_scenes_stops_on_failed_shot_without_packaging_partial_video(self):
         calls = 0
 
@@ -457,6 +692,7 @@ class VideoProductBuilderTests(unittest.TestCase):
         with (
             patch("muse.video_product_builder.discover_media_tools", return_value=self._inventory()),
             patch("muse.video_product_builder._probe_media_duration_seconds", return_value=1.0),
+            patch("muse.video_product_builder._probe_video_stream_metadata", return_value=(512, 288, 12.0, 13)),
             patch("muse.wan_video.generate_wan21_t2v", side_effect=fake_generate),
             patch.object(self.builder, "package_generated_clip") as package,
         ):
@@ -571,7 +807,7 @@ class VideoProductBuilderTests(unittest.TestCase):
             return {"validated": True, "relative_path": "data/products/fake"}
 
         with (
-            patch("muse.cantonese_tts.synthesize_cantonese_with_runtime", side_effect=fake_synthesize),
+            patch("muse.cantonese_tts.synthesize_cantonese_segments_with_runtime", side_effect=fake_synthesize),
             patch.object(self.builder, "package_generated_clip", side_effect=fake_package),
         ):
             result = self.builder.package_generated_clip_with_cantonese_narration(
@@ -673,7 +909,7 @@ class VideoProductBuilderTests(unittest.TestCase):
             self.assertEqual(kwargs["narration_asr"]["model_revision"], MODEL_REVISION)
             return {"validated": True, "relative_path": "data/products/asr-wrapper"}
         with (
-            patch("muse.cantonese_tts.synthesize_cantonese_with_runtime", side_effect=fake_synthesize),
+            patch("muse.cantonese_tts.synthesize_cantonese_segments_with_runtime", side_effect=fake_synthesize),
             patch("muse.cantonese_asr.transcribe_cantonese", side_effect=fake_asr),
             patch.object(self.builder, "package_generated_clip", side_effect=fake_package),
         ):
@@ -704,7 +940,7 @@ class VideoProductBuilderTests(unittest.TestCase):
             return {"status": "needs_review", "comparison": {"status": "needs_review", "cer": 0.42}}
 
         with (
-            patch("muse.cantonese_tts.synthesize_cantonese_with_runtime", side_effect=fake_synthesize),
+            patch("muse.cantonese_tts.synthesize_cantonese_segments_with_runtime", side_effect=fake_synthesize),
             patch("muse.cantonese_asr.transcribe_cantonese", side_effect=fake_asr),
             patch.object(self.builder, "package_generated_clip") as package,
         ):

@@ -11,8 +11,7 @@ from typing import Any
 
 
 CATEGORIES = frozenset({"task", "agent", "research", "test", "review", "system", "evolution"})
-EVENTS = frozenset({"started", "progress", "waiting_approval", "completed", "failed", "cancelled"})
-
+EVENTS = frozenset({"started", "progress", "waiting_approval", "completed", "failed", "cancelled", "interrupted"})
 
 class ProgressEventStore:
     """Persist bounded operational summaries, never task payloads or chat content."""

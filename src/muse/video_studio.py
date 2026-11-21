@@ -7,6 +7,7 @@ only execution and approval authority.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import uuid
@@ -35,6 +36,55 @@ class VideoPipelineProfile:
         return asdict(self) | {
             "execution_mode": "plan_only",
             "commander_is_scheduler": True,
+        }
+
+
+@dataclass(frozen=True)
+class VideoStudioBatch:
+    """One bounded Commander sub-plan; persistence and dispatch remain external."""
+
+    batch_id: str
+    checkpoint_key_template: str
+    index: int
+    total_batches: int
+    max_steps: int
+    step_ids: tuple[str, ...]
+    required_completed_steps: tuple[str, ...]
+    dag_sha256: str
+    batch_fingerprint: str
+    step_stage_ids: tuple[tuple[str, str], ...]
+    plan: CommanderPlan
+    input_sha256: str | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        stage_by_step_id = dict(self.step_stage_ids)
+        return {
+            "batch_id": self.batch_id,
+            "checkpoint_key_template": self.checkpoint_key_template,
+            "dag_sha256": self.dag_sha256,
+            "batch_fingerprint": self.batch_fingerprint,
+            "input_sha256": self.input_sha256,
+            "step_stage_ids": dict(self.step_stage_ids),
+            "index": self.index,
+            "total_batches": self.total_batches,
+            "max_steps": self.max_steps,
+            "step_ids": list(self.step_ids),
+            "required_completed_steps": list(self.required_completed_steps),
+            "status": "preview_only_worker_integration_pending",
+            "execution_eligible": False,
+            "commander_plan": {
+                "plan_id": self.plan.plan_id,
+                "source": self.plan.source,
+                "parallel_waves": [list(wave) for wave in self.plan.parallel_waves],
+                "steps": [{
+                    "id": step.step_id,
+                    "step_id": step.step_id,
+                    "stage_id": stage_by_step_id.get(step.step_id),
+                    "role": step.role,
+                    "depends_on": list(step.depends_on),
+                    "required_capabilities": list(step.required_capabilities),
+                } for step in self.plan.steps],
+            },
         }
 
 
@@ -98,6 +148,22 @@ def load_video_stage_specs(manifest_path: str | Path | None = None) -> dict[str,
 
 
 _STAGE_SPECS = load_video_stage_specs()
+
+
+def _stage_id_for_step(step: PlannedStep) -> str:
+    """Resolve a planned step to one fixed manifest stage; ambiguous mappings fail closed."""
+    if step.step_id in _STAGE_SPECS:
+        return step.step_id
+    capabilities = set(step.required_capabilities)
+    matches = [
+        stage_id for stage_id, spec in _STAGE_SPECS.items()
+        if capabilities.intersection(spec.capabilities)
+    ]
+    if len(matches) != 1:
+        raise ValueError(
+            f"plan step {step.step_id} has no unique fixed video stage mapping"
+        )
+    return matches[0]
 
 PIPELINE_MANIFEST_PATH = Path(__file__).with_name("video_pipelines.yaml")
 _PROFILE_FIELDS = frozenset({
@@ -265,31 +331,319 @@ def build_video_studio_plan(storyboard: Mapping[str, Any], pipeline_id: str) -> 
     return profile, plan
 
 
-def assess_video_studio_commander_admission(plan: CommanderPlan, *, max_steps: int = 16) -> dict[str, Any]:
-    """Fail closed before dispatch when the preview exceeds Commander planning limits."""
+def assess_video_studio_commander_admission(
+    plan: CommanderPlan,
+    *,
+    max_steps: int = 16,
+    capability_registry: Any | None = None,
+    role_registry: Any | None = None,
+    handler_registry: Mapping[str, Any] | None = None,
+    authorization_scope: str = "video_studio",
+) -> dict[str, Any]:
+    """Check registered capabilities and scoped role grants without authorizing execution.
+
+    Registries are injected from the existing Commander runtime. This function never
+    creates policies, registers capabilities, launches handlers, or dispatches work.
+    A successful metadata/policy check remains pending until a trusted execution
+    handler, resource budget, and all human gates are independently verified.
+    """
     if isinstance(max_steps, bool) or not isinstance(max_steps, int) or not 2 <= max_steps <= 32:
         raise ValueError("max_steps must be between 2 and 32")
+    if (not isinstance(authorization_scope, str) or not authorization_scope
+            or len(authorization_scope) > 64):
+        raise ValueError("authorization_scope must be non-empty bounded text")
     invalid_roles = sorted({step.role for step in plan.steps} - CommanderPlanner.ALLOWED_ROLES)
+    required_capabilities = sorted({
+        capability for step in plan.steps for capability in step.required_capabilities
+    })
     result = {
         "step_count": len(plan.steps),
         "max_steps": max_steps,
         "invalid_roles": invalid_roles,
+        "authorization_scope": authorization_scope,
+        "required_capabilities": required_capabilities,
+        "missing_capabilities": [],
+        "unauthorized_steps": [],
+        "missing_handlers": [],
         "capability_registry_checked": False,
         "role_capability_authorization_checked": False,
+        "handler_registry_checked": False,
         "execution_eligible": False,
+        "dispatch_started": False,
     }
     if invalid_roles:
         return result | {"status": "blocked_role_allowlist", "reason": "one or more plan roles are not admitted by CommanderPlanner"}
     if len(plan.steps) > max_steps:
         return result | {"status": "blocked_step_limit", "reason": "split the DAG into bounded, checkpointed Commander batches before dispatch"}
-    return result | {"status": "pending_capability_registry", "reason": "role allowlist passed; local capability availability, role-to-capability authorization, resource/cost checks and human gates remain unverified"}
+    if capability_registry is None:
+        return result | {"status": "pending_capability_registry", "reason": "the existing Commander CapabilityRegistry was not supplied"}
+    try:
+        missing = []
+        for capability in required_capabilities:
+            records = capability_registry.find_by_capability(capability, status="ready")
+            if not isinstance(records, (list, tuple)) or not any(
+                isinstance(record, Mapping) and record.get("status") == "ready"
+                for record in records
+            ):
+                missing.append(capability)
+    except Exception as exc:
+        return result | {
+            "capability_registry_checked": True,
+            "status": "blocked_capability_registry_error",
+            "reason": f"capability lookup failed closed ({type(exc).__name__})",
+        }
+    result["capability_registry_checked"] = True
+    result["missing_capabilities"] = missing
+    if missing:
+        return result | {
+            "status": "blocked_missing_capabilities",
+            "reason": "one or more required capabilities are not registered and ready",
+        }
+    if role_registry is None:
+        return result | {
+            "status": "pending_role_capability_authorization",
+            "reason": "the existing scoped AgentRoleRegistry was not supplied",
+        }
+    unauthorized: list[dict[str, str]] = []
+    for step in plan.steps:
+        try:
+            role_registry.authorize(
+                step.role, step.required_capabilities, scope=authorization_scope,
+            )
+        except Exception as exc:
+            unauthorized.append({"step_id": step.step_id, "role": step.role, "error_type": type(exc).__name__})
+    result["role_capability_authorization_checked"] = True
+    result["unauthorized_steps"] = unauthorized
+    if unauthorized:
+        return result | {
+            "status": "blocked_role_capability_authorization",
+            "reason": "one or more steps lack an explicit scoped role grant",
+        }
+    if handler_registry is None:
+        return result | {
+            "status": "pending_execution_handler",
+            "reason": "capability readiness and scoped role grants passed; the trusted Commander handler registry was not supplied",
+        }
+    if not isinstance(handler_registry, Mapping):
+        return result | {
+            "status": "blocked_handler_registry_error",
+            "reason": "handler registry must be an injected capability-to-callable mapping",
+        }
+    missing_handlers = [
+        capability for capability in required_capabilities
+        if not callable(handler_registry.get(capability))
+    ]
+    result["handler_registry_checked"] = True
+    result["missing_handlers"] = missing_handlers
+    if missing_handlers:
+        return result | {
+            "status": "blocked_missing_execution_handlers",
+            "reason": "one or more ready capabilities have no trusted executable Commander handler",
+        }
+    return result | {
+        "status": "pending_resource_and_human_gates",
+        "reason": "capability readiness, scoped role grants and handler presence passed; resource/cost policy and human gates remain unverified",
+    }
 
 
-def build_video_studio_preview(storyboard: Mapping[str, Any], pipeline_id: str) -> dict[str, Any]:
+def build_video_studio_batches(
+    plan: CommanderPlan,
+    *,
+    max_steps: int = 16,
+    input_sha256: str | None = None,
+) -> tuple[VideoStudioBatch, ...]:
+    """Create deterministic, bounded plan-only batches without breaking DAG dependencies.
+
+    Each batch reserves one Commander step for a checkpoint gate. Cross-batch
+    dependencies become explicit `required_completed_steps` preconditions; the
+    gate must not be dispatched until a future durable checkpoint adapter verifies
+    those preconditions and the parent Video Attempt's approval/recipe identity.
+    """
+    if isinstance(max_steps, bool) or not isinstance(max_steps, int) or not 2 <= max_steps <= 32:
+        raise ValueError("max_steps must be between 2 and 32")
+    if input_sha256 is not None and (
+        not isinstance(input_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", input_sha256)
+    ):
+        raise ValueError("input_sha256 must be a lowercase SHA-256 digest or None")
+    if not isinstance(plan, CommanderPlan) or not isinstance(plan.steps, tuple) or not plan.steps:
+        raise ValueError("plan must be a non-empty CommanderPlan")
+    if (not isinstance(plan.goal, str) or not plan.goal.strip() or len(plan.goal) > 1000
+            or not isinstance(plan.source, str) or not plan.source.strip() or len(plan.source) > 256):
+        raise ValueError("plan goal and source must be non-empty bounded strings")
+
+    by_id: dict[str, PlannedStep] = {}
+    for step in plan.steps:
+        if not isinstance(step, PlannedStep):
+            raise ValueError("plan contains an invalid step")
+        if not isinstance(step.step_id, str) or not step.step_id or len(step.step_id) > 64 or step.step_id in by_id:
+            raise ValueError("plan step IDs must be unique bounded strings")
+        if not isinstance(step.role, str) or step.role not in CommanderPlanner.ALLOWED_ROLES:
+            raise ValueError(f"plan step {step.step_id} has a role not admitted by Commander")
+        if not isinstance(step.objective, str) or not step.objective.strip() or len(step.objective) > 1000:
+            raise ValueError(f"plan step {step.step_id} has an invalid objective")
+        if (not isinstance(step.required_capabilities, tuple)
+                or any(not isinstance(capability, str) or not capability.strip() or len(capability) > 128
+                       for capability in step.required_capabilities)):
+            raise ValueError(f"plan step {step.step_id} has invalid required capabilities")
+        if not isinstance(step.depends_on, tuple) or any(not isinstance(dep, str) or not dep for dep in step.depends_on):
+            raise ValueError(f"plan step {step.step_id} has invalid dependencies")
+        if len(set(step.depends_on)) != len(step.depends_on) or step.step_id in step.depends_on:
+            raise ValueError(f"plan step {step.step_id} has duplicate or self dependencies")
+        by_id[step.step_id] = step
+    for step in plan.steps:
+        if any(dep not in by_id for dep in step.depends_on):
+            raise ValueError(f"plan step {step.step_id} references an unknown dependency")
+
+    # Stable Kahn traversal: retain the source order inside every ready wave.
+    pending = set(by_id)
+    completed: set[str] = set()
+    ordered: list[PlannedStep] = []
+    while pending:
+        ready = [step for step in plan.steps if step.step_id in pending and set(step.depends_on) <= completed]
+        if not ready:
+            raise ValueError("video studio plan contains a dependency cycle")
+        for step in ready:
+            ordered.append(step)
+            completed.add(step.step_id)
+            pending.remove(step.step_id)
+
+    fingerprint_payload = {
+        "goal": plan.goal,
+        "stage_manifest_sha256": hashlib.sha256(STAGE_MANIFEST_PATH.read_bytes()).hexdigest(),
+        "source": plan.source,
+        "steps": [{
+            "id": step.step_id,
+            "role": step.role,
+            "objective": step.objective,
+            "depends_on": list(step.depends_on),
+            "required_capabilities": list(step.required_capabilities),
+        } for step in ordered],
+        "max_steps": max_steps,
+        "input_sha256": input_sha256,
+    }
+    fingerprint = hashlib.sha256(json.dumps(
+        fingerprint_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")).hexdigest()
+    capacity = max_steps - 1  # One step is reserved for the durable-checkpoint entry gate.
+    chunks = [ordered[offset:offset + capacity] for offset in range(0, len(ordered), capacity)]
+    positions = {step.step_id: index for index, step in enumerate(ordered)}
+    prior_ids: set[str] = set()
+    batches: list[VideoStudioBatch] = []
+
+    for index, chunk in enumerate(chunks, start=1):
+        chunk_ids = {step.step_id for step in chunk}
+        external_dependencies = {
+            dep for step in chunk for dep in step.depends_on if dep not in chunk_ids
+        }
+        if any(dep not in prior_ids for dep in external_dependencies):
+            raise ValueError("batch order would require a dependency from a future batch")
+        required_completed_steps = tuple(sorted(external_dependencies, key=positions.__getitem__))
+
+        gate_id = "__video_batch_entry__"
+        while gate_id in chunk_ids:
+            gate_id = "_" + gate_id
+        gate = PlannedStep(
+            gate_id,
+            "operator",
+            "仅在外层检查点适配器核验父 Video Attempt、审批与 required_completed_steps 后放行本批；当前为预览占位",
+            (),
+            ("video_attempt_checkpoint_read",),
+        )
+        batch_steps = [gate]
+        for step in chunk:
+            internal_dependencies = tuple(dep for dep in step.depends_on if dep in chunk_ids)
+            batch_steps.append(PlannedStep(
+                step.step_id, step.role, step.objective,
+                (gate_id, *internal_dependencies), step.required_capabilities,
+            ))
+
+        batch_pending = {step.step_id: set(step.depends_on) for step in batch_steps}
+        batch_completed: set[str] = set()
+        batch_waves: list[tuple[str, ...]] = []
+        while batch_pending:
+            wave = tuple(step.step_id for step in batch_steps
+                         if step.step_id in batch_pending and batch_pending[step.step_id] <= batch_completed)
+            if not wave:
+                raise ValueError("generated Commander batch contains a dependency cycle")
+            batch_waves.append(wave)
+            batch_completed.update(wave)
+            for step_id in wave:
+                del batch_pending[step_id]
+
+        step_stage_ids = tuple((step.step_id, _stage_id_for_step(step)) for step in chunk)
+        batch_fingerprint_payload = {
+            "dag_sha256": fingerprint,
+            "batch_index": index,
+            "batch_total": len(chunks),
+            "max_steps": max_steps,
+            "step_ids": [step.step_id for step in chunk],
+            "step_stage_ids": [list(item) for item in step_stage_ids],
+            "required_completed_steps": list(required_completed_steps),
+            "steps": [{
+                "id": step.step_id,
+                "role": step.role,
+                "objective": step.objective,
+                "depends_on": list(step.depends_on),
+                "required_capabilities": list(step.required_capabilities),
+            } for step in chunk],
+        }
+        batch_fingerprint = hashlib.sha256(json.dumps(
+            batch_fingerprint_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")).hexdigest()
+        batch_plan = CommanderPlan(
+            plan_id=hashlib.sha256(f"{fingerprint}:{index}".encode("ascii")).hexdigest()[:32],
+            goal=f"{plan.goal} [batch {index}/{len(chunks)}]",
+            steps=tuple(batch_steps),
+            source=f"video_studio_batch:{plan.source}",
+            parallel_waves=tuple(batch_waves),
+        )
+        batches.append(VideoStudioBatch(
+            batch_id=f"vbatch_{fingerprint[:16]}_{index:03d}",
+            checkpoint_key_template=f"video-studio:{{attempt_id}}:{fingerprint[:32]}:{index:03d}",
+            dag_sha256=fingerprint,
+            batch_fingerprint=batch_fingerprint,
+            input_sha256=input_sha256,
+            step_stage_ids=step_stage_ids,
+            index=index,
+            total_batches=len(chunks),
+            max_steps=max_steps,
+            step_ids=tuple(step.step_id for step in chunk),
+            required_completed_steps=required_completed_steps,
+            plan=batch_plan,
+        ))
+        prior_ids.update(chunk_ids)
+
+    return tuple(batches)
+
+
+def build_video_studio_preview(
+    storyboard: Mapping[str, Any],
+    pipeline_id: str,
+    *,
+    max_steps: int = 16,
+    capability_registry: Any | None = None,
+    role_registry: Any | None = None,
+    handler_registry: Mapping[str, Any] | None = None,
+    authorization_scope: str = "video_studio",
+) -> dict[str, Any]:
+    """Build a non-executing preview, optionally checking Commander-owned registries."""
     profile, plan = build_video_studio_plan(storyboard, pipeline_id)
     normalized = validate_storyboard(storyboard)
+    storyboard_sha256 = hashlib.sha256(json.dumps(
+        normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
+    batches = build_video_studio_batches(
+        plan, max_steps=max_steps, input_sha256=storyboard_sha256,
+    )
+    admission = assess_video_studio_commander_admission(
+        plan, max_steps=max_steps, capability_registry=capability_registry,
+        role_registry=role_registry, handler_registry=handler_registry,
+        authorization_scope=authorization_scope,
+    )
     return {
-        "status": "validated",
+        "status": "preview_only",
+        "storyboard_validation": "passed",
+        "storyboard_sha256": storyboard_sha256,
         "pipeline": profile.as_dict(),
         "storyboard": {
             "title": normalized["title"],
@@ -309,7 +663,15 @@ def build_video_studio_preview(storyboard: Mapping[str, Any], pipeline_id: str) 
             } for step in plan.steps],
         },
         "creative_gates": list(profile.creative_gates),
-        "commander_admission": assess_video_studio_commander_admission(plan),
+        "commander_admission": admission,
+        "commander_batching": {
+            "status": "preview_only_worker_integration_pending",
+            "batch_count": len(batches),
+            "max_steps_per_batch": max_steps,
+            "checkpoint_persistence_available": False,
+            "execution_eligible": False,
+            "batches": [batch.as_dict() for batch in batches],
+        },
         "execution": "not_started",
         "commander_submission": "not_submitted",
         "note": "预览只生成 Commander DAG；实际能力、权限、资源、成本与审批须由 Muse Commander 在执行前重新核验。",

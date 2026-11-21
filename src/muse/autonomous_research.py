@@ -19,6 +19,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from muse.model_client import LMStudioClient, ModelError
+from muse.model_call_context import current_model_call_context, model_call_scope
 
 _DEFAULT_LM_STUDIO_CLIENT = LMStudioClient
 
@@ -2321,11 +2322,17 @@ class AutonomousResearchEngine:
             cycle_id = event.get("subject_id")
             if not isinstance(cycle_id, str) or latest_by_cycle.get(cycle_id, {}).get("id") != event.get("id"):
                 continue
-            if event.get("event") in {"started", "progress"}:
+            if event.get("event") in {"started", "progress", "interrupted"}:
                 return cycle_id, topic_by_cycle.get(cycle_id)
         return None, None
 
     def run_once(self, *, stop_event: Any | None = None, preferred_topic_key: str | None = None) -> dict[str, Any]:
+        if current_model_call_context() is not None:
+            return self._run_once_scoped(stop_event=stop_event, preferred_topic_key=preferred_topic_key)
+        with model_call_scope(self.progress_db, task_id=None, agent_id=None, project_id="muse"):
+            return self._run_once_scoped(stop_event=stop_event, preferred_topic_key=preferred_topic_key)
+
+    def _run_once_scoped(self, *, stop_event: Any | None = None, preferred_topic_key: str | None = None) -> dict[str, Any]:
         cycle_id, resume_topic_key = self._interrupted_cycle_checkpoint()
         resumed = cycle_id is not None
         if cycle_id is None:
@@ -2349,6 +2356,8 @@ class AutonomousResearchEngine:
         status = result.get("status")
         if status == "cancelled":
             event, summary, error_code = "cancelled", "Autonomous research cycle cancelled", None
+        elif status == "interrupted":
+            event, summary, error_code = "interrupted", "Autonomous research cycle interrupted and resumable", None
         elif status == "completed":
             event, summary, error_code = "completed", "Autonomous research cycle completed", None
         else:
@@ -2359,6 +2368,7 @@ class AutonomousResearchEngine:
         record_evolution_cycle_event(
             self.progress_db, cycle_id, event, summary=summary, error_code=error_code,
         )
+
         result["evolution_cycle_id"] = cycle_id
         return result
 
@@ -2421,13 +2431,20 @@ class AutonomousResearchEngine:
                 progress_events=progress, knowledge_store=knowledge,
             ).run(queries, max_sources=self.max_sources, task_id=run_key,
                   stop_event=stop_event)
-            if result.get("cancelled"):
+            def stopped_result(status: str = "interrupted") -> dict[str, Any]:
                 return {
-                    "status": "cancelled", "evolution_cycle_id": cycle_id, "topic_key": topic["key"],
-                    "read_source_count": 0, "independent_domain_count": 0,
-                    "independent_publisher_group_count": 0,
-                    "reminder_created": False,                    "failures": result.get("failures", []), "report": {},
+                    "status": status, "evolution_cycle_id": cycle_id, "topic_key": topic["key"],
+                    "read_source_count": len(result.get("sources", [])),
+                    "independent_domain_count": result.get("independent_domain_count", 0),
+                    "independent_publisher_group_count": result.get("independent_publisher_group_count", 0),
+                    "reminder_created": False,
+                    "failures": result.get("failures", []), "report": {},
                 }
+            if result.get("cancelled"):
+                interrupted = bool(stop_event is not None and stop_event.is_set())
+                return stopped_result("interrupted" if interrupted else "cancelled")
+            if stop_event is not None and stop_event.is_set():
+                return stopped_result()
             source_refs = [item["url"] for item in result["sources"]]
             fetched_at = datetime.now(timezone.utc).isoformat()
             idea = knowledge.upsert_node(
@@ -2449,6 +2466,8 @@ class AutonomousResearchEngine:
                           "last_researched_at": fetched_at},
                 provenance=tuple(source_refs[:32]),
             )
+            if stop_event is not None and stop_event.is_set():
+                return stopped_result()
             experiment = None
             feedback_experiment_execution = {"status": "not_applicable"}
             if topic.get("improvement_proposal_id"):
@@ -2481,6 +2500,7 @@ class AutonomousResearchEngine:
                             evolution_cycle_id=cycle_id,
                             review_gate=self.feedback_experiment_reviewer,
                             reviewer_scope=self.feedback_reviewer_scope,
+                            stop_event=stop_event,
                         )
                         if isinstance(feedback_experiment_execution, dict):
                             feedback_experiment_execution["evolution_cycle_id"] = cycle_id
@@ -2510,6 +2530,8 @@ class AutonomousResearchEngine:
                         reason_to_avoid="不要把检索失败解释为支持或反对假设；修复或更换独立来源后再重试。",
                         task_id=run_key,
                     )
+            if stop_event is not None and stop_event.is_set():
+                return stopped_result()
             for source in result["sources"]:
                 source_node = next((item for item in knowledge.list_nodes(node_type="source", limit=500)
                                     if item.get("external_ref") == source["url"]), None)
@@ -2829,6 +2851,8 @@ class AutonomousResearchEngine:
                 "source_count": 0, "independence_assessment": "unassessed",
                 "explicitly_independent_source_count": 0,
             })
+        if stop_event is not None and stop_event.is_set():
+            return stopped_result()
         report_path = None
         try:            report_path = self._persist_report(topic["key"], report, fetched_at)
         except OSError as exc:
@@ -2988,6 +3012,8 @@ class AutonomousResearchEngine:
                 }
                 # Turn each completed research cycle into a creator-value opportunity,
                 # not just a report. This proposal is the hand-off to prototype work.
+                if stop_event is not None and stop_event.is_set():
+                    return stopped_result()
                 from muse.initiative_engine import InitiativeStore
                 with InitiativeStore(self.workspace / "data/initiatives/muse.sqlite3") as initiatives:
                     from muse.value_forge import ValueForge
@@ -3193,6 +3219,8 @@ class AutonomousResearchEngine:
         # Output-first policy: every completed cycle gets an inbox entry. Evidence coverage
         # controls the wording, not whether the user can see the work. The final report path
         # is included so the result is immediately actionable from the local reminder inbox.
+        if stop_event is not None and stop_event.is_set():
+            return stopped_result()
         digest = hashlib.sha256((topic["key"] + "|" + "|".join(sorted(source_refs))).encode()).hexdigest()[:24]
         evidence_label = "较高覆盖，仍待人工核对" if high_value else "初步成果，证据待补充"
         with ReminderStore(self.reminder_db) as reminders:

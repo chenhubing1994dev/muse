@@ -461,6 +461,281 @@ class TaskQueue:
             self._connection.rollback()
             raise
 
+
+    def complete_contextual_inquiry_review_only(
+        self, task_id: str, *, worker_id: str, expected_updated_at: str,
+        encrypted_review_result: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Atomically attach an encrypted, validated review result and release its lease.
+
+        The result is never written to the generic _result field or event payload.
+        This transition returns the Ticket to human approval; it never approves it.
+        """
+        if not isinstance(task_id, str) or not task_id.strip() or len(task_id) > 128:
+            raise ValueError("task_id must be non-empty text of at most 128 characters")
+        if not isinstance(worker_id, str) or not worker_id.strip() or len(worker_id) > 120:
+            raise ValueError("worker_id must be non-empty text of at most 120 characters")
+        if not isinstance(expected_updated_at, str) or not expected_updated_at.strip():
+            raise ValueError("expected_updated_at must be a non-empty Ticket revision timestamp")
+        if not isinstance(encrypted_review_result, dict):
+            raise TypeError("encrypted_review_result must be a DPAPI envelope")
+
+        import hashlib
+
+        from muse.contextual_inquiry_security import (
+            deserialize_contextual_inquiry,
+            deserialize_contextual_inquiry_review_result,
+            unprotect_case_bytes,
+        )
+
+        timestamp = datetime.now(timezone.utc).isoformat()
+        actor = "contextual-inquiry-review-handler"
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = self._connection.execute(
+                "SELECT payload_json, status, updated_at, lease_owner, lease_expires_at, idempotency_key "
+                "FROM tasks WHERE id = ?",
+                (task_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(task_id)
+            if row["status"] != "running":
+                raise PermissionError("contextual inquiry review completion requires a running review-only lease")
+            if row["updated_at"] != expected_updated_at:
+                raise RuntimeError("contextual inquiry Ticket revision conflict")
+            if row["lease_owner"] != worker_id.strip():
+                raise PermissionError("contextual inquiry review completion requires the current Worker lease owner")
+            try:
+                expiry = datetime.fromisoformat(row["lease_expires_at"])
+            except (TypeError, ValueError):
+                raise PermissionError("contextual inquiry review Worker lease expiry is invalid") from None
+            if expiry.tzinfo is None or expiry.astimezone(timezone.utc) <= datetime.now(timezone.utc):
+                raise PermissionError("contextual inquiry review Worker lease has expired")
+
+            payload = json.loads(row["payload_json"])
+            if not isinstance(payload, dict):
+                raise PermissionError("contextual inquiry review Ticket payload is invalid")
+            authorization = payload.get("_review_authorization")
+            case_envelope = payload.get("case_context_envelope")
+            if (
+                payload.get("kind") != "contextual_inquiry_review"
+                or not isinstance(authorization, dict)
+                or set(authorization) != {"scope", "authorized_by", "authorized_at"}
+                or authorization.get("scope") != "review_only"
+                or not isinstance(authorization.get("authorized_by"), str)
+                or not authorization["authorized_by"].strip()
+                or not isinstance(authorization.get("authorized_at"), str)
+                or not authorization["authorized_at"].strip()
+                or payload.get("case_context_envelope_stored") is not True
+                or not isinstance(case_envelope, dict)
+                or payload.get("context_status") != "encrypted_pending_handler"
+                or payload.get("case_context_attached") is not False
+                or payload.get("requires_context_reentry") is not True
+                or payload.get("long_term_storage_performed") is not False
+                or "_approved" in payload
+                or "_result" in payload
+                or "review_result_envelope" in payload
+            ):
+                raise PermissionError("Ticket is not an eligible pending contextual inquiry review")
+
+            authorization_event = self._connection.execute(
+                "SELECT actor, payload_json FROM task_events "
+                "WHERE task_id = ? AND event_type = 'contextual_inquiry.review_only_authorized' "
+                "ORDER BY rowid DESC LIMIT 1",
+                (task_id,),
+            ).fetchone()
+            if authorization_event is None:
+                raise PermissionError("review completion requires its dedicated human authorization audit record")
+            try:
+                authorization_payload = json.loads(authorization_event["payload_json"])
+            except (TypeError, ValueError):
+                authorization_payload = None
+            if (
+                authorization_event["actor"] != authorization["authorized_by"]
+                or authorization_payload != {"scope": "review_only"}
+            ):
+                raise PermissionError("review-only authorization audit record does not match the Ticket")
+
+            claim_event = self._connection.execute(
+                "SELECT actor, payload_json FROM task_events "
+                "WHERE task_id = ? AND event_type = 'assignment.contextual_review_only_claimed' "
+                "ORDER BY rowid DESC LIMIT 1",
+                (task_id,),
+            ).fetchone()
+            if claim_event is None:
+                raise PermissionError("review completion requires its dedicated Worker claim audit record")
+            try:
+                claim_payload = json.loads(claim_event["payload_json"])
+            except (TypeError, ValueError):
+                claim_payload = None
+            if (
+                claim_event["actor"] != worker_id.strip()
+                or claim_payload != {
+                    "scope": "review_only", "lease_expires_at": row["lease_expires_at"],
+                }
+            ):
+                raise PermissionError("review-only Worker claim audit record does not match the live lease")
+
+            existing_attachment = self._connection.execute(
+                "SELECT 1 FROM task_events WHERE task_id = ? "
+                "AND event_type = 'contextual_inquiry.context_attached' LIMIT 1",
+                (task_id,),
+            ).fetchone()
+            if existing_attachment is not None:
+                raise PermissionError("contextual inquiry review result has already been attached")
+
+            inquiry = deserialize_contextual_inquiry(unprotect_case_bytes(case_envelope))
+            expected_idempotency_key = (
+                "contextual-inquiry-review:"
+                + hashlib.sha256(inquiry.inquiry_id.encode("utf-8")).hexdigest()
+            )
+            if row["idempotency_key"] != expected_idempotency_key:
+                raise PermissionError("encrypted inquiry identity does not match the TaskQueue Ticket")
+            result_plaintext = unprotect_case_bytes(encrypted_review_result)
+            deserialize_contextual_inquiry_review_result(result_plaintext, inquiry)
+            # Decryption/validation can consume time; the lease must still be live
+            # immediately before the lease-fenced state transition.
+            if expiry.astimezone(timezone.utc) <= datetime.now(timezone.utc):
+                raise PermissionError("contextual inquiry review Worker lease expired during result validation")
+
+            payload["review_result_envelope"] = encrypted_review_result
+            payload["case_context_attached"] = True
+            payload["requires_context_reentry"] = False
+            payload["context_status"] = "validated_attached"
+            cursor = self._connection.execute(
+                "UPDATE tasks SET payload_json = ?, status = 'waiting_approval', updated_at = ?, "
+                "lease_owner = NULL, lease_expires_at = NULL, heartbeat_at = NULL "
+                "WHERE id = ? AND status = 'running' AND updated_at = ? "
+                "AND lease_owner = ? AND lease_expires_at = ?",
+                (
+                    json.dumps(payload, ensure_ascii=False), timestamp, task_id,
+                    expected_updated_at, worker_id.strip(), row["lease_expires_at"],
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("contextual inquiry Ticket revision or lease conflict")
+            self._record_event(
+                task_id, "contextual_inquiry.context_attached", actor,
+                {"attachment_state": "validated"},
+            )
+            self._connection.commit()
+        except Exception:
+            self._connection.rollback()
+            raise
+
+        completed = self.get(task_id)
+        assert completed is not None
+        return completed
+
+    def load_contextual_inquiry_review_result(self, task_id: str) -> dict[str, Any]:
+        """Decrypt one validated review result only for a trusted UI caller.
+
+        This is a read-only, non-generic access path. It does not alter Ticket
+        state, persist plaintext, approve the task, or return the original case.
+        Callers must not write the returned plaintext to stdout, psmux logs,
+        task events, telemetry, or any persistent store.
+        """
+        import hashlib
+
+        from muse.contextual_inquiry_security import (
+            deserialize_contextual_inquiry,
+            deserialize_contextual_inquiry_review_result,
+            unprotect_case_bytes,
+        )
+
+        task = self.get(task_id)
+        if task is None:
+            raise KeyError(task_id)
+        payload = task.get("payload")
+        if (
+            task.get("status") != "waiting_approval"
+            or not isinstance(payload, dict)
+            or payload.get("kind") != "contextual_inquiry_review"
+            or payload.get("case_context_envelope_stored") is not True
+            or not isinstance(payload.get("case_context_envelope"), dict)
+            or payload.get("case_context_attached") is not True
+            or payload.get("requires_context_reentry") is not False
+            or payload.get("context_status") != "validated_attached"
+            or payload.get("long_term_storage_performed") is not False
+            or not isinstance(payload.get("review_result_envelope"), dict)
+            or "_approved" in payload
+            or "_result" in payload
+            or task.get("lease_owner") is not None
+            or task.get("lease_expires_at") is not None
+        ):
+            raise PermissionError("contextual inquiry review result is not ready for human review")
+
+        authorization = payload.get("_review_authorization")
+        if (
+            not isinstance(authorization, dict)
+            or set(authorization) != {"scope", "authorized_by", "authorized_at"}
+            or authorization.get("scope") != "review_only"
+            or not isinstance(authorization.get("authorized_by"), str)
+            or not authorization["authorized_by"].strip()
+            or not isinstance(authorization.get("authorized_at"), str)
+            or not authorization["authorized_at"].strip()
+        ):
+            raise PermissionError("human review result requires a valid review-only authorization")
+
+        rows = self._connection.execute(
+            "SELECT rowid, event_type, actor, payload_json FROM task_events "
+            "WHERE task_id = ? AND event_type IN ("
+            "'contextual_inquiry.review_only_authorized', "
+            "'assignment.contextual_review_only_claimed', "
+            "'contextual_inquiry.context_attached') ORDER BY rowid",
+            (task_id,),
+        ).fetchall()
+        authorization_events = [row for row in rows if row["event_type"] == "contextual_inquiry.review_only_authorized"]
+        claim_events = [row for row in rows if row["event_type"] == "assignment.contextual_review_only_claimed"]
+        attachment_events = [row for row in rows if row["event_type"] == "contextual_inquiry.context_attached"]
+        if (
+            len(authorization_events) != 1
+            or len(claim_events) != 1
+            or len(attachment_events) != 1
+        ):
+            raise PermissionError(
+                "human review result requires exactly one authorization, Worker claim audit, and attachment audit"
+            )
+        try:
+            authorization_payload = json.loads(authorization_events[0]["payload_json"])
+            claim_payload = json.loads(claim_events[0]["payload_json"])
+            attachment_payload = json.loads(attachment_events[0]["payload_json"])
+            claim_expiry = datetime.fromisoformat(claim_payload["lease_expires_at"])
+        except (KeyError, TypeError, ValueError):
+            raise PermissionError("human review result audit records are malformed") from None
+        if (
+            authorization_events[0]["actor"] != authorization["authorized_by"]
+            or authorization_payload != {"scope": "review_only"}
+            or not isinstance(claim_events[0]["actor"], str)
+            or not claim_events[0]["actor"].strip()
+            or claim_payload.get("scope") != "review_only"
+            or set(claim_payload) != {"scope", "lease_expires_at"}
+            or claim_expiry.tzinfo is None
+            or not (
+                authorization_events[0]["rowid"]
+                < claim_events[0]["rowid"]
+                < attachment_events[0]["rowid"]
+            )
+            or attachment_events[0]["actor"] != "contextual-inquiry-review-handler"
+            or attachment_payload != {"attachment_state": "validated"}
+        ):
+            raise PermissionError("human review result audit records do not match the validated Ticket")
+
+        inquiry = deserialize_contextual_inquiry(
+            unprotect_case_bytes(payload["case_context_envelope"])
+        )
+        expected_idempotency_key = (
+            "contextual-inquiry-review:"
+            + hashlib.sha256(inquiry.inquiry_id.encode("utf-8")).hexdigest()
+        )
+        if task.get("idempotency_key") != expected_idempotency_key:
+            raise PermissionError("encrypted inquiry identity does not match the TaskQueue Ticket")
+        return deserialize_contextual_inquiry_review_result(
+            unprotect_case_bytes(payload["review_result_envelope"]),
+            inquiry,
+        )
+
+
     def workflow_revision(self, task_id: str) -> int:
         if self.get(task_id) is None:
             raise KeyError(task_id)

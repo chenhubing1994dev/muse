@@ -120,18 +120,21 @@ class LightpandaBrowserAdapterTests(unittest.TestCase):
     def test_output_directory_must_be_new_and_inside_workspace(self) -> None:
         adapter = LightpandaBrowserAdapter(workspace=self.workspace, cdp_url="http://127.0.0.1:9222")
         outside = self.workspace.parent / "outside-lightpanda"
-        with self.assertRaises(ValueError):
-            adapter.capture_url(
-                "https://example.com", output_directory=outside,
-                authorization_confirmed=True, approved=True,
-            )
         existing = self.workspace / "existing"
         existing.mkdir()
-        with self.assertRaises(FileExistsError):
-            adapter.capture_url(
-                "https://example.com", output_directory=existing,
-                authorization_confirmed=True, approved=True,
-            )
+        # Output-boundary rejection must happen before public URL validation/DNS.
+        with patch("muse.lightpanda_adapter._validate_public_url") as validate:
+            with self.assertRaises(ValueError):
+                adapter.capture_url(
+                    "https://example.com", output_directory=outside,
+                    authorization_confirmed=True, approved=True,
+                )
+            with self.assertRaises(FileExistsError):
+                adapter.capture_url(
+                    "https://example.com", output_directory=existing,
+                    authorization_confirmed=True, approved=True,
+                )
+        validate.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -264,11 +264,17 @@ def create_local_dashboard_server(
                         chunk = response.read(min(1024 * 1024, remaining))
                         if not chunk:
                             raise OSError("upstream binary response ended before Content-Length")
-                        self.wfile.write(chunk)
                         remaining -= len(chunk)
+                        if remaining == 0:
+                            # Release the upstream socket before the final client write;
+                            # slow browsers must not keep the local API connection open.
+                            response.close()
+                            response = None
+                        self.wfile.write(chunk)
                     return
                 payload = response.read(10 * 1024 * 1024 + 1)
             except HTTPError as exc:
+                response = exc
                 status = exc.code
                 payload = exc.read(1024 * 1024)
                 response_headers = exc.headers

@@ -246,5 +246,55 @@ class MultiAgentOrchestratorTests(unittest.TestCase):
                 self.assertTrue(all(item["status"] == "succeeded" for item in persisted["agents"]))
 
 
+    def test_scoped_role_policy_is_isolated_from_global_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with AgentRoleRegistry(Path(directory) / "roles.sqlite3") as roles:
+                roles.register("developer", allowed_capabilities=("shell.execute", "filesystem.write"))
+                scoped = roles.register_scoped(
+                    "video_pipeline", "developer",
+                    allowed_capabilities=("video.generate", "ffmpeg.concat"),
+                )
+                self.assertEqual(scoped["scope"], "video_pipeline")
+                self.assertEqual(scoped["allowed_capabilities"], ["ffmpeg.concat", "video.generate"])
+                self.assertEqual(
+                    roles.authorize("developer", ("video.generate",), scope="video_pipeline")["scope"],
+                    "video_pipeline",
+                )
+                with self.assertRaisesRegex(PermissionError, "not allowed"):
+                    roles.authorize("developer", ("shell.execute",), scope="video_pipeline")
+                global_policy = roles.authorize("developer", ("shell.execute",))
+                self.assertNotIn("scope", global_policy)
+                self.assertEqual(global_policy["allowed_capabilities"], ["filesystem.write", "shell.execute"])
+
+    def test_scoped_authorization_fails_closed_without_exact_scope_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with AgentRoleRegistry(Path(directory) / "roles.sqlite3") as roles:
+                roles.register("developer", allowed_capabilities=("video.generate",))
+                with self.assertRaisesRegex(PermissionError, "scoped agent role is not registered"):
+                    roles.authorize("developer", ("video.generate",), scope="video_pipeline")
+                with self.assertRaisesRegex(PermissionError, "scoped agent role is not registered"):
+                    roles.authorize("unknown", (), scope="video_pipeline")
+
+    def test_scoped_role_policies_are_independent_per_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with AgentRoleRegistry(Path(directory) / "roles.sqlite3") as roles:
+                roles.register_scoped("video_pipeline", "reviewer", allowed_capabilities=("video.review",))
+                roles.register_scoped("research_pipeline", "reviewer", allowed_capabilities=("research.review",))
+                self.assertEqual(
+                    roles.authorize("reviewer", ("video.review",), scope="video_pipeline")["scope"],
+                    "video_pipeline",
+                )
+                with self.assertRaisesRegex(PermissionError, "not allowed"):
+                    roles.authorize("reviewer", ("video.review",), scope="research_pipeline")
+
+    def test_scoped_role_registry_rejects_unsafe_scope_identifiers(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with AgentRoleRegistry(Path(directory) / "roles.sqlite3") as roles:
+                for scope in ("", "VideoPipeline", "../video", "video pipeline", "video.", "video..pipeline", "x" * 65):
+                    with self.subTest(scope=scope):
+                        with self.assertRaisesRegex(ValueError, "scope"):
+                            roles.register_scoped(scope, "developer", allowed_capabilities=("video.generate",))
+
+
 if __name__ == "__main__":
     unittest.main()

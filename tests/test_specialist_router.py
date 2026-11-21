@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from muse.agent_registry import AgentRegistry
+from muse.model_capabilities import ModelCapabilityStore
 from muse.orchestration import AgentRoleRegistry, MultiAgentOrchestrator, OrchestrationStore
 from muse.specialist_router import AgentAdapterDescriptor, SpecialistProfile, SpecialistRegistry, SpecialistRouter, install_builtin_profiles
 
@@ -21,12 +22,18 @@ class SpecialistRouterTests(unittest.TestCase):
         self.store = OrchestrationStore(root / "runs.sqlite3")
         self.registry = SpecialistRegistry(root / "specialists.sqlite3")
         self.agents = AgentRegistry(root / "agents.sqlite3")
-        self.router = SpecialistRouter(self.registry, MultiAgentOrchestrator(self.store, role_registry=self.roles), agent_registry=self.agents)
+
+        self.capability_store = ModelCapabilityStore(root / "model-capabilities.sqlite3")
+        self.router = SpecialistRouter(
+            self.registry, MultiAgentOrchestrator(self.store, role_registry=self.roles),
+            agent_registry=self.agents, model_capability_store=self.capability_store,
+        )
 
     def tearDown(self) -> None:
         self.registry.close()
         self.agents.close()
         self.store.close()
+        self.capability_store.close()
         self.roles.close()
         self.temp.cleanup()
 
@@ -66,6 +73,114 @@ class SpecialistRouterTests(unittest.TestCase):
         self.assertIn("## 输出格式", observed[0])
         self.assertIn("## 验收标准", observed[0])
         self.assertIn("=== MUSE TASK ===", observed[0])
+
+    def test_model_family_round_trips_through_agent_registry(self) -> None:
+        profile = SpecialistProfile("persisted-claude", "developer", ("开发",), ("代码",))
+        self.router.register(profile, lambda prompt: "done", model_family="anthropic")
+        self.assertEqual(self.agents.get("persisted-claude")["model_family"], "anthropic")
+        second_router = SpecialistRouter(self.registry, self.router.orchestrator, agent_registry=self.agents)
+        second_router.register(profile, lambda prompt: "done")
+        self.assertEqual(second_router.adapter_catalog()[0].model_family, "anthropic")
+
+    def test_model_id_round_trips_and_reads_unknown_then_verified_capabilities(self) -> None:
+        profile = SpecialistProfile("model-bound", "developer", ("开发",), ("代码",))
+        model_id = "anthropic/claude-sonnet-4"
+        self.router.register(profile, lambda prompt: "done", model_family="anthropic", model_id=model_id)
+        self.assertEqual(self.agents.get("model-bound")["model_id"], model_id)
+        unknown = self.router.model_capability_profile("model-bound")
+        self.assertEqual(unknown["model_id"], model_id)
+        self.assertEqual(unknown["capabilities"]["vision"]["status"], "unknown")
+        self.capability_store.set_capability(
+            model_id, "anthropic", "context_window_tokens", 200000,
+            status="verified", source="operator_measurement", evidence_ref="test:evidence:model-window",
+        )
+        measured = self.router.model_capability_profile("model-bound")
+        self.assertEqual(measured["capabilities"]["context_window_tokens"]["value"], 200000)
+        self.assertEqual(measured["capabilities"]["context_window_tokens"]["status"], "verified")
+        self.assertEqual(measured["capabilities"]["vision"]["status"], "unknown")
+        second_router = SpecialistRouter(
+            self.registry, self.router.orchestrator, agent_registry=self.agents,
+            model_capability_store=self.capability_store,
+        )
+        second_router.register(profile, lambda prompt: "done")
+        self.assertEqual(second_router.adapter_catalog()[0].model_id, model_id)
+        self.assertEqual(second_router.model_capability_profile("model-bound")["model_id"], model_id)
+
+    def test_capability_lookup_without_concrete_model_id_is_not_guessed(self) -> None:
+        profile = SpecialistProfile("unidentified", "developer", ("开发",), ("代码",))
+        self.router.register(profile, lambda prompt: "done", model_family="anthropic")
+        self.assertIsNone(self.router.model_capability_profile("unidentified"))
+
+    def test_explicit_model_capability_requirement_fails_closed_until_verified_true(self) -> None:
+        model_id = "anthropic/claude-vision-candidate"
+        profile = SpecialistProfile("vision-agent", "developer", ("开发",), ("代码",))
+        self.router.register(profile, lambda prompt: "done", model_family="anthropic", model_id=model_id)
+
+        self.assertEqual(self.router.route("开发代码", required_model_capabilities=("vision",)).selected, ())
+        self.capability_store.set_capability(
+            model_id, "anthropic", "vision", True, status="declared", source="provider_claim",
+        )
+        self.assertEqual(self.router.route("开发代码", required_model_capabilities=("vision",)).selected, ())
+        self.capability_store.set_capability(
+            model_id, "anthropic", "vision", True, status="verified", source="operator_test",
+            evidence_ref="test:evidence:vision-pass",
+        )
+        self.assertEqual(
+            [item.specialist_id for item in self.router.route(
+                "开发代码", required_model_capabilities=("vision",),
+            ).selected],
+            ["vision-agent"],
+        )
+
+    def test_explicit_model_capability_requirement_rejects_verified_false_and_unknown_model(self) -> None:
+        false_model = "anthropic/text-only"
+        self.router.register(
+            SpecialistProfile("text-agent", "developer", ("开发",), ("代码",)),
+            lambda prompt: "done", model_family="anthropic", model_id=false_model,
+        )
+        self.capability_store.set_capability(
+            false_model, "anthropic", "vision", False, status="verified", source="operator_test",
+            evidence_ref="test:evidence:no-vision",
+        )
+        self.assertEqual(self.router.route("开发代码", required_model_capabilities=("vision",)).selected, ())
+
+    def test_model_capability_requirement_validation_rejects_unknown_or_duplicate_names(self) -> None:
+        self.router.register(
+            SpecialistProfile("coder", "developer", ("开发",), ("代码",)),
+            lambda prompt: "done", model_family="anthropic", model_id="anthropic/model",
+        )
+        for required in (("unknown_feature",), ("vision", "vision"), "vision"):
+            with self.subTest(required=required), self.assertRaises(ValueError):
+                self.router.route("开发代码", required_model_capabilities=required)
+
+    def test_dispatch_does_not_invoke_agent_without_verified_model_capability(self) -> None:
+        invoked = []
+        self.router.register(
+            SpecialistProfile("vision-agent", "developer", ("开发",), ("代码",)),
+            lambda prompt: invoked.append(prompt) or "done",
+            model_family="anthropic", model_id="anthropic/unknown-vision",
+        )
+        with self.assertRaises(LookupError):
+            self.router.dispatch("开发代码", required_model_capabilities=("vision",))
+        self.assertEqual(invoked, [])
+
+    def test_pipeline_rejects_unverified_model_capabilities_before_execution(self) -> None:
+        invoked = []
+        for agent_id, role, domain, keyword in (
+            ("researcher", "research", "研究", "资料"),
+            ("architect", "architecture", "架构", "设计"),
+        ):
+            self.router.register(
+                SpecialistProfile(agent_id, role, (domain,), (keyword,)),
+                lambda prompt, name=agent_id: invoked.append(name) or "done",
+                model_family="anthropic", model_id=f"anthropic/{agent_id}",
+            )
+        with self.assertRaises(PermissionError):
+            self.router.dispatch_pipeline(
+                "研究并设计", agent_ids=("researcher", "architect"),
+                required_model_capabilities=("vision",),
+            )
+        self.assertEqual(invoked, [])
 
     def test_default_router_fanout_selects_32_online_specialists(self) -> None:
         for index in range(32):
@@ -159,6 +274,47 @@ class SpecialistRouterTests(unittest.TestCase):
         from muse.commander_planner import CommanderPlanner
         with self.assertRaisesRegex(LookupError, "no live compatible Agent"):
             self.router.dispatch_commander("Build Muse capability", CommanderPlanner())
+
+    def test_commander_dag_applies_per_step_verified_model_capability_requirements(self) -> None:
+        from muse.commander_planner import CommanderPlanner
+        goal = "Build Muse capability"
+        planner = CommanderPlanner()
+        plan = planner.plan(goal)
+        invoked = []
+        registrations = (
+            ("researcher", "research", ("research",)),
+            ("architect", "architecture", ("design",)),
+            ("developer", "developer", ("coding", "testing")),
+            ("reviewer", "reviewer", ("review",)),
+        )
+        for agent_id, role, capabilities in registrations:
+            self.router.register_adapter(
+                SpecialistProfile(agent_id, role, (role,), (role,)),
+                AgentAdapterDescriptor(
+                    agent_id, frozenset(capabilities), model_family="anthropic",
+                    model_id=f"anthropic/{agent_id}",
+                ),
+                lambda prompt, name=agent_id: invoked.append(name) or name + " completed",
+            )
+        requirements = {plan.steps[0].step_id: ("vision",)}
+        with self.assertRaisesRegex(LookupError, "no live compatible Agent"):
+            self.router.dispatch_commander(goal, planner, required_model_capabilities_by_step=requirements)
+        self.assertEqual(invoked, [])
+        self.capability_store.set_capability(
+            "anthropic/researcher", "anthropic", "vision", True,
+            status="verified", source="operator_test", evidence_ref="test:evidence:commander-vision",
+        )
+        result = self.router.dispatch_commander(goal, planner, required_model_capabilities_by_step=requirements)
+        self.assertEqual(result.dispatch.orchestration.status, "succeeded")
+        self.assertEqual(set(invoked), {"researcher", "architect", "developer", "reviewer"})
+
+    def test_commander_model_capability_mapping_rejects_unknown_step_ids(self) -> None:
+        from muse.commander_planner import CommanderPlanner
+        with self.assertRaises(ValueError):
+            self.router.dispatch_commander(
+                "Build Muse capability", CommanderPlanner(),
+                required_model_capabilities_by_step={"not-a-step": ("vision",)},
+            )
 
     def test_dispatch_pipeline_runs_research_architecture_development_review_in_order(self) -> None:
         executed = []

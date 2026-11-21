@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from muse.model_client import LMStudioClient, ModelError
+from muse.model_call_context import current_model_call_context, model_call_scope
 from muse.task_queue import TaskQueue
 
 
@@ -324,12 +325,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     client = LMStudioClient(args.base_url, model=args.model, timeout=90)
     def run_cycle() -> dict[str, Any]:
-        result = propose_next_step(
-            args.backlog, args.task_db, args.plan_db,
-            lambda messages: client.chat(messages, temperature=0.2, max_tokens=900),
-        )
+        if current_model_call_context() is not None:
+            result = propose_next_step(
+                args.backlog, args.task_db, args.plan_db,
+                lambda messages: client.chat(messages, temperature=0.2, max_tokens=900),
+            )
+        else:
+            with model_call_scope(args.task_db, task_id=None, agent_id=None, project_id="muse"):
+                result = propose_next_step(
+                    args.backlog, args.task_db, args.plan_db,
+                    lambda messages: client.chat(messages, temperature=0.2, max_tokens=900),
+                )
         print(json.dumps(result, ensure_ascii=False, indent=2), flush=True)
         return result
+
     try:
         if args.loop:
             if args.interval_seconds < 60:

@@ -15,24 +15,49 @@ from muse.conversations import ConversationStore
 
 
 class ChatGPTBridgeTests(unittest.TestCase):
-    def test_classify_is_advisory_and_never_executes(self):
-        classifier = SimpleNamespace(classify=lambda _request: {
-            "domain": "software", "capability": "coding",
-            "confidence": 0.95, "rationale": "A coding request.",
-        })
-        args = SimpleNamespace(
-            request="Build a Python helper", base_url="http://127.0.0.1:1234/v1",
-            model="gemma-test", timeout=20,
-        )
-        output = io.StringIO()
-        with patch.object(chatgpt_bridge, "LMStudioGemmaIntentClassifier", return_value=classifier), \
-             patch.dict("os.environ", {}, clear=True), redirect_stdout(output):
-            code = chatgpt_bridge.command_classify(args)
-        result = json.loads(output.getvalue())
-        self.assertEqual(code, 0)
-        self.assertTrue(result["advisory_only"])
-        self.assertEqual(result["classification"]["capability"], "coding")
-        self.assertEqual(result["execution"], "not_started")
+    def test_classify_is_advisory_and_records_project_usage_without_task_or_agent(self):
+        from muse.usage_ledger import UsageLedger
+
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "tasks.sqlite3"
+
+            def classify(_request):
+                from muse.model_call_context import record_current_model_usage
+                self.assertTrue(record_current_model_usage(
+                    "lm-studio-local", "gemma-cli-model",
+                    {"prompt_tokens": 13, "completion_tokens": 5, "total_tokens": 18},
+                ))
+                return {
+                    "domain": "software", "capability": "coding",
+                    "confidence": 0.95, "rationale": "A coding request.",
+                }
+
+            classifier = SimpleNamespace(classify=classify)
+            args = SimpleNamespace(
+                request="Build a Python helper", base_url="http://127.0.0.1:1234/v1",
+                model="gemma-test", timeout=20,
+            )
+            output = io.StringIO()
+            with (
+                patch.object(chatgpt_bridge, "DEFAULT_DATABASE", database),
+                patch.object(chatgpt_bridge, "LMStudioGemmaIntentClassifier", return_value=classifier),
+                patch.dict("os.environ", {}, clear=True),
+                redirect_stdout(output),
+            ):
+                code = chatgpt_bridge.command_classify(args)
+            result = json.loads(output.getvalue())
+            self.assertEqual(code, 0)
+            self.assertTrue(result["advisory_only"])
+            self.assertEqual(result["classification"]["capability"], "coding")
+            self.assertEqual(result["execution"], "not_started")
+            with UsageLedger(database.with_name("model_usage.sqlite3")) as ledger:
+                events = ledger.list_events(limit=10)
+            self.assertEqual(len(events), 1)
+            self.assertIsNone(events[0]["task_id"])
+            self.assertIsNone(events[0]["agent_id"])
+            self.assertEqual(events[0]["project_id"], "muse")
+            self.assertEqual(events[0]["input_tokens"], 13)
+            self.assertEqual(events[0]["output_tokens"], 5)
 
     def test_submit_creates_waiting_approval_ticket_in_existing_queue(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -64,6 +89,105 @@ class ChatGPTBridgeTests(unittest.TestCase):
                 approved = queue.approve(task["id"], approved_by="user")
                 self.assertEqual(approved["status"], "queued")
                 self.assertTrue(approved["payload"]["_approved"])
+
+    def test_submit_same_request_id_replays_existing_ticket_without_duplicate_events(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "tasks.sqlite3"
+            args = SimpleNamespace(
+                request="Research local agent orchestration", request_id="stable-replay-1",
+                title=None, database=str(database), priority=50, estimated_seconds=900,
+                base_url="http://127.0.0.1:1234/v1", model=None, timeout=20,
+            )
+            output = io.StringIO()
+            with patch.object(chatgpt_bridge, "classify_request", side_effect=[
+                {"domain": "research", "capability": "research", "confidence": 0.9,
+                 "classifier_source": "deterministic_rules"},
+                RuntimeError("classifier must not run for an existing request ID"),
+            ]) as classifier, patch.dict("os.environ", {}, clear=True), redirect_stdout(output):
+                first_code = chatgpt_bridge.command_submit(args)
+                first = json.loads(output.getvalue())
+                with TaskQueue(database) as queue:
+                    approved = queue.approve(first["task_id"], approved_by="user")
+                    self.assertEqual(approved["status"], "queued")
+                    event_count_before_replay = len(queue.events(first["task_id"]))
+                output.seek(0)
+                output.truncate(0)
+                second_code = chatgpt_bridge.command_submit(args)
+                second = json.loads(output.getvalue())
+                with TaskQueue(database) as queue:
+                    claimed = queue.claim_next(worker_id="replay-worker", lease_seconds=60, task_id=first["task_id"])
+                    self.assertIsNotNone(claimed)
+                    queue.finish(first["task_id"], status="succeeded", result={"ok": True}, worker_id="replay-worker")
+                    event_count_after_finish = len(queue.events(first["task_id"]))
+                output.seek(0)
+                output.truncate(0)
+                third_code = chatgpt_bridge.command_submit(args)
+                third = json.loads(output.getvalue())
+                classifier.assert_called_once()
+            self.assertEqual(first_code, 0)
+            self.assertEqual(second_code, 0)
+            self.assertEqual(third_code, 0)
+            self.assertEqual(first["task_id"], second["task_id"])
+            self.assertEqual(first["task_id"], third["task_id"])
+            self.assertEqual(first["request_id"], args.request_id)
+            self.assertEqual(second["request_id"], args.request_id)
+            self.assertEqual(third["request_id"], args.request_id)
+            self.assertEqual(second["status"], "queued")
+            self.assertEqual(second["approval_required"], False)
+            self.assertEqual(second["next_action"], "existing_ticket_reused")
+            self.assertEqual(third["status"], "succeeded")
+            self.assertEqual(third["approval_required"], False)
+            self.assertEqual(third["next_action"], "existing_ticket_reused")
+            self.assertEqual(first["intent_source"], "deterministic_rules")
+            self.assertEqual(second["intent_source"], "deterministic_rules")
+            self.assertEqual(third["intent_source"], "deterministic_rules")
+            with TaskQueue(database) as queue:
+                self.assertEqual(len(queue.events(first["task_id"])), event_count_after_finish)
+                self.assertEqual(queue.snapshot(limit=10)["counts"]["succeeded"], 1)
+                self.assertEqual(queue.get(first["task_id"])["payload"]["_result"], {"ok": True})
+
+    def test_submit_rejects_request_id_reuse_for_different_request(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "tasks.sqlite3"
+            args = SimpleNamespace(
+                request="Research local agent orchestration", request_id="stable-conflict-1",
+                title=None, database=str(database), priority=50, estimated_seconds=900,
+                base_url="http://127.0.0.1:1234/v1", model=None, timeout=20,
+            )
+            changed = SimpleNamespace(**{**vars(args), "request": "Delete all local records"})
+            output = io.StringIO()
+            with patch.object(chatgpt_bridge, "classify_request", return_value={
+                "domain": "research", "capability": "research", "confidence": 0.9,
+            }), patch.dict("os.environ", {}, clear=True), redirect_stdout(output):
+                self.assertEqual(chatgpt_bridge.command_submit(args), 0)
+                output.seek(0)
+                output.truncate(0)
+                code = chatgpt_bridge.command_submit(changed)
+            result = json.loads(output.getvalue())
+            self.assertEqual(code, 2)
+            self.assertEqual(result["error"], "request_id_conflict")
+            self.assertEqual(result["request_id"], args.request_id)
+            self.assertEqual(result["execution"], "not_started")
+            with TaskQueue(database) as queue:
+                self.assertEqual(queue.snapshot(limit=10)["counts"]["waiting_approval"], 1)
+                task = queue.get(result["task_id"])
+                self.assertEqual(task["payload"]["goal"], args.request)
+
+    def test_submit_rejects_blank_or_malformed_request_id_before_classification(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "tasks.sqlite3"
+            args = SimpleNamespace(
+                request="Do safe research", request_id="  ", title=None, database=str(database),
+                priority=50, estimated_seconds=900, base_url="http://127.0.0.1:1234/v1",
+                model=None, timeout=20,
+            )
+            output = io.StringIO()
+            with patch.object(chatgpt_bridge, "classify_request") as classify, redirect_stdout(output):
+                code = chatgpt_bridge.command_submit(args)
+            self.assertEqual(code, 2)
+            self.assertEqual(json.loads(output.getvalue())["error"], "invalid_request_id")
+            classify.assert_not_called()
+            self.assertFalse(database.exists())
 
     def test_chatgpt_export_import_is_local_opt_in_bounded_and_excludes_hidden_reasoning(self):
         with tempfile.TemporaryDirectory() as directory:

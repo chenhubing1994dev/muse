@@ -99,3 +99,53 @@ Muse now has `src/muse/herdr_events.py`, a pure protocol reducer:
 - Snapshot recovery exposes a separate explicit projection function so a caller can reconcile only pre-bound Agents after a `missed` snapshot.
 
 The reducer is transport-independent and tested against synthetic protocol messages. It does not yet open the Windows named pipe, run `hc events`, start Core, or create a reconnecting daemon. That next transport stage must use a dedicated least-privilege reader and be proven against a real pinned `hc` build before any default-path integration.
+
+## Fourth implementation slice: existing-Core-only event transport
+
+The current upstream source was checked at `herdrdev/herdr-core` commit `c7517808d64f06609e4ecf0db1757005373cc3a3`:
+
+- The `hc events` CLI command calls `client::connect_or_start`; it is not safe for an existing-Core-only observer. On non-macOS, the app connection helper `platform::connect_for_app` also calls `connect_or_start`.
+- The Core client has a `require_existing` helper that only calls the platform pipe connector, but it is an internal Rust API, not a documented external CLI command. Muse therefore does not shell out to `hc` for event subscription.
+- In v0.1.21, the upstream Windows named-pipe connector uses CreateFileW, OPEN_EXISTING, FILE_FLAG_OVERLAPPED and SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION; its normal client retries ERROR_PIPE_BUSY with WaitNamedPipeW. Muse deliberately omits that retry loop: its observer makes one existing-pipe open attempt and fails immediately if unavailable. Muse then uses PeekNamedPipe plus bounded reads for cancellable observation. This is a narrower read-only path, not a full transport clone.
+- Endpoint resolution follows upstream precedence: non-empty `HC_SOCKET`, then `socket` in `%APPDATA%/herdr-core/config.toml` (or `XDG_CONFIG_HOME`), then the default `\\.\pipe\herdr-core-{ASCII-alphanumeric-USERNAME}-{HC_SESSION}.sock`. `HC_SESSION` defaults to `default`, trims whitespace, and rejects path/control characters. Custom endpoints must be local `\\.\pipe\` paths; remote UNC and filesystem paths fail closed.
+- HerdrCoreEventSubscription.connect() without expected_version sends one JSON-RPC events.subscribe request; with an expected_version pin it first performs rpc.discover, validates OpenRPC info.version and the events.subscribe method, then sends events.subscribe on the same pipe. Both paths validate the matching response and authoritative snapshot. It exposes only next_event() and close(), with no hc subprocess, autostart path, terminal mutation method, reconnect loop or Commander integration. The native Windows stream uses PeekNamedPipe before os.read, so each read is limited to bytes already available; connect() bounds/cancels the handshake and next_event() accepts a caller stop event, timeout and poll interval. A custom injected stream must implement readline_cancellable() to provide these guarantees. Callers still run the reader under Muse's existing supervisor, not the UI thread; after EOF/error, create a fresh subscription and consume its authoritative snapshot.
+- The schema's `missed` notification is a separate JSON-RPC method (`method: "missed"`), not merely `method: "event"` with `params.type: "missed"`. The reducer now handles the actual notification shape and atomically replaces its snapshot.
+
+Fake-stream tests verify endpoint precedence/validation, exact request shape, snapshot bootstrap, status and `missed` notification reduction, invalid reply closure, and a single connection attempt when the Core is absent. They do not exercise a real Windows named pipe or a live Core. The transport is not yet wired into AgentRegistry, a daemon, or a default provider path; real pinned-Core smoke and supervised lifecycle integration remain acceptance gates.
+
+## Fifth implementation slice: cancellable read lifecycle
+
+- `_WindowsPipeStream.readline_cancellable()` checks cancellation/closure between bounded polls. `PeekNamedPipe` reports available bytes, and `os.read` consumes no more than that count; partial lines remain buffered until a newline arrives. This avoids an uninterruptible blocking read on the Windows pipe while waiting for the next byte.
+- `HerdrCoreEventSubscription.connect()` now accepts `stop_event`, a bounded handshake timeout and poll interval. `next_event()` accepts the same cancellation/timeout controls. Closing the stream wakes its polling reader; EOF, timeout and cancellation remain distinct outcomes for the existing supervisor to handle.
+- Injected/test streams that request bounded or cancellable behavior must implement `readline_cancellable`; unsupported streams fail explicitly rather than silently promising cancellation they cannot provide. The transport still does not own a thread, reconnect policy, AgentRegistry writes, or Commander dispatch.
+- `tests/test_herdr_transport.py` covers pre-cancelled connection (no pipe open), handshake cancellation/timeout, event-read cancellation/timeout, close wake-up, fresh snapshot after sequence reset, and a mocked `PeekNamedPipe` reader that consumes only available bytes. These mocked Win32 tests validate reader logic, not a live Windows pipe/Core connection.
+- Existing-Core-only safety remains unchanged: no `hc` process launch, no `WaitNamedPipe`, no auto-start, no automatic terminal→Agent binding. Real pinned-Core Windows smoke remains a prerequisite before wiring this into the existing `AutonomousSupervisor` lifecycle or any default provider path.
+
+
+## Sixth implementation slice: pinned stable release and live smoke harness
+
+The stable Windows compatibility target is now pinned to Herdr Core v0.1.21:
+- Source tag/commit: v0.1.21 / 1b0393f80c35b1dae34f37934d33d0144a8fc8d7.
+- API generation: 1; target: windows-x86_64.
+- Archive: https://releases.herdr.dev/core/0.1.21/herdr-core-windows-x86_64.zip.
+- Versioned manifest: https://releases.herdr.dev/core/0.1.21/manifest.json.
+- Windows ZIP SHA-256 from that manifest, fetched read-only on 2026-11-21: a8984634c35b58ba82d0aec078d5a5e6004da01d5a25b3daf822ab5e31c7312b.
+- Upstream distribution/install.ps1 confirms the archive contains herdr-core.exe and conpty/conpty.dll; the ZIP must be treated as a pair, not as a standalone executable.
+
+The earlier transport source review used c7517808d64f06609e4ecf0db1757005373cc3a3, which is 10 commits ahead of the v0.1.21 stable tag. A GitHub compare confirms crates/herdr-core/src/platform/windows.rs was not changed in those 10 commits, while events.rs and the OpenRPC schema did change. The pinned release's schema/README.md documents plain JSON-RPC 2.0, rpc.discover, events.subscribe, event/heartbeat/missed notifications, and a protocol generation-1 schema. Its OpenRPC schema is version 1.3.2 with Git blob SHA 2048664078012a88f90e49d1819d44f8f1e18b86. The release tag's paths.rs, platform/windows.rs, and events.rs were separately inspected.
+
+Windows transport distinction: v0.1.21 upstream opens the local pipe with CreateFileW, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, and identification-only QoS; its normal connector retries ERROR_PIPE_BUSY via WaitNamedPipeW. Muse deliberately does not copy that retry loop: its observer makes one existing-pipe open attempt and fails immediately if unavailable. The Muse reader uses PeekNamedPipe and bounded reads so its own worker can be cancelled. This is an intentionally narrower read-only observer, not a complete replacement for Herdr's client transport.
+
+HerdrCoreEventSubscription.connect(expected_version="0.1.21", expected_openrpc_version="1.3.2") performs rpc.discover and validates both OpenRPC info.version and the OpenRPC schema version, plus the events.subscribe method; it then sends events.subscribe on the same pipe and validates its authoritative snapshot. The same-connection sequence avoids a version-check/subscribe race. Calls without expected_version retain the previous single-request behavior.
+
+New files:
+- src/muse/herdr_core_release.py stores the stable source/target/manifest/archive pin and streams SHA-256 verification.
+- src/muse/herdr_core_smoke.py and the muse-herdr-core-smoke entry point provide an opt-in, read-only live smoke. It requires a ZIP the user has already downloaded; verifies the pinned archive hash; safely extracts to a temporary directory only; checks the extracted binary's --version and schema --json; then checks the running Core's rpc.discover version on the same connection, subscribes, and waits for a heartbeat.
+- The smoke never downloads, installs, updates, launches, stops, lists terminal output, sends input, or dispatches work. It reports counts only, then closes its observer pipe. It does not restart the Core; restart/reconnect acceptance still requires a separately authorized operational test.
+- Archive extraction rejects traversal, alternate-stream/drive paths, duplicate case-insensitive Windows paths, symlinks/special files, oversized archives, and incomplete ZIPs.
+
+Upstream security documentation states that the release service's HTTPS manifest checksum is not a separately signed release manifest and Windows Authenticode signing is conditional. The pin therefore proves byte equality with the official HTTPS manifest's published SHA-256, not an independent publisher signature. Do not treat the checksum as stronger than that trust model.
+
+The environment check still found no hc.exe and no running hc process. The live smoke has intentionally not been run. A real pipe heartbeat against the pinned Core remains the gate before any AutonomousSupervisor integration.
+
+

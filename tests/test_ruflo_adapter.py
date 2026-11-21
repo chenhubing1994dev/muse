@@ -31,6 +31,22 @@ class RufloAdapterTests(unittest.TestCase):
         self.assertEqual(kwargs["cwd"], str(Path(self.tmp.name).resolve()))
 
     @patch("muse.ruflo_adapter.subprocess.run")
+    def test_agent_execute_preserves_provider_usage_in_mcp_result(self, run):
+        run.return_value = subprocess.CompletedProcess(
+            [], 0,
+            'INFO\nResult:\n{"success":true,"model":"local-model","messageId":"chatcmpl-123","usage":{"inputTokens":12,"outputTokens":4,"totalTokens":16}}',
+            "",
+        )
+        adapter = self.make_adapter(("agent_execute",))
+        result = adapter.call_tool(
+            "agent_execute", {"agentId": "agent-test", "prompt": "short"}, approved=True,
+        )
+        self.assertEqual(result.result["usage"], {
+            "inputTokens": 12, "outputTokens": 4, "totalTokens": 16,
+        })
+        self.assertEqual(result.result["messageId"], "chatcmpl-123")
+
+    @patch("muse.ruflo_adapter.subprocess.run")
     def test_agent_execute_gets_bounded_local_generation_timeout(self, run):
         run.return_value = subprocess.CompletedProcess([], 0, 'Result:\n{"output":"ok"}', "")
         adapter = self.make_adapter(("agent_execute",))

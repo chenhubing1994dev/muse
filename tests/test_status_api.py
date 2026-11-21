@@ -9,13 +9,13 @@ import unittest
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 from muse.agent_registry import AgentRegistry
 from muse.capabilities import CapabilityRegistry
 from muse.progress import ProgressEventStore
-from muse.status_api import _find_product_subtitle_review, build_agents, build_capabilities, build_initiative_timeline, build_mempalace_status, build_overview, build_products, build_improvement_detail, create_status_server
+from muse.status_api import _find_product_subtitle_review, build_agents, build_agent_org_chart, build_capabilities, build_initiative_timeline, build_mempalace_status, build_overview, build_products, build_improvement_detail, create_status_server
 from muse.improvement import ImprovementStore
 from muse.task_queue import TaskQueue
 from muse.commander_planner import CommanderPlanner
@@ -222,6 +222,215 @@ class StatusApiTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp.cleanup()
+
+    def test_contact_sheet_endpoint_serves_only_hash_verified_release_evidence(self) -> None:
+        workspace = Path(self.temp.name)
+        products_dir = workspace / "data" / "products"
+        initiative_id, version_id = "a" * 32, "b" * 20
+        product_dir = products_dir / initiative_id / version_id
+        product_dir.mkdir(parents=True)
+        video_path = product_dir / "video.mp4"
+        video_bytes = b"video-evidence-fixture"
+        video_path.write_bytes(video_bytes)
+        video_hash = hashlib.sha256(video_bytes).hexdigest()
+        release_dir = product_dir / "publish-package-v1"
+        release_dir.mkdir(parents=True)
+        sheet = b"\x89PNG\r\n\x1a\n" + (13).to_bytes(4, "big") + b"IHDR" + (800).to_bytes(4, "big") + (600).to_bytes(4, "big") + b"contact-sheet-fixture"
+        report = {
+            "can_publish": False,
+            "checks": {"visual_anomaly_review": {"contact_sheet": {
+                "status": "available", "sha256": hashlib.sha256(sheet).hexdigest(),
+            }}},
+        }
+        report_bytes = json.dumps(report, sort_keys=True, separators=(",", ":")).encode()
+        sheet_path = release_dir / "contact-sheet.png"
+        report_path = release_dir / "release-quality-report.json"
+        sheet_path.write_bytes(sheet)
+        report_path.write_bytes(report_bytes)
+        package_manifest = {
+            "package_type": "muse_manual_platform_publish_pack",
+            "initiative_id": initiative_id, "version_id": version_id,
+            "release_state": "draft_only", "can_publish": False,
+            "source_video_sha256": video_hash,
+            "files": {
+                "video.mp4": video_hash,
+                "contact-sheet.png": hashlib.sha256(sheet).hexdigest(),
+                "release-quality-report.json": hashlib.sha256(report_bytes).hexdigest(),
+            },
+        }
+        (release_dir / "manifest.json").write_text(json.dumps(package_manifest), encoding="utf-8")
+        daemon_stub = ModuleType("muse.daemon_control")
+        daemon_stub.MuseDaemonController = lambda **kwargs: SimpleNamespace()
+        daemon_stub.DaemonError = RuntimeError
+        with patch.dict("sys.modules", {"muse.daemon_control": daemon_stub}):
+            server, token = create_status_server(
+                task_db=self.task_db, progress_db=self.progress_db,
+                capability_db=self.capability_db, products_dir=products_dir,
+            )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            request = Request(
+                f"http://127.0.0.1:{server.server_address[1]}/api/v1/products/{initiative_id}/{version_id}/contact-sheet",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            with patch("muse.status_api._verified_product_files", return_value=(
+                product_dir, {"product_kind": "video_creator"}, {"video.mp4": (video_path, video_hash)},
+            )):
+                with urlopen(request, timeout=5) as response:
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(response.headers["Content-Type"], "image/png")
+                    self.assertEqual(response.read(), sheet)
+                sheet_path.write_bytes(sheet + b"tampered")
+                with self.assertRaises(HTTPError) as rejected:
+                    urlopen(request, timeout=5)
+                self.assertEqual(rejected.exception.code, 409)
+                rejected.exception.close()
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
+    def test_visual_review_post_and_get_are_authenticated_hash_bound_and_append_only(self):
+        root = Path(self.temp.name)
+        products_dir = root / "data" / "products"
+        initiative_id, version_id = "a" * 32, "b" * 20
+        product_dir = products_dir / initiative_id / version_id
+        release_dir = product_dir / "publish-package-v1"
+        release_dir.mkdir(parents=True)
+        video = product_dir / "video.mp4"
+        video.write_bytes(b"video-master")
+        video_hash = hashlib.sha256(video.read_bytes()).hexdigest()
+        sheet = release_dir / "contact-sheet.png"
+        sheet.write_bytes(
+            b"\x89PNG\r\n\x1a\n" + (13).to_bytes(4, "big") + b"IHDR"            + (640).to_bytes(4, "big") + (480).to_bytes(4, "big") + b"fixture"
+        )
+        sheet_hash = hashlib.sha256(sheet.read_bytes()).hexdigest()
+        report = {"can_publish": False, "checks": {"visual_anomaly_review": {
+            "contact_sheet": {"status": "available", "sha256": sheet_hash}
+        }}}
+        report_bytes = json.dumps(report, sort_keys=True, separators=(",", ":")).encode()
+        (release_dir / "release-quality-report.json").write_bytes(report_bytes)
+        release_manifest = {
+            "package_type": "muse_manual_platform_publish_pack",
+            "initiative_id": initiative_id, "version_id": version_id,
+            "release_state": "draft_only", "can_publish": False,
+            "source_video_sha256": video_hash,
+            "files": {
+                "video.mp4": video_hash, "contact-sheet.png": sheet_hash,
+                "release-quality-report.json": hashlib.sha256(report_bytes).hexdigest(),
+            },
+        }
+        (release_dir / "manifest.json").write_text(json.dumps(release_manifest), encoding="utf-8")
+        daemon_stub = ModuleType("muse.daemon_control")
+        daemon_stub.MuseDaemonController = lambda **kwargs: SimpleNamespace()
+        daemon_stub.DaemonError = RuntimeError
+        with patch.dict("sys.modules", {"muse.daemon_control": daemon_stub}):
+            server, token = create_status_server(
+                task_db=self.task_db, progress_db=self.progress_db,
+                capability_db=self.capability_db, products_dir=products_dir,
+            )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        endpoint = f"http://127.0.0.1:{server.server_address[1]}/api/v1/products/{initiative_id}/{version_id}/visual-review"
+        headers = {
+            "Authorization": "Bearer " + token, "Origin": "tauri://localhost",
+            "Content-Type": "application/json", "Accept": "application/json",
+        }
+        payload = {
+            "decision": "approved", "reviewer": "Local Editor",
+            "reviewer_role": "video_editor",
+            "rationale": "Reviewed the complete video and every sampled keyframe carefully.",
+            "checklist": {
+                "subject_framing": True, "shot_continuity": True,
+                "visual_anomalies": True, "subtitle_visibility": True,
+                "full_video_playback": True,
+            },
+            "confirmation": "RECORD-VISUAL-REVIEW",
+        }
+        try:
+            with patch(
+                "muse.status_api._verified_product_files",
+                return_value=(product_dir, {"product_kind": "video_creator"}, {"video.mp4": (video, None)}),
+            ):
+                with self.assertRaises(HTTPError) as unauth:
+                    urlopen(Request(endpoint, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"}, method="POST"), timeout=5)
+                self.assertEqual(unauth.exception.code, 401)
+                unauth.exception.close()
+                request = Request(endpoint, data=json.dumps(payload).encode(), headers=headers, method="POST")
+                with urlopen(request, timeout=5) as response:
+                    self.assertEqual(response.status, 201)
+                    created = json.loads(response.read())
+                self.assertTrue(created["append_only"])
+                self.assertFalse(created["digital_signature"])
+                self.assertEqual(created["record"]["subject"]["video_sha256"], video_hash)
+                self.assertEqual(created["record"]["evidence_status"], "verified_human_review_digest_scope_bound")
+                self.assertEqual(created["record"]["subject"]["artifact_sha256"]["contact-sheet.png"], sheet_hash)
+                get_request = Request(endpoint, headers={"Authorization": "Bearer " + token})
+                with urlopen(get_request, timeout=5) as response:
+                    history = json.loads(response.read())
+                self.assertEqual(history["count"], 1)
+                self.assertEqual(history["reviews"][0]["evidence_status"], "verified_human_review_digest_scope_bound")
+                self.assertEqual(history["identity_assurance"], "self_asserted_local_session")
+                revision_payload = {
+                    **payload, "decision": "changes_requested",
+                    "findings": [{
+                        "timecode_ms": 12500, "shot_id": "shot-03", "severity": "major",
+                        "category": "continuity",
+                        "description": "镜头切换时人物动作出现明显跳变",
+                        "expected_fix": "重新衔接该镜头前后动作并复核切点",
+                    }],
+                }
+                with urlopen(Request(endpoint, data=json.dumps(revision_payload).encode(), headers=headers, method="POST"), timeout=5) as response:
+                    self.assertEqual(response.status, 201)
+                    revised = json.loads(response.read())
+                self.assertEqual(revised["record"]["findings"][0]["timecode_ms"], 12500)
+                revision_endpoint = endpoint.replace("/visual-review", "/revision-brief")
+                with urlopen(Request(revision_endpoint, headers={"Authorization": "Bearer " + token}), timeout=5) as response:
+                    brief_result = json.loads(response.read())
+                self.assertTrue(brief_result["active"])
+                self.assertFalse(brief_result["can_auto_modify_source"])
+                self.assertFalse(brief_result["new_version_created"])
+                self.assertEqual(brief_result["brief"]["source_version"], version_id)
+                self.assertEqual(brief_result["brief"]["tasks"][0]["timecode_ms"], 12500)
+                self.assertEqual(brief_result["brief"]["tasks"][0]["status"], "open")
+                with urlopen(Request(endpoint, data=json.dumps(payload).encode(), headers=headers, method="POST"), timeout=5) as response:
+                    self.assertEqual(response.status, 201)
+                with urlopen(Request(revision_endpoint, headers={"Authorization": "Bearer " + token}), timeout=5) as response:
+                    cleared_brief = json.loads(response.read())
+                self.assertFalse(cleared_brief["active"])
+                self.assertIsNone(cleared_brief["brief"])
+                with self.assertRaises(HTTPError) as invalid:
+                    urlopen(Request(endpoint, data=json.dumps({**payload, "checklist": {}}).encode(), headers=headers, method="POST"), timeout=5)
+                self.assertEqual(invalid.exception.code, 400)
+                invalid.exception.close()
+                release_manifest_path = release_dir / "manifest.json"
+                release_manifest_document = json.loads(release_manifest_path.read_text(encoding="utf-8"))
+                release_manifest_document["created_at"] = "changed-after-review"
+                release_manifest_path.write_text(json.dumps(release_manifest_document), encoding="utf-8")
+                with urlopen(get_request, timeout=5) as response:
+                    changed_manifest_history = json.loads(response.read())
+                self.assertEqual(
+                    changed_manifest_history["reviews"][0]["evidence_status"],
+                    "evidence_mismatch_or_incomplete",
+                )
+                with self.assertRaises(HTTPError) as stale_brief:
+                    urlopen(Request(revision_endpoint, headers={"Authorization": "Bearer " + token}), timeout=5)
+                self.assertEqual(stale_brief.exception.code, 409)
+                stale_brief.exception.close()
+                sheet.write_bytes(sheet.read_bytes() + b"tampered")
+                with self.assertRaises(HTTPError) as mismatch:
+                    urlopen(get_request, timeout=5)
+                self.assertEqual(mismatch.exception.code, 409)
+                mismatch.exception.close()
+                with self.assertRaises(HTTPError) as mismatch_post:
+                    urlopen(Request(endpoint, data=json.dumps(payload).encode(), headers=headers, method="POST"), timeout=5)
+                self.assertEqual(mismatch_post.exception.code, 409)
+                mismatch_post.exception.close()
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
 
     def test_subtitle_review_lookup_binds_exact_product_audio_script_and_srt(self) -> None:
         workspace = Path(self.temp.name)
@@ -487,6 +696,24 @@ class StatusApiTests(unittest.TestCase):
         self.assertIsNotNone(result[0]["reported_at"])
         self.assertNotIn("private prompt text", json.dumps(result))
 
+    def test_agent_org_chart_exposes_reporting_tree_and_truncation_without_private_fields(self) -> None:
+        with AgentRegistry(self.agent_db) as registry:
+            registry.register("org-manager", role="architect", capabilities=["design"], display_name="组织经理")
+            registry.register("org-worker", role="researcher", capabilities=["research"], display_name="研究员")
+            registry.set_org_assignment("org-worker", title="研究专员", reports_to="org-manager")
+        chart = build_agent_org_chart(self.agent_db)
+        self.assertEqual(chart["total"], 3)
+        self.assertFalse(chart["truncated"])
+        self.assertEqual(chart["unresolved_parent_count"], 0)
+        self.assertIn({"manager_id": "org-manager", "report_id": "org-worker"}, chart["edges"])
+        worker = next(item for item in chart["nodes"] if item["agent_id"] == "org-worker")
+        self.assertEqual(worker["title"], "研究专员")
+        self.assertEqual(worker["capabilities"], ["research"])
+        self.assertNotIn("executable", json.dumps(chart))
+
+        partial = build_agent_org_chart(self.agent_db, limit=1)
+        self.assertTrue(partial["truncated"])
+        self.assertEqual(partial["total"], 3)
     def test_improvement_detail_exposes_review_material_but_not_arbitrary_metadata_or_notes(self) -> None:
         improvement_db = Path(self.temp.name) / "improvements.sqlite3"
         with ImprovementStore(improvement_db) as store:
@@ -582,12 +809,97 @@ class StatusApiTests(unittest.TestCase):
             self.assertTrue(agents_payload["registry_configured"])
             self.assertEqual(agents_payload["count"], 1)
             self.assertEqual(agents_payload["agents"][0]["agent_id"], "researcher")
+            self.assertEqual(agents_payload["org_chart"]["total"], 1)
+            self.assertEqual(agents_payload["org_chart"]["nodes"][0]["agent_id"], "researcher")
+            self.assertFalse(agents_payload["org_chart"]["truncated"])
             mutation = Request(base + "/api/v1/overview", data=b"{}", method="POST",
                                headers={"Authorization": f"Bearer {token}"})
             with self.assertRaises(HTTPError) as forbidden:
                 urlopen(mutation, timeout=3)
             self.assertEqual(forbidden.exception.code, 405)
             forbidden.exception.close()
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
+    def test_contextual_inquiry_review_api_is_authenticated_redacted_and_read_only(self) -> None:
+        from unittest.mock import patch
+
+        task_id = "a" * 32
+        valid_payload = {
+            "case_context_envelope_stored": True,
+            "case_context_attached": True,
+            "requires_context_reentry": False,
+            "context_status": "validated_attached",
+            "long_term_storage_performed": False,
+            "review_result_envelope": {"version": 1, "protection": "dpapi", "ciphertext_b64": "opaque"},
+        }
+        tasks = [
+            {
+                "id": task_id, "title": "PRIVATE USER GOAL", "status": "waiting_approval",
+                "payload": valid_payload, "created_at": "2026-11-21T10:00:00+00:00",
+                "updated_at": "2026-11-21T10:05:00+00:00", "lease_owner": None,
+                "lease_expires_at": None,
+            },
+            {
+                "id": "b" * 32, "title": "not ready", "status": "queued",
+                "payload": valid_payload, "created_at": "2026-11-21T10:00:00+00:00",
+                "updated_at": "2026-11-21T10:05:00+00:00", "lease_owner": None,
+                "lease_expires_at": None,
+            },
+        ]
+        review = {
+            "schema_version": 1, "inquiry_id": "inquiry-1", "summary": "Review summary",
+            "findings": [{
+                "finding_id": "finding-1", "statement": "Candidate only",
+                "observation_refs": ["observation-1"], "hypothesis_refs": ["hypothesis-1"],
+                "assessment": "support_candidate", "rationale": "Needs human verification",
+            }],
+            "unknowns": ["Still unknown"],
+        }
+        server, token = create_status_server(
+            task_db=self.task_db, progress_db=self.progress_db, capability_db=self.capability_db,
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        try:
+            with patch("muse.task_queue.TaskQueue") as queue_class:
+                queue = queue_class.return_value.__enter__.return_value
+                queue.list_tasks.return_value = tasks
+                queue.load_contextual_inquiry_review_result.return_value = review
+                listing = Request(
+                    base + "/api/v1/contextual-inquiry-reviews?limit=20",
+                    headers={"Authorization": f"Bearer {token}", "Origin": "tauri://localhost"},
+                )
+                with urlopen(listing, timeout=3) as response:
+                    listed = json.loads(response.read())
+                    self.assertEqual(response.headers["Cache-Control"], "no-store")
+                    self.assertEqual(response.headers["Access-Control-Allow-Origin"], "tauri://localhost")
+                self.assertEqual(listed["count"], 1)
+                self.assertEqual(listed["reviews"], [{
+                    "task_id": task_id, "created_at": tasks[0]["created_at"],
+                    "updated_at": tasks[0]["updated_at"],
+                }])
+                self.assertNotIn("PRIVATE USER GOAL", json.dumps(listed))
+
+                with self.assertRaises(HTTPError) as unauthorized:
+                    urlopen(base + f"/api/v1/contextual-inquiry-reviews/{task_id}", timeout=3)
+                self.assertEqual(unauthorized.exception.code, 401)
+                unauthorized.exception.close()
+
+                detail = Request(
+                    base + f"/api/v1/contextual-inquiry-reviews/{task_id}",
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                with urlopen(detail, timeout=3) as response:
+                    payload = json.loads(response.read())
+                    self.assertEqual(response.headers["Cache-Control"], "no-store")
+                self.assertEqual(payload["review"], review)
+                self.assertNotIn("PRIVATE USER GOAL", json.dumps(payload))
+                self.assertNotIn("case_context_envelope", payload)
+                queue.load_contextual_inquiry_review_result.assert_called_once_with(task_id)
         finally:
             server.shutdown()
             server.server_close()

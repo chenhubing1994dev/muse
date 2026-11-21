@@ -228,6 +228,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     plan = sub.add_parser("plan", help="validate a storyboard and preview its parallel Commander DAG")
     plan.add_argument("storyboard_json")
     plan.add_argument("--story-bible", dest="story_bible_json", help="optional Muse Story Bible JSON for continuity cross-validation")
+    compose = sub.add_parser("compose", help="compile a director prompt spec into a validated storyboard and Commander DAG preview")
+    compose.add_argument("prompt_spec_json", help="JSON VideoPromptSpec file")
+    compose.add_argument("--story-bible", dest="story_bible_json", help="optional Muse Story Bible JSON for continuity locks")
     make = sub.add_parser("make", help="assemble images/video clips in a folder into one MP4")
     make.add_argument("input_directory")
     make.add_argument("output")
@@ -282,6 +285,49 @@ def main(argv: Sequence[str] | None = None) -> int:
         except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
             print(json.dumps({"status": "invalid_mpt_params", "error": str(exc)}, ensure_ascii=False))
             return 2
+        return 0
+
+    if args.command == "compose":
+        from muse.video_prompt_composer import compile_video_prompt, video_prompt_spec_from_dict
+        from muse.video_workflow import build_video_commander_plan
+
+        try:
+            spec_data = json.loads(Path(args.prompt_spec_json).read_text(encoding="utf-8"))
+            spec = video_prompt_spec_from_dict(spec_data)
+            story_bible = (
+                json.loads(Path(args.story_bible_json).read_text(encoding="utf-8"))
+                if args.story_bible_json else None
+            )
+            compiled = compile_video_prompt(spec, story_bible)
+            commander_plan = build_video_commander_plan(compiled["storyboard"])
+        except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            print(json.dumps({"status": "invalid_video_prompt_package", "error": str(exc)}, ensure_ascii=False))
+            return 2
+        print(json.dumps({
+            "status": "composed",
+            "video_prompt_spec_version": compiled["video_prompt_spec_version"],
+            "title": compiled["storyboard"]["title"],
+            "master_prompt": compiled["master_prompt"],
+            "storyboard": compiled["storyboard"],
+            "clip_manifest": compiled["clip_manifest"],
+            "audio_plan": compiled["audio_plan"],
+            "model_guidance": compiled["model_guidance"],
+            "source_ledger": compiled["source_ledger"],
+            "continuity_validation": compiled["continuity_validation"],
+            "commander_plan_preview": {
+                "plan_id": commander_plan.plan_id,
+                "source": commander_plan.source,
+                "parallel_waves": [list(wave) for wave in commander_plan.parallel_waves],
+                "steps": [{
+                    "id": step.step_id,
+                    "role": step.role,
+                    "depends_on": list(step.depends_on),
+                    "required_capabilities": list(step.required_capabilities),
+                } for step in commander_plan.steps],
+            },
+            "execution": "not_started",
+            "commander_submission": "not_submitted",
+        }, ensure_ascii=False, indent=2))
         return 0
 
     if args.command == "plan":

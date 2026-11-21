@@ -528,4 +528,10 @@
 - 本地自报身份显式标记 `self_asserted_local_identity`，不冒充认证。新版本 Manifest 的 `human_reviews.subtitle_review` 绑定当前 MP4、SRT、审核文档哈希及产品版本，并由发布质量报告校验摘要和范围。
 - 工作台增加结构化字段，证据引用默认空白；字幕审批只生成不可覆盖的新版本，不改变发布权限。
 - 本地字幕审校 CLI 同步要求 reviewer ID/role、理由与重复 `--evidence-ref` 参数，避免绕过 API/工作台的结构化审核要求；CLI help 已验证。
-- Python 定向回归 98/98；Node UI tests 51/51；Svelte check 0 errors / 0 warnings；Vite build 141 modules。证据注册表真实性验证和真实桌面视觉验收仍待完成。
+- 证据注册表真实性验证和真实桌面视觉验收仍待完成。
+
+### B251 FFmpeg Skill 安全 Cut 执行器
+- 新增 probe-first 的本地 MP4 Cut：accurate 精确解码重编码、copy 快速关键帧对齐；输入/输出路径、时长、源文件指纹、HDR 决策和编码器能力均先检查。
+- 固定 argv、`-nostdin`、`-n`，不接受 shell/filtergraph；输出在目标同卷临时目录生成，FFprobe + Muse full-decode QA 通过后才用原子 hard-link 发布，绝不覆盖已有目标。
+- 自动优先本机 AMF，失败才回退 libx264；当前本机 FFmpeg 8.1.1 的真实 AMF Cut 与独立编码 smoke 均通过，fallback=False。
+- Python 3.11 专项 20/20（FFmpeg Skill 6/6 + Cut 14/14）；CLI contract/doctor/dry-run、合成 MP4 probe、真实切片与完整解码 smoke 通过。42 项目录仍不代表 42 项功能已实现；下一步优先安全 join/fit。

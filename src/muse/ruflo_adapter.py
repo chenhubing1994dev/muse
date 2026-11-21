@@ -246,7 +246,8 @@ class RufloMCPAdapter:
             raise ValueError("Ruflo tool parameters must be a JSON object")
         try:
             encoded = json.dumps(params, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
-        except (TypeError, ValueError) as exc:            raise ValueError("Ruflo parameters must be finite JSON data") from exc
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Ruflo parameters must be finite JSON data") from exc
         if len(encoded.encode("utf-8")) > MAX_PARAMS_BYTES:
             raise ValueError("Ruflo parameters exceed 32 KiB")
         output = self._run(("mcp", "exec", "-t", name, "-p", encoded))

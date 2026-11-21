@@ -2829,21 +2829,38 @@ eady_to_publish=false。
 - B248：新增 `src/muse/video_stages.yaml`，将 stage_id、Commander 角色、阶段目标与 capability_hints 从 Python 硬编码迁入独立声明式清单。
 - B248：新增严格 stage loader，检查 schema、重复键/ID、未知字段、角色是否属于 `CommanderPlanner.ALLOWED_ROLES`、目标/提示格式及 intake/preflight/publish_gate 生命周期保留阶段。
 - `capability_hints` 明确只是规划提示，不授予工具权限、不证明本机能力存在；执行前仍须由 Commander 进行真实 registry 与角色权限校验。两个 YAML 资源均纳入 Python 包数据。
-- 增加 profile/stage manifest 加载、重复键、非法/保留 stage 和非法 Commander 角色拒绝测试。专项验证待执行后补录准确结果；不以脚本启动成功代替测试通过。
+- 增加 11 个 VideoStudio 专项测试用例，覆盖 profile/stage manifest 加载、重复键、非法/保留 stage、非法 Commander 角色、DAG 依赖与准入限额；目前尚无本轮新测试通过证据。原合并回归脚本已启动，但其嵌套 psmux 输出报告 `test_adapter_handlers (unittest.loader._FailedTest.test_adapter_handlers) ... ERROR`、内层 exit code 1；没有可确认的通过数。新建的窄范围验证脚本 `scripts/validate_video_studio_manifest.ps1` 再次提交时被宿主安全检查拦截，未执行。
 - Commander 仍是唯一调度/审批中心，CLI 仍只生成计划预览，不创建 Ticket、不派发、不渲染、不调用 Provider。本轮未安装依赖、未下载素材、未生成视频、未创建第二个 checkpoint/ledger。
 - 新增 `assess_video_studio_commander_admission()`：显式检查 Commander 角色白名单与默认 16-step 上限；超限计划返回 `blocked_step_limit`，不允许误认为可派发。即使未超限也只返回 `pending_capability_registry`，因为真实本机能力、角色-能力授权、资源/成本与人工审批仍未核验。
 - 下一步：将长 DAG 切成不超过 Commander 限额的幂等批次，并复用现有 Initiative/Video Attempt 处理阶段检查点与恢复；不扩大全局 max_steps，不创建第二个队列。
+- B249：新增纯计划函数 `build_video_studio_batches()`：稳定拓扑排序、按 16-step Commander 上限预留一个批次入口门，将跨批依赖显式输出为 `required_completed_steps`，保留批内依赖，并由规范化 DAG 指纹生成稳定 batch_id 与 checkpoint_key 模板。模板显式要求运行时绑定父 `attempt_id`，避免相同 DAG 的不同视频任务共享检查点命名空间。预览可显示所有批次，但每批仍标记 `execution_eligible=false`。
+- B249：原 Attempt 事件表仍只承载 queued/started/succeeded/failed/cancelled 生命周期事件；阶段检查点使用独立的同库表，不伪装成普通 started 事件。
+- B249：`tests/test_video_studio.py` 通过 Muse psmux 运行，**13/13 passed**；覆盖批次稳定性、批内/跨批依赖、最小边界和环依赖拒绝。批次仍只是预览，`execution_eligible=false`。
+- B250：新增 `docs/VIDEO_STAGE_CHECKPOINT_DESIGN.md`，记录同一 InitiativeStore SQLite 内的追加式批次/步骤检查点、父 Attempt 外键、DAG/batch/recipe/approval/input/output 指纹、lease epoch fencing 与恢复协议。
+- B250：`InitiativeStore` 已升级 `initiative_video_stage_checkpoints`：新增 `batch_id`、`batch_fingerprint`、独立 `step_id`、固定 manifest `stage_id`、`lease_epoch`；唯一键为 Attempt + DAG + batch + step + epoch。`record_video_stage_checkpoint()` 在 `BEGIN IMMEDIATE` 中要求 lease_epoch 等于父 Attempt 当前 `attempt_count`，并校验当前 Worker、未过期租约、审批/recipe identity、stage manifest、哈希和 4 KiB 元数据；新 epoch 可追加同一 step 的新证据，旧 epoch 永远不能写。`list_video_stage_checkpoints()` 保留历史 epoch，并按 DAG/recipe/approval 过滤。
+- B250：旧 stage-only checkpoint 表通过事务式 rebuild 迁移，保留历史行并映射为 `batch_id=legacy`、`batch_fingerprint=dag_sha256`、`step_id=stage_id`、`lease_epoch=1`；原 Attempt 与事件行不变。
+- B250：`tests/test_initiative_engine.py` 通过 Muse psmux **26/26 passed**（3.140s），覆盖旧库迁移、stage-only 历史行迁移、过期租约、epoch fencing、跨 epoch 追加、动态 `shot_001` step ID、并发幂等、追加式/FK 与 recipe/approval 指纹失效。
+- 回归：`tests/test_video_studio.py` **13/13 passed**；`tests/test_video_task_worker.py` **15/15 passed**。后者复验现有 `_commander_approval_is_valid()` 持久化审批守卫及 claim 后复核。
+- 全量回归：通过现有 `scripts/validate_python_suite.py` 经 Muse psmux 执行，**2,054 tests OK，1 skipped，0 failures/errors**；随后 `compileall` 输出 `MUSE_PYTHON_COMPILEALL_OK`。detached psmux Job `f212df62e38e4ad08d900b59ca0da90c`，exit code 0。此前的 RED/并发写入期间错误结果均已被这次干净全量回归取代。
+- 安全边界：Store 本身不查询 Commander；现有 `VideoTaskWorker._commander_approval_is_valid()` 核对精确 brief digest、单次 Attempt scope、queued + `_approved` Ticket、approved_by 与持久化 `human.decision=approved`。新批次 adapter 必须复用该 guard，并在批次边界和 dispatch/checkpoint 前复核。Store 只保存调用方提供的输入/输出摘要，不会自行读取素材验证产物；依赖安全恢复前沿与 artifact 验证仍待 adapter 实现。所有批次仍 `execution_eligible=false`，没有派发、渲染或调用 Provider。
+- B251：补齐检查点读取侧的租约栅栏。`list_video_stage_checkpoints()` 现在必须提交当前 `worker_id + lease_epoch`，在 `BEGIN IMMEDIATE` 内校验父 Attempt 仍为 running、Worker 所有权匹配、epoch 等于当前 attempt_count 且 lease 未过期；通过当前 lease 读取历史 epoch 的成功记录，允许同一 worker ID 在重试后读取旧 epoch，但不能用旧 epoch 身份读取或写入。新增 batch_id、batch_fingerprint、step_id 精确过滤；DAG/recipe/approval 绑定继续生效。
+- B251：新增测试覆盖同一 worker ID 重新 claim 后以新 epoch 读取旧 epoch 记录、旧 epoch/错误 worker/过期 lease 拒绝、批次/步骤过滤。通过 Muse psmux：`tests/test_initiative_engine.py` **27/27 passed**，`tests/test_video_studio.py` **14/14 passed**。
+- B251：VideoStudioBatch 已暴露完整 64 位 DAG 与批次指纹，并提供动态 step_id → 固定 stage_id 映射；指纹纳入 stage manifest SHA-256。12 种 profile 的映射回归通过。尚未接入 VideoTaskWorker；断点恢复仍需验证 required predecessors、重算输入摘要、核验输出 artifact 字节，并在批次边界复用既有 Commander 审批 guard。保持 `execution_eligible=false`，未派发、渲染或调用 Provider。- B251：修复并行编辑期间 `tests/test_video_publish_package.py` 中一个 def/import 粘连导致的语法错误（只调整该行换行，未重写测试）；该文件专项回归 **12/12 passed**。
+- B251：修复后重新执行完整 Python 回归，**2,080 tests OK，1 skipped，0 failures/errors**；`compileall` 输出 `MUSE_PYTHON_COMPILEALL_OK`。Detached psmux Job `cf001eb1978d48619f5e87821264ce29`，exit code 0。- B252：新增 `src/muse/video_checkpoint_adapter.py` 只读恢复证据验证器。它在当前有效 lease 下按完整 DAG/batch/batch fingerprint 读取历史，检查跨批 required predecessors 与批内依赖、固定 stage_id 映射、调用方重算的输入 SHA-256，并对 workspace 内非 symlink 普通文件重新计算输出字节 SHA-256（最大 2 GiB）；文件缺失、路径穿越、symlink、输入变化或输出字节变化均不能复用。
+- B252：验证器返回 reusable/missing/blocked 与拒绝原因，明确 `execution_eligible=false`、`dispatch_started=false`，不创建 checkpoint、不派发、不渲染、不调用 Provider。新增 3 个测试，覆盖有效复用、产物篡改后阻断下游、跨批前置步骤缺失、路径穿越拒绝；`tests/test_video_checkpoint_adapter.py` **3/3 passed**。
+- B252：VideoStudio 预览状态由不准确的 `preview_only_checkpoint_adapter_missing` 改为 `preview_only_worker_integration_pending`；检查点持久层和只读恢复验证器已存在，但尚未接入 VideoTaskWorker 的真实阶段执行生命周期。`tests/test_video_studio.py` **14/14**、`tests/test_video_prompt_studio.py` **4/4**、`tests/test_initiative_engine.py` **27/27** 均通过。- B252：新增验证器后重新执行完整 Python 回归，**2,084 tests OK，1 skipped，0 failures/errors**；`compileall` 输出 `MUSE_PYTHON_COMPILEALL_OK`。Detached psmux Job `882e3c1c25d845189af44826df885b0d`，exit code 0。
+
+
 ## 2026-11-21｜B246 NeonClipping 2–4 kHz 可选频谱辅助评分
 
 - `score_audio_windows` 增加可选 `band_energy_db`：用独立尾随局部中位数/MAD 计算 2–4 kHz 频带突显度；默认路径保留原始评分公式，显式开启时频谱特征占 15%，并输出逐秒 dB 与 prominence 供复核。
 - `rank` 与 `rank-cantonese` 新增 `--spectral-2-4khz`。显式开启才额外运行 FFmpeg 音频-only 2–4 kHz 带通分析；不解码视频画面、不增加第三方依赖或云 API。该特征不是情绪、语义、说话人或爆款识别。
 - 新增评分/输入校验与第二次 FFmpeg 带通调用测试。Python 3.11 专项回归 **19/19 passed**；真实 FFmpeg 合成 3 kHz 音频频带 smoke 通过；同一验证还复验 1080×1920 AMF 渲染、字幕烧录、Muse full-decode QA、正式产品 ZIP 与 InitiativeStore Attempt。
-- 验证经 `muse-dev run` → detached psmux，Job `5993e7e5820e423daec04383f55da2ca`，exit code 0；验证脚本输出 `MUSE_NEONCLIPPING_STAGE3_VALIDATION_OK`。
-- 限制：真实用户长视频的本地粤语 ASR 性能/准确率尚未验收；频谱启发式需要真实节目素材 A/B，当前不自动改变用户剪辑选择或发布权限。
+- 最终频谱/剪辑验证经 `muse-dev run` → detached psmux，Job `50f8188395a849ec9a31da1d223eaeec`，exit code 0；输出 `MUSE_NEONCLIPPING_STAGE3_VALIDATION_OK`。
+- 真正 CLI 端到端验收：本机 Python 3.14.5 + 项目隔离 faster-whisper + 固定 SHA-256 模型，对真实 Wan 2.1 粤语旁白样片（5.125 秒）执行 `rank-cantonese --spectral-2-4khz`，实际转写 20 个词级时间戳，文本与样片旁白一致，产出 1 个候选且候选信号包含 2–4 kHz 频带指标。模型 967,072,097 bytes / SHA-256 `d343caa7…f6804b34`。Job `2142d93813774bd19aa99128ee1dfe04`，exit code 0；验证脚本 `scripts/validate_neonclipping_cantonese_asr.py`。
+- 限制：样片只有 5.125 秒，不等于长视频性能验收；人工听审仍必需。频谱启发式仍需真实节目素材 A/B，不自动改变用户剪辑选择或发布权限。
 
-## 2026-11-21｜B247 Herdr Core / psmux Provider-neutral 终端发现接口
-
-- 重新核对 Herdr Core 当前生成 CLI 契约：`hc --version`、`hc schema --json`、`hc ls --json`；没有借用旧 Herdr TUI 的 `herdr api schema` 等命令，也没有猜测参数。
+## 2026-11-21｜B247 Herdr Core / psmux Provider-neutral 终端发现接口- 重新核对 Herdr Core 当前生成 CLI 契约：`hc --version`、`hc schema --json`、`hc ls --json`；没有借用旧 Herdr TUI 的 `herdr api schema` 等命令，也没有猜测参数。
 - 新增 `src/muse/terminal_runtime.py`：定义 `TerminalRuntimeProvider`、`TerminalRuntimeProbe` 与 `TerminalSessionListing`；`PsmuxProvider` 仅委托现有只读 inspect/list observer，`HerdrCoreProvider` 仅执行固定 argv 的版本、OpenRPC schema 与终端列表查询。
 - `HerdrCoreProvider` 使用 `shell=False`、短超时、输出大小上限、JSON/schema 结构校验；拒绝 shell 字符串命令，二进制缺失或 schema 无效时 fail-closed。没有实现 run/send/attach/kill/SSH/机器管理能力。
 - `scripts/muse_dev.py` 新增 `terminal probe/list`：默认仍是 psmux；Herdr Core 需显式 `--provider herdr-core`。不改变默认执行路径、不创建第二套 Job/Ticket/Commander。
@@ -2877,3 +2894,680 @@ eady_to_publish=false。
 - 后续复核发现 `src/muse/value_forge.py` 有两处语句意外粘连：第 181 行导致语法错误，第 215 行虽可解析但字段排版异常；已按 revision fence 分别拆行并读回。最终修订后重新经 `muse-dev run` → detached psmux 执行 ValueForge + AutonomousResearch **68/68 passed**（Job `wc_job_i9jKhqVUayd2tt_C`，exit 0）。
 - B247 旧全量回归记录引用的 `tests/test_task_queue.py:731` 与 `test_contextual_review_completion_requires_dedicated_queue_transition` 在当前 704 行文件中均不存在；当前 TaskQueue 专项 **40/40 passed**（detached psmux Job `9d11fde6608745d88b3b4a66bd4f6d5e`，exit 0）。这只能证明当前专项通过，不能倒推旧全量失败的历史根因；全项目回归仍待重新执行。
 
+## 2026-11-21｜B251 FFmpeg Skill 安全 Cut 执行器
+
+- 新增 `build_cut_command()`、`plan_cut()`、`cut_media()` 与 `muse-ffmpeg-skill cut` CLI；支持 accurate（默认，解码后精确 seek）及 copy（快速关键帧对齐），`--encoder auto` 优先尝试本机 `h264_amf`，AMF 启动失败自动回退 `libx264`；也可显式指定编码器，并提供 `--dry-run`。
+- Probe-first 校验源视频流、时长、时间边界、路径别名、符号链接、输出目录和禁止覆盖；FFmpeg 使用固定 argv、`-nostdin`、`-n`，不接受 shell 命令或任意 filtergraph。
+- 输出写入目标同卷临时目录；FFprobe 复核流与时长，复用 `muse.video_qa.inspect_video_file` 做完整解码 QA；检查源文件 stat 指纹后，以原子 hard-link 发布，目标被并发创建时失败关闭。超时/QA 失败不发布临时文件。
+- HDR 源默认拒绝 accurate 重编码；只有显式选择 copy 才允许保留源编码，并警告无 tone mapping、需复核目标播放。本阶段不擅自 HDR→SDR。
+- 新增 `tests/test_ffmpeg_cut.py` 共 **14/14 passed**；`test_ffmpeg_skill.py` **6/6 passed**；CLI cut help/dry-run 通过；真实合成 MP4 切片由 `h264_amf` 完成，fallback=False，输出经 FFprobe + Muse full-decode QA 验证。psmux Job `28414b10ae01405d8ef841666bf76f21`，exit 0。
+- 本机 FFmpeg/FFprobe 8.1.1；42 项依赖组合 16 available / 26 missing / 0 unknown。AMF 独立编码 smoke 与实际 Cut 均通过，自动选择 `h264_amf` 且未触发软件回退；这只证明当前本机路径已验收，不代表其他机器或其他 AMF 编码器也可用。
+- 并行 psmux 的全项目 unittest discover 完成 **1901 tests，1 error、1 skipped**；唯一错误是 `tests/test_jyutping.py` 导入不存在的 `muse.jyutping`，与 FFmpeg Cut 无关，因此全项目仍不能称为全绿。Cut 专项验证独立通过。上游 42 项目录仍不等于 42 项功能或 MCP tools 全部实现；未安装/运行上游 npm 包。
+- 复验：Python 3.11 通过 `muse-dev run` → detached psmux 执行 `scripts/validate_ffmpeg_skill.py`，FFmpeg Skill 6/6、Cut 14/14；真实 FFmpeg/FFprobe 8.1.1 probe、CLI dry-run、AMF Cut、AMF 独立编码及 Muse full-decode QA 全部通过。自动选择 `h264_amf`，fallback=False。psmux Job `fd46ac1c659c45dcb4c32782c6b00cfc`，exit 0。
+- 下一步优先实现 join 与 fit，沿用相同 probe/plan/临时产物/全解码/原子发布门禁，并保留 AMF→libx264 的安全回退。
+## 2026-11-21｜B252 Paperclip 组织树只读 API 与 Muse 指挥中心可视化
+
+- 扩展现有 `/api/v1/agents` 响应，附带 `AgentRegistry.org_chart(limit=500)` 的只读快照：节点、直属汇报边、全量总数、截断标记及快照外上级计数；不暴露执行路径、凭据或任务正文，不新增 endpoint、数据库、队列或调度器。
+- 扩展 Svelte API 类型与 App 快照，将组织数据传入既有 `AgentGalaxyPanel`；新增数字员工组织树，显示职位/角色、直属上级、在线/执行中/离线/停用/受阻状态和能力标签。截断及未出现在当前快照的上级均明确提示；循环/断裂数据不会让树渲染无限递归。
+- TDD：组织树状态 API 测试先观察到缺少 `build_agent_org_chart` 的预期失败，再实现最小 helper/响应字段并通过。
+- 验证：`tests/test_status_api.py` **39/39 passed**（Python 3.11，psmux Job `ccd85cb2423e40eca50ba7c3d78b10ca`，exit 0）；UI Node tests **51/51 passed**，`svelte-check` **0 errors / 0 warnings**（psmux Job `50a5ea316ba5456ebc7f45046caf7de0`，exit 0）。组织树专项测试 **1/1 passed**；`StatusApiTests` 子集 **33/33 passed**。
+- 未执行生产构建；全项目 Python regression 仍未确认，既有未知 Job 不重派、不强制恢复。当前只报告上述文件级与 UI 验证，不宣称全项目全绿。
+
+## 2026-11-21｜B253 Herdr Core Existing-Core-Only 事件传输层
+
+- 复核上游 `herdrdev/herdr-core` 当前源码 commit `c7517808d64f06609e4ecf0db1757005373cc3a3`：`hc events` 和非 macOS `connect_for_app` 会走 `connect_or_start`，不能作为只读 existing-only 客户端；内部 `require_existing` 只连接现有 endpoint。Windows 原生连接以 `CreateFileW(OPEN_EXISTING)` + `SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION` 打开命名管道。
+- 新增 `src/muse/herdr_transport.py`：解析 `HC_SOCKET > herdr-core/config.toml socket > 默认 Windows named pipe`，匹配 `HC_SESSION` 默认值、trim 与控制/路径字符约束；仅接受本地 `\\.\pipe\` endpoint，拒绝远程 UNC、普通文件路径、畸形配置和超长路径。
+- 新增 `open_existing_windows_pipe()`：只调用一次 `CreateFileW` 打开已存在命名管道，不调用 `hc`、`subprocess`、`WaitNamedPipe`、服务启动或自动重试；采用与上游一致的 Identification QoS。真实 Windows 命名管道尚未对真实 Core 实测。
+- 新增 `HerdrCoreEventSubscription`：只发送一条 `events.subscribe` JSON-RPC 请求，严格核对 reply id、snapshot shape 与 UTF-8/JSON 行大小；之后只提供 `next_event()` 和 `close()`，无终端 mutation API、无 Commander 派单、无重连循环。`next_event()` 是阻塞读取，必须由既有 Supervisor 后台调用；断线后调用者需重建订阅并取得新快照。
+- TDD 发现并修复 B249 Reducer 的协议遗漏：上游 `missed` 是独立 notification method，不是 `event` 内的 `type`。新增实际协议形状测试，先 RED 后 GREEN；另补齐 Rust `char.is_control` 对 C1 Unicode 控制字符的等价校验，先 RED 后 GREEN。
+- 新增 `tests/test_herdr_transport.py`，覆盖 endpoint 优先级/拒绝规则、配置解析、session 规则、唯一 subscribe 请求、snapshot/event/missed、reply 校验/关闭、Core 不存在时只尝试一次且不启动。Herdr transport/events、TerminalRuntime/CLI、Herdr Adapter、AgentRegistry、Status API 定向回归 **92/92 passed**（detached psmux Job `b73a908e5d0b4c189c339a0e5f118544`，exit 0）；同一验证内相关文件 `py_compile` 与 `pyproject.toml` TOML 解析通过。
+- 全项目 unittest discover 未取得结果：共享 `muse-dev` psmux session 当时被并行 Job `5505896331ec46a0aeae074dbbee1468` 占用，启动器 30 秒超时；未中断该并行任务，故不宣称全项目回归通过。
+- 当前仅完成可测试的 existing-only transport adapter，未安装/启动/连接真实 `hc`，未创建后台订阅服务，未接入 AgentRegistry 自动更新或默认终端 Provider。下一步应在显式配置与真实 Windows Core smoke 条件下验证命名管道权限/读写/关闭，再通过现有 Supervisor 做受控后台生命周期集成；不创建第二套调度器。
+
+## 2026-11-21｜B254 Paperclip B241 预算计量前置审计
+
+- 只读追踪 `LMStudioClient.chat()`、OpenRouter、`ProviderRegistry`、`ProviderMetricsStore` 与主要模型调用路径：LM Studio 当前只返回文本并丢弃响应 usage；OpenRouter 只提取 token 数；ProviderMetricsStore 只持久化健康/延迟/熔断指标，不记录 token 或费用。
+- 发现 `ProviderRegistry` 尚未成为 Muse 主流程统一模型网关，主流程多个模块直接调用 `LMStudioClient`；`ChatRequest` 也缺少 task/agent/project 归属上下文。因此目前无法可信地生成每个 Agent/项目的真实成本账单。
+- 架构裁决：B241 先做统一模型调用上下文 + append-only 用量账本，保留 provider/model、token usage、观测时间、来源和可空归属；实际费用须有 cost/currency 或带版本的价格来源，估算与实测分层。未知成本不当作零。
+- 本轮仅完成审计与研究文档更新，未实现美元预算 hard-stop；在归属、计量来源、周期和原子预留/结算证据齐备前，不开放金额预算门禁，避免伪造成本或误停任务。
+
+## 2026-11-21｜B255 FFmpeg Skill 安全 Join 执行器
+
+- B255 新增安全 Join 首阶段：plan_join() / join_media() / build_join_command() 与 muse-ffmpeg-skill join OUTPUT INPUT... CLI；最多 32 段，先逐段 FFprobe，再验证视频尺寸/FPS/色彩元数据一致、音轨存在性与采样率/声道布局一致；VFR、旋转、HDR、多视频流、多音轨及不兼容素材 fail-closed。
+- Join 使用固定生成的 concat filtergraph，不接收任意用户 filtergraph；明确为重新编码而非无损拼接，自动优先本机 AMF、失败回退 libx264；临时目录产物通过 FFprobe 时长/流复核、Muse full-decode QA、全部源文件指纹检查后才原子 hard-link 发布，禁止覆盖。
+- 新增 tests/test_ffmpeg_join.py：6/6 passed（固定 filtergraph、dry-run、尺寸不兼容拒绝、QA 失败不发布、成功发布、AMF 回退）；整套 FFmpeg Skill 验证 ffmpeg_skill 6/6 + cut 14/14 + join 6/6 全部通过。真实双素材合并由 h264_amf 完成，fallback=False，并通过 FFprobe + full-decode QA；CLI join help、contract、Cut smoke 与 AMF smoke 同轮通过。psmux Job f29aea9036444e83bb057ef3e3e44bba，exit 0。
+- 本阶段 Join 不是跨格式万能拼接器，也未实现转场、音频淡入淡出、VFR 规范化或自动 Fit；不兼容素材明确要求先规范化。下一步优先实现 Fit（主体保留/画幅适配与可视化检查），再补 Join 转场及音频连续性。
+
+## 2026-11-21｜B256 NeonClipping 可选本地人脸构图提示
+
+- 新增 `src/muse/video_face_framing.py`：复用 OpenCV 自带 Haar frontal-face cascade，在用户显式启用时对候选区间均匀抽样 3–30 帧（默认上限 12），每帧取最大正脸框，使用横向中心中位数生成整条片段的固定裁切位置。
+- `muse.video_highlights render` 新增 `--face-aware-crop`；通过 FFmpeg 有边界约束的 crop expression 完成 9:16 构图。默认仍是旧中心裁切；不增加模型下载、不调用云 API、不做身份识别或连续跟踪。
+- 增加 fail-closed 覆盖率门槛：至少 2 帧且不少于有效采样帧的 40% 检出正脸，才允许偏移裁切；`no_face`、`low_confidence`、OpenCV/cascade 缺失均回退中心裁切。
+- 真实 FFmpeg CLI smoke 在合成纹理上观察到 Haar 单帧误报（11 帧仅 1 帧），新门槛将其判为 `low_confidence`，`face_center_x=null` 并回退中心裁切；这次误报验证了门禁有效，而不是人脸检测准确率证明。
+- 真实 FFmpeg 对非中心 crop expression 完成 1080×1920 渲染并通过 Muse full-decode QA；原 AMF 字幕切片、产品 ZIP/Manifest 与 InitiativeStore Attempt 回归也通过。视频高光/人脸构图/产品适配专项 **25/25 passed**，验证 Job `579b48dd20944e26849c7ab1cffc47e3`，exit 0，输出 `MUSE_NEONCLIPPING_STAGE3_VALIDATION_OK`。
+- 限制：尚未在人像真实素材上评估 precision/recall、检测覆盖与构图观感；多人、侧脸、遮挡、镜头内人物切换仍须人工审片。该功能是单片段构图提示，不是持续跟踪。未运行全项目测试。
+
+## 2026-11-21｜B257 FFmpeg Skill 智能画幅 Fit 执行器
+
+- B257 新增安全 Fit：plan_fit() / fit_media() / build_fit_command() 与 muse-ffmpeg-skill fit INPUT OUTPUT CLI；支持 cover（按人工焦点裁切）和 contain（黑边适配），自定义偶数画布尺寸（128–3840）、归一化焦点坐标、目标 FPS。
+- Fit 在执行前 probe；VFR 必须明确指定输出 FPS，旋转/HDR 源暂时 fail-closed；AMF 自动优先、失败回退 libx264。输出必须通过 FFprobe 画幅/时长/音轨校验、Muse full-decode QA、源文件指纹检查后原子发布；报告 visual_review_required=true，技术 QA 不代替画面审美复核。
+- 新增 tests/test_ffmpeg_fit.py 8/8 passed；FFmpeg Skill 整套专项为 skill 6/6 + cut 14/14 + join 6/6 + fit 8/8，全数通过。真实横屏素材转换为 180×320 竖屏由 h264_amf 完成，fallback=False，FFprobe 与 full-decode QA 通过；真实输出仍需人工看画面确认焦点。CLI fit help、contract、Cut/Join/Fit smoke 与 AMF smoke 全通过。psmux Job ac7d962c48b5452a8ed1aefbc5a46e38，exit 0。
+- Fit 暂不做自动主体/人脸追踪、智能背景延展、HDR 色彩映射或任意画布尺寸；focus_x/focus_y 是人工构图提示。下一步可将已有的可选人脸构图中心与 Fit 手动焦点打通，并加入 contact sheet/人工视觉复核流程。
+
+## 2026-11-21｜B258 Herdr Core 可取消读取与连接生命周期
+
+- 将 Windows named-pipe 文件流封装为 `_WindowsPipeStream`：用 `PeekNamedPipe` 轮询当前可读字节，再以 `os.read` 读取不超过已知可用量的数据；未读完的 JSON 行保留在内部缓冲区，等待期间不会进入无期限同步阻塞读取。
+- `HerdrCoreEventSubscription.connect()` 新增 stop event、握手 timeout 与 poll interval；`next_event()` 支持 stop event、timeout 与 poll interval。`close()` 关闭底层流，等待中的轮询读取会在下一次检查时退出。超时、取消、EOF/断连保留为不同结果，重连仍由上层基于新订阅快照处理。
+- 自定义注入流若不实现 `readline_cancellable()`，请求 bounded/cancellable read 时明确报 `NotImplementedError`，不虚假承诺取消能力。没有增加独立线程、重连守护进程、AgentRegistry 自动写入、终端自动绑定或 Commander 派单。
+- 扩展 `tests/test_herdr_transport.py`：预取消不打开管道、握手取消/超时、事件读取取消/超时、close 唤醒、Core 序号重置后的新快照、模拟 `PeekNamedPipe` 只读取已可用字节；专项 **17/17 passed**（Python 3.11，独立 `muse-herdr` psmux Job `87fb5f54f199436e92e4f6ff24e0e7aa`，exit 0）。
+- 跨模块回归 **101/101 passed**：Herdr Transport 17、Events 15、Adapter 5、Terminal Runtime 7、Terminal Runtime CLI 3、AgentRegistry 15、Status API 39；各模块均通过 `muse-herdr` psmux 顺序执行，外层 WebCodex Job `wc_job_G1-N5TwdanWuElMK` completed/exit 0。
+- 验证边界：`PeekNamedPipe` 测试使用模拟 Win32 函数，不代表真实 Windows named pipe 或真实 Herdr Core 已验收；未安装、启动或连接 `hc`。只读环境探测未在当前 PATH 找到 `hc.exe`，也未发现运行中的 `hc` 进程。未接入现有 `AutonomousSupervisor` 或默认终端 Provider。下一步必须先完成固定版本 Core 的 Windows pipe smoke，再评估在既有 Supervisor 中的 opt-in 生命周期接入；不新建第二调度器。
+
+## 2026-11-21｜B259 FFmpeg Fit 人脸焦点提示融合
+
+- B259 将 Muse 既有可选 Haar 正脸构图提示接入 FFmpeg Fit：新增 face_aware / max_face_samples 与 CLI --face-aware / --max-face-samples。仅在检测状态为 detected 且置信门槛通过时，使用片段内脸部中心中位数覆盖 focus_x；no_face、low_confidence、unavailable 或异常全部保留用户手动焦点，并把完整 face_framing 决策写入执行结果。
+- 人脸检测仍是 OpenCV Haar 正脸启发式，不做身份识别、连续跟踪或多人主体判断；检测结果只作构图建议，visual_review_required 仍为 true。合成纹理真实 Fit smoke 返回 no_face，安全回退手动中心焦点；随后 AMF 编码、FFprobe 和 Muse full-decode QA 均通过。这验证了 fallback 链路，不代表人脸检测精度。
+- Fit 单测扩展至 9/9，既有人脸构图测试 5/5；整套 FFmpeg Skill + face framing 定向验证为 6 + 14 + 6 + 9 + 5 = 40 项全部通过。psmux Job `2b9fa64a85c142bf93f71d0cdfb8d2ca`，exit 0。
+- 下一步优先增加关键帧 contact sheet 与人工视觉复核交接，再评估真实人像素材的检测覆盖、误检率和主体构图观感；不把 Haar 结果自动当作成片审核通过。
+
+## 2026-11-21｜B260 本地视频 Contact Sheet 人工审片素材
+
+- 新增 `muse.video_contact_sheet`：对本地单视频流素材按固定采样率生成 PNG 联系表，默认 12 帧、4 列；采样数 3–30、列数 1–6、缩略宽度 96–640 均有硬边界，不接受用户 filtergraph。
+- 先用 FFprobe 验证输入视频与时长；输出先写目标同卷临时目录，检查 PNG 签名并由 FFprobe 复核图像尺寸，复核源文件指纹后原子 hard-link 发布；拒绝符号链接、覆盖和源文件变更。
+- Python 3.11 定向测试 5/5 通过（Job `547e4101d09f4ab0a946fba5563ff837`）；真实 FFmpeg/FFprobe 8.1.1 合成 MP4 smoke 通过，8 帧/4 列输出 1320×384 PNG（Job `5ce16951391b453b8624a661fa0c7796`）。
+
+
+
+
+
+## 2026-11-21｜B261 Herdr Core v0.1.21 固定版本与真实 Pipe Smoke 工具
+
+- 固定稳定兼容基线：Herdr Core v0.1.21，源码 tag commit 1b0393f80c35b1dae34f37934d33d0144a8fc8d7，API generation 1，OpenRPC 1.3.2（schema Git blob SHA 2048664078012a88f90e49d1819d44f8f1e18b86），Windows x64 ZIP herdr-core-windows-x86_64.zip。通过只读 GET 读取官方版本 manifest，确认 ZIP URL 与 SHA-256：a8984634c35b58ba82d0aec078d5a5e6004da01d5a25b3daf822ab5e31c7312b。
+- 新增 src/muse/herdr_core_release.py：固定版本、源码提交、目标、manifest URL、ZIP URL 和 SHA-256；流式计算本地归档 hash 并 fail-closed 比对。
+- HerdrCoreEventSubscription.connect(expected_version=..., expected_openrpc_version=...) 增加同一连接内的 rpc.discover → 校验 Core 版本、OpenRPC 版本和 events.subscribe → events.subscribe 握手，避免版本检查与订阅之间重连到另一 Core 的竞态；不传 expected_version 时维持原有单请求行为。
+- 新增 src/muse/herdr_core_smoke.py 和 muse-herdr-core-smoke CLI：只接受用户已下载的 ZIP；先核验官方 manifest SHA-256，再安全解压到临时目录、只运行本地 --version / schema --json，随后只连接已存在的 Windows pipe、核验服务端 schema、订阅并等待 heartbeat。拒绝 ZIP 路径穿越、重复大小写路径、符号链接/特殊文件、超大归档和缺少 ConPTY 的不完整包。
+- Smoke 不下载、不安装、不更新、不启动/停止 Core、不读取终端输出、不发送输入、不派单；只报告版本、schema 方法数、初始终端数和 heartbeat 后关闭连接。它不替代 Core restart/reconnect 的操作验收。
+- 新增 tests/test_herdr_core_smoke.py 8/8 passed；tests/test_herdr_transport.py 22/22 passed，覆盖 Core/OpenRPC 双版本发现、同管道订阅、版本不匹配和缺少方法时 fail-closed。Herdr 相关跨模块回归合计 **114/114 passed**：Smoke 8、Transport 22、Events 15、Adapter 5、Terminal Runtime 7、Terminal Runtime CLI 3、AgentRegistry 15、Status API 39；通过独立 muse-herdr psmux 顺序执行，外层 WebCodex Job wc_job_jTYzb11UFfCqh2ek completed/exit 0。
+- 上游安全文档指出 manifest checksum 通过 HTTPS 信任发布服务，未独立签名；Windows Authenticode 也属条件签名，不能把 checksum 误称为独立发行者签名。当前环境仍未发现 hc.exe 或运行中的 Core，因此没有运行真实 pipe smoke，也没有安装/启动 Core。下一步仍是等已有 Core 可用后做真实 heartbeat 验收，再考虑现有 AutonomousSupervisor 的 opt-in 接入；不创建第二调度中心。
+
+## 2026-11-21｜NeonClipping 动态人脸关键帧裁切增量
+
+- `detect_clip_face_center()` 在既有检测覆盖率门槛通过时，额外输出片段相对时间 `face_keyframes`；每个关键帧来自对应抽样画面的独立 Haar 正脸检测，不进行人物身份关联。
+- 新增 `build_dynamic_crop_expression()`：校验关键帧至少两个、时间严格递增且处于片段时长内、横向中心处于 0..1；生成 FFmpeg crop 的逐帧分段线性插值表达式，裁切坐标限制在有效范围。
+- `muse.video_highlights render` 新增互斥 `--dynamic-face-crop`；旧 `--face-aware-crop` 保持固定片段中心，默认仍是中心裁切。低置信、无脸、依赖不可用均回退中心裁切。
+- 修正真实 FFmpeg 兼容性：`crop` 滤镜没有 `eval=frame` 选项；改为默认逐帧求值的时间表达式，并用引号包住表达式中的逗号。
+- 动态关键帧/表达式/异常输入测试与高光、ASR mock、产品适配专项共 **28/28 passed**；真实 FFmpeg 对 3 个动态关键帧的 1080×1920 输出通过 Muse full-decode QA，动态 CLI flag 也完成无脸低置信安全回退 smoke；原 AMF 字幕渲染、产品 ZIP/Manifest、SRT sidecar 和 InitiativeStore Attempt 回归通过。最终验证 Job `e6d25a7ff49040c2a77f8b5476b9bd16`，exit 0，输出 `MUSE_NEONCLIPPING_STAGE3_VALIDATION_OK`。
+- 限制：这是稀疏 Haar 重检测关键帧插值，不是光流或连续身份跟踪；真实素材上的主体跟随观感、多人切换、侧脸/遮挡和镜头快速运动仍未验收，必须人工视觉复核。
+
+## 2026-11-21｜B263 Contact Sheet 接入人工发布审核证据包
+
+- `build_publish_package()` 新增可选 workspace-relative `contact_sheet` 参数及 CLI `--contact-sheet`；验证 PNG 签名/IHDR 后将其作为 `contact-sheet.png` 收入人工发布包和 ZIP。
+- `release-quality-report.json` 的视觉异常检查记录联系表是否提供、SHA-256 和人工复核要求；新增 `visual_content_review` 审核记录类别，批准记录必须绑定精确视频哈希，并在提供联系表时绑定联系表哈希。
+- 未提供联系表时保持兼容，状态为 `not_provided`；提供联系表也不会自动批准。人工审核记录缺失、技术 QA、版权/隐私/平台披露和账号授权等门槛仍独立存在，`can_publish=False`、`draft_only`、不调用发布 API。
+- Python 3.11 发布包专项 **9/9 passed**，包含联系表归档/哈希引用和非 PNG 拒绝；psmux Job `0659b47e5c6040a5bc1c422adbc0b8ce`，exit 0。首轮测试发现测试夹具 PNG magic bytes 被双重转义，已修正后重跑全绿。
+- 当前接通的是人工发布包证据链，不代表 NeonClipping UI 已集成，也不代表视觉审核自动化；下一步补 `visual_content` 人工审核记录的端到端签名范围测试及 UI 审核入口。
+
+## 2026-11-21｜B264 Paperclip 用量账本与 Provider 遥测首阶段
+
+- 新增 `src/muse/usage_ledger.py`：SQLite WAL append-only 用量账本，`BEGIN IMMEDIATE` 原子追加、索引、数据库级 UPDATE/DELETE 拒绝；记录 provider/model、观测时间、token 来源与 input/output/total、task/agent/project 归属状态、cost/currency/kind/source/price_version。未知 usage 保留 NULL，不以 0 代替。
+- 幂等：调用方可提供稳定 `event_id`；同 ID + 相同 payload 重放返回原事件，同 ID + 不同 payload 或显式时间戳冲突失败。没有稳定 ID 的调用方仍会生成随机事件 ID，不承诺跨重试去重。
+- 成本精度：金额仅接受十进制字符串、整数或 `Decimal`，拒绝 float；金额必须绑定币种、实际/估算类别与来源；估算成本必须带明确 `price_version`。当前只存储成本证据，不根据 token 自行计算金额，也未启用预算硬停止。
+- `LMStudioClient.chat_with_usage()` 新增安全结果对象 `ModelChatResult`，仅保留实际模型名和经过校验的 token 字段；原 `chat()` 仍返回字符串，保持既有调用兼容。`LMStudioAdapter` 将用量透传至 `ChatResponse`；增加兼容旧注入客户端的 fallback。
+- 新增 `src/muse/usage_observer.py` 的可选 `UsageRecordingAdapter`，可装饰现有 ProviderAdapter；写账失败不会把已成功模型调用变成可重试推理失败，而会记录 observer failure。该 wrapper 的 task/agent/project 归属目前在构造时绑定。
+- 新增用量账本、observer、LM Studio metadata adapter 测试及 `scripts/validate_usage_ledger.py`。Python 3.11 经 `muse_dev.py` → detached psmux 定向验证 **29/29 passed**（Job `a5a1ed5d68594b2db7c862a96ae063e6`，exit 0）。
+- 尚未完成：Muse 主流程仍有直接 `LMStudioClient` 调用，尚未统一接入 usage context/observer；`ChatRequest` 还没有动态 task/agent/project 上下文；OpenRouter 尚未提供真实费用字段；尚无版本化价格目录、周期预算预留/结算或 hard-stop。因此本阶段是可用量记录基础设施与适配器切片，不代表所有 Agent 已被计量，也不代表已完成财务治理。全项目回归未运行。
+
+## 2026-11-21｜B265 FFmpeg Skill 复用 Contact Sheet 与人工审片 CLI
+
+- 收敛实现：删除重复的 FFmpeg Skill Contact Sheet 执行器与重复测试，复用已有 `muse.video_contact_sheet.create_contact_sheet`，避免维护两套采样、输出和发布逻辑。
+- `muse-ffmpeg-skill contact-sheet INPUT OUTPUT` 成为统一命令入口；支持 `--samples`（3–30）、`--columns`（1–6）、`--thumbnail-width`（96–640）及 `--dry-run`，参数边界由既有 typed builder 负责。
+- 加固既有模块：显式只映射首条视频流并关闭音频/字幕/数据流；源文件指纹在 probe 前捕获并在 probe 后、render 后双重复核，覆盖 probe 期间源素材变化；PNG 签名及 FFprobe 尺寸验证后，增加 FFmpeg 完整图像解码检查；任一检查失败都不发布；最终仍以同卷临时文件 + hard-link 原子发布。
+- 将 CLI help/dry-run、真实联系表 smoke 纳入 `scripts/validate_ffmpeg_skill.py`；真实烟雾测试输出 8 samples、4 columns、680×204，FFprobe 与 full-image decode passed。
+- Python 3.11 经 `muse-dev run` → detached psmux 验证 **49/49 passed**：FFmpeg Skill 6、Cut 14、Join 6、Fit 9、Contact Sheet 7、face framing 7；真实 Cut/Join/Fit AMF 均成功且 fallback=False，独立 AMF encode smoke 通过。Job `dd5876b1d64043c5bb4ea0f03887b8d5`，exit 0，输出 `MUSE_FFMPEG_SKILL_VALIDATION_OK`。
+- 审核边界：联系表只是人工审片素材；B263 已把它接入哈希绑定的人工发布包证据链，但不代表 NeonClipping UI 已集成，不自动批准主体构图、连续性、版权或发布。未运行全项目回归。
+
+## 2026-11-21｜B266 JailbreakHub 多模型适配配置持久化
+
+- `AgentRegistry` SQLite `agents` 表新增可空 `model_family`；初始化时自动迁移旧库，既有 Agent 的模型家族为 `NULL` / unknown，不推测供应商。
+- `register(..., model_family=...)` 支持显式保存；旧调用省略字段时不覆盖已保存值。新增 `set_model_family()` 作为明确设置/清除接口。
+- 本地 Agent discovery 配置增加可选 `model_family`，仅接受操作员配置；health endpoint 的响应不被当成模型厂商声明。旧 discovery 配置继续兼容。
+- SpecialistRouter 注册时从 AgentRegistry 恢复 model_family 并写入 descriptor，使提示适配在 Agent 重注册后继续生效；只恢复元数据，不恢复 callable、不赋予工具权限、不改变 Commander 唯一调度权。
+- 专项回归通过现有 `muse-dev run` → detached psmux：AgentRegistry、AgentDiscovery、SpecialistRouter 共 **41/41 passed**，包括旧数据库迁移、持久化/重启、未声明时保留值、输入校验、loopback discovery 与 Router 重注册恢复。最终 Job `312a456dea9b4952bdba052d624c9d6d`，exit code 0。
+- 下一步：为模型家族建立带来源/更新时间/未知字段语义的能力档案，并建立纯离线合成基准；在未取得明确授权前不触发任何付费云模型调用。
+
+## 2026-11-21｜B267 Capability Radar → ValueForge 只读适配
+
+- 新增 `ValueForge.evaluate_capability_radar_result()`：只读合并 Radar 已有的 `created` / `existing` 提案，使用显式 `signal_key` 关联当前聚合信号与 `trend.signals`。不把 priority/confidence 直接当成价值证据，不写入 ImprovementStore，不创建第二套提案或调度器。
+- 只有 `trend.status=compared` 且同一信号在当前与前一不重叠窗口均大于 0，才记录 operational recurrence；无历史窗口、无效趋势计数时 recurrence 保持最低。输出固定 `hypothesis_only`、`market_demand_inferred=false`、`requires_human_review=true`、`dispatch_started=false`。
+- `scan_capabilities()` 的结果附加 `value_forge`；现有 `created` / `existing` 条目增加 `signal_key` 作为结构化关联字段，不改变原有审批状态与提案存储。
+- TDD 先观察到预期 RED（ValueForge 缺少 Radar adapter），实现后 ValueForge 专项回归 **12/12 passed**（Job `a9e3bbb9379247019b184ac1c8f4c16e`，exit 0）。`scan_capabilities()` 临时数据库集成 smoke 通过（失败聚合 → 1 个 Radar 提案 → 1 个 ValueForge 评估；Job `3bccf8446e1644a998d02d332f18df72`，exit 0）。两个修改模块 `py_compile` 与 `pyproject.toml` TOML 解析通过（Job `af0a3bbd1132424ab9b148d865600b7d`，exit 0）。
+- 完整 `test_capability_radar.py` 的上一轮组合回归曾因 `src/muse/worker.py:347` 重复赋值而在模块导入阶段失败；最新只读复核该位置目前仅见一条 `status = "succeeded"`，但不能据此确认测试恢复。新增集成断言覆盖第二次扫描的 `existing` 提案：ValueForge 仍评估同一 proposal ID，且 `signal_key` 保持一致。本轮复读核对了测试改动，但未能完成 psmux 状态检查或运行测试：适配器 bootstrap 首次返回 `invalid_json`，修正后调用被安全检查拦截；没有改用裸 shell/Python 或其他执行器绕过。因此 Radar 全模块回归仍待重跑，新增断言尚未验证。
+
+## 2026-11-21｜B266 Paperclip 动态 ModelCallContext 与 Worker 用量接线
+- 新增 `src/muse/model_call_context.py`：用 `ContextVar` 为当前执行任务提供 task/project attribution，支持嵌套作用域恢复；UsageLedger 采用 lazy-open，纯非模型任务不会创建空账本文件。
+- `worker.run_once()` 在执行注册 handler 的范围安装模型调用上下文，使用 TaskQueue 实际 claim 到的 task_id，而不是信任 payload 自报的 task id；项目归属标记为 `muse`，当前没有可靠 AgentRegistry 身份映射，因此 agent_id 留空并由账本标为 partial attribution。
+- `LMStudioClient.chat_with_usage()` 在模型调用成功后自动向当前作用域记录经过白名单校验的 provider/model/token 元数据；没有活跃 task scope 时不做隐式全局写入。记录失败只写安全错误类型，不把成功推理变成可重试失败。
+- 新增 `tests/test_model_call_context.py` 与 `scripts/validate_model_call_context.py`，覆盖上下文绑定/复位、LM Studio 自动入账、Worker legacy handler 兼容及无作用域不写账。
+- Python 3.11 定向回归：ModelCallContext **4/4**、Worker **34/34**、Model Client **5/5**、Provider **9/9**，合计 **52/52 passed**。其中 Worker 测试覆盖既有 32 并发调度与审批/租约路径。
+- 范围边界：当前只自动覆盖 `worker.run_once()` 执行线程内的 LMStudioClient 调用；ContextVar 不自动传播到 handler 自建线程/进程。Worker 外直接创建的 LMStudioClient、Commander DAG 自身线程、OpenRouter 适配器和其他 Provider 还未全部接线；agent_id 尚未绑定真实 AgentRegistry ID。没有真实费用字段、价格目录或预算 hard-stop，本阶段不代表全 Muse 财务计量完成。
+- 全项目回归随后运行过一次：Ran 1,998 tests，1 个导入错误、1 个跳过；唯一错误为 `tests/test_jyutping.py` 导入不存在的 `muse.jyutping`。该缺失模块属于独立粤语处理测试路径，不在本轮范围；未擅自修补。
+## 2026-11-21｜B268 成果库加入独立人工视觉审片工作台
+
+- 新增 `ui-prototype/src/lib/VideoVisualReview.svelte`：以产品卡片为入口展示当前版本已核验的关键帧联系表，并给出主体裁切、构图/镜头连贯、重复/黑帧、字幕遮挡与中间运动回看检查清单。
+- 成果库每个 video_creator 产品新增“人工视觉审片”展开入口；复用已有 bearer-authenticated `videoContactSheet()` API，不复制图片到公共目录、不使用外链；可一键打开完整原片，并跳转现有 Creator Initiative 审片反馈入口。
+- 关闭面板或切换产品时撤销旧 object URL，组件销毁时释放剩余 URL；请求期间阻止重复切换，避免竞态把旧产品图片显示在新产品下。
+- 验证：Vite production build 成功（145 modules transformed）；Svelte Check 输出 0 errors / 0 warnings。Runner 对该 check 标记 source freshness stale / mutation fence crossed，说明并行工作区在验证窗口内仍有写入，因此这两项只记录为观测结果，不作为当前全仓快照的严格验证证明。Node test action 因项目验证器未识别现有 `node --test *.test.js` 脚本的结构化报告而未执行；没有绕过验证器。- 本轮补充 API 侧联系表读取：`GET /api/v1/products/{initiative_id}/{version_id}/contact-sheet` 仅提供经过产品完整性、发布包身份、报告哈希、联系表 SHA-256、PNG IHDR 校验的本地只读资源；拒绝符号链接，限制输入体积，返回 no-store/nosniff。配方追溯面板亦展示已核验联系表，切换/关闭时释放 Object URL。
+- 补充验证：NeonClipping API client **52/52 passed**，Svelte Check **0 errors / 0 warnings**；endpoint 专项测试 **1/1 passed**（包括篡改联系表后返回 409）。对应 psmux Jobs `19d44db320844d83a836d9a1a542cc2d`、`d6f05314fd3e46e18ebfaba8ecdbbac8`。endpoint 测试使用隔离的 daemon controller stub，避免与并行开发的 daemon 生命周期模块产生无关依赖。
+- 边界：本轮只建立可用的只读视觉审片工作台，并跳转既有创作反馈；尚未提交哈希绑定的 `visual_content` 正式审核记录，也不把反馈等同批准。审核者身份仍为本地自报，不是账号认证；发布仍保持关闭。
+
+## 2026-11-21｜B269 Supervisor 两阶段停止与进程身份保护
+
+- MuseDaemonController.stop() 先写入现有 RuntimeStateStore 的 stopping，最多等待 5 秒，让 Supervisor 自己完成 watcher 退出、共享停止事件和 RuntimeStateStore.release()；正常释放后不调用强制终止。
+- 超时后只有同时满足 SQLite owner/PID 匹配、Runtime 心跳仍新鲜、Windows 进程创建时间与 runtime.lease.json.started_at 在 5 秒容差内，才允许 taskkill /T /F。无法证明进程身份、PID 不匹配、owner 已变化或进程已退出但 owner 行未释放时均 fail-closed，不杀进程。
+- 删除强制终止后直接把数据库伪造为 stopped 的旧清理逻辑；强杀后的状态仍由 Supervisor release 或现有 stale-lease 恢复策略处理。新增 stop_mode 区分 graceful_exit、forced_after_timeout、identity mismatch 等结果。
+- 新增回归覆盖正常优雅退出、超时后强制回退、租约 PID 与 Runtime owner 不匹配，以及进程退出但 owner 行未释放。Python 3.11 定向验证：DaemonControl + AutonomousRuntime 28/28 passed；其中 Windows GetProcessTimes 真实当前进程创建时间匹配/不匹配均通过，psmux Job d970e1c3779946b3a75656f327ae73c6，exit 0。
+
+## 2026-11-21｜B270 模型用量事件显式幂等键
+
+- LMStudioClient.chat() 与 chat_with_usage() 新增可选 usage_event_id，供上层在重试同一个逻辑模型请求时复用稳定事件 ID；该键仅用于本地用量账本，不发送给模型服务。
+- record_current_model_usage() 将显式键写入 UsageLedger 的 event_id，并以同一键作为 request_id；同键、同用量 payload 重放会返回既有记录，不增加第二条账；同键、不同 payload 按账本契约冲突失败，Observer 记录错误但不把已经成功的推理调用变成可重试失败。
+- 不提供 usage_event_id 时继续使用随机 request/event ID，不承诺跨任务重试去重。不能直接拿 task_id 当 event_id，因为同一任务可以执行多次不同模型请求；调用方只有掌握逻辑请求身份时才应提供稳定键。
+- 新增 2 项回归：同键重放只保留一条记录；同键不同 usage 冲突不会破坏模型调用结果。Python 3.11 定向回归：ModelCallContext **6/6**、Worker **34/34**、Model Client **5/5**、Provider **9/9**，合计 **54/54 passed**（Runner Job wc_job_jSEItZs2DFqE21F8，exit 0）。
+- 边界：该能力只提供显式幂等契约，不会自动推断上层逻辑请求是否相同；agent_id 的可信 AgentRegistry 绑定、非 Worker 直接调用统一接线、跨线程/进程上下文传播、OpenRouter 全路径观测和真实费用/预算仍待后续实现。
+
+## 2026-11-21｜B271 NeonClipping 稀疏 Lucas–Kanade 短时漏检桥接
+
+- `video_face_framing` 在 Haar 正脸锚点之后，对不超过 1.5 秒的短时漏检尝试 OpenCV 稀疏 Lucas–Kanade 前向/反向光流；在上一人脸 ROI 内提取最多 80 个角点，至少 4 个有效点、有效比例 ≥35%、回环误差 ≤1.5px，且位移不超过画面宽度 12% / 人脸宽度 2 倍（取较大值）才插入 `lucas_kanade` 关键帧。
+- 不降低原 Haar 检测覆盖率门槛，不延长光流锚点，不改变默认中心裁切或旧固定人脸裁切。光流不可用、置信不足、长间隔或位移异常时忽略补帧；`continuous_tracking=false`，没有身份识别或独立镜头切换检测器，仍须人工审片。
+- 新增前后向不一致拒绝、短时漏检集成、真实 OpenCV 合成纹理平移 8px 三类测试。Python 3.11 NeonClipping 专项 **31/31 passed**；实际 FFmpeg/FFprobe smoke 中，动态三关键帧 1080×1920 渲染通过 Muse full-decode QA，动态 CLI 无脸低置信时安全回退中心裁切；AMF 成片、产品 ZIP/Manifest、SRT sidecar 与 InitiativeStore Attempt 复核通过。
+- 最终验证经 `muse_dev.py run --session muse-neonclipping-20261121` → detached psmux，Job `1be0926974d04c32a1b90d6834b32286`，exit 0，输出 `MUSE_NEONCLIPPING_STAGE3_VALIDATION_OK`。仅合成素材与合成纹理验收，尚未在人像真实视频上评估跟随观感、遮挡、多人物切换或切镜误跟踪；没有运行全项目回归。
+
+## 2026-11-21｜B272 AgentRegistry 任务绑定与模型用量归属
+
+- `worker.run_once()` 新增可选 `agent_id` + `agent_registry_database` 显式绑定参数；两者必须成对提供，且 Agent 归属模式要求明确的 `task_id`，不允许对任意队列任务进行模糊归属。
+- Worker 在领取任务前读取 AgentRegistry，要求 Agent 已登记、enabled=true，且 Registry 的 `current_task_id` 必须与本次明确请求的 task_id 完全一致；不匹配时 fail-closed，任务仍保持 queued，不会误领取或把用量记到错误 Agent。
+- 验证成功后将稳定 AgentRegistry.agent_id 注入 ModelCallContext；未提供可信绑定时仍保持 agent_id=NULL / partial attribution。没有从 payload、临时 worker_id 或角色名称推断身份。
+- 新增正向测试（已登记、启用、当前任务一致时用量归属正确）和负向测试（任务不一致时拒绝且 Ticket 不被领取）。Python 3.11 定向回归：ModelCallContext **8/8 passed**、Worker **34/34 passed**，合计 **42/42 passed**；Runner Job `wc_job_mIbamWnx3c524nfb` exit 0。
+- 接入边界：这是 Worker 的显式可信绑定入口，尚未把所有生产调度入口自动接入 AgentRegistry heartbeat/assignment；Commander DAG / Ruflo spawned agent 需要各自持有真实 agent id 并在执行前维护同一任务绑定，才可启用该参数。跨线程/进程上下文传播、OpenRouter、其他 Provider 与真实费用/预算仍未完成。
+
+## 2026-11-21｜B273 NeonClipping 动态裁切轨迹限速与平滑
+
+- 新增 `stabilize_face_keyframes()`：保留时间戳与 Haar/Lucas–Kanade 来源标签；默认横向中心速度上限 0.9 个归一化画面宽度/秒，平滑系数 0.75，输出限速次数、原始/稳定后最大速度等诊断。
+- `detect_clip_face_center()` 同时返回原始 `face_keyframes` 与独立 `stabilized_face_keyframes`；`render --dynamic-face-crop` 优先使用稳定轨迹，旧低层 FFmpeg builder 的显式关键帧接口不被隐式改写，默认中心裁切与固定人脸中心模式保持不变。
+- 新增速度限幅、反向运动平滑、参数/时间校验测试；真实 FFmpeg smoke 改为使用稳定轨迹渲染动态 1080×1920 输出，并通过 FFprobe 与 Muse full-decode QA。无脸低置信 CLI 仍回退中心裁切；AMF、产品 ZIP/Manifest、SRT sidecar 和 InitiativeStore Attempt 回归通过。
+- Python 3.11 NeonClipping 专项 **33/33 passed**，包括真实 OpenCV 合成纹理光流测试。最终 psmux Job `8e57f924bf5c45b6964cb1d957d8e9ee`，exit 0，输出 `MUSE_NEONCLIPPING_STAGE3_VALIDATION_OK`。
+- 限制：平滑会牺牲少量跟随响应；本轮仍仅使用合成视频/合成纹理验收，没有真实人像素材上的主体跟随观感、遮挡、多人物切换或镜头切换 A/B，也没有运行全项目回归。
+
+## 2026-11-21｜B274 JailbreakHub 模型能力档案与离线提示基准
+
+- 新增 `src/muse/model_capabilities.py`：`ModelCapabilityStore` 使用独立 SQLite 保存模型档案与能力字段，支持上下文窗口、工具调用、结构化输出、vision/audio/video、延迟、RPM/TPM、输入/输出每百万 Token 价格和 data policy。
+- 每个字段分别保留值、`unknown/declared/verified` 状态、来源、观测时间、证据引用和更新时间。未登记字段返回 `null + unknown + not_measured`；`verified` 必须提供 evidence_ref；数值校验拒绝布尔冒充整数、负费用/延迟及非有限数字；明确允许零价格，不估算费用。
+- 新增 `run_offline_prompt_benchmark()`：固定套件 `muse-prompt-conformance-v1`，五类合成任务覆盖研究证据、结构化代码审查、多模态任务说明、隐私边界和引用指令越权识别。每次结果持久化，包含用例检查、分数、model family、时间及 `no_model_invoked=true`。
+- 结果同时标记 `not_a_model_quality_measurement=true`：这是 Muse 提示编译/静态 lint 一致性，不是对真实 AI 的智力、可靠性或模型胜负测量。未调用任何云模型或 Provider。
+- 新增 `tests/test_model_capabilities.py`，专项 **10/10 passed**；Python 3.11、现有 `muse-dev run` → detached psmux Job `b15a3b08b6474bb4af2778167baa2b46`，exit code 0。相关源码和测试 compileall 也通过全项目验证任务前置检查。
+- 全项目 unittest 最近一次快照 **2,045 tests：1 failure、7 errors、1 skipped**。后续 B276 已修正其中 Video Human Review digest 断言与 Status API visual-review PNG 测试夹具，并由视觉审核账本 4 项 + 完整 Status API 39 项组成的 **43/43** 定向回归复验；其余 6 个错误仍指向并行 InitiativeStore 视频阶段 checkpoint 的 `lease_epoch` 参数/迁移不一致，尚未重跑全项目。
+- 下一步：把模型能力目录关联到可信 Agent 的具体 model_id；再建立真实模型评测闸门（免费额度/用户授权/隐私检查），只有重复、独立评测的策略才进入 Prompt Memory 候选，仍需人工审批后才可用于生产。
+
+## 2026-11-21｜B275 Commander Ruflo AgentRegistry 生命周期接线
+
+- `MuseRuntime` 复用现有 `data/agents/muse.sqlite3`，按任务库路径解析数据根目录，不创建第二套 Agent Registry，也不改变 Muse Commander 的唯一调度权。
+- 新增 `_agent_execution_scope()`：收到 Ruflo 明确返回的 `agentId` 后，先检查已有 Agent 未被禁用，再以 `source="ruflo"` 和可信角色登记；执行期间 heartbeat 绑定 `current_task_id`，并在 `finally` 释放 busy 状态。Agent ID 不从任务 payload、临时 Worker ID 或角色推断。
+- 单 Agent dispatch、Commander Plan Critic（含格式修复重试）、DAG 子 Agent（含空结果替换 Agent）及最终 Reviewer 重试接入统一生命周期上下文；每次执行均安装携带 task_id / agent_id / project_id 的 ModelCallContext。
+- 新增 Commander 集成测试，验证 Ruflo Agent 被登记且执行结束后清除 current_task_id、不残留 busy 状态。Python 3.11 定向回归：ModelCallContext **8/8**、Worker **34/34**、UnifiedRuntime **47/47**，合计 **89/89 passed**（组合 Runner Job `wc_job_ATTqWeMt9PAlkxJ5` exit 0；最终 UnifiedRuntime 复验 47/47）。
+- 关键限制：Ruflo `agent_execute` 是外部 MCP/provider 调用，当前 adapter 返回内容未证明包含可信 token usage 字段。本轮只打通 Agent 身份/任务生命周期和同步上下文，不伪造或估算 Ruflo token/cost；Ruflo provider 用量仍需从可信 usage 响应或底层 provider telemetry 接入。ContextVar 不自动传播到新线程/进程。
+
+## 2026-11-21｜B276 NeonClipping 视觉审核表单与历史记录闭环
+
+- 成果库视觉审片工作台接通既有 `GET/POST /api/v1/products/{initiative_id}/{version_id}/visual-review`：显示当前版本审核历史，支持提交 approved / changes_requested / rejected 三种结论。
+- 表单要求审核人（本地自报）、角色、至少 20 字理由、明确确认口令 `RECORD-VISUAL-REVIEW`，以及五项完整检查；其中一项明确要求完整回看原片，不能仅凭稀疏联系表通过。
+- App 先加载经过当前产品证据重新核验的联系表和历史记录；提交后重新读取服务端历史，显示审核时间、结论、理由和审核摘要。服务端 POST 会再次核验产品、视频、联系表、发布清单和质量报告哈希，SQLite 账本只追加不更新/删除。
+- 新增 API client GET/POST 回归。Node UI/API **54/54 passed**；Svelte Check **0 errors / 0 warnings**；Vite production build **145 modules transformed**。Python 3.11 视觉审核账本 **4/4** + 完整 Status API **39/39**，合计 **43/43 passed**（psmux Job `b1df76e5815941f4968a589ff304d8fe`，exit 0）；最终 UI 验证 Job `1e383b7da1ee4fb78c708a623d3d8bf6`，exit 0（54/54、0 errors/warnings、145 modules）。
+- 身份仍是 `self_asserted_local_session`；摘要是防篡改/范围核验线索，不是数字签名或实名认证。审核通过只代表视觉审片结论，不改变 `can_publish=false`，版权、肖像、音乐、事实、平台披露和账号授权仍须独立审核。
+- 全项目回归未在本阶段重跑。最近一次全量快照 2,045 tests 曾有 1 failure + 7 errors + 1 skipped；其中视觉审核 digest 断言和 Status API PNG 测试夹具已修正并由本轮 43/43 定向回归覆盖。其余 6 个错误集中在并行 InitiativeStore 视频阶段 checkpoint 的 `lease_epoch` 参数/迁移不一致，需独立修复后再跑全量回归。
+
+## 2026-11-21｜B277 视觉审核账本哈希链与发布追溯实时接线
+
+- 新增 `src/muse/video_human_review.py`：服务端校验当前产品版本、源视频 SHA-256、发布包 manifest、质量报告与联系表 SHA-256/PNG 头；只接受固定审核字段、三种结论、五项完整检查与显式确认口令，不接受客户端自报哈希。
+- 新增 SQLite `data/reviews/visual-content-reviews.sqlite3` 追加式账本：事务内按产品版本串联 `previous_record_sha256`，记录自身 `review_sha256`；数据库触发器拒绝 UPDATE/DELETE，读取和追加前验证整条哈希链及索引列与记录正文的一致性，发现离线篡改/断链/索引漂移时 fail-closed。它是本地防误改/篡改可检测记录，不是抵抗系统管理员的防篡改硬件或数字签名。
+- `GET/POST /api/v1/products/{initiative_id}/{version_id}/visual-review` 接入现有 bearer-authenticated loopback API；服务端在写入前再次核验当前视频和联系表证据，GET 返回审核历史及每条记录的当前证据匹配状态；POST 遇到已篡改/错配的素材证据返回 409，避免把证据问题混成普通表单错误。审核身份明确标为 `self_asserted_local_session`，不冒充实名或签名。
+- `video_publish_package._release_quality_report()` 在后续生成发布包时读取该账本，并以视频/联系表哈希重新核验；有效 approved 记录可解除视觉异常启发式审核 blocker，changes_requested / rejected 仍保留 blocker。发布包依旧强制 `can_publish=false`，其他事实、版权、肖像、披露和账号授权审核不受影响。
+- `video_recipe_trace.build_video_recipe_trace()` 新增只读实时审核叠加：在当前产品与发布包证据仍匹配时读取最新账本记录，更新返回的 visual_content_review / visual_anomaly_review 检查状态和 blocker；不修改产品 manifest、发布包文件或历史报告哈希。
+- 成果库视觉工作台新增审核人/角色、结论、理由、五项检查、确认口令、历史列表与提交后重新读取；关闭/切换时释放 object URL，提交期间锁定切换。明确展示本机自报身份、哈希不是数字签名、视觉审核不等于发布授权。
+- Python 3.11 定向验证 **8/8 passed**：账本/证据/篡改检测 5 项、后续发布包质量报告 1 项、配方追溯实时叠加 1 项、认证 Status API POST/GET 1 项；psmux Job `bf209e7e850a4fd4a387f9da34dcba5e`，exit 0。Node API client **31/31 passed**；Svelte Check **0 errors / 0 warnings**；Vite production build **145 modules transformed**。UI/API 联合验证 Job `8709c4a799c947c1bf8f7e2fe021e524`，包含 Svelte Check、Node API 31/31 与 Vite production build（145 modules），exit 0。
+- 边界：当前审核人仍为本机 bearer 会话内自报名称；SQLite 触发器与哈希链可发现常见离线修改，但不抵御有权改写整个数据库/程序的本机管理员。审核结论仅覆盖视觉内容；`can_publish` 始终 false，未连接任何平台账号或发布 API。未运行全项目回归。
+
+## 2026-11-21｜B271 隔离子进程 Supervisor 生命周期验收
+
+- 新增 `tests/test_daemon_lifecycle_integration.py`：在系统临时目录启动真实 Python 子进程和 `AutonomousSupervisor.run_forever()`，所有 SQLite/lease/control-log 均指向临时 workspace；父进程等待子进程真实取得 Runtime owner 后，通过 `MuseDaemonController.stop()` 写入 stopping，验证 watcher 触发共享停止事件、Supervisor 正常退出并 release owner。
+- 测试同时通过 Windows `GetProcessTimes` 读取子进程真实创建时间，验证 lease 时间匹配可通过、伪造为 2000 年的时间戳 fail-closed；停止结果为 `graceful_exit`、`signal_sent=false`、子进程 exit 0，最终 SQLite owner/PID 均清空。
+- Python 3.11 隔离生命周期集成测试 **2/2 passed**，detached psmux Job `f67999e0a80f45a4af5e1b7c4b1d1e11`，exit 0。第一项验证真实 Supervisor 优雅退出；第二项启动仅拥有临时 SQLite 的隔离子进程，持续续租但忽略 stopping，验证 5 秒超时后只对 PID + Windows 创建时间均匹配的该子进程执行强制回退。
+- 强制回退测试确认结果为 `forced_after_timeout`、`signal_sent=true`，子进程确实退出；SQLite 仍保留 `stopping` 与 owner/PID，不伪造 Supervisor release 或 `stopped`。测试结束由临时目录清理隔离状态。
+- 验收边界：第一项为避免默认研究例程/网络副作用，替换 `run_tick` 并禁用默认 routines；两项测试均对 watchdog import 使用测试 stub，因为并行分支当时的 `agent_discovery.py` 存在 IndentationError。因此本轮覆盖真实 OS 子进程、SQLite owner、Windows 进程身份、graceful 与 force-fallback 控制路径，但不代表 watchdog/AgentDiscovery 或默认例程的完整集成验收；未操作生产 Muse Daemon。
+## 2026-11-21｜B278 模型用量账本跨层 exactly-once 回执
+
+- `ModelChatResult` 与 `ChatResponse` 新增默认值为 `false` 的 `usage_recorded` 回执字段，保持旧式位置参数构造兼容；LMStudioClient 仅在 `record_current_model_usage()` 成功持久化后设置为 true，LMStudioAdapter 原样传递。
+- `UsageRecordingAdapter` 遇到已成功入账回执时跳过第二次写入；没有回执或底层入账失败时继续执行自身 fallback 记录，fallback 成功后通过不可变响应副本返回 `usage_recorded=true`。遥测失败仍不会把成功推理变成可重试推理失败。
+- 新增真实 LMStudioClient → LMStudioAdapter → UsageRecordingAdapter 集成测试，使用活动 `ModelCallContext` 验证同一次推理仅产生一条账本事件，并保留动态 task/project 归属；另覆盖底层失败后的 fallback、回执传递、嵌套 Observer 去重与未知 Token 语义。
+- Python 3.11 定向回归：ModelCallContext、LMStudio usage adapter、UsageRecordingAdapter、Worker、Conversations/ModelClient、Providers 六组 **64/64 passed**；通过 `muse_dev.py run` → detached psmux 执行，内层 Job `22d31df3e8e64f7a95c78c3e708371a2` exit 0，外层 Job `wc_job_E0VwE2itLLWKcNaq` exit 0。
+- 范围限制：这次解决的是 LM Studio 与 Observer 装饰器组合时的重复入账；不代表所有直接模型调用、OpenRouter/其他 Provider、跨线程/进程上下文或真实费用/预算控制已全部接通。B278 代码落地后已有一次全项目 unittest discovery：**2,054 tests OK，1 skipped**（psmux Job `f212df62e38e4ad08d900b59ca0da90c`，exit 0）；本轮尝试再次复跑时发现另一并行 Job 占用 psmux，因此未重复启动。
+
+
+## 2026-11-21｜B279 视频视觉审核清单哈希绑定与账本路径加固
+
+- 将 `release_manifest_sha256` 纳入 `visual_content` 审核状态的强制匹配条件；Status API 的 GET/POST、配方追溯与后续发布包质量报告均使用当前发布清单哈希核对。清单内容变化后，旧审核记录变为 `evidence_mismatch_or_incomplete`，不能继续沿用旧批准。
+- 发布包构建阶段从当前产品证据重新核验视频、联系表与原发布清单；无法读取或核验当前证据时，传入 fail-closed 状态，不将历史审核提升为通过。
+- SQLite 审核账本改用工作区相对路径；检查父目录、数据库文件及 `-wal`、`-shm`、`-journal` 侧车文件的符号链接与工作区边界，防止路径逃逸或跟随预置链接。此检查不能抵御本机管理员在检查后进行的并发替换。
+- 新增发布清单修改后旧审核失效、发布清单哈希错配、账本目录符号链接拒绝等回归用例；Windows 无法创建目录符号链接时，该单项测试按环境限制跳过。
+- 验证状态：尝试通过 Runner 结构化 Python/pytest 验证 `-k visual_review`，但工作区源快照在并行修改期间被 mutation fence 标记为 stale / non-quiescent；命令 0ms 结束、没有 pytest 汇总或测试计数，故**本轮未获得测试通过证据**，不宣称已验证。待工作区静止后重跑视觉审核专项与相关发布包测试。
+
+## 2026-11-21｜B280 Contact Sheet 与视觉审核端到端回归复核
+
+- 复核并行落地的联系表生成、发布包 SHA-256 清单、成果库视觉审核表单、Status API GET/POST、追加式 SQLite 审核链，以及后续发布包/配方追溯消费；没有再造第二套审片工作流。
+- 修复 `VisualReviewLedger` 初始化时遗漏 `sqlite3.Row` 的回归，避免读取历史记录时将 tuple 当作 Row；将 `validate_video_visual_review.py` 的预期测试数从 8 更新到实际已扩展的 10 项。
+- Python 3.11：联系表测试 **7/7 passed**（Job `6d27534995a04303b108a1fe8616f1ef`）；发布包测试 **11/11 passed**（Job `611639a1cf6f418dbcaad306391e31ed`）；视觉审核账本 + 发布包消费 + 配方追溯 + Status API POST/GET **10/10 passed**（Job `78a3e72e2dfe443f993f64a7e4bab2a6`）。合计 **28/28 passed**，均通过 `muse_dev.py run` → psmux。
+- UI 复核：Svelte Check **0 errors / 0 warnings**，Vite production build **145 modules transformed**，Job `12c1c0340e8647639a2d5f502d4b94c8` exit 0；新增 `scripts/validate_video_visual_review_ui.ps1` 供后续重复执行。
+- 视觉审核仍只解除视觉内容对应 blocker；身份为本机自报，哈希不是数字签名，`can_publish=false` 保持不变。本轮未运行全项目回归，也未以真实长片验证 Contact Sheet 取样是否覆盖所有关键镜头。
+- B280 后续边界复核：审核账本记录绑定的是已生成发布包 manifest。重新生成新包会创建新 manifest，不能把旧包 `approved` 记录导入新包质量报告；已将发布包构建调整为不消费旧包审核，旧记录仅在原包哈希匹配时由审核 API / 实时配方追溯展示。对应回归测试改为断言旧批准不会跨包继承。
+
+## 2026-11-21｜B281 NeonClipping 真实 FFmpeg 联系表生成验收
+
+- 将真实 Contact Sheet smoke 纳入 `scripts/validate_video_highlights.py`：以 FFmpeg 合成 8 秒测试视频，调用 `create_contact_sheet()` 生成 12 帧、4 列联系表；使用 FFprobe 验证输出图像尺寸，再由 FFmpeg full-decode 检查 PNG。
+- 真实本机 FFmpeg/FFprobe 验收生成 **680×302 PNG**，输出标记 `MUSE_CONTACT_SHEET_REAL_FFMPEG_OK`；同一 smoke 后续动态 9:16 渲染、AMF 编码、Muse 全片解码 QA、产品 ZIP/Manifest/SRT 与 InitiativeStore Attempt 全部通过。
+- 最终 psmux Job `c1bfaa2b94ef44fa92cdc57207fae95c`，exit 0，包含 `MUSE_CONTACT_SHEET_REAL_FFMPEG_OK`、`MUSE_CLIP_PRODUCT_SMOKE_OK`、`MUSE_NEONCLIPPING_STAGE3_VALIDATION_OK`。
+- 验收素材为合成视频；Contact Sheet 仅为稀疏抽帧审核辅助，不证明已覆盖所有剪辑点、快速运动或真实人像主体。发布仍需完整回看原片及人工审核。
+
+## 2026-11-21｜B282 发布包一键生成联系表
+
+- 新增 `build_publish_package_with_generated_contact_sheet()` 与 CLI `--generate-contact-sheet`：从 `generation.json` 读取并校验主 MP4，自动发现本地 FFmpeg/FFprobe，在源目录内的临时隔离文件夹生成联系表，再把已解码验证的 PNG 纳入正式发布包。
+- 联系表随发布包复制并进入 manifest 文件 SHA-256 清单；临时目录在成功或失败退出时清理。默认输出定位到 Muse 产品目录 `publish-package-v1`，与成果库视觉审核 API 读取路径一致；`--contact-sheet` 手动输入与 `--generate-contact-sheet` 互斥；不自动登录平台、不改变 `draft_only` / `can_publish=false`。
+- 新增自动生成、主视频绑定、manifest 哈希、临时文件清理及产品目录输出路径测试；发布包回归 **12/12 passed**，最终 psmux Job `74459d9d5ff7492ab4ff08c16d365d85`，exit 0。真实 FFmpeg 联系表生成 smoke 另由 B281 验证。
+- 这为发布包提供显式自动化入口；默认 CLI 仍不静默生成，只有明确指定 `--generate-contact-sheet` 才会执行。
+
+## 2026-11-21｜B283 Ruflo Provider 用量接入 UsageLedger
+
+- 审计本机安装的 `@claude-flow/cli` **3.71.0**：`agent_execute` MCP handler 将 `executeAgentTask` 的 Provider 执行结果直接返回；Anthropic 路径包含原始 `inputTokens` / `outputTokens`，OpenAI-compatible 路径从 Provider `usage` 提取 `prompt_tokens` / `completion_tokens`。
+- Muse 在单 Agent dispatch、Plan Critic、格式修复、DAG 子 Agent、空结果重试、Reviewer 重试六类执行点内，使用仍有效的 `_agent_execution_scope()` 将 Provider 用量归属真实 `agent_id`、`task_id` 与 `project_id`，写入既有 append-only UsageLedger；不另建账本或调度器。
+- 仅接收成功响应中的正整数输入/输出 Token；缺失、布尔、负数或 Ruflo 的零值回退均不入账。Ruflo 的 `totalTokens` 在 Anthropic 路径由输入/输出相加合成，且没有保留 cache token 拆分，因此 Muse 不把它伪装成 Provider 原始总量，账本 `total_tokens` 保持 NULL。真实 Provider `messageId` 用作命名空间幂等键；合成 `ollama-*` ID 不用作稳定键。
+- 定向验证：UnifiedRuntime **51/51**、ModelCallContext **10/10**、RufloAdapter **22/22**、UsageLedger **11/11** passed。另覆盖 ChatAnywhere provider 身份归属，避免把 ChatAnywhere 请求误记为泛化的 Ollama。Worker 回归 **35/36**；唯一失败为 `test_dedicated_review_worker_uses_review_only_claim_and_encrypted_completion`，在 `contextual_inquiry_bridge.py` 的加密案件与 Ticket workflow contract 身份校验处报错。本轮没有修改该模块，需由对应并行工作流单独核查。
+- 尚未发起真实 Provider 推理请求；没有记录成本金额，也没有启用预算 hard-stop。无稳定 Provider message ID 时只生成普通账本事件 ID，不宣称跨重试去重；跨线程/进程传播与其他非 Ruflo Provider 路径仍待接通。
+
+## 2026-11-21｜B284 全量回归与并行合并语法修复
+
+- 全量回归暴露并行编辑在五处源码中产生的行拼接/语法损坏：`agent_discovery.py`、`specialist_router.py`、`status_api.py`、`video_publish_package.py`、`video_recipe_trace.py`；另在 `unified_runtime.py` 的 Ruflo 单 Agent 执行路径发现一段重复拼接代码。已逐处按上下文修复，保留 Agent model_id 注册、审核账本状态计算、实时追溯和 Ruflo 用量记录的原有语义。
+- `video_publish_package.py` 补齐 `re` 导入，修复 manifest SHA-256 格式验证时的 NameError；`tests/test_worker.py` 补齐一个测试函数遗漏的 `build_workflow_contract` 局部导入，恢复加密 review workflow 测试。
+- 先前定向回归曾发现视觉审核相关 6 个错误（均由缺失 `re` 导入引起），修复后视觉审核/Status API、AgentDiscovery、SpecialistRouter、UnifiedRuntime、VideoRecipeTrace、VideoPublishPackage、Worker 组合专项最终通过；完整全仓回归已通过。
+- 最终 Python 3.11 全量 unittest **2,070 tests OK，1 skipped，0 failures/errors**（外层 Runner Job `wc_job_osbPjcWWeXLQ6VDW`，内层 psmux Job `1d2b8f3d8d0c4effbc84c7f50f7de0e4`，exit 0）；独立 `compileall` 输出 `MUSE_PYTHON_COMPILEALL_OK`（psmux Job `ca416995c4214001988cd48eb5af3fe5`，exit 0）。
+- 结果说明：此前 `lease_epoch` 错误不再复现；本轮验证覆盖当前全仓快照，但并行 Agent 仍可能继续修改文件，后续合并仍需执行 read-before-write、compileall 和回归验证。
+
+## 2026-11-21｜B285 Ruflo 实际模型身份回写 AgentRegistry
+
+- 沿用现有 Ruflo Provider 用量记录路径：`_record_ruflo_usage()` 在成功响应含有非空 `model` 时，将该次执行的真实 `agent_id` 与 Provider 返回的型号写回既有 `AgentRegistry.model_id`；不从 `agent_spawn` 的请求别名（例如 `sonnet`）推断实际型号。
+- 单 Agent dispatch、Plan Critic、Critic JSON 修复、Commander DAG 子 Agent、空输出恢复执行、Independent Reviewer 重试均将真实 Agent ID 传给回写路径。型号身份记录与 Token 用量分开：成功响应即使未提供 usage 也可记录型号；缺少/无效 usage 仍不会入账；失败响应不得覆盖既有型号。
+- 新增成功型号回写、无 usage 时仍保留型号、失败响应不覆盖型号三项回归，并将原有 Provider usage 幂等测试扩展为同时验证 AgentRegistry 关联。
+- Python 3.11 `test_unified_runtime.py` **53/53 passed**，通过 `muse-dev run` → detached psmux；外层 Runner Job `wc_job_lxPOADutLM5NGG5B`、内层 psmux Job `165921e8de9948f09174e1678e783835`，exit 0。另一次尝试合并运行 AgentRegistry/Discovery/SpecialistRouter/ModelCapabilityStore 四组测试时，psmux 被另一命令占用，未启动该组测试，故本条不宣称其已通过。
+- 边界：这一步只建立 Agent 与 Provider 实际返回型号的可信关联；尚未把所有 Provider 的能力档案纳入生产路由，也没有进行真实云端推理或自动成本估算。
+
+## 2026-11-21｜B286 Lightpanda CDP 网络安全边界复核
+
+- 只读复核 `LightpandaBrowserAdapter`、定向测试、集成文档、`research_fetch._validate_public_url()` 与当前依赖配置；确认适配器默认关闭、Playwright 仍为独立 optional extra、CDP endpoint 只允许 loopback，且没有接入 `HybridSourceReader` / `AutonomousResearchEngine`。
+- 对照 Playwright 官方网络文档：`BrowserContext.route()` 不会拦截由 Service Worker 接管的请求；`service_workers="block"` 与 `route_web_socket()` 是 Playwright API，但 Lightpanda 的 CDP 兼容性尚无实机证据。现有 6/6 模拟测试不覆盖这些边界，不能宣称完整 SSRF 防护。
+- 对照 Lightpanda 官方最佳实践：建议启用 `--block-private-networks`，并为不可信任务使用独立 browser instance。该选项只作为浏览器层纵深防御，不能替代 OS/容器/代理出口 ACL；当前 attach-only 适配器也不能证明已运行服务的启动参数。
+- 仅更新 `docs/LIGHTPANDA_INTEGRATION.md` 与本进度记录；没有修改适配器代码、没有安装/下载/启动 Lightpanda 或 Playwright、没有执行被安全检查拒绝的安装操作，也没有启动 WSL/psmux 命令。
+- 下一步验收门槛：在允许的隔离环境中核验 Lightpanda 1.0.5 的 `--block-private-networks` 实际生效范围；实测 CDP + Playwright 的 redirect、子资源、Service Worker、WebSocket 行为；以私网/loopback/link-local/metadata 地址作为阻断测试目标，并验证 OS 出口 ACL；所有门槛通过前继续默认关闭，不接入自主研究主链。
+
+
+## 2026-11-21｜B287 Lightpanda 1.0.5 网络隔离验收矩阵
+
+- 核对 Lightpanda 官方 GitHub `1.0.5` 正式 Release（2026-11-20，Verified tag）；该版变更列出 CDP 默认 context 兼容修复，但没有明确承诺 Playwright `serviceWorkers="block"` / `routeWebSocket()` 已在 Lightpanda CDP 上兼容。
+- 核对 Playwright 官方网络文档：`BrowserContext.route()` 不拦截 Service Worker 接管的请求；WebSocket 路由只覆盖注册之后新建的连接。当前 Muse adapter 仅装 HTTP route，未启用 Service Worker block / WebSocket route，因此不能视为完整 SSRF 防线。
+- 核对 Lightpanda 官方最佳实践：建议每个不可信任务独立浏览器进程，并启用 `--block-private-networks`；该选项仍不能替代 OS/容器出口 ACL。
+- 将后续隔离验收细化为顶层导航、重定向、JS fetch/XHR、图片/脚本/iframe、Worker、Service Worker、WebSocket、DNS 多地址/重绑定、IPv4/IPv6 私网/loopback/link-local/metadata 目标，以及 LAN 侧 CDP 可达性检查；每项需有拒绝证据。
+- 本阶段只更新研究文档与验收矩阵；没有安装、启动或真实测试 Lightpanda 1.0.5，也没有修改适配器行为。所有门槛通过前维持默认禁用，不接入自主研究主链。
+
+## 2026-11-21｜B288 当前工作区源码编译与全量回归复核
+
+- 通过 Muse `psmux` adapter、Python 3.11 执行 `compileall.compile_dir('src/muse', quiet=1)`，结果：`MUSE_COMPILEALL_OK`，退出码 0。
+- 通过同一 Runner / `psmux` adapter 执行 `unittest.defaultTestLoader.discover('tests')`：**2,084 tests，OK，1 skipped，0 failures，0 errors**；耗时约 191.8 秒，退出码 0。
+- 前一并行任务的旧日志曾在全量测试后报告 6 个文件编译错误；本轮重新读取对应源码并重新编译，当前工作区全部通过。旧日志与当前快照不一致，不能将其记作当前仍存在的源码缺陷。
+- 本轮没有修改 Python 源码；本条仅记录本轮可复现的验证证据。此前 `tests/test_jyutping.py` 专项 8/8 通过仍为历史验证，不将其与本轮全量统计混算。
+- 视频制作仍维持 plan-only / approval-gated；没有启用 dispatch、真实渲染、Provider 调用或发布。
+- 后续：在下一轮源码变更后重复 compileall 与全量 unittest；任何并行任务完成后必须对当前工作区重新验收，不能直接沿用旧快照的测试结果。
+- 补充 B267 专项复验：同一 Python 3.11 测试进程组合运行 `tests/test_capability_radar.py` + `tests/test_value_forge.py`，**25/25 passed**（Radar 13、ValueForge 12），psmux Job `ed160f550b3144af93195a70697623fe`，exit 0。此前 `src/muse`、`tests`、`scripts` 共 427 个 Python 文件 UTF-8 内存 `compile()` 扫描亦为 427/427 无语法错误。该专项与本条全量 2,084 测试是不同验证范围，不重复计数。
+
+## 2026-11-21｜B289 NeonClipping 旗舰视频生产自动接入视觉审片证据
+
+- 将 `scripts/muse-inspiration-flagship-video.py` 第 8 阶段改为调用 `build_publish_package_with_optional_generated_contact_sheet()`：主 MP4 已完成全解码及 `VideoProductBuilder` 技术 QA、`generation.json` 已写入后，自动尝试生成 12 帧本地联系表，再构建多平台人工交接包。
+- 默认发布包统一写入产品版本目录 `publish-package-v1`，与成果库视觉审核 API 的读取路径一致；联系表通过现有 Manifest SHA-256 清单绑定。旧的独立 `publish-package-{slug}` 路径不再用于旗舰生产链。
+- 新增可选生成降级策略：FFmpeg/FFprobe 缺失、抽帧异常或图像解码验证失败时，仍构建不含联系表的普通草稿包，并在结果 `contact_sheet_generation` 写明 `status=unavailable` 与原因；不会伪称视觉证据存在。产品包完整性/主视频 QA 错误仍会抛出并阻止交付。成功时记录 `status=completed` 与联系表 SHA-256。
+- 新增成功/失败两条生产策略回归：验证成功路径的 PNG 哈希同时出现在结果与 Manifest；失败路径不产生伪联系表、报告 `not_provided` 且 `can_publish=false`。发布包专项 **14/14 passed**，并对发布包模块、视觉审核账本模块、旗舰生产脚本执行 Python 3.11 `py_compile`，输出 `MUSE_NEONCLIPPING_PIPELINE_COMPILE_OK`。最终 psmux Job `03475f5e35ff486f91477837e404918c`，exit 0。
+- 合并复核期间发现并修复 `video_human_review.py` 中 `_prepare_ledger_path` 与 `build_visual_revision_brief` 函数声明被并行编辑拼接的语法损坏；恢复函数边界后，视觉审核相关发布包测试通过。该文件属于并行修改区域，后续仍需全量回归确认。
+- 本轮没有执行真实旗舰长片生产；可选生成成功/失败路径以确定性模拟测试验证。真实 FFmpeg 联系表生成仍引用 B281 的合成视频验收（680×302 PNG），不据此宣称真实长片视觉覆盖。发布仍为 `draft_only` / `can_publish=false`，没有平台登录、自动发布或解除人工审核门禁。
+- 下一步：在隔离测试素材上走通旗舰脚本的端到端生产入口，验证生成 JSON、产品版本目录、联系表 API 读取和 UI 审片提交；再运行当前全仓编译与完整 unittest 回归。
+
+## 2026-11-21｜B290 视觉返工结构化问题与版本绑定清单
+
+- 视觉审核 payload 新增可选 `findings`；`changes_requested` 必须至少包含 1 项，`approved` 不允许携带未解决问题。每项限定时间点（毫秒）、镜头编号、严重程度、问题类别、问题描述和预期修复；最多 20 项，服务端逐字段校验长度、枚举和时间范围。
+- Findings 写入原视觉审核 SQLite 记录正文并纳入 `review_sha256` 哈希链；不会单独写入可被覆盖的返工文件。新增 `build_visual_revision_brief()`，从该版本最新一条审核记录确定性生成任务 ID、返工清单 ID，并绑定来源审核记录摘要、版本 ID 与视频 SHA-256。
+- 新增只读 `GET /api/v1/products/{initiative_id}/{version_id}/revision-brief`：仅当最新审核结论为 `changes_requested` 且当前视频、联系表、发布包 manifest/质量报告证据仍匹配时返回 active 清单；后续新审核结论会取代旧清单。证据失效返回 409。
+- NeonClipping 工作台加入多问题录入和返工清单展示，按时间点/镜头/严重程度/类别显示任务；API client 新增版本校验与鉴权读取。响应显式 `can_auto_modify_source=false`、`new_version_created=false`：本阶段不自动修改源视频、不创建新版本，也不继承旧版本审核。
+- Python 3.11 专项验证 **44/44 passed**：VisualHumanReviewTests 9 项 + 完整 StatusApiTests 35 项；另完成 `py_compile`。Node UI/API **54/54 passed**；Svelte Check **0 errors / 0 warnings**；Vite production build **145 modules transformed**。统一验证脚本 `scripts/validate_visual_revision_brief.ps1`，外层 Runner Job `wc_job_h3UsFyZd9ljYFimG` exit 0，内层 psmux Job `b2ebcd71a5a649c79c6bb45f361bf3aa` exit 0。
+- 验证中发现 revision-brief 对最新审核记录的证据校验只在存在 active brief 时执行，导致最新审核已通过但 release manifest 被改动时错误返回 inactive；已改为无论最新结论如何，先验证该条记录的当前证据范围，错配统一 409。回归覆盖 changes_requested 生成任务、后续 approved 关闭任务、manifest 篡改后拒绝返回。
+
+## 2026-11-21｜B291 视觉返工 API 证据状态回归复验
+
+- 复验发现 revision-brief API 原先只接受 `verified_human_review_digest_scope_bound`，会把合法的 `changes_requested` 记录误判为无效证据并返回 409；调整为同时接受 `human_review_changes_requested`，仍严格要求视频、联系表、发布包 Manifest 与审核摘要全部匹配。证据被篡改后仍返回 409。
+- 修复并行编辑导致的 `video_human_review.py` / `test_video_human_review.py` 函数边界拼接，以及视觉审核验证脚本的测试名/行拼接问题；没有放宽审核记录、版本绑定或自动改片权限。
+- `scripts/validate_video_visual_review.py` 最终 **12/12 passed**，覆盖审核 payload、哈希账本、返工 brief、发布包版本隔离、配方追溯和 Status API POST/GET/revision-brief；psmux Job `d9e7e1a6cf6a44e7b85f9d5830bad47a`，exit 0。
+- 该结果仅验证 Python 后端/API。B290 新增的 UI 交互与前端构建仍待 Node/Svelte 验收；未运行真实旗舰长片生产、未自动返工源视频、未创建新产品版本、未发布。
+
+## 2026-11-21｜B292 Video Attempt 长任务租约续期与 fencing
+
+- 在既有 `InitiativeStore` 增加 `renew_video_attempt_lease(attempt_id, worker_id, lease_epoch, lease_seconds)`：必须匹配 running Attempt、当前 Worker、当前 `attempt_count` epoch 与未过期 lease；在 `BEGIN IMMEDIATE` 中原子续期，过期租约不可复活，旧 Worker/旧 epoch 不能续期。
+- 续期不会改变 `attempt_count`，不会写入高频生命周期事件；如果现有 lease 比新请求更长，则保留较晚到期时间，防止续期意外缩短租约。此接口为后续长镜头生成与批次边界 checkpoint 提供前置能力，尚未接入 VideoTaskWorker 自动心跳。
+- `tests/test_initiative_engine.py` 经 Muse psmux **28/28 passed**；VideoStudio、只读恢复验证器、Worker 组合回归 **32/32 passed**。设计文档已补充续租协议与验收项。
+- 随后全量回归受并行编辑影响：**1,958 tests，1 failure、13 errors、1 skipped**，compileall 亦报告错误。失败输出包含多个并行文件的瞬时语法拼接；复读时 `specialist_router.py`、`unified_runtime.py` 已恢复，`status_api.py` 的单行函数边界粘连也已由并行编辑者修复。另有 contextual-review 错误消息不一致与测试模块导入错误，尚未在静止快照复验。
+- 当前未将该次全量结果记为通过；默认 `muse-dev` psmux 会话又检测到另一项 `outcome_unknown` 活动作业时，停止追加执行。租约续期专项与 32 项视频组合回归通过不受影响；全量回归须待并行写入结束后重跑。
+- VideoTaskWorker 仍未调用恢复验证器或续租 API；没有改变现有派发、渲染、Provider 调用或发布行为，所有 VideoStudio 批次继续 `execution_eligible=false`。
+
+## 2026-11-21｜B293 Commander 本地规划模型用量归属补齐
+
+- 审计确认 LocalModelCommanderPlanner 通过 LMStudioClient.chat() 调用本地 OpenAI-compatible endpoint；chat() 委托 chat_with_usage()，后者已有在活动 ModelCallContext 中记录安全 Provider usage 的能力。
+- dispatch_commander_once() 原先在建立任务级模型上下文之前生成 initial_plan，导致本地规划模型的输入/输出 Token 无法归属 Ticket。现将 model_planner.plan(planning_goal) 放入现有 model_call_scope()，绑定真实 task_id 与 project_id="muse"。
+- 规划器属于系统规划阶段，不冒充 Ruflo Agent：账本记录 agent_id=NULL、attribution_status=partial；上下文退出后正常 reset。Ruflo Agent 执行仍沿用 B275/B283 的稳定 Agent 身份和 Provider usage 路径。
+- 定向回归：UnifiedRuntime **54/54**、ModelCallContext **10/10**、RufloAdapter **22/22**、UsageLedger **11/11**，合计 **97/97 passed**；unified_runtime.py 与新增测试文件 Python 3.11 compileall 通过。验证经 muse-dev → psmux：UnifiedRuntime Job 0f07d4d80cd746eea15feb51871d90c2，组合专项 Job 709ec2ef50ba49d0897152b586e57297，均 exit 0。
+- 本轮没有发起真实模型推理请求，没有记录费用、推算成本或启用预算 hard-stop。此改动只补齐 Commander 本地规划这一条同步调用路径，不宣称所有 Muse Provider/线程/进程路径已全覆盖。
+
+## 2026-11-21｜B294 SpecialistRouter 显式模型能力准入门槛
+
+- `SpecialistRouter.route()`、`dispatch()` 与 `dispatch_pipeline()` 新增可选 `required_model_capabilities`；目前仅允许 `tool_calling`、`structured_output`、`vision`、`audio`、`video` 五类布尔能力，拒绝未知字段、重复字段和非 tuple 输入。
+- 路由仅在 Agent 已绑定具体 `model_id`、ModelCapabilityStore 可读取档案，且每项能力均为 `status=verified`、`value is True` 时才选择/执行；未知、仅 provider 声明、已验证 false、缺少 model_id 或 capability store 均 fail-closed。未提供要求时维持旧路由行为。
+- 新增回归覆盖 unknown → declared → verified true 的准入变化、verified false 拒绝、无 model_id 不猜测、参数校验，以及 dispatch / pipeline 在能力不足时不调用 Agent。Python 3.11 定向组合：SpecialistRouter **25/25**；SpecialistRouter + ModelCapabilityStore + AgentRegistry **55/55 passed**（psmux Job `f85d7e4014894263aeb0959a9c972ba9`，exit 0）。修改的源码与测试文件 Python 3.11 UTF-8 内存 compile **2/2 passed**（Job `65690cd0a6a0461ea0e0e5c3311c35e5`，exit 0）。
+- 范围边界：本阶段是调用方显式声明要求时的准入门槛，不自动推断任务需要何种模型能力；普通路由、dispatch 与固定 pipeline 已接入，Commander DAG 的逐步骤门槛由后续 B296 补齐；数值型上下文窗口/配额与数据策略尚未纳入本门槛。未发起真实 Provider 推理或费用测量。
+- 本轮没有重跑全项目 unittest / compileall：并行 Session 持续占用共享 psmux，且 B292 已记录的全量失败属于并行写入快照。B288 的 2,084 项全量通过是本次代码变更之前的历史快照，不作为 B294 全量验收证据。
+## 2026-11-21｜B295 自主研究 Routine 的本地模型用量归属
+
+- 发现 AutonomousSupervisor._autonomous_research() 是 RoutineStore handler，不经过普通 Worker.run_once() 的 TaskQueue 模型上下文；其中 AutonomousResearchEngine 的本地 synthesis / claim review / feedback reviewer 可能真实调用 LMStudio，却没有任务归属上下文。
+- 在 engine.run_once() 外围安装现有 model_call_scope：Routine 本身没有 TaskQueue Ticket，因此只记录 project_id="muse"，task_id=NULL、agent_id=NULL、attribution_status=partial；若调用方已有真实 ModelCallContext，则保留原上下文，不覆盖其 Task/Agent 归属。
+- 新增回归验证无外层上下文时写入项目级 partial usage；存在外层 task/agent 上下文时保持原有归属；调用结束后 ContextVar 正确 reset。
+- Python 3.11 定向回归：AutonomousRuntime **27/27 passed**，源码与测试 compileall 通过；muse-dev → psmux Job `5d75f4a0301e48e59e5072a7021d1208`，exit 0。
+- 本轮通过假 Provider usage 测试验证账本上下文，不代表发起真实本地模型推理；没有记录真实费用或启用预算 hard-stop。下一批仍需覆盖 inspiration_evolution 的直接研究入口及其他无 TaskQueue 的本地模型调用。
+
+## 2026-11-21｜B296 Commander DAG 逐步骤模型能力门槛
+
+- `SpecialistRouter.dispatch_commander()` 新增可选 `required_model_capabilities_by_step`，以 DAG `step_id` 为键分别声明模型布尔能力要求；未知步骤 ID、非法字段、重复字段或非 tuple 要求 fail-fast。
+- 每个步骤的候选 Agent 在角色、在线状态、Adapter capability 检查之外，还必须通过具体 `model_id` 对应的 ModelCapabilityStore 证据检查；只有 `status=verified` 且 `value is True` 才能接单。某步骤无合格 Agent 时，整个 DAG 在任何 Agent 执行前拒绝派发。
+- 新增回归：无已验证视觉能力时研究步骤拒绝派发、补入 verified=true 后 DAG 正常执行、未知 step_id 拒绝。Python 3.11 SpecialistRouter **27/27 passed**；SpecialistRouter + ModelCapabilityStore + AgentRegistry **57/57 passed**（psmux Job `4fc5f6266140438497bed8297b3ddc30`，exit 0）；修改的源码与测试文件 UTF-8 内存 compile **2/2 passed**（Job `5e802f5c180a458e97647eb0986b6939`，exit 0）。
+- 该门槛是 Commander DAG 的显式约束，不从 prompt 自动推断；仍只支持五类布尔能力，不覆盖 context window / RPM / TPM / data policy，也没有调用真实模型或测量费用。视频执行、外部发布和人工审批边界未改变。
+- 本阶段未重跑全项目回归。最近并行全量快照为 **2,109 tests，1 error，1 skipped**；唯一错误是 `tests/test_autonomous_runtime.py` 的 FakeResearchEngine 测试夹具误调用 `self.assertTrue`，不是 SpecialistRouter；相关 owner 已收到诊断。该结果不是全量通过证据，B296 仍需在并行写入静止后进行全仓 compileall 与 unittest。
+## 2026-11-21｜B297 AutonomousResearchEngine 统一模型用量边界
+
+- 将 ModelCallContext 接到 AutonomousResearchEngine.run_once() 公共入口，而非只依赖特定调用方。无外层上下文时自动建立 project_id="muse" 的 partial scope（task_id=NULL、agent_id=NULL）；已有真实 Task/Agent 上下文时原样保留，不嵌套覆盖。
+- 因此同时覆盖 RoutineStore 的自主研究、inspiration_evolution 直接调用，以及其他直接使用 AutonomousResearchEngine.run_once() 的入口；B295 Routine wrapper 与中心入口协作时只使用已有上下文，不重复写账。
+- 新增回归验证无外层上下文的项目级 usage、存在外层 task/agent 时保留原归属、事件只写一次且 ContextVar 正确 reset。Python 3.11 定向回归：AutonomousResearch **59/59 passed**、AutonomousRuntime **27/27 passed**，合计 **86/86 passed**；四个修改文件 compileall 通过。psmux Jobs `5497f761901c4c8fbf898a52dc9e6482` 与 `6bf6ba1107734e339a2f6e3aa7144dc2`，均 exit 0。
+- 测试使用假 Provider usage，不代表发起真实模型推理；未记录费用、推算成本或启用预算 hard-stop。全仓回归仍待并行编辑稳定后重跑；Gemma 意图分类、CLI 助手、记忆抽取等不经过 AutonomousResearchEngine 的本地模型入口仍待逐一审计。
+## 2026-11-21｜B298 Gemma 意图分类线程的 ModelCallContext 传播
+
+- LMStudioGemmaIntentClassifier.classify() 为硬超时保护在后台线程执行 client.chat()；ContextVar 默认不会跨线程传播，因此即使调用方处于真实 Task/Agent scope，LM Studio usage 也会漏掉归属。
+- 在启动分类线程前使用 contextvars.copy_context()，并通过 copied_context.run(work) 执行模型请求。只传播调用方已有上下文，不创建伪造 Task/Agent，也不改变分类阈值、超时、失败关闭或审批边界。
+- 新增测试在外层 model_call_scope 中调用分类器，验证后台线程能读取同一 Task/Agent 上下文，并且 Provider usage 只写一条完整归属事件。Python 3.11 定向回归：GemmaIntent **10/10 passed**；源码与测试 compileall 通过；muse-dev → psmux Job `56cce5406dbf45dfbd7954fc69076722`，exit 0。
+- 测试使用假客户端，不发起真实 LM Studio 推理。若分类器在没有外层 ModelCallContext 的独立 CLI/预分类流程运行，当前仍不会自动创建 project-only usage scope；该入口需后续结合数据库路径再接入。
+
+## 2026-11-21｜B300 VideoStudio 批次身份与动态阶段映射
+
+- `VideoStudioBatch` 对外暴露完整 `dag_sha256`、独立 `batch_fingerprint` 与 `step_stage_ids`；DAG 指纹纳入 `video_stages.yaml` 的 SHA-256，批次指纹覆盖批次序号、步骤顺序、依赖、能力、固定阶段映射与必需前置步骤。
+- 动态步骤 ID（如 `shot_opening`）与固定 `stage_id` 明确分离；新增 `shot_generation` 固定阶段。只有 capability hints 唯一匹配时才映射；零匹配或多匹配均 fail-closed。
+- 全部 12 种制片配置均增加动态步骤映射回归；VideoStudio 专项 **14/14 passed**（psmux Job `b81d952b502841d2b57380dfb3b14616`，exit 0）。
+- 本轮全量 unittest 实际运行 **2,116 tests，1 error、1 skipped**；唯一错误为 `test_output_directory_must_be_new_and_inside_workspace` 在验证输出路径时意外进入 `example.com` 公网 DNS-over-HTTPS，握手超时。全项目 `compileall` 输出 `MUSE_PYTHON_COMPILEALL_OK`。已将输出路径边界与目标目录存在性检查提前到 DNS 校验之前，避免无效路径触发网络请求；修复后的 Lightpanda 专项已 6/6 通过，未重跑全量，因此全量仍按未通过记录。
+- Worker 尚未调用 `evaluate_video_checkpoint_resume()` 或 checkpoint write API；没有新增阶段执行器、派发、渲染、Provider 调用或发布权限。`execution_eligible=false` 保持不变。
+
+## 2026-11-21｜B299 Muse CLI 意图分类的项目级用量归属
+
+- 在 `chatgpt_bridge.py` 增加 `_with_project_usage()`：独立 CLI 的 `classify`、`route` 与 `submit` 在没有外层 ModelCallContext 时建立 project_id="muse" 的 partial scope；`submit` 使用其实际 TaskQueue 数据库路径定位同库 `model_usage.sqlite3`。
+- 若调用方已经处于真实 Task/Agent 上下文，则直接复用，不覆盖现有归属。Gemma 分类后台线程沿用 B298 的 `copy_context()`，因此 CLI scope 会传播到 LM Studio 请求线程。
+- 新增 CLI 回归：模拟 Provider 报告 Token，确认写入一条 project-only 事件，task_id/agent_id 为空且 input/output token 原样记录；分类结果仍 advisory-only，执行保持 not_started。
+- 定向验证已完成：`tests/test_chatgpt_bridge.py` **9/9 passed**，确认 project-only 用量记录与 approval-gated submit；`tests/test_gemma_intent.py` **10/10 passed**，确认后台线程 ContextVar 传播。无真实模型推理、无费用测量、无预算 hard-stop。
+
+## 2026-11-21｜B301 Lightpanda 非法输出路径先行拒绝
+
+- 调整 `LightpandaBrowserAdapter.capture_url()` 校验顺序：先验证输出目录位于工作区且目标尚不存在，再执行公网 URL/DNS 验证；无效输出路径和覆盖目标不再触发 DNS-over-HTTPS 网络请求。
+- 保持公网地址校验、loopback CDP 限制、授权门槛与请求路由防护不变；仅让本地路径前置条件在网络操作前 fail-fast。
+- Python 3.11 定向验证：Lightpanda **6/6**、ChatGPT Bridge **9/9**、Gemma Intent **10/10**、VideoStudio **14/14**，合计 **39/39 passed**；四个相关源码模块 `compileall` 通过。所有测试均经 Muse `muse-dev run` → psmux。
+- 最近一次全量快照仍为 **2,116 tests，1 error、1 skipped**；唯一错误是修复前 Lightpanda 输出目录测试意外依赖外部 DNS 握手超时。修复后对应专项 6/6 通过，但本轮没有重跑全量，故不把旧全量结果改记为通过。
+
+## 2026-11-21｜B302 粤语旁白分句合成与真实停顿注入
+
+- 新增 split_cantonese_narration()：按粤语/中文句末与分句标点保留文本边界，输出有界分段；句末默认请求 320ms、分句默认请求 160ms，参数范围均受校验。
+- 新增 synthesize_cantonese_segments_with_runtime()：复用已固定的本地 Python 3.14 TTS 子进程，在单个子进程内加载一次 CantoTTS 模型并合成多个片段；通过 PCM WAV 拼接写入真实静音帧，不把韵律意图仅留在 metadata。
+- 每个片段独立检查 WAV 可读性、48kHz 采样率、声道、位深与片段间格式一致性；拼接前不一致即失败，不交付部分成品。结果显式报告已应用的 segment_pause、插入帧数/秒数，以及仍不支持的情绪、语速、音高和呼吸控制。
+- VideoProductBuilder.build_from_scenes() 与 package_generated_clip_with_cantonese_narration() 已改接分段 TTS 入口；测试桩同步迁移。
+- 定向验证经 Muse psmux：tests/test_cantonese_tts.py + tests/test_video_product_builder.py **61/61 passed**；cantonese_tts.py 与 video_product_builder.py 均通过 py_compile。使用模拟 TTS WAV 验证 PCM 静音帧与拼接长度；没有调用真实 TTS 模型、没有生成真实视频，也没有调用 Provider。
+- 当前全量回归快照：**2,060 tests，9 errors，1 skipped**；compileall 未通过，错误集中于共享工作区 src/muse/status_api.py 第 1295–1296 行的未完成 elif 分支，相关 9 个测试模块因此无法导入。本条不将全量标记为通过，也不覆盖该并行文件。
+- 下一步：待 status_api.py 并行修改收敛后，重跑全仓 compileall 与完整 unittest；随后继续接入 VideoStudio checkpoint 持久化适配器，保持审批守卫与 execution_eligible=false，不启用 dispatch、渲染或 Provider 调用。
+
+## 2026-11-21｜B303 助手对话与记忆抽取用量归属
+
+- `chat_cli.run_turn()` 在没有现存 ModelCallContext 时，为正常助手回复与显式启用的记忆候选抽取共同建立 Muse 项目级 partial scope；默认使用中心 TaskQueue 数据库 `data/tasks/muse.sqlite3` 对应的 `model_usage.sqlite3`。
+- 若调用方已有 Task/Agent scope，则完整保留原上下文，不创建嵌套或影子归属。记忆候选仍保持显式 opt-in、待审核，不自动批准或写入长期记忆。
+- 扩展测试验证一次聊天 + 一次记忆抽取分别写入两条 Provider-reported usage 事件；另验证已有 task_id/agent_id 不被覆盖。
+- Python 3.11 定向回归：Chat CLI **4/4**、Assistant **4/4**、Cantonese TTS **8/8**，合计 **16/16 passed**；四个相关源码/测试文件 compileall 通过。真实 TTS/LM Studio 推理未执行，费用未测量。
+- 全量回归仍需在并行文件编辑稳定后重跑；最近的 2,060-test 快照发生在 `status_api.py` 并行编辑尚未完成时，报告 9 errors、1 skipped，不能视为当前最终状态。
+
+## 2026-11-21｜B304 自主研究周期中断可恢复语义
+
+- `AutonomousResearchEngine` 区分 `interrupted` 与 `cancelled`：由 `stop_event` 引起的研究流水线中止记录为可恢复中断；显式取消仍为终态，不会被恢复扫描重新启动。
+- 恢复扫描接受最新事件为 `interrupted` 的周期，并沿用该周期最近一次 `topic_key:` 检查点；恢复成功后写入正常终态。`ProgressEventStore` 的事件白名单同步支持 `interrupted`。
+- 新增真实停止／恢复回归：预置 stop event 后周期写入 interrupted，下一次 run_once 沿用相同 Evolution Cycle ID 与主题并完成；不重复创建调度器或任务队列。
+- 定向验证：AutonomousResearch + TestRunner **68/68 passed**；Feedback Experiments **6/6 passed**；Cantonese TTS、TTS Runtime、Chat CLI 与隐私测试 **18/18 passed**。相关五个源码／测试文件 compileall 通过。测试使用本地假搜索、模拟 TTS 与隔离测试快照，不代表真实 TTS 或外部模型调用。
+- 最新全量快照 **2,136 tests，3 failures、24 errors、1 skipped**；`compileall` 仍失败于并行视频租约代码 `src/muse/initiative_engine.py:1295–1296` 的 IndentationError，视频 Attempt 完成／失败路径另有 `lease_epoch` 缺失或所有权校验不匹配。该全量结果未通过；本阶段没有修改该共享视频租约文件。
+
+## 2026-11-21｜B305 自主研究阶段中断检查点与全仓回归恢复
+
+- 在研究流水线返回后、核心知识节点写入后、反馈实验阶段后、报告落盘前、创作者价值机会阶段前及提醒入队前增加 `stop_event` 检查；中断返回保留 Evolution Cycle ID、主题键、已读取来源数量与失败摘要，不创建提醒，也不把中断记为失败。
+- 新增“流水线已完成、后续知识写入前收到停止信号”的真实回归：确认该轮不写入 idea，下一轮仍恢复相同周期与主题，完成后只保留一个对应 idea。
+- Python 3.11 全仓回归经 `muse-dev run` → psmux：**2,140 tests，0 failures，0 errors，1 skipped**；`MUSE_PYTHON_COMPILEALL_OK`。内层 psmux Job `3500c613f3ef46708728b8474b4bd050` 明确 `command_succeeded=true`、exit code 0。此结果 supersedes 上一条 B304 的 2,136-test 失败快照。
+- 本轮未启用真实模型推理、GPU 视频渲染、外部发布或自动代码升级；全仓通过只证明当前测试集与编译检查通过，不代表真实视频 Provider 端到端已完成。
+
+
+## 2026-11-21｜B306 视频 Worker 显式传递租约 fencing epoch
+
+- `VideoTaskWorker.run_once()` 在领取 Attempt 后立即捕获数据库返回的 `worker_id` 与 `attempt_count`（lease epoch），并在暂停释放、Commander 审批失效释放、完成与失败路径中显式传入；不再依赖跨调用隐式 ContextVar 推断 Worker 身份。
+- 保持数据库层当前 worker、attempt_count 与未过期 lease 三重校验；旧 Worker 无法完成、失败或释放已被重新领取的 Attempt。没有放宽过期租约保护。
+- 修正 `test_expired_attempt_requeued_by_another_claim_cannot_be_terminalized_by_old_worker` 测试夹具：按显式 Attempt claim 的契约提供 `approval_task_id`，不绕过 Commander 审批要求。
+- Python 3.11 定向回归经 psmux 新会话 `muse-dev-leasefix`：VideoTaskWorker **15/15 passed**、InitiativeEngine **30/30 passed**、Video Recipe Trace **6/6 passed**，合计 **51/51 passed**；三份相关源码／测试文件 `py_compile` 输出 `MUSE_VIDEO_LEASE_COMPILE_OK`。
+- 最新全仓基线仍为 B305 的 **2,140 tests，0 failures，0 errors，1 skipped**；该全仓运行发生在 B306 修改之前。本轮尚未重跑全仓，因此不把 B305 全量结果冒充 B306 后的全量结果。
+- 原 `muse-dev` psmux 会话遗留一个 outcome_unknown Job `154db5d25b5e4507a332bf4ee991e459`：已确认对应 PID 746 不再运行，但该 Job 没有 `result.txt`，故未伪造退出码或清除其未知状态；本轮在独立 psmux 会话 `muse-dev-leasefix` 完成专项验证。真实视频 Provider、GPU 渲染和自动发布仍未启用。
+
+## 2026-11-21｜B307 Attempt 过期回收后的队列终态写入封堵
+
+- `complete_video_attempt()` / `fail_video_attempt()` 在 `BEGIN IMMEDIATE` 事务内读取并条件更新；running 状态必须同时匹配当前 `worker_id`、`attempt_count`（lease epoch）及未过期 lease，`release_video_attempt()` 使用相同三重栅栏。
+- 增加 queued 状态保护：只有从未被领取过的 legacy/admin queued Attempt（`attempt_count == 0`）可直接完成或失败；已领取过、因租约过期重新入队的 Attempt 必须先由新 Worker 重新 claim，旧 Worker 即使保留原 worker_id 与 epoch 也不能终结它。
+- 新增回归覆盖“worker-A claim epoch 1 → lease 过期 → claim 另一个 Attempt 触发回收 → 旧 Attempt 重新 queued → worker-A 旧 epoch complete/fail 被拒绝”，并保留 epoch 0 queued legacy 兼容测试。
+- Python 3.11 定向验证：InitiativeEngine **30/30 passed**（包括旧 worker 同 ID、旧 epoch 与过期后 queued 绕过防护）；VideoTaskWorker、Video Attempt Ledger、Cantonese TTS、VideoStudio、Lightpanda 合计 **53/53 passed**。全部经 Muse `muse-dev run` → psmux。
+- B305 的 **2,140 tests / 1 skipped** 全量回归早于 B306/B307；B306/B307 修改后的全仓回归尚未取得完成标记。独立 `muse-dev-leasefix` 的旧 Job `54b0a279fd5745fe85e9a2b7ac7fbbfd` 返回 `completion_not_yet_recorded`，未把它当作通过证据，也未清除未知状态。执行、渲染与 Provider 派发仍保持关闭。
+
+## 2026-11-21｜B308 NeonClipping 高价值短视频视觉审片交接
+
+- `scripts/muse-high-value-short.py` 在主视频完成全解码 QA 后才写入 `generation.json`，调用 `build_publish_package_with_optional_generated_contact_sheet()` 生成联系表、SHA-256 发布审核包，并将包状态回写到生成记录；QA 未通过会在入口处拒绝进入视觉审片交接。
+- 联系表缺少 FFmpeg/FFprobe、图像生成失败或子进程超时均明确写入 `contact_sheet_generation.status=unavailable`，仍生成不含伪造联系表的草稿审核包；新增 `subprocess.TimeoutExpired` 回归，`can_publish` 始终为 false，绝不自动发布。
+- Python 3.11 经 Muse `muse-dev run` → psmux 定向回归：**169/169 passed**，覆盖短视频 handoff、发布包/视觉审核、状态 API、视频 Worker、Attempt/Recipe Trace、Cantonese TTS、Chat CLI 与本地 Dashboard；`MUSE_HIGH_VALUE_SHORT_HANDOFF_COMPILE_OK`。内层 psmux Job `2e69cf6995ce4e4ba9cc5633a4834bea` exit 0；WebCodex Job `wc_job_4QN_gFbERhCdRFIZ` exit 0。
+- 这次只证明本地合成夹具和接口回归通过；未执行真实 GPU 渲染、真实 TTS 模型、外部 Provider 或平台发布。人工视觉/事实审核仍是独立门槛，`can_publish=false` 保持不变。
+- Store lease/epoch 与 Worker 文件已明确交回 OpenMontage / Paperclip 单一 owner；本 NeonClipping Session 不再编辑 `initiative_engine.py`、`test_initiative_engine.py`、`video_task_worker.py` 或其测试。此前 `release_video_attempt(lease_epoch=None)` 兼容性改动已向 OpenMontage owner 说明，需由该 owner 审核；本条不把它计作 NeonClipping 独立交付。
+
+## 2026-11-21｜B309 反馈实验子进程可中断与无失败污染
+
+- `_run_isolated_suite()` 新增可选 `stop_event`，以短间隔轮询子进程；收到停止信号时只终止本执行器启动的子进程，并在 Windows 优先使用其专属 Job Object 结束进程树，随后回收 stdout/stderr 与句柄。
+- 被中断的隔离测试写入 `interrupted` 进度事件，不写 `failed`，不创建伪造的 ExperimentBridge run 结果；指标错误数保持 0。预算超时仍保持 `budget_exceeded` 独立语义。
+- `run_feedback_research_experiment()` 接收并传递 stop_event；若执行被中断，返回 `status=interrupted` 且不生成失败节点或 claim 结论，确定性 run key 可在下次恢复时重新执行。
+- `AutonomousResearchEngine` 将同一 stop_event 传入反馈实验执行器；实验子进程中断后由外层周期记录 `interrupted`，继续沿用既有 Evolution Cycle ID 与主题检查点。
+- 定向验证：TestRunner + Feedback Experiments + AutonomousResearch **77/77 passed**；六个相关源码／测试模块 compileall 通过（`MUSE_B306_COMPILE_OK`）。真实子进程测试确认停止信号后 5 秒内回收，不产生实验失败记录。
+- B309 后一次全仓回归快照 **2,084 tests，7 errors，1 skipped**；`compileall` 阶段报告成功，但 unittest 导入期间 `autonomy.py`、`improvement_cli.py`、`routines.py` 曾出现并发编辑导致的 import 行拼接错误。随后只读复查三处均已恢复为独立导入行；此快照不能视为全仓通过，需在这些并行写入静止后再跑完整回归。B305 的 2,140/0/0/1 全量结果早于 B309 代码修改，不作为本阶段全量验证。
+
+## 2026-11-21｜B310 视频租约与全仓回归闭环
+
+- 在 B306 Worker 显式传递 `worker_id` / `lease_epoch`、B307 终态事务栅栏及过期回收后 queued 状态防绕过基础上，重新运行全仓 Python 回归。
+- Python 3.11 全量：**2,153 tests，0 failures，0 errors，1 skipped**；`MUSE_PYTHON_COMPILEALL_OK`。Muse psmux 内层 Job `8f00b5deffa041029b5acec54a93fad5` 明确 `command_succeeded=true`、exit code 0；外层 WebCodex Job `wc_job_ZHpmnH0_cwJRyXPN` exit code 0。此次运行显式设置 `muse-dev run --timeout 600`，避免 120 秒默认超时导致 outcome_unknown。
+- 本轮也重跑发布包、人工视觉审核、灵感演化与反馈实验相关专项：**35/35 passed**；此前 VideoStudio、粤语 TTS、Lightpanda、Worker 与 Attempt 专项均已通过。
+
+
+## 2026-11-21｜B311 Worker 过期租约异常路径 fail-closed
+
+- `VideoTaskWorker` 在完成、失败、暂停释放和 Commander 审批失效释放时均显式传递 `worker_id` 与 `lease_epoch`。若失败或释放时发现 Attempt 已被另一 Worker 重新领取，返回 `status=lease_lost`，`failure_recorded=false` / `release_recorded=false`，不写入旧 Worker 的失败或释放状态。
+- 新增两项并发回归：渲染期间另一 Worker 重新 claim 后旧 Worker 抛错；暂停检查期间租约被接管后旧 Worker 尝试 release。两种情形均确认新 Worker 的 `worker_id`、`attempt_count` 和 running 状态保持不变。
+- `tests/test_video_task_worker.py` **17/17 passed**；Worker 与测试文件 `py_compile` 输出 `MUSE_STALE_LEASE_RELEASE_COMPILE_OK`。Store API 与 `tests/test_initiative_engine.py` 的所有权已按协作约定交回 OpenMontage owner，本会话不再修改这两份文件。
+
+## 2026-11-21｜B312 反馈实验幂等测试固定源码快照
+
+- `test_real_test_runner_executes_allowlisted_suite_and_persists_linked_result` 现在先把 `src/` 与 `tests/` 复制到临时不可变快照，再对同一快照连续执行两次；两次运行的 source fingerprint 因此保持稳定，不会被其他并行会话修改工作区源码所干扰。
+- 这只改变测试隔离方式，不改变生产 run key 语义：不同源码指纹仍产生不同实验 run；相同快照、相同提案/反馈/计划仍复用同一结果。
+- `tests/test_feedback_experiments.py` **7/7 passed**，两次内部隔离测试套件各 **62/62 passed**。
+
+## 2026-11-21｜B313 最终全仓回归
+
+- 在 B311 Worker stale-lease fail-closed 与 B312 固定源码快照测试之后，再次运行 Python 3.11 全仓验证：**2,155 tests，0 failures，0 errors，1 skipped**；`MUSE_PYTHON_COMPILEALL_OK`。
+- Muse psmux 内层 Job `69748134f3eb4900822b4bfd90e05160` 明确 `command_succeeded=true`、exit code 0；外层 WebCodex Job `wc_job_GP-L2rDQmP4J6ubr` exit code 0。完整运行时各 psmux 会话无活动 Job；测试仍不启用真实 GPU 渲染、真实 TTS 模型或平台自动发布。
+- 全仓测试通过不等于真实媒体链路已完成：没有运行真实 TTS 模型、GPU 渲染或外部 Provider；VideoStudio 仍为 plan-only，`execution_eligible=false`，没有自动发布。
+
+## 2026-11-21｜B311 镜头级检查点准备接口
+
+- `prepare_video_attempt_staging_directory()` 创建按 Attempt ID 隔离的持久 staging 路径，拒绝符号链接、非目录组件和越出 workspace 的路径。
+- `build_video_scene_checkpoint_plan()` 将 2–20 个镜头构造成确定性 `shot_001…shot_020` DAG，并映射到固定 `shot_generation` stage；输入 SHA-256 独立绑定场景 prompt、duration、seed、negative prompt、aspect ratio、steps、recipe、builder version 与模型标识。
+- `record_video_checkpoint_artifact()` 可附带严格 allowlist 的生成元数据（分辨率、FPS、帧数、prompt ID、模型），和 artifact 相对路径及实际文件 SHA-256 一起持久化，供恢复后重建镜头信息。
+- 定向回归：`test_video_checkpoint_adapter.py` + `test_video_studio.py` + `test_initiative_engine.py` **53/53 passed**，psmux Job `9018afaf06d846ca98bc6090635e2610` exit 0。
+- 当前仅完成准备接口与证据元数据；`VideoTaskWorker` / `VideoProductBuilder` 尚未接入 staging、resume map、逐镜头 callback，真实镜头恢复仍未启用。完整 2,153 项全仓通过发生在 B311 之前；B311 后需再跑全仓回归。保持 `execution_eligible=false`。
+
+## 2026-11-21｜B312 隔离测试进程树回收与管道期限保护
+
+- `_run_isolated_suite()` 在 Windows 使用专属 Job Object 终止该隔离执行器拥有的进程树；POSIX 使用独立 session/process group 与 SIGTERM/SIGKILL，避免只杀 root Python 后留下持有 stdout/stderr 管道的后代进程。
+- 将 `communicate()` 改为带总预算的短轮询；即使 root 已退出但子进程仍持有输出管道，也继续受同一 deadline 约束，预算到期后回收整个进程组，不再出现无期限等待。
+- 新增后代进程继承输出管道的预算测试，确认超时在 5 秒内终止；原 stop_event 子进程中断测试继续验证只终止 Runner 自己启动的进程，不记录失败实验。
+- 定向验证：TestRunner **9/9**、Feedback Experiments **7/7**、AutonomousResearch **62/62**，合计 **78/78 passed**；六个源码／测试模块 compileall 通过（`MUSE_B310_COMPILE_OK`）。
+- B310 的并行全仓运行中，一次 **2,153 tests / 0 failures / 0 errors / 1 skipped** 完成；另一并行副本出现 1 个 `test_real_test_runner_executes_allowlisted_suite_and_persists_linked_result` 失败，原因是同一测试期间源码 fingerprint 在两次调用间变化，导致确定性 run_ref 按不同源码快照正确变化。该并行写入竞争不影响本次 78/78 定向结果，但仍需在共享源码冻结后单独复跑一次全仓回归。
+
+## 2026-11-21｜B314 镜头检查点 Session 与全仓回归
+
+- 新增 `VideoSceneCheckpointSession`：统一执行当前 Attempt 的 checkpoint resume 校验，向 Builder 暴露 `resume_scene_metadata`、`reusable_step_ids`、`pending_step_ids`，并提供 `record(step_id, artifact_path, generation_metadata)` 回调；它始终保持 `execution_eligible=false` / `dispatch_started=false`，回调自动选中所属 batch、校验工作区内路径、重算 artifact 字节 SHA-256，并复用 Commander 精确审批门禁。
+- 修复首次生成边界：无历史 checkpoint 的步骤现在只标记为 `missing`，不再误记为 `rejected`；只有确实存在但身份、输入摘要或 artifact 字节不匹配的历史行才阻止同 epoch 重写，避免新镜头第一次生成就被错误拦截。
+- Windows 路径安全补强：workspace 与 artifact 路径检查同时拒绝符号链接和 Windows reparse point；新增 20 镜头两批 DAG、独立输入摘要、持久 staging、生成元数据回读与 reparse point 单元测试。
+- `tests/test_video_checkpoint_adapter.py` 初次 8/8 后继续增加跨 epoch 失效证据覆盖，最新 **9/9 passed**（psmux Job `957cf9ff52174e208416fa77de0419a8`，exit 0）。
+## 2026-11-21｜B315 检查点跨 epoch 替换规则
+
+- 区分 `rejected` 与 `same_epoch_rejected_steps`：旧 epoch 的输入摘要或 artifact 字节失效时，旧证据永不复用，但新 lease epoch 可以重新生成并追加新 checkpoint；同一 epoch 已存在但被拒绝的 checkpoint 不可覆盖，必须重新 claim 获得新 epoch。
+- `VideoSceneCheckpointSession` 暴露 `same_epoch_rejected_steps`，`record()` 与底层 artifact writer 都在写入前阻止同 epoch 覆盖；旧 epoch 的失败行仍保留为历史证据。
+- 新增回归：epoch 1 写入后 artifact 被篡改，同 epoch 写入被拒；显式 retry 并 claim epoch 2 后，改变 prompt/input digest 可重新生成并追加 epoch 2，历史 epoch 1/2 均保留。
+- `tests/test_video_checkpoint_adapter.py` **9/9 passed**；全仓 Python 3.11 **2,160 tests，0 failures，0 errors，1 skipped**，`MUSE_PYTHON_COMPILEALL_OK`。psmux Job `c6531720326b4292aaec88cfd943f1c2` `command_succeeded=true` / exit 0；外层 WebCodex Job `wc_job_quNtBTlvDUqtP7iK` exit 0；`muse-dev run --timeout 600`。
+- Worker/Builder 尚未消费这些接口；继续由 Paperclip owner 接线，当前不宣称 crash-resume 已打通，`execution_eligible=false`。
+
+## 2026-11-21｜B316 Attempt 终态租约边界复核
+
+- 复核 `initiative_engine.py` 当前快照：`complete_video_attempt()` / `fail_video_attempt()` / `release_video_attempt()` 方法结构可读；运行中终态写入均在 `BEGIN IMMEDIATE` 内核对 worker_id、attempt_count/lease_epoch 与未过期 lease，并以同一条件执行 CAS 更新。
+- 已确认并覆盖两种旧 Worker 失效路径：过期 lease 被另一条 claim 回收后，旧 Attempt 变为 queued 但 `attempt_count>0`，旧 worker 不能终态化；同 worker_id 重领后旧 epoch 也不能写入。`renew_video_attempt_lease()` 的当前 owner/epoch/expiry fencing 与不缩短租约测试已存在。
+- 新增 `test_expired_running_video_attempt_cannot_complete_fail_or_release`，专门覆盖 lease 已过期但 Attempt 尚未被下一次 claim 回收的窗口，要求 complete/fail/release 全部拒绝且 Attempt 保持 running 原状。
+- 进一步修复 SQLite 锁等待竞态：claim/renew/complete/fail/release 的真实 wall-clock 时间改为取得 `BEGIN IMMEDIATE` 后再读取；显式测试 `now` 仍保持确定性。旧 `mark_video_attempt_running()` 也改为事务内读取状态、设置租约并检查 CAS rowcount，避免并发重复 start 事件。
+- 两条新增租约回归均已通过：`test_expired_running_video_attempt_cannot_complete_fail_or_release` 与 `test_terminal_lease_check_uses_clock_after_waiting_for_write_lock`。
+- 后续在 `muse-dev` psmux 空闲后完成验证：`initiative_engine.py` `py_compile` 通过（Job `a0b68551271b4d75bed3fbcfbb68f016`）；`tests/test_initiative_engine.py` **32/32**（Job `3b2ea96976f94c958e511db8eae9b83e`）；`tests/test_video_studio.py` **16/16**（Job `f3b706dc946a4f84a63307452d8236ce`）；`tests/test_lightpanda_adapter.py` **6/6**（Job `0f6fddc4e31647d891063533285b2b6a`）；`tests/test_video_checkpoint_adapter.py` **9/9**（Job `12cbebaa3ad14e0db5dedb0253836463`）；`tests/test_video_task_worker.py` **17/17**（Job `7baf8511b1b24cbfbfffb6ceacab28fd`）。合计 **80/80 focused tests passed**，外层 WebCodex Job `wc_job_4y2QhmdaKk3E-TkE` exit 0。
+- B316 修改后的完整 Python 3.11 全仓回归已通过：**2,175 tests，0 failures，0 errors，1 skipped**，`MUSE_PYTHON_COMPILEALL_OK`；psmux Job `2df0e69f861f4600bdcc9e40ae178e9b` exit 0，外层 WebCodex Job `wc_job_S8oYZXgSf4gx2DYS` exit 0。Worker/Builder 接线仍归 Paperclip owner，本 Session 不修改其文件；`execution_eligible=false`。
+- 另一个独立执行门禁仍未满足：VideoStudio admission 当前明确返回 `capability_registry_checked=false`、`role_capability_authorization_checked=false`。`video_stages.yaml` 中的 `capability_hints` 仅用于计划/映射，不等于已注册的本地 handler 或角色授权；必须接入既有 Commander capability registry/dispatch 后才能评估执行资格，不能创建第二调度器或直接调用 GPU。
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+## 2026-11-21｜B317 共享工作区全量复验与语法完整性
+
+- 修复后的共享快照重新通过 Python 3.11 全仓 unittest：**2,180 tests，0 failures，0 errors，1 skipped**；外层 WebCodex Job `wc_job__Dfs06YftoyQL-mO` exit 0。该轮运行由 Open Design 审计 Session 发起，结果按共享工作区证据记录。
+- 本 Session 随后经官方 `scripts/muse_dev.py → psmux` 对 `src/muse/`、`tests/`、`scripts/` 做完整 `compile()` 扫描：**439 个 Python 文件，0 syntax errors**（psmux Job `b054377d227c466b952e20692813bd5e`，exit 0）。
+- 此前全量回归中的 `open_design.py` 两处语句粘连在最新 revision `8362026664560127` 已恢复正常；Worker / ResourceGovernor 导入错误随之消失。当前没有启动第二轮全量测试，以免重复消耗并与其他会话争用 psmux。
+- 本次验证不代表真实视频渲染、TTS 模型或外部 Provider 已验收。B316 所述 VideoStudio admission 仍需接入既有 Commander capability registry 与角色授权；VideoTaskWorker / VideoProductBuilder 的 checkpoint 消费接线仍待 Paperclip owner 完成，`execution_eligible=false`，未自动派发、渲染或发布。
+
+## 2026-11-21｜B318 NeonClipping 视觉交接与 ChatGPT Bridge 合并回归
+
+- 复核高价值短视频、PROMETHEUS teaser/film 与旗舰视频的视觉交接调用链：`build_publish_package_with_optional_generated_contact_sheet()` 在未显式传入 `output_dir` 时，会从 `generation.json.product.relative_path` 自动定位产品版本目录下的 `publish-package-v1`；此前怀疑的默认输出路径不一致并不存在，没有进行多余改动。
+- 专项验证脚本 `scripts/validate_high_value_short_handoff.py` 覆盖高价值短视频交接、发布包、Cantonese TTS、Chat CLI/隐私、业务机会、Status API、Creative Studio、Dashboard、产品 API、Recipe Trace、VideoTaskWorker 与 InitiativeStore：**173/173 passed**；9 个相关脚本/模块 `py_compile` 通过，输出 `MUSE_HIGH_VALUE_SHORT_HANDOFF_COMPILE_OK`。外层 Runner Job `wc_job_R8Qra0idhyKILCbH` exit 0，内层 psmux Job `27d2b67f8da141dc815c5dfa80721e09` exit 0。
+- 专项回归最初发现 `src/muse/chatgpt_bridge.py` 在并行编辑合并时多处相邻语句拼接，导致 `muse_dev.py` 导入 `chatgpt_bridge` 时 SyntaxError、项目命令入口无法启动。按当前 revision 恢复 `same_request` 判断、冲突返回与正常 JSON 返回的语句边界；`tests/test_chatgpt_bridge.py` **12/12 passed**，内层 psmux Job `1101da15f3a047ef853c4942a8169bb5` exit 0。
+- 通用 `/api/v1/video-products` 产品创建仍只生成 `VideoProductBuilder` 产品，不自动生成发布包与联系表；现有视觉审核 API 依赖发布包 Manifest，因此该通用入口尚不能直接进入审片流程。旗舰/Teaser/High-value-short 脚本链已接入。后续需为通用产品设计独立、哈希绑定的视觉证据包，不伪造封面/字幕，不绕过技术 QA；维持 `can_publish=false`、人工审片与 Commander 授权边界。
+
+## 2026-11-21｜B319 ChatGPT Bridge 请求幂等与隐私回归
+
+- `chatgpt_bridge submit` 增加 `request_id` 输入校验：必须是无首尾空白、无控制字符的非空字符串，长度不超过 180；无效 ID 在本地分类器与队列数据库初始化前拒绝。
+- 同一 ID 的重放绑定原始请求文本、来源、审批要求、执行未授权标记、标题、优先级、耗时估算与 manual recovery policy；忽略队列后续追加的 `_approval` / `_approved` 生命周期字段，以及重试时可能变化的 advisory `intent` 分类结果。重放返回原 Ticket 状态与原分类来源，不重复追加事件。
+- 同 ID 不同请求/任务参数返回 `request_id_conflict`，保留原 Ticket，不创建第二张任务单、不触发执行；审批后重放仍保持幂等。
+- Python 3.11 / psmux 定向验证：ChatGPT Bridge **12/12**（Job `afa634f2e6bd4772b94e76e2fd342286`）、Chat CLI **4/4**（Job `92e4ca0d192b41ffb02e4acdfb840052`）、Chat CLI Privacy **2/2**（Job `032261a8682e49099cf3fdc755928da2`）、Cantonese TTS **8/8**（Job `7754956811124f748c1166c803bc7d09`），合计 **26/26 passed**；`chatgpt_bridge.py` 与 `chat_cli.py` `py_compile` 通过（Job `33b10d6591fc4dc0932dd45777a777d2`）。
+- 本轮没有发起真实模型推理、没有测量实际费用、没有自动审批或派发；`submit` 仍保持 `execution=not_started`，批准与派发仍是分开的动作。本轮没有发起真实模型推理、没有测量实际费用、没有自动审批或派发；`submit` 仍保持 `execution=not_started`，批准与派发仍是分开的动作。
+- B319 后续合并复验：ChatGPT Bridge **12/12**、Chat CLI **4/4**、Gemma Intent **10/10**、Assistant **4/4**，合计 **30/30 passed**；8 个相关源码/测试文件 compileall 通过，`MUSE_PAPERCLIP_OWNED_COMPILE_OK`。psmux Job `c870430717a6411f854dddeb042c52fd`，`command_succeeded=true` / exit 0。
+- 单写者边界已收敛：Worker + Worker tests 交由主视频 Session `wc_sess_3eVxhb11foE0Gxj-`；Paperclip Session 仅维护 ChatGPT Bridge/CLI 与 Paperclip 文档，不编辑 Worker、Builder、TTS、VideoStudio 或 Commander admission。
+- 当前测试仅验证本地假 Provider usage 与调用上下文归属，不代表真实推理或 cost 已测量。视频 checkpoint Builder 消费和 Commander capability/role admission 仍待主视频 Session 集成，`execution_eligible=false`。
+
+## 2026-11-21｜B320 通用视频产品视觉审片证据链
+
+- 新增 `src/muse/video_visual_evidence.py`，为通用 `VideoProductBuilder` 产品建立独立 `visual-review-evidence-v1`，不伪造发布包封面、字幕或研究笔记。生成前同时验证产品 `verify_path`、Manifest、QA 报告、视频 SHA-256 与 `quality_gate`；只有 `status=testing`、技术 QA 明确 passed 且 `ready_to_publish=false` 才允许制作联系表。
+- 证据包绑定源产品 Manifest、MP4、QA 报告和真实 PNG 联系表的 SHA-256；联系表需通过生成器的 image decode 结果、PNG 头和尺寸复核。生成失败/媒体工具不可用时返回 `unavailable`，QA 不通过或证据不一致时 `blocked`；重复调用验证既有证据包，不覆盖。证据目录与元数据拒绝符号链接，证据不授权发布，`can_publish=false`、`human_review_required=true`。
+- `verify_visual_review_evidence()` 现在同时识别旧 `publish-package-v1` 与新通用证据包。Status API 联系表 GET、视觉审片 POST、历史 GET 共用哈希验证路径；通用视频异步任务成功响应附带 `visual_review_evidence` 状态。人工审片仍写 append-only ledger，身份保障仍标注为本地自声明，不声称数字签名。
+- `video_recipe_trace.py` 增加对通用证据包的实时审片叠加：即使没有传统发布包，也能显示已验证人工审片记录；发布包未准备时仍返回 `blocked_pending_release_package`，不会把人工审片批准转换成发布授权。修复了先前因只依赖旧发布包目录/账本文件存在判断而漏掉通用证据的兼容断点。
+- Python 3.11 / psmux 当前快照定向回归：`test_video_visual_evidence.py` **5/5**、`test_video_product_api.py` **5/5**、`test_video_human_review.py` **9/9**、`test_video_recipe_trace.py` **7/7**，合计 **26/26 passed**；9 个相关源码/测试文件 `py_compile` 通过。组合 Job `wc_job_Kf0mMu8sbLj1GGNy` exit 0，内层 psmux jobs：`bcba6b78dcfe4bb0879ad14b2ef1a241`、`9134c39e5b81475b9117fbe38dc5b7dd`、`ea5197b7a5404aeb829ec536fd1bd46c`、`55b3f731c0854dc38f95d74c25fd66f2`。Recipe Trace 修复后独立复跑 7/7（Job `22fef3b6946248d396380772feafc4cf`）；全仓 Python 编译扫描 `src/muse`、`tests`、`scripts` 均通过（Job `318b20a92e9a4e3f838abceca2dee05d`）。
+- 本轮未执行真实视频生成/FFmpeg 全流程验收、未启动 GPU、未自动发布。B321 已将 VideoTaskWorker→Checkpoint Adapter→Builder 的镜头级持久恢复接通；但这不等于 VideoStudio 预览 DAG 已交给 Commander 分阶段执行。B316 的真实 VideoStudio Handler、资源/成本门禁消费与最终人工门禁绑定仍未完成，`execution_eligible=false`。
+## 2026-11-21｜B321 Worker 与 Builder 镜头级断点续作接线
+
+- `VideoTaskWorker` 在已通过 Commander 审批、成功 claim Attempt 后，针对具有有效 `recipe_sha256` 且未启用旁白动态时长的多镜头任务，创建 `VideoSceneCheckpointSession`；Worker 复用 Store / TaskQueue / 现有 Commander 审批校验，不创建第二调度器或审批系统。
+- 每次镜头生成前由 `scene_generation_guard` 重新检查 Attempt lease 与 Commander 审批；续租丢失或审批撤销时阻止启动下一镜头。检查点 callback 只在 Builder 完成 MP4 容器、流参数和 FFprobe 时长校验后调用，Adapter 再重算 SHA-256、校验 Attempt/worker/epoch/审批/依赖并追加证据。
+- Builder 支持持久 `staging_directory`、`resume_scene_metadata`、`reusable_step_ids` 和逐镜头 callback。目录按 `data/video_attempt_staging/<attempt_id>/epoch_<lease_epoch>` 隔离，跨 Epoch 复用旧目录内经过验证的镜头，不覆盖旧 Epoch 文件；路径拒绝 traversal、symlink、reparse point 与跨 Attempt 文件。
+- 新增 Worker 端到端中断恢复回归：第一轮在第一镜检查点写入后模拟中断，Attempt 失败；显式 retry 取得新 Epoch 后复用第一镜，只生成第二镜并成功完成。Builder 单测另覆盖跨 Epoch artifact 复用、失败镜头保留已完成检查点与跨 Attempt 路径拒绝。
+- Recipe SHA-256 是 Store 检查点写入的硬性前置条件；没有有效 Recipe 指纹的任务继续走原有多镜头构建，但不宣称可断点恢复。旁白任务因 TTS 会重新分配镜头时长，也暂不启用此检查点路径，避免用错误输入摘要复用旧镜头。
+- Python 3.11 / `scripts/muse_dev.py → psmux` 定向回归：VideoTaskWorker **23/23**、VideoProductBuilder **56/56**、VideoCheckpointAdapter **9/9**、VideoStudio **21/21**，合计 **109/109 passed**；内层 psmux Job `003bec064a4a418394da85625a52bddb` `command_succeeded=true` / exit 0；外层 WebCodex Job `wc_job_UAo0QXOyL7h_F7PY` exit 0。断点恢复单测另行复跑 **1/1 passed**（内层 Job `e2529de037db40778d7c98c3c9406f00`）。
+- 测试使用本地假 Builder / 假 MP4 夹具，不代表真实 Wan GPU 渲染、真实 TTS、外部 Provider 或发布链已验收。VideoStudio 仍保持 `execution_eligible=false`、`dispatch_started=false`；未自动派发、启动 GPU 或发布。
+
+## 2026-11-21｜B322 粤语旁白韵律载荷完整性校验
+
+- 加固 `src/muse/narration_prosody_bridge.py` 的 TTS payload 边界：要求 `segment_count` 与实际段数一致、索引连续且保持原顺序、能力声明唯一且排序；每段 requested/applied/unsupported 控制必须构成无重叠且完整的分类，防止把未请求或不受支持的控制伪装成已应用。
+- 对 `pause_after_ms` 增加 intent-to-payload 一致性检查；仍只允许当前明确验证的 `pause_after` 能力进入 TTS payload，不扩展声学能力声明。
+- 新增独立 `tests/test_narration_prosody_bridge_integrity.py`，覆盖段数错配、布尔段数、段落重排、伪造控制分类、停顿值篡改、重复能力声明，共 7 项负向回归。
+- 早期验证记录（2,226 tests）及当时并行 compile 错误快照已被 B323 当前稳定快照验证取代；B323 现已对 `src/muse`、`tests`、`scripts` 全目录编译扫描，并完成 2,237 项全量 unittest，结果 0 failures / 0 errors / 1 skipped。
+- 并行编译曾报告的 `video_product_builder.py:69` 语法错误属于不同共享快照/旧读数；当前稳定快照 compileall 与全量 unittest 均通过。仍未完成真实 TTS 音频 smoke，也未把结构化 prosody segments 作为独立字段贯通 TTS runtime→Builder/Worker；目前 Worker 仍将生成段落合并为 narration script。
+## 2026-11-21｜B323 视频生产线稳定快照回归与测试拼接修复
+
+- 修复 `tests/test_video_studio.py` 中合并时产生的行拼接，恢复测试语句分行，并清理未被该测试使用的局部变量；当前文件第 163–182 行已只读复核为结构完整、语句分行。
+- 最新 Python 3.11 / `scripts/muse_dev.py → psmux` 定向回归覆盖 `tests.test_video_studio`、`tests.test_video_task_worker`、`tests.test_video_product_builder`、`tests.test_video_checkpoint_adapter`：**118 tests / 0 failures / 0 errors**；`compileall.compile_dir('src/muse', quiet=1)` = PASS。psmux 内层 Job `41b86d59e5ae482897e3c980aa35f200` exit 0，外层 WebCodex Job `wc_job_ID-usuhSTVk4AKjF` exit 0。FFmpeg 在一个负向夹具上打印 `moov atom not found`，测试套件仍以 118/118 通过结束。
+- B323 当前快照全量验证：`compileall` 对 `src/muse`、`tests`、`scripts` 均通过；`unittest discover -s tests` **2,237 tests / 0 failures / 0 errors / 1 skipped**，psmux 内层 Job `0d41acedc9f94fe09f241abd00c9c27a` exit 0，外层 WebCodex Job `wc_job_WJpPUdfgUwdhAYBK` exit 0。未启动真实 Wan/GPU 渲染；VideoStudio Commander admission 尚未完成可信 Handler、资源预算及最终人工门禁的实际消费，故 `execution_eligible=false`、`dispatch_started=false` 继续保持。
+## 2026-11-21｜B324 Commander 视频执行链边界审计
+
+- 确认现有 Commander 自主运行时确实注册 `creator-video-queue` routine；`AutonomousSupervisor._video_worker()` 在 `MUSE_ENABLE_VIDEO_WORKER=1` 时调用 `VideoTaskWorker.run_once()`，后者会复核与具体 Attempt/brief 绑定的最新人工审批、lease、checkpoint 和 Worker 生成路径。这是现有 Attempt 级视频执行入口，不是空壳。
+- 同时确认 `build_video_studio_preview()` 只生成 plan/batch 并调用 `assess_video_studio_commander_admission()`；`commander_batching.status=preview_only_worker_integration_pending`，不提交 Commander Task，也不把 admission 结果传给 `VideoTaskWorker`。两条路径目前并列，未形成统一的 DAG→grant→Attempt→Worker 链。
+- `CapabilityRegistry` 只保存能力元数据；现有 `create_adapter()` / `build_adapter_handlers()` 仅对 `media.ffmpeg` 提供实际 Adapter Handler。VideoStudio 的多种能力（research、scriptwriting、storyboard、comfyui_generation、video_assembly、media_review、publication_approval 等）不能因为 registry 标记 ready 或注入任意 callable 就视为有可信执行器。
+- 因此下一步需要一个由 Commander 产生、持久化并可撤销/一次性消费的 admission grant，绑定 Attempt、recipe/input SHA-256、DAG/batch fingerprint、scoped role grants、可信 handler identity、资源预算快照及最新人工审批事件；VideoTaskWorker 在 GPU/FFmpeg 前必须重新验证并消费该 grant。未完成之前维持 `execution_eligible=false`，不把现有 Attempt 级审批误报为 VideoStudio DAG 授权，也不启动真实 GPU 生成。
+
+## 2026-11-21｜B325 成功 Attempt 的安全 staging 清理边界
+
+- 在 `src/muse/video_checkpoint_adapter.py` 新增 `cleanup_video_attempt_staging_directory()`：清理决策读取 InitiativeStore 的真实 Attempt 状态，不接受调用方传入的 success 布尔值；仅当状态为 `succeeded` 且 MP4、package、manifest 三个 SHA-256 均有效时才允许删除 Attempt staging。
+- 清理前逐级检查 `data/video_attempt_staging/<attempt_id>` 路径和全部后代，不跟随 symlink/reparse point，拒绝路径逃逸及特殊文件；失败、暂停、审批撤销、租约丢失的 Attempt 不符合 Store 成功条件，因此保留断点材料。
+- 新增清理安全测试，覆盖成功清理、重复清理幂等、运行中拒绝清理、链接目录拒绝清理。Python 3.14 / `scripts/muse_dev.py → psmux`：VideoCheckpointAdapter + VideoTaskWorker + VideoProductBuilder **96/96 passed**；adapter 两个源码/测试文件 compileall 断言通过。psmux 内层 Job `df91191a17004acc9387a263265badc4` exit 0，外层 WebCodex Job `wc_job_buQGhk5mM8xj--2K` exit 0。
+- B326 已由 Worker owner 接通：仅在 `complete_video_attempt()` 返回 `succeeded` 后，Worker 再读回 Store Attempt，确认状态仍为 `succeeded` 且三个产物 SHA-256 有效，才调用清理 helper。清理异常只记录 warning，不改变已提交的成功状态；失败、暂停、审批阻断、租约丢失路径均不进入清理分支。
+- B326 验证：Python 3.11 / `scripts/muse_dev.py → psmux` 的 `tests.test_video_task_worker` **28/28 passed**，同时 `py_compile` 检查 Worker 与测试文件通过（内层 Job `c88913979e144200bbb14b0b51dee4ca` exit 0）；`tests.test_video_checkpoint_adapter` + `tests.test_video_product_builder` **69/69 passed**（内层 Job `6354ce690ed5446c901c9a512f56c1cc` exit 0）。合计 97 项定向测试通过。FFmpeg 的 `moov atom not found` 仅出现在损坏媒体负向夹具，测试整体通过。
+- 补充复验（本轮最新稳定快照）：Worker + CheckpointAdapter 合并 **38/38 passed**，并对 Worker/Adapter 执行 `py_compile`；psmux 内层 Job `ad73c13892b44621ae84da9c5cab7293` exit 0，外层 WebCodex Job `wc_job_ed1Zc3AQhfUkCSSp` exit 0。Worker 场景成功测试额外断言已提交成功后 `data/video_attempt_staging/<attempt_id>` 被移除；清理失败仍保留 succeeded 状态并记录 warning。
+- B327 全量复验已完成：Python 3.11 经 `scripts/muse_dev.py → psmux` 对 `src/muse`、`tests`、`scripts` 执行 compileall 全部通过；全仓库 unittest **2,243 tests，0 failures，0 errors，1 skipped**（206.491 秒）。内层 psmux Job `3943d770efc94db591044852b1646b4a` exit 0，外层 WebCodex Job `wc_job_PV6QJtUSZzC08xgS` exit 0。该结果是 B326 当前共享快照的完整回归证据。
+- B328 旁白集成审计（只读）：Worker 已生成结构化 `generated_script.segments`，但在 `video_task_worker.py:318` 将其 join 为纯文本；Builder `video_product_builder.py:910-915` 只调用 text-based `synthesize_cantonese_segments_with_runtime()`，TTS 再自行按标点切段。当前分段引擎只实际应用 `pause_after_ms`；情绪、语速、音高、呼吸仍是 unsupported，prosody bridge 尚未接入 runtime。Builder `:886-889` 还明确禁止 narration 与 scene checkpoint resume 同时启用，因此带旁白的多镜头 Attempt 目前不能享有逐镜头 crash-resume。已将精确接口/所有权请求发给音频协作 Session（消息 `wc_msg_wX6VRA0iR1LhAVpa`、`wc_msg_Qrj-7DD9GLDg2A9k`）；未修改其拥有权未确认的 TTS/Builder 文件，也未虚报语音效果已应用。
+
+## 2026-11-22｜B330 视频主链专项回归
+
+- 在最新共享快照上通过官方 `scripts/muse_dev.py → psmux`（Python 3.14）运行 `tests.test_video_task_worker`、`tests.test_video_product_builder`、`tests.test_video_checkpoint_adapter`、`tests.test_video_studio`：**121/121 passed，0 failures，0 errors**。内层 psmux Job `9b532a2c807f4ccda6fe3c7c7c956758` exit 0，外层 WebCodex Job `wc_job_jbxuk3O4gwcM5qBd` exit 0。
+- 本次是四个视频模块的定向回归，不包含 compileall 或全仓库 unittest；不替代完整回归，也不代表真实 GPU/ComfyUI 渲染已执行。
+- B331 回归隔离复验：针对两次并发全量回归中出现的本地视频代理 `fake.closed` 失败，单独通过官方 psmux/Python 3.14 运行 `tests.test_local_dashboard`：**11/11 passed**，其中 `test_large_video_product_proxy_streams_without_buffering_limit` 通过。内层 psmux Job `12250f39397a4439ae5c257a344aebe6` exit 0，外层 WebCodex Job `wc_job_IgUA3ibkGMWRUB73` exit 0；因此该失败在独立复跑中未复现，尚不能断言根因已修复。
+
+## 2026-11-22｜B332 Open Design MCP 与全仓回归复验
+
+- 最新共享全量回归使用 Python 3.11：**2,259 tests / 0 failures / 0 errors / 1 skipped**，耗时 210.969 秒；Job `wc_job_ggkMYiFTBt0qgfyY` exit 0。该结果取代更早 2,247 项 / 1 error 的旧快照作为当前全量基线。
+- Open Design MCP + Evidence + Software Crafting 定向回归 **47/47 passed**；内层 psmux Job `ea07965d85e145c5a7dea838bcf4a4f5` exit 0。真实本地 Open Design 只读 smoke 的 `projects` 返回 2 个项目，`doctor` exit 0；当前 `allowed_agents=[]`、`generation_enabled=false`，未启动创作 run。
+- Python 3.14 的一次全量测试快照出现 54 个时区相关错误，原因是该解释器环境缺少 Windows `tzdata`；不作为当前项目代码回归基线。开发全量回归以 Python 3.11 结果为准。
+- 尚未打通的主链：VideoStudio DAG 仍为 preview-only，等待 InitiativeStore 原子 admission grant bind/one-shot consume/revoke 契约；旁白结构化 segments 仍被 Worker flatten，TTS runtime 仍是 text-based，当前已验证仅支持 `pause_after_ms`。未执行真实 GPU/Wan 渲染或自动发布。
+- B333 粤语旁白/韵律桥接最新专项：Python 3.14 经官方 psmux 运行 `test_prosody_contract`、`test_narration_pipeline`、`test_narration_prosody_bridge`、`test_narration_prosody_bridge_integrity`、`test_cantonese_tts`、`test_cantonese_tts_runtime`，**76/76 passed，0 failures，0 errors**；内层 Job `aa61c8b4b3c845d1acd1b2c129f870c8` exit 0。该结果验证规划/桥接与现有 TTS runtime 回归，不代表结构化 prosody payload 已被 runtime 消费。

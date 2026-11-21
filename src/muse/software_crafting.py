@@ -117,18 +117,34 @@ class MCPStdioClient:
             )
         ):
             raise ValueError("MCP child environment overrides must be string pairs")
+        # The environment copy is created after detecting the packaged Open Design CLI.
+        packaged_cli_suffix = "/resources/app/prebundled/daemon/daemon-cli.mjs"
+        self.persistent_session = any(
+            str(part).replace("\\", "/").casefold().endswith(packaged_cli_suffix)
+            for part in self.command
+        )
         self.environment = dict(environment or {})
+        if self.persistent_session:
+            # Open Design's packaged MCP CLI requires a live stdio session for one-shot calls.
+            # Keep its remote Vela/task telemetry disabled unless the caller explicitly opts in.
+            self.environment.setdefault("OPEN_DESIGN_VELA_TELEMETRY", "off")
+            self.environment.setdefault("OD_NEXT_TASK_OBSERVABILITY_MODE", "off")
+            if environment is not None:
+                environment.setdefault("OPEN_DESIGN_VELA_TELEMETRY", "off")
+                environment.setdefault("OD_NEXT_TASK_OBSERVABILITY_MODE", "off")
         self.timeout_seconds = float(timeout_seconds)
 
     def _exchange(
         self, calls: list[dict[str, Any]] | None = None, *, timeout_seconds: float | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
         if timeout_seconds is None:
-            effective_timeout = self.timeout_seconds
+            effective_timeout = float(getattr(self, "timeout_seconds", 120.0))
         else:
             if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)) or not 1 <= timeout_seconds <= 600:
                 raise ValueError("MCP timeout must be between 1 and 600 seconds")
             effective_timeout = float(timeout_seconds)
+        if getattr(self, "persistent_session", False):
+            return self._exchange_sequential(calls or [], timeout_seconds=effective_timeout)
         if calls and len(calls) > 1:
             return self._exchange_sequential(calls, timeout_seconds=effective_timeout)
         requests: list[dict[str, Any]] = [
@@ -231,8 +247,9 @@ class MCPStdioClient:
 
     def _exchange_sequential(
         self, calls: list[dict[str, Any]], *, timeout_seconds: float,
+        request_method: str = "tools/call", capabilities: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
-        """Run stateful tool batches in order within one persistent MCP session."""
+        """Run protocol requests in order within one persistent MCP session."""
         stdout_lines: queue.Queue[str | None] = queue.Queue()
         stderr_tail: list[str] = []
         stderr_lock = threading.Lock()
@@ -333,7 +350,7 @@ class MCPStdioClient:
             send({
                 "jsonrpc": "2.0", "id": 1, "method": "initialize",
                 "params": {
-                    "protocolVersion": "2025-06-18", "capabilities": {},
+                    "protocolVersion": "2025-06-18", "capabilities": capabilities or {},
                     "clientInfo": {"name": "muse-software-crafting", "version": "0.1.0"},
                 },
             })
@@ -350,11 +367,26 @@ class MCPStdioClient:
                 raise SoftwareCraftingError("MCP tools/list returned an invalid tool catalog")
             results: list[dict[str, Any]] = []
             for index, call in enumerate(calls, start=3):
+                if request_method == "tools/call":
+                    request_params = {"name": call["name"], "arguments": call["arguments"]}
+                else:
+                    request_params = call["arguments"]
                 send({
-                    "jsonrpc": "2.0", "id": index, "method": "tools/call",
-                    "params": {"name": call["name"], "arguments": call["arguments"]},
+                    "jsonrpc": "2.0", "id": index, "method": request_method,
+                    "params": request_params,
                 })
-                results.append(validate_tool_result(call["name"], receive(index)))
+                response = receive(index)
+                if request_method == "tools/call":
+                    results.append(validate_tool_result(call["name"], response))
+                    continue
+                rpc_error = response.get("error")
+                if isinstance(rpc_error, dict):
+                    detail = str(rpc_error.get("message") or rpc_error.get("code") or "JSON-RPC error")
+                    raise SoftwareCraftingError(f"MCP {request_method} failed: {detail[:500]}")
+                result = response.get("result")
+                if not isinstance(result, dict) or result.get("isError") is True:
+                    raise SoftwareCraftingError(f"MCP {request_method} returned an unsuccessful result")
+                results.append(result)
             return initialize["result"], tools, results
         finally:
             if process.stdin is not None:
@@ -373,6 +405,95 @@ class MCPStdioClient:
                 process.stdout.close()
             if process.stderr is not None:
                 process.stderr.close()
+
+    def _resource_request(
+        self, method: str, params: dict[str, Any] | None = None, *,
+        timeout_seconds: float | None = None,
+    ) -> dict[str, Any]:
+        """Issue one bounded MCP protocol-level resources request."""
+        if method not in {"resources/list", "resources/read"}:
+            raise ValueError("unsupported MCP resource method")
+        if params is None:
+            params = {}
+        if not isinstance(params, dict) or len(json.dumps(params, ensure_ascii=False).encode("utf-8")) > 16 * 1024:
+            raise ValueError("MCP resource parameters must be a bounded JSON object")
+        if timeout_seconds is None:
+            effective_timeout = float(getattr(self, "timeout_seconds", 120.0))
+        else:
+            if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)):
+                raise ValueError("MCP timeout must be between 1 and 600 seconds")
+            effective_timeout = float(timeout_seconds)
+        if not 1 <= effective_timeout <= 600:
+            raise ValueError("MCP timeout must be between 1 and 600 seconds")
+        if getattr(self, "persistent_session", False):
+            _, _, results = self._exchange_sequential(
+                [{"name": method, "arguments": params}],
+                timeout_seconds=effective_timeout,
+                request_method=method,
+                capabilities={"resources": {}},
+            )
+            return results[0]
+        requests = [
+            {"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+                "protocolVersion":"2025-06-18","capabilities":{"resources":{}},
+                "clientInfo":{"name":"muse-open-design","version":"0.1.0"}}},
+            {"jsonrpc":"2.0","method":"notifications/initialized","params":{}},
+            {"jsonrpc":"2.0","id":2,"method":method,"params":params},
+        ]
+        payload = "\n".join(json.dumps(item, ensure_ascii=False, separators=(",", ":"), allow_nan=False) for item in requests) + "\n"
+        try:
+            completed=subprocess.run(list(self.command),input=payload,capture_output=True,text=True,
+                encoding="utf-8",errors="replace",timeout=effective_timeout,cwd=str(self.workspace),
+                env=_child_environment(self.environment),shell=False,check=False)
+        except (OSError,subprocess.TimeoutExpired) as exc:
+            raise SoftwareCraftingError("MCP resource request failed: "+type(exc).__name__) from exc
+        if len(completed.stdout.encode("utf-8"))>MAX_MCP_OUTPUT_BYTES:
+            raise SoftwareCraftingError("MCP resource response exceeded its bounded size")
+        if completed.returncode!=0:
+            raise SoftwareCraftingError("MCP resource server exited unsuccessfully: "+str(completed.returncode))
+        responses={}
+        for line in completed.stdout.splitlines():
+            try: message=json.loads(line)
+            except json.JSONDecodeError: continue
+            if isinstance(message,dict) and isinstance(message.get("id"),int):
+                responses[message["id"]]=message
+        if not isinstance(responses.get(1,{}).get("result"),dict):
+            raise SoftwareCraftingError("MCP resource initialize handshake failed")
+        response=responses.get(2)
+        if not isinstance(response,dict):
+            raise SoftwareCraftingError("MCP resource server returned no response")
+        if response.get("error"):
+            detail=str(response["error"].get("message","JSON-RPC error"))[:500]
+            raise SoftwareCraftingError("MCP "+method+" failed: "+detail)
+        result=response.get("result")
+        if not isinstance(result,dict) or result.get("isError") is True:
+            raise SoftwareCraftingError("MCP "+method+" returned an unsuccessful result")
+        return result
+
+    def list_resources(self, *, timeout_seconds: float | None = None) -> list[dict[str, Any]]:
+        result=self._resource_request("resources/list",timeout_seconds=timeout_seconds)
+        resources=result.get("resources")
+        if not isinstance(resources,list) or len(resources)>2048:
+            raise SoftwareCraftingError("MCP resources/list returned an invalid resource catalog")
+        if any(not isinstance(item,dict) for item in resources):
+            raise SoftwareCraftingError("MCP resources/list contains an invalid entry")
+        return resources
+
+    def read_resource(self, uri: str, *, timeout_seconds: float | None = None) -> dict[str, Any]:
+        if not isinstance(uri,str) or not uri or len(uri)>2048:
+            raise ValueError("MCP resource URI must be bounded text")
+        result=self._resource_request("resources/read",{"uri":uri},timeout_seconds=timeout_seconds)
+        contents=result.get("contents")
+        if not isinstance(contents,list) or len(contents)>32:
+            raise SoftwareCraftingError("MCP resources/read returned invalid contents")
+        total=0
+        for item in contents:
+            if not isinstance(item,dict) or not isinstance(item.get("text"),str):
+                raise SoftwareCraftingError("MCP resource content is not bounded text")
+            total+=len(item["text"].encode("utf-8"))
+        if total>MAX_MCP_OUTPUT_BYTES:
+            raise SoftwareCraftingError("MCP resource content exceeded its bounded size")
+        return result
 
     def list_tools(self, *, timeout_seconds: float | None = None) -> list[dict[str, Any]]:
         _, tools, _ = self._exchange(timeout_seconds=timeout_seconds)

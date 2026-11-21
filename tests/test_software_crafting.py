@@ -54,6 +54,24 @@ class MCPStdioClientTests(unittest.TestCase):
             self.assertEqual(sent[-1]["method"], "tools/call")
 
     @patch("muse.software_crafting.subprocess.run")
+    def test_protocol_resource_read_uses_mcp_resources_read(self, run: Mock) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            client=self.make_client(Path(directory))
+            run.return_value=__import__("subprocess").CompletedProcess(
+                args=[],returncode=0,stdout="\n".join([
+                    json.dumps({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18"}}),
+                    json.dumps({"jsonrpc":"2.0","id":2,"result":{"contents":[
+                        {"uri":"od://design-systems/muse/DESIGN.md","mimeType":"text/markdown","text":"# Muse"},
+                    ]}}),
+                ]),stderr="",
+            )
+            result=client.read_resource("od://design-systems/muse/DESIGN.md")
+            self.assertEqual(result["contents"][0]["text"],"# Muse")
+            sent=[json.loads(line) for line in run.call_args.kwargs["input"].splitlines()]
+            self.assertEqual(sent[-1]["method"],"resources/read")
+            self.assertEqual(sent[-1]["params"]["uri"],"od://design-systems/muse/DESIGN.md")
+
+    @patch("muse.software_crafting.subprocess.run")
     def test_mcp_child_environment_overrides_are_applied_before_secret_scrubbing(self, run: Mock) -> None:
         with tempfile.TemporaryDirectory() as directory, patch.dict(
             "os.environ", {"MUSE_TEST_TOKEN": "ambient-secret"}, clear=False,

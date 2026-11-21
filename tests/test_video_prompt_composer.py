@@ -7,6 +7,7 @@ from muse.video_prompt_composer import (
     VideoPromptScene,
     VideoPromptSpec,
     compile_video_prompt,
+    video_prompt_spec_from_dict,
 )
 
 
@@ -117,7 +118,49 @@ class VideoPromptComposerTests(unittest.TestCase):
         self.assertEqual(result["model_guidance"]["family"], "google")
         self.assertEqual(result["model_guidance"]["provider_parameters_applied"], [])
 
+    def test_rejects_malformed_typed_fields_with_value_errors(self) -> None:
+        with self.assertRaisesRegex(ValueError, "method_tags"):
+            PromptSourceRef(
+                "s1", "author", "https://example.com/p", "CC-BY-4.0", "full", "cinematic",
+                method_tags=(123,),
+            )
+        with self.assertRaisesRegex(ValueError, "captured_at"):
+            PromptSourceRef(
+                "s1", "author", "https://example.com/p", "CC-BY-4.0", "full", "cinematic",
+                captured_at=None,
+            )
+        with self.assertRaisesRegex(ValueError, "depends_on"):
+            VideoPromptScene("one", "动作", 1, depends_on=(None,))
+        with self.assertRaisesRegex(ValueError, "scenes"):
+            VideoPromptSpec("title", "intent", scenes=("not-a-scene",))
+        with self.assertRaisesRegex(ValueError, "source_refs"):
+            VideoPromptSpec("title", "intent", scenes=(VideoPromptScene("one", "动作", 1),),
+                            source_refs=("not-a-source",))
+        with self.assertRaisesRegex(ValueError, "fps"):
+            VideoPromptSpec("title", "intent", scenes=(VideoPromptScene("one", "动作", 1),), fps=24.0)
+
+    def test_json_loader_rejects_non_string_nested_labels(self) -> None:
+        import json
+        from dataclasses import asdict
+
+        payload = json.loads(json.dumps(asdict(self.make_spec()), ensure_ascii=False))
+        payload["scenes"][0]["depends_on"] = [None]
+        with self.assertRaisesRegex(ValueError, "depends_on"):
+            video_prompt_spec_from_dict(payload)
+
+        payload = json.loads(json.dumps(asdict(self.make_spec()), ensure_ascii=False))
+        payload["source_refs"][0]["method_tags"] = [123]
+        with self.assertRaisesRegex(ValueError, "method_tags"):
+            video_prompt_spec_from_dict(payload)
+
     def test_rejects_invalid_source_url_and_incomplete_label(self) -> None:
+        with self.assertRaises(ValueError):
+            PromptSourceRef("s1", "author", "https://user:pass@example.com/p", "CC-BY-4.0", "full", "cinematic")
+        with self.assertRaisesRegex(ValueError, "completeness"):
+            PromptSourceRef("s1", "author", "https://example.com", "CC-BY-4.0", [], "cinematic")
+        with self.assertRaisesRegex(ValueError, "aspect_ratio"):
+            VideoPromptSpec("title", "intent", scenes=(VideoPromptScene("one", "动作", 1),),
+                            aspect_ratio=[])
         with self.assertRaises(ValueError):
             PromptSourceRef("s1", "author", "http://example.com", "CC-BY-4.0", "full", "cinematic")
         with self.assertRaises(ValueError):
@@ -146,6 +189,47 @@ class VideoPromptComposerTests(unittest.TestCase):
                     depends_on=("missing",),
                 ),),
             )
+
+    def test_json_loader_builds_typed_spec_and_rejects_unknown_fields(self) -> None:
+        import json
+        from dataclasses import asdict
+
+        payload = json.loads(json.dumps(asdict(self.make_spec()), ensure_ascii=False))
+        loaded = video_prompt_spec_from_dict(payload)
+        self.assertEqual(loaded.title, "雨夜归途")
+        self.assertEqual(loaded.scenes[1].depends_on, ("opening",))
+        self.assertEqual(loaded.source_refs[0].method_tags, ("shot-beats", "continuity"))
+        invalid = json.loads(json.dumps(asdict(self.make_spec()), ensure_ascii=False))
+        invalid["surprise"] = "must not be silently ignored"
+        with self.assertRaisesRegex(ValueError, "unsupported fields"):
+            video_prompt_spec_from_dict(invalid)
+
+    def test_video_factory_compose_cli_previews_existing_commander_plan(self) -> None:
+        import json
+        import tempfile
+        from contextlib import redirect_stdout
+        from dataclasses import asdict
+        from io import StringIO
+        from pathlib import Path
+        from muse.video_factory import main
+
+        with tempfile.TemporaryDirectory() as directory:
+            spec_path = Path(directory) / "video-prompt.json"
+            bible_path = Path(directory) / "story-bible.json"
+            spec_path.write_text(json.dumps(asdict(self.make_spec()), ensure_ascii=False), encoding="utf-8")
+            bible_path.write_text(json.dumps(sample_bible(), ensure_ascii=False), encoding="utf-8")
+            output = StringIO()
+            with redirect_stdout(output):
+                code = main(["compose", str(spec_path), "--story-bible", str(bible_path)])
+            result = json.loads(output.getvalue())
+
+        self.assertEqual(code, 0)
+        self.assertEqual(result["status"], "composed")
+        self.assertEqual(result["storyboard"]["aspect_ratio"], "9:16")
+        self.assertEqual(result["continuity_validation"]["continuity_scene_count"], 1)
+        self.assertEqual(result["commander_plan_preview"]["source"], "deterministic_video_storyboard")
+        self.assertEqual(result["execution"], "not_started")
+        self.assertEqual(result["commander_submission"], "not_submitted")
 
 
 if __name__ == "__main__":

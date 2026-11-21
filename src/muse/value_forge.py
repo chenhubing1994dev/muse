@@ -221,6 +221,101 @@ class ValueForge:
             "dispatch_started": False,
         }
 
+    def evaluate_capability_radar_result(self, radar_result: Mapping[str, Any]) -> dict[str, Any]:
+        """Score existing Radar proposals using operational recurrence only.
+
+        A prior non-overlapping window is an operational repeat signal, not evidence
+        of customer demand, commercial value, or independently verified causality.
+        This adapter is read-only: it never creates or updates proposals.
+        """
+        if not isinstance(radar_result, Mapping):
+            raise TypeError("radar_result must be a mapping")
+        signals_seen = radar_result.get("signals_seen")
+        signals_seen = signals_seen if isinstance(signals_seen, list) else []
+        signal_index: dict[str, Mapping[str, Any]] = {}
+        for signal in signals_seen[:64]:
+            if isinstance(signal, Mapping):
+                key = signal.get("key")
+                if isinstance(key, str) and key and len(key) <= 64:
+                    signal_index[key] = signal
+
+        trend = radar_result.get("trend")
+        trend = trend if isinstance(trend, Mapping) else {}
+        trend_signals = trend.get("signals")
+        trend_signals = trend_signals if isinstance(trend_signals, Mapping) else {}
+        has_prior_window = trend.get("status") == "compared"
+
+        proposals: list[Mapping[str, Any]] = []
+        seen_ids: set[str] = set()
+        for bucket_name in ("created", "existing"):
+            bucket = radar_result.get(bucket_name)
+            if not isinstance(bucket, list):
+                continue
+            for proposal in bucket[:128]:
+                if not isinstance(proposal, Mapping):
+                    continue
+                proposal_id = proposal.get("id")
+                if not isinstance(proposal_id, str) or not proposal_id or proposal_id in seen_ids:
+                    continue
+                seen_ids.add(proposal_id)
+                proposals.append(proposal)
+
+        evaluations: list[dict[str, Any]] = []
+        for proposal in proposals:
+            metadata = proposal.get("metadata")
+            metadata = metadata if isinstance(metadata, Mapping) else {}
+            signal_key = proposal.get("signal_key") or metadata.get("signal_key")
+            if not isinstance(signal_key, str) or not signal_key:
+                continue
+            signal = signal_index.get(signal_key, {})
+            window = trend_signals.get(signal_key)
+            window = window if isinstance(window, Mapping) else {}
+            current = window.get("current")
+            previous = window.get("previous")
+            valid_window = (
+                has_prior_window
+                and isinstance(current, int) and not isinstance(current, bool) and current >= 0
+                and isinstance(previous, int) and not isinstance(previous, bool) and previous >= 0
+            )
+            recurrence_observed = bool(valid_window and current > 0 and previous > 0)
+            combined_count = (current + previous) if valid_window else 0
+            evidence_quality = 3 if valid_window and combined_count >= 3 else 2 if signal else 1
+            impact_value = signal.get("impact")
+            impact_rating = impact_value if isinstance(impact_value, int) and not isinstance(impact_value, bool) and 1 <= impact_value <= 5 else 3
+            proposal_ref = f"capability-radar:proposal:{proposal_id}"
+            evaluated = self.evaluate(
+                "capability_gap_to_experiment",
+                {
+                    "impact": impact_rating,
+                    "recurrence": 2 if recurrence_observed else 1,
+                    "capability_fit": 4,
+                    "evidence_quality": evidence_quality,
+                    "feasibility": 3,
+                    "risk": 3,
+                },
+                evidence_refs=[proposal_ref],
+            )
+            evaluations.append({
+                "proposal_id": proposal_id,
+                "signal_key": signal_key,
+                "recurrence_observed": recurrence_observed,
+                "current_window_count": current if valid_window else signal.get("count"),
+                "previous_window_count": previous if valid_window else None,
+                "evaluation": evaluated["evaluation"],
+                "evidence_refs": evaluated["evidence_refs"],
+            })
+
+        evaluations.sort(key=lambda item: item["proposal_id"])
+        return {
+            "schema_version": 1,
+            "epistemic_status": "hypothesis_only",
+            "recurrence_scope": "operational_signal_across_non_overlapping_windows",
+            "evaluations": evaluations,
+            "market_demand_inferred": False,
+            "requires_human_review": True,
+            "dispatch_started": False,
+        }
+
     def propose_initiative(
         self, initiative_store: Any, pattern_id: str, ratings: Mapping[str, int], *,
         title: str | None = None, evidence_refs: Sequence[str] = (), capability_gap: str | None = None,

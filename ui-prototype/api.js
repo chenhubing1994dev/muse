@@ -82,7 +82,7 @@ export function createApiClient({ baseUrl, token, fetchImpl = globalThis.fetch, 
   async function productBlob(initiativeId, versionId, action) {
     if (typeof initiativeId !== "string" || !/^[0-9a-f]{32}$/.test(initiativeId)
         || typeof versionId !== "string" || !/^[0-9a-f]{20}$/.test(versionId)
-        || !["download", "preview", "video"].includes(action)) {
+        || !["download", "preview", "video", "contact-sheet"].includes(action)) {
       throw new Error("产品编号无效");
     }
     const response = await fetchImpl(new URL(
@@ -99,6 +99,14 @@ export function createApiClient({ baseUrl, token, fetchImpl = globalThis.fetch, 
 
     health: () => get("/api/v1/health"),
     agents: () => get("/api/v1/agents?limit=200"),
+    contextualInquiryReviews: (limit = 50) => {
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new RangeError("审查结果数量必须介于 1 和 100 之间");
+      return get(`/api/v1/contextual-inquiry-reviews?limit=${limit}`);
+    },
+    contextualInquiryReviewResult: (taskId) => {
+      if (typeof taskId !== "string" || !/^[0-9a-f]{32}$/.test(taskId)) throw new Error("个案审查任务编号无效");
+      return get(`/api/v1/contextual-inquiry-reviews/${taskId}`);
+    },
     feedback: (limit = 20) => {
       if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new RangeError("反馈数量必须介于 1 和 100 之间");
       return get(`/api/v1/feedback?limit=${limit}`);
@@ -220,6 +228,30 @@ export function createApiClient({ baseUrl, token, fetchImpl = globalThis.fetch, 
     downloadProduct: (initiativeId, versionId) => productBlob(initiativeId, versionId, "download"),
     previewProduct: (initiativeId, versionId) => productBlob(initiativeId, versionId, "preview"),
     downloadVideo: (initiativeId, versionId) => productBlob(initiativeId, versionId, "video"),
+    videoContactSheet: (initiativeId, versionId) => productBlob(initiativeId, versionId, "contact-sheet"),
+    visualRevisionBrief: (initiativeId, versionId) => {
+      if (typeof initiativeId !== "string" || !/^[0-9a-f]{32}$/.test(initiativeId)
+          || typeof versionId !== "string" || !/^[0-9a-f]{20}$/.test(versionId)) {
+        throw new Error("产品编号无效");
+      }
+      return get("/api/v1/products/" + initiativeId + "/" + versionId + "/revision-brief");
+    },
+    visualReviews: (initiativeId, versionId) => {
+      if (typeof initiativeId !== "string" || !/^[0-9a-f]{32}$/.test(initiativeId)
+          || typeof versionId !== "string" || !/^[0-9a-f]{20}$/.test(versionId)) {
+        throw new Error("产品编号无效");
+      }
+      return get("/api/v1/products/" + initiativeId + "/" + versionId + "/visual-review");
+    },
+    submitVisualReview: (initiativeId, versionId, payload) => {
+      if (typeof initiativeId !== "string" || !/^[0-9a-f]{32}$/.test(initiativeId)
+          || typeof versionId !== "string" || !/^[0-9a-f]{20}$/.test(versionId)) {
+        throw new Error("产品编号无效");
+      }
+      return request("/api/v1/products/" + initiativeId + "/" + versionId + "/visual-review", {
+        method: "POST", body: payload,
+      });
+    },
     subtitleReview: (initiativeId, versionId) => {
       if (typeof initiativeId !== "string" || !/^[0-9a-f]{32}$/.test(initiativeId)
           || typeof versionId !== "string" || !/^[0-9a-f]{20}$/.test(versionId)) {

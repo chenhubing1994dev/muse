@@ -80,6 +80,16 @@ class HerdrEventStreamTests(unittest.TestCase):
         ]})
         self.assertEqual(bound_agent_snapshot_updates(stream, {"t1": "coder", "t2": "reviewer", "t3": "writer"}), (("coder", "working"),))
 
+    def test_core_missed_notification_method_replaces_snapshot(self):
+        stream = HerdrEventStream.from_snapshot({"seq": 2, "terminals": [{"id": "old", "status": "working", "reported": True}]})
+        result = stream.apply({"jsonrpc": "2.0", "method": "missed", "params": {
+            "seq": 9, "terminals": [{"id": "new", "status": "blocked", "reported": True}],
+        }})
+        self.assertTrue(result.accepted)
+        self.assertTrue(result.snapshot_replaced)
+        self.assertEqual(stream.sequence, 9)
+        self.assertEqual(stream.statuses, {"new": "blocked"})
+
     def test_missed_without_snapshot_requires_external_reconcile(self):
         stream = HerdrEventStream.from_snapshot({"seq": 2, "terminals": []})
         result = stream.apply({"jsonrpc": "2.0", "method": "event", "params": {"seq": 3, "type": "missed"}})

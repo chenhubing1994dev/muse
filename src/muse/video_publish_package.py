@@ -4,7 +4,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import shutil
+import subprocess
 import tempfile
 import zipfile
 from datetime import datetime, timezone
@@ -245,6 +247,7 @@ def _platform_draft(
 def _review_record_status(
     record: Any, *, category: str, initiative_id: str, version_id: str,
     video_sha256: str, required_artifacts: dict[str, str],
+    release_manifest_sha256: str | None = None,
 ) -> str:
     """Verify review scope and digest; the digest is not a digital signature."""
     if not isinstance(record, dict):
@@ -271,18 +274,32 @@ def _review_record_status(
         return "evidence_mismatch_or_incomplete"
     if not isinstance(rationale, str) or not rationale.strip():
         return "evidence_mismatch_or_incomplete"
-    if not all(isinstance(reviewer.get(key), str) and reviewer[key].strip() for key in ("id", "role")):
+    if (not (isinstance(reviewer.get("id"), str) and reviewer["id"].strip()
+            or isinstance(reviewer.get("label"), str) and reviewer["label"].strip())
+            or not isinstance(reviewer.get("role"), str) or not reviewer["role"].strip()):
         return "evidence_mismatch_or_incomplete"
     if (record.get("schema_version") != 1 or record.get("category") != category
-            or record.get("decision") != "approved"
             or subject.get("initiative_id") != initiative_id
             or subject.get("version_id") != version_id
             or subject.get("video_sha256") != video_sha256
             or subject.get("artifact_sha256") != required_artifacts):
         return "evidence_mismatch_or_incomplete"
+    if category == "visual_content":
+        if (not isinstance(release_manifest_sha256, str)
+                or re.fullmatch(r"[0-9a-f]{64}", release_manifest_sha256) is None
+                or subject.get("release_manifest_sha256") != release_manifest_sha256):
+            return "evidence_mismatch_or_incomplete"
+    elif (release_manifest_sha256 is not None
+            and subject.get("release_manifest_sha256") != release_manifest_sha256):
+        return "evidence_mismatch_or_incomplete"
     payload = {key: value for key, value in record.items() if key != "review_sha256"}
     expected = hashlib.sha256(_json_bytes(payload)).hexdigest()
     if record.get("review_sha256") != expected:
+        return "evidence_mismatch_or_incomplete"
+    decision = record.get("decision")
+    if decision != "approved":
+        if decision in {"changes_requested", "rejected"}:
+            return f"human_review_{decision}"
         return "evidence_mismatch_or_incomplete"
     return "verified_human_review_digest_scope_bound"
 
@@ -290,6 +307,8 @@ def _review_record_status(
 def _release_quality_report(
     *, product_manifest: dict[str, Any], qa_warnings: list[dict[str, Any]],
     subtitles: Path, video: Path, initiative_id: str, version_id: str,
+    contact_sheet: Path | None = None,
+    visual_review_manifest_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Summarize evidence without promoting missing human reviews to approvals."""
     video_hash, subtitle_hash = _sha256(video), _sha256(subtitles)
@@ -300,7 +319,12 @@ def _release_quality_report(
     review_artifact_sha256 = (
         product_files.get("subtitle-review.json") if isinstance(product_files, dict) else None
     )
+    contact_sheet_hash = _sha256(contact_sheet) if contact_sheet is not None else None
     review_specs = {
+        "visual_content_review": (
+            "visual_content",
+            {"video.mp4": video_hash, **({"contact-sheet.png": contact_sheet_hash} if contact_sheet_hash else {})},
+        ),
         "subtitle_review": (
             "subtitle_review",
             {
@@ -318,6 +342,7 @@ def _release_quality_report(
             review_records.get(record_key), category=record_key,
             initiative_id=initiative_id, version_id=version_id,
             video_sha256=video_hash, required_artifacts=artifacts,
+            release_manifest_sha256=(visual_review_manifest_sha256 if record_key == "visual_content" else None),
         )
         for report_key, (record_key, artifacts) in review_specs.items()
     }
@@ -328,6 +353,12 @@ def _release_quality_report(
             "status": "pending_human_review" if qa_warnings else "heuristics_only_review_required",
             "warning_count": len(qa_warnings),
             "warning_codes": sorted({item["code"] for item in qa_warnings if isinstance(item.get("code"), str)}),
+            "contact_sheet": {
+                "status": "available" if contact_sheet is not None else "not_provided",
+                "evidence": "contact-sheet.png" if contact_sheet is not None else None,
+                "sha256": contact_sheet_hash,
+                "human_review_required": True,
+            },
         },
         "subtitle_review": {
             "status": subtitle_status,
@@ -341,6 +372,11 @@ def _release_quality_report(
         "platform_upload_specifications": {"status": "manual_account_specific_check_required"},
         "account_authorization": {"status": "not_connected"},
     }
+    visual_status = verified_reviews["visual_content_review"]
+    if visual_status == "verified_human_review_digest_scope_bound":
+        checks["visual_anomaly_review"]["status"] = visual_status
+    elif visual_status in {"human_review_changes_requested", "human_review_rejected"}:
+        checks["visual_anomaly_review"]["status"] = visual_status
     blockers = [name for name, item in checks.items() if item["status"] not in {"passed", "verified_human_review_digest_scope_bound"}]
     return {
         "schema_version": 1,
@@ -361,6 +397,7 @@ def build_publish_package(
     *,
     output_dir: str | Path | None = None,
     platforms: Sequence[str] = DEFAULT_PLATFORMS,
+    contact_sheet: str | Path | None = None,
 ) -> dict[str, Any]:
     """Create a verifiable manual handoff package; never logs in or publishes."""
     root = Path(workspace).resolve()
@@ -389,6 +426,15 @@ def build_publish_package(
     cover = _project_file(root, cover_info.get("path"), "cover")
     subtitles = _project_file(root, (source / "subtitles.srt").relative_to(root).as_posix(), "subtitles")
     readme = _project_file(root, (source / "README.md").relative_to(root).as_posix(), "README")
+    contact_sheet_path = _project_file(root, str(contact_sheet), "contact sheet") if contact_sheet is not None else None
+    if contact_sheet_path is not None:
+        try:
+            with contact_sheet_path.open("rb") as image_file:
+                header = image_file.read(24)
+        except OSError as exc:
+            raise VideoPublishPackageError("contact sheet cannot be read") from exc
+        if len(header) != 24 or header[:8] != b"\x89PNG\r\n\x1a\n" or header[12:16] != b"IHDR":
+            raise VideoPublishPackageError("contact sheet must be a valid PNG with an IHDR header")
 
     if not subtitles.stat().st_size:
         raise VideoPublishPackageError("subtitles file is empty")
@@ -430,6 +476,11 @@ def build_publish_package(
     product_manifest = _project_file(root, (product_dir / "manifest.json").relative_to(root).as_posix(), "Muse product manifest")
     qa_document = _load_object(qa_report, "QA report")
     product_manifest_document = _load_object(product_manifest, "Muse product manifest")
+    # A review ledger is bound to the exact already-built release manifest. A newly
+    # generated package has a different manifest, so never import a prior package's
+    # approval into this new package's quality report. The append-only ledger remains
+    # available through the review API and live recipe-trace overlay.
+    visual_review_manifest_sha256: str | None = None
     raw_warnings = qa_document.get("warnings", [])
     if not isinstance(raw_warnings, list):
         raise VideoPublishPackageError("QA report warnings must be a list")
@@ -438,6 +489,8 @@ def build_publish_package(
     release_quality_report = _release_quality_report(
         product_manifest=product_manifest_document, qa_warnings=qa_warnings,
         subtitles=subtitles, video=video, initiative_id=initiative_id, version_id=version_id,
+        contact_sheet=contact_sheet_path,
+        visual_review_manifest_sha256=visual_review_manifest_sha256,
     )
     profile = product_info.get("video_metadata", {})
     if isinstance(profile, dict) and profile.get("aspect_ratio") not in (None, master_aspect_ratio):
@@ -482,6 +535,8 @@ def build_publish_package(
             (qa_report, "qa-report.json"), (product_zip, "muse-product.zip"),
             (product_manifest, "muse-product-manifest.json"),
         ]
+        if contact_sheet_path is not None:
+            copies.append((contact_sheet_path, "contact-sheet.png"))
         for src, name in copies:
             shutil.copyfile(src, staging / name)
         for platform, draft in drafts.items():
@@ -582,15 +637,152 @@ def build_publish_package(
         raise
 
 
+def build_publish_package_with_generated_contact_sheet(
+    workspace: str | Path,
+    source_dir: str | Path,
+    *,
+    output_dir: str | Path | None = None,
+    platforms: Sequence[str] = DEFAULT_PLATFORMS,
+    samples: int = 12,
+    columns: int = 4,
+) -> dict[str, Any]:
+    """Generate a verified local contact sheet, then package it as review evidence."""
+    root = Path(workspace).resolve()
+    source = _workspace_directory(root, source_dir, "source directory")
+    generation_path = _project_file(
+        root, (source / "generation.json").relative_to(root).as_posix(), "generation metadata",
+    )
+    generation = _load_object(generation_path, "generation.json")
+    if output_dir is None:
+        product_info = generation.get("product")
+        if not isinstance(product_info, dict):
+            raise VideoPublishPackageError("generation metadata lacks Muse product directory provenance")
+        product_dir = _workspace_directory(root, product_info.get("relative_path"), "Muse product directory")
+        output_dir = product_dir / "publish-package-v1"
+    mp4_info = generation.get("mp4")
+    if not isinstance(mp4_info, dict):
+        raise VideoPublishPackageError("generation metadata lacks master MP4 provenance")
+    video = _project_file(root, mp4_info.get("path"), "master MP4")
+
+    from muse.media import discover_media_tools
+    from muse.video_contact_sheet import create_contact_sheet
+
+    inventory = discover_media_tools()
+    tools = {item.tool_id: item.executable for item in inventory.tools}
+    ffmpeg, ffprobe = tools.get("ffmpeg"), tools.get("ffprobe")
+    if not ffmpeg or not ffprobe:
+        raise VideoPublishPackageError("FFmpeg and FFprobe are required to generate visual review evidence")
+
+    with tempfile.TemporaryDirectory(prefix=".muse-contact-sheet-", dir=str(source)) as temporary:
+        sheet = Path(temporary) / "contact-sheet.png"
+        generated = create_contact_sheet(
+            video, sheet, samples=samples, columns=columns,
+            ffmpeg_path=ffmpeg, ffprobe_path=ffprobe,
+        )
+        if (generated.get("status") != "completed"
+                or generated.get("image_decode") != "passed"
+                or not sheet.is_file()):
+            raise VideoPublishPackageError("contact sheet generation did not produce verified image evidence")
+        return build_publish_package(
+            root, source, output_dir=output_dir, platforms=platforms,
+            contact_sheet=sheet.relative_to(root).as_posix(),
+        )
+
+
+
+def build_publish_package_with_optional_generated_contact_sheet(
+    workspace: str | Path,
+    source_dir: str | Path,
+    *,
+    output_dir: str | Path | None = None,
+    platforms: Sequence[str] = DEFAULT_PLATFORMS,
+    samples: int = 12,
+    columns: int = 4,
+) -> dict[str, Any]:
+    """Build the normal handoff package even when optional visual sampling is unavailable.
+
+    Contact-sheet failures are surfaced in the returned status; they never become a
+    false claim that visual review evidence exists. Package-integrity failures still
+    propagate and are not downgraded to an optional-evidence warning.
+    """
+    root = Path(workspace).resolve()
+    source = _workspace_directory(root, source_dir, "source directory")
+    generation_path = _project_file(
+        root, (source / "generation.json").relative_to(root).as_posix(), "generation metadata",
+    )
+    generation = _load_object(generation_path, "generation.json")
+    if output_dir is None:
+        product_info = generation.get("product")
+        if not isinstance(product_info, dict):
+            raise VideoPublishPackageError("generation metadata lacks Muse product directory provenance")
+        product_dir = _workspace_directory(root, product_info.get("relative_path"), "Muse product directory")
+        output_dir = product_dir / "publish-package-v1"
+
+    failure: str | None = None
+    result: dict[str, Any] | None = None
+    from muse.media import discover_media_tools
+    from muse.video_contact_sheet import create_contact_sheet
+
+    with tempfile.TemporaryDirectory(prefix=".muse-contact-sheet-", dir=str(source)) as temporary:
+        sheet = Path(temporary) / "contact-sheet.png"
+        try:
+            mp4_info = generation.get("mp4")
+            if not isinstance(mp4_info, dict):
+                raise VideoPublishPackageError("generation metadata lacks master MP4 provenance")
+            video = _project_file(root, mp4_info.get("path"), "master MP4")
+            inventory = discover_media_tools()
+            tools = {item.tool_id: item.executable for item in inventory.tools}
+            ffmpeg, ffprobe = tools.get("ffmpeg"), tools.get("ffprobe")
+            if not ffmpeg or not ffprobe:
+                raise VideoPublishPackageError("FFmpeg and FFprobe are required to generate visual review evidence")
+            generated = create_contact_sheet(
+                video, sheet, samples=samples, columns=columns,
+                ffmpeg_path=ffmpeg, ffprobe_path=ffprobe,
+            )
+            if (generated.get("status") != "completed"
+                    or generated.get("image_decode") != "passed"
+                    or not sheet.is_file()):
+                raise VideoPublishPackageError("contact sheet generation did not produce verified image evidence")
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError, VideoPublishPackageError) as exc:
+            failure = str(exc)[:500] or type(exc).__name__
+        if failure is None:
+            result = build_publish_package(
+                root, source, output_dir=output_dir, platforms=platforms,
+                contact_sheet=sheet.relative_to(root).as_posix(),
+            )
+            result["contact_sheet_generation"] = {
+                "status": "completed", "path": "contact-sheet.png",
+                "sha256": _sha256(sheet), "human_review_required": True,
+            }
+            return result
+
+    # Build a truthful draft package without pretending the missing sheet exists.
+    result = build_publish_package(root, source, output_dir=output_dir, platforms=platforms)
+    result["contact_sheet_generation"] = {
+        "status": "unavailable", "reason": failure,
+        "human_review_required": True,
+    }
+    return result
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Build a Muse manual multi-platform video publish package")
     parser.add_argument("source_dir", help="existing production directory containing generation.json")
     parser.add_argument("--workspace", default=".")
     parser.add_argument("--output")
     parser.add_argument("--platforms", nargs="+", choices=tuple(_PLATFORM_COPY), default=list(DEFAULT_PLATFORMS))
+    parser.add_argument("--contact-sheet", help="workspace-relative PNG contact sheet for human visual review")
+    parser.add_argument("--generate-contact-sheet", action="store_true", help="generate and verify a local FFmpeg contact sheet automatically")
     args = parser.parse_args(argv)
     try:
-        result = build_publish_package(args.workspace, args.source_dir, output_dir=args.output, platforms=args.platforms)
+        if args.generate_contact_sheet and args.contact_sheet:
+            raise ValueError("choose either --contact-sheet or --generate-contact-sheet")
+        if args.generate_contact_sheet:
+            result = build_publish_package_with_generated_contact_sheet(
+                args.workspace, args.source_dir, output_dir=args.output, platforms=args.platforms,
+            )
+        else:
+            result = build_publish_package(args.workspace, args.source_dir, output_dir=args.output,
+                                           platforms=args.platforms, contact_sheet=args.contact_sheet)
     except (OSError, ValueError, VideoProductError, VideoPublishPackageError) as exc:
         print(json.dumps({"status": "failed", "error": str(exc)}, ensure_ascii=False))
         return 2

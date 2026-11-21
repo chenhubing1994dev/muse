@@ -49,6 +49,10 @@ class VideoMotionDiagnosticsTests(unittest.TestCase):
             import numpy as np
         except ModuleNotFoundError:
             self.skipTest("optional NumPy dependency is not installed")
+        try:
+            import cv2  # noqa: F401
+        except Exception as exc:
+            self.skipTest(f"optional OpenCV dependency is unavailable: {type(exc).__name__}")
         class Capture:
             def __init__(self, _path):
                 self.index = 0

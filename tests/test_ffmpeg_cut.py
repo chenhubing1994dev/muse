@@ -43,17 +43,44 @@ class FFmpegCutTests(unittest.TestCase):
         payload = self.source_metadata if Path(command[-1]).name == self.source.name else self.output_metadata
         return SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
 
+    def encoder_listing(self, *names):
+        rows = ["Encoders:"] + [f" V....D {name}" for name in names]
+        return SimpleNamespace(returncode=0, stdout="\n".join(rows), stderr="")
+
     def test_accurate_and_copy_commands_use_literal_argv_without_filtergraph(self):
         accurate = build_cut_command(self.source, self.output, 1.25, 3.25, mode="accurate")
+        amf = build_cut_command(self.source, self.output, 1.25, 3.25, mode="accurate", video_encoder="h264_amf")
         copy = build_cut_command(self.source, self.output, 1.25, 3.25, mode="copy")
         self.assertEqual(accurate[accurate.index("-i") + 1], str(self.source))
         self.assertGreater(accurate.index("-ss"), accurate.index("-i"))
         self.assertLess(copy.index("-ss"), copy.index("-i"))
         self.assertIn("-c:v", accurate)
+        self.assertIn("h264_amf", amf)
+        self.assertIn("nv12", amf)
         self.assertIn("copy", copy)
         self.assertFalse(any("filter_complex" in item or item == "-vf" for item in accurate))
         self.assertIn("-nostdin", accurate)
         self.assertIn("-n", accurate)
+
+    def test_auto_prefers_amf_when_encoder_is_advertised(self):
+        def runner(command, **kwargs):
+            if "-encoders" in command:
+                return self.encoder_listing("h264_amf", "libx264")
+            return self.probe_runner(command, **kwargs)
+
+        plan = plan_cut(self.source, self.output, 1, 3, runner=runner)
+        self.assertEqual(plan["encoder_requested"], "auto")
+        self.assertEqual(plan["encoder_selected"], "h264_amf")
+        self.assertIn("h264_amf", plan["command_preview"])
+
+    def test_explicit_amf_requires_encoder_to_be_advertised(self):
+        def runner(command, **kwargs):
+            if "-encoders" in command:
+                return self.encoder_listing("libx264")
+            return self.probe_runner(command, **kwargs)
+
+        with self.assertRaisesRegex(ValueError, "h264_amf was not reported"):
+            plan_cut(self.source, self.output, 1, 3, encoder="h264_amf", runner=runner)
 
     def test_plan_probes_and_returns_dry_run_without_creating_output(self):
         plan = plan_cut(self.source, self.output, 1, 3, runner=self.probe_runner)
@@ -93,6 +120,8 @@ class FFmpegCutTests(unittest.TestCase):
 
         def runner(command, **kwargs):
             calls.append(command)
+            if "-encoders" in command:
+                return self.encoder_listing("libx264")
             if Path(command[0]).name.casefold().startswith("ffprobe"):
                 return self.probe_runner(command, **kwargs)
             Path(command[-1]).write_bytes(b"rendered-cut")
@@ -113,11 +142,15 @@ class FFmpegCutTests(unittest.TestCase):
         self.assertEqual(self.source.read_bytes(), original)
         self.assertEqual(self.output.read_bytes(), b"rendered-cut")
         self.assertEqual(len(qa_calls), 1)
-        self.assertEqual([Path(item[0]).name.casefold().split(".")[0] for item in calls], ["ffprobe", "ffmpeg", "ffprobe"])
+        self.assertEqual([Path(item[0]).name.casefold().split(".")[0] for item in calls], ["ffprobe", "ffmpeg", "ffmpeg", "ffprobe"])
+        self.assertIn("-encoders", calls[1])
+        self.assertIn("libx264", calls[2])
         self.assertFalse(any(path.name.startswith(".muse-cut-") for path in self.root.iterdir()))
 
     def test_timeout_discards_partial_temp_output_and_never_creates_target(self):
         def runner(command, **kwargs):
+            if "-encoders" in command:
+                return self.encoder_listing("libx264")
             if Path(command[0]).name.casefold().startswith("ffprobe"):
                 return self.probe_runner(command, **kwargs)
             Path(command[-1]).write_bytes(b"partial")
@@ -130,6 +163,8 @@ class FFmpegCutTests(unittest.TestCase):
 
     def test_source_change_during_render_prevents_publication(self):
         def runner(command, **kwargs):
+            if "-encoders" in command:
+                return self.encoder_listing("libx264")
             if Path(command[0]).name.casefold().startswith("ffprobe"):
                 return self.probe_runner(command, **kwargs)
             Path(command[-1]).write_bytes(b"rendered-cut")
@@ -145,6 +180,8 @@ class FFmpegCutTests(unittest.TestCase):
 
     def test_failed_qa_never_publishes_output(self):
         def runner(command, **kwargs):
+            if "-encoders" in command:
+                return self.encoder_listing("libx264")
             if Path(command[0]).name.casefold().startswith("ffprobe"):
                 return self.probe_runner(command, **kwargs)
             Path(command[-1]).write_bytes(b"rendered-cut")
@@ -157,8 +194,30 @@ class FFmpegCutTests(unittest.TestCase):
             )
         self.assertFalse(self.output.exists())
 
+    def test_auto_falls_back_to_libx264_when_amf_process_fails(self):
+        def runner(command, **kwargs):
+            if "-encoders" in command:
+                return self.encoder_listing("h264_amf", "libx264")
+            if Path(command[0]).name.casefold().startswith("ffprobe"):
+                return self.probe_runner(command, **kwargs)
+            if "h264_amf" in command:
+                Path(command[-1]).write_bytes(b"partial-amf")
+                return SimpleNamespace(returncode=1, stdout="", stderr="AMF device unavailable")
+            Path(command[-1]).write_bytes(b"software-cut")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        result = cut_media(
+            self.source, self.output, 1, 3, runner=runner,
+            qa_inspector=lambda path: {"status": "passed"},
+        )
+        self.assertEqual(result["encoder"], "libx264")
+        self.assertTrue(result["encoder_fallback_used"])
+        self.assertEqual(self.output.read_bytes(), b"software-cut")
+
     def test_destination_created_during_qa_is_never_overwritten(self):
         def runner(command, **kwargs):
+            if "-encoders" in command:
+                return self.encoder_listing("libx264")
             if Path(command[0]).name.casefold().startswith("ffprobe"):
                 return self.probe_runner(command, **kwargs)
             Path(command[-1]).write_bytes(b"rendered-cut")

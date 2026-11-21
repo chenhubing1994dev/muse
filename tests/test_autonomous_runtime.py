@@ -36,6 +36,142 @@ class AutonomousRuntimeTests(unittest.TestCase):
             workspace=root,
         )
 
+    def test_commander_dispatches_only_review_only_authorized_contextual_ticket(self):
+        import hashlib
+        import json
+        from unittest.mock import patch
+        from muse.contextual_inquiry import ContextualInquiry, Hypothesis, Observation, SourceKind
+        from muse.contextual_inquiry_bridge import build_workflow_contract
+        from muse.contextual_inquiry_security import _serialize_contextual_inquiry
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / "tasks.sqlite3"
+            inquiry = ContextualInquiry(
+                "commander-review-case", "Review one bounded case.",
+                observations=(Observation("obs-1", SourceKind.USER_QUOTE, "Private case text.", "source:1"),),
+                hypotheses=(Hypothesis(
+                    "hyp-1", "A tentative claim.", ("obs-1",), confidence=0.4,
+                    falsification_condition="Independent evidence contradicts it.",
+                ),),
+            )
+            case_envelope = {
+                "version": 1, "protection": "windows-dpapi-current-user",
+                "ciphertext_b64": "Y2FzZS1jaXBoZXJ0ZXh0",
+            }
+            result_plaintext = json.dumps(
+                {
+                    "schema_version": 1, "inquiry_id": inquiry.inquiry_id,
+                    "summary": "The result remains provisional.",
+                    "findings": [{
+                        "finding_id": "finding-1", "statement": "Candidate only.",
+                        "observation_refs": ["obs-1"], "hypothesis_refs": ["hyp-1"],
+                        "assessment": "unresolved", "rationale": "Needs independent corroboration.",
+                    }],
+                    "unknowns": ["Independent corroboration is unavailable."],
+                },
+                ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
+            ).encode("utf-8")
+            result_envelope = {
+                "version": 1, "protection": "windows-dpapi-current-user",
+                "ciphertext_b64": "cmV2aWV3LXJlc3VsdC1jaXBoZXJ0ZXh0",
+            }
+            case_plaintext = _serialize_contextual_inquiry(inquiry)
+            with TaskQueue(database) as queue:
+                task = queue.enqueue(
+                    "Contextual inquiry review",
+                    {
+                        "kind": "contextual_inquiry_review",
+                        "workflow_contract": build_workflow_contract(inquiry).to_dict(),
+                        "case_context_attached": False,
+                        "case_context_envelope_stored": True,
+                        "case_context_envelope": case_envelope,
+                        "context_status": "encrypted_pending_handler",
+                        "requires_context_reentry": True,
+                        "long_term_storage_performed": False,
+                    },
+                    require_approval=True, recovery_policy="manual",
+                    idempotency_key=(
+                        "contextual-inquiry-review:"
+                        + hashlib.sha256(inquiry.inquiry_id.encode("utf-8")).hexdigest()
+                    ),
+                )
+                queue.authorize_contextual_inquiry_review_only(
+                    task["id"], authorized_by="operator", expected_updated_at=task["updated_at"],
+                )
+
+            class ReviewHandler:
+                accepts_execution_context = True
+
+                def execute_review(self, reviewed_inquiry, *, execution_context):
+                    self.reviewed_inquiry = reviewed_inquiry
+                    self.execution_context = execution_context
+                    return result_envelope
+
+            handler = ReviewHandler()
+            supervisor = AutonomousSupervisor(
+                task_db=database, routine_db=root / "routines.sqlite3",
+                state_db=root / "runtime.sqlite3", improvement_db=root / "improvements.sqlite3",
+                knowledge_db=root / "knowledge.sqlite3", reminder_db=root / "reminders.sqlite3",
+                memory_db=root / "memory.sqlite3", conversation_db=root / "conversations.sqlite3",
+                workspace=root, contextual_review_handler=handler,
+            )
+
+            def decrypt(envelope):
+                if envelope == case_envelope:
+                    return case_plaintext
+                if envelope == result_envelope:
+                    return result_plaintext
+                raise ValueError("unexpected test envelope")
+
+            with (
+                patch("muse.autonomous_runtime.run_due_once", return_value={"processed": 0, "outcomes": []}),
+                patch("muse.contextual_inquiry_bridge.unprotect_case_bytes", side_effect=decrypt),
+                patch("muse.contextual_inquiry_security.unprotect_case_bytes", side_effect=decrypt),
+            ):
+                result = supervisor.run_tick()
+
+            self.assertEqual(result["contextual_review"]["status"], "waiting_approval")
+            self.assertEqual(result["contextual_review"]["id"], task["id"])
+            self.assertIsInstance(handler.reviewed_inquiry, ContextualInquiry)
+            with TaskQueue(database) as queue:
+                completed = queue.get(task["id"])
+            self.assertEqual(completed["status"], "waiting_approval")
+            self.assertEqual(completed["payload"]["review_result_envelope"], result_envelope)
+            self.assertNotIn("_result", completed["payload"])
+            self.assertNotIn("_approved", completed["payload"])
+
+    def test_supervisor_does_not_dispatch_review_only_ticket_without_injected_handler(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            supervisor = self.make_supervisor(root)
+            with TaskQueue(root / "tasks.sqlite3") as queue:
+                task = queue.enqueue(
+                    "Contextual inquiry review",
+                    {
+                        "kind": "contextual_inquiry_review",
+                        "case_context_attached": False,
+                        "case_context_envelope_stored": True,
+                        "case_context_envelope": {
+                            "version": 1, "protection": "windows-dpapi-current-user",
+                            "ciphertext_b64": "Y2FzZS1jaXBoZXJ0ZXh0",
+                        },
+                        "context_status": "encrypted_pending_handler",
+                        "requires_context_reentry": True,
+                        "long_term_storage_performed": False,
+                    },
+                    require_approval=True, recovery_policy="manual",
+                    idempotency_key="contextual-inquiry-review:manual-no-handler-test",
+                )
+                queue.authorize_contextual_inquiry_review_only(
+                    task["id"], authorized_by="operator", expected_updated_at=task["updated_at"],
+                )
+            with patch("muse.autonomous_runtime.run_due_once", return_value={"processed": 0, "outcomes": []}):
+                result = supervisor.run_tick()
+            self.assertNotIn("contextual_review", result)
+            with TaskQueue(root / "tasks.sqlite3") as queue:
+                self.assertEqual(queue.get(task["id"])["status"], "waiting_approval")
+
     def test_local_supervisor_claims_only_registered_review_research_handoff(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -374,6 +510,74 @@ class AutonomousRuntimeTests(unittest.TestCase):
             self.assertFalse(snapshot["automatic_code_changes"])
             self.assertEqual(snapshot["proposal_counts"]["ready_for_review"], 1)
 
+    def test_autonomous_research_records_project_usage_without_shadowing_active_task_context(self):
+        from muse.model_call_context import (
+            current_model_call_context, model_call_scope, record_current_model_usage,
+        )
+        from muse.usage_ledger import UsageLedger
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            supervisor = self.make_supervisor(root)
+            expected = {"task_id": None, "agent_id": None}
+            test_case = self
+
+            class FakeResearchEngine:
+                def __init__(self, **_kwargs):
+                    pass
+
+                def run_once(self, *, stop_event=None):
+                    context = current_model_call_context()
+                    self.assert_context(context)
+                    test_case.assertTrue(record_current_model_usage(                        "lm-studio-local", "research-local-model",
+                        {"prompt_tokens": 31, "completion_tokens": 9, "total_tokens": 40},
+                    ))
+                    return {
+                        "status": "completed",
+                        "report": {"topic": {"question": "bounded test topic"}},
+                        "feedback_reviewer_configuration": {"status": "pending"},
+                    }
+
+                @staticmethod
+                def assert_context(context):
+                    if context is None:
+                        raise AssertionError("routine research must install or preserve a model usage context")
+                    if context.task_id != expected["task_id"] or context.agent_id != expected["agent_id"]:
+                        raise AssertionError("routine research replaced the caller's attribution context")
+                    if context.project_id != "muse":
+                        raise AssertionError("routine research must retain Muse project attribution")
+
+            with patch("muse.autonomous_runtime.AutonomousResearchEngine", FakeResearchEngine), \
+                 patch.dict(os.environ, {}, clear=True):
+                first = supervisor._autonomous_research({})
+                self.assertEqual(first["status"], "completed")
+                self.assertIsNone(current_model_call_context())
+
+                expected.update({"task_id": "outer-task-123", "agent_id": "outer-agent-456"})
+                with model_call_scope(
+                    supervisor.task_db, task_id=expected["task_id"],
+                    agent_id=expected["agent_id"], project_id="muse",
+                ):
+                    second = supervisor._autonomous_research({})
+                    self.assertEqual(second["status"], "completed")
+                    self.assertEqual(current_model_call_context().task_id, expected["task_id"])
+                self.assertIsNone(current_model_call_context())
+
+            with UsageLedger(root / "model_usage.sqlite3") as ledger:
+                events = ledger.list_events(limit=10)
+            self.assertEqual(len(events), 2)
+            unscoped, scoped = sorted(events, key=lambda event: event["task_id"] is not None)
+            self.assertIsNone(unscoped["task_id"])
+            self.assertIsNone(unscoped["agent_id"])
+            self.assertEqual(unscoped["attribution_status"], "partial")
+            self.assertEqual(unscoped["project_id"], "muse")
+            self.assertEqual(scoped["task_id"], "outer-task-123")
+            self.assertEqual(scoped["agent_id"], "outer-agent-456")
+            self.assertEqual(scoped["attribution_status"], "complete")
+            self.assertEqual(scoped["project_id"], "muse")
+            self.assertTrue(all(event["input_tokens"] == 31 for event in events))
+            self.assertTrue(all(event["output_tokens"] == 9 for event in events))
+
     def test_control_watcher_renews_lease_during_a_long_blocking_tick(self):
         from muse.autonomous_runtime import _ControlWatcher
         with tempfile.TemporaryDirectory() as directory:
@@ -451,6 +655,58 @@ class AutonomousRuntimeTests(unittest.TestCase):
             self.assertEqual(result["tasks_processed"], 0)
             self.assertEqual(supervisor.status()["runtime"]["state"], "stopped")
 
+    def test_run_tick_does_not_claim_local_task_after_routine_stop_request(self):
+        with tempfile.TemporaryDirectory() as directory:
+            supervisor = self.make_supervisor(Path(directory))
+            stop_event = threading.Event()
+
+            def stop_during_routines(*_args, **_kwargs):
+                stop_event.set()
+                return {"processed": 1, "outcomes": [{"status": "cancelled"}]}
+
+            with patch("muse.autonomous_runtime.run_due_once", side_effect=stop_during_routines):
+                with patch.object(supervisor, "_next_local_workflow_id") as next_task:
+                    result = supervisor.run_tick(stop_event=stop_event)
+
+            next_task.assert_not_called()
+            self.assertIsNone(result["task"])
+            self.assertEqual(result["routines"]["outcomes"][0]["status"], "cancelled")
+
+
+    def test_cli_local_contextual_review_requires_explicit_opt_in(self):
+        from muse.autonomous_runtime import main
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            args = [
+                "--task-db", str(root / "tasks.sqlite3"),
+                "--routine-db", str(root / "routines.sqlite3"),
+                "--state-db", str(root / "runtime.sqlite3"),
+                "--improvement-db", str(root / "improvements.sqlite3"),
+                "--knowledge-db", str(root / "knowledge.sqlite3"),
+                "--reminder-db", str(root / "reminders.sqlite3"),
+            ]
+            with (
+                patch("muse.autonomous_runtime.AutonomousSupervisor") as supervisor_class,
+                patch("muse.contextual_inquiry_local_review.build_local_contextual_review_handler") as factory,
+            ):
+                supervisor = supervisor_class.return_value
+                supervisor.run_tick.return_value = {"task": None}
+                factory.return_value = object()
+
+                self.assertEqual(main(args + ["once"]), 0)
+                factory.assert_not_called()
+                self.assertIsNone(supervisor_class.call_args.kwargs.get("contextual_review_handler"))
+
+                supervisor_class.reset_mock()
+                self.assertEqual(main(args + ["once", "--enable-contextual-review"]), 0)
+                project_root = Path(__import__("muse.autonomous_runtime", fromlist=["main"]).__file__).resolve().parents[2]
+                factory.assert_called_once_with(project_root, timeout_seconds=90.0)
+                self.assertIs(
+                    supervisor_class.call_args.kwargs["contextual_review_handler"],
+                    factory.return_value,
+                )
+
     def test_cli_enqueue_and_status_are_usable(self):
         from muse.autonomous_runtime import main
         with tempfile.TemporaryDirectory() as directory:
@@ -467,6 +723,28 @@ class AutonomousRuntimeTests(unittest.TestCase):
                                           "--steps-json", '[{"action":"queue_snapshot"}]']), 0)
             self.assertEqual(main(args + ["status"]), 0)
 
+
+    def test_cli_defaults_are_project_root_anchored_outside_project_cwd(self):
+        from muse.autonomous_runtime import main
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("muse.autonomous_runtime.Path.cwd", return_value=Path(directory)):
+                with patch("muse.autonomous_runtime.AutonomousSupervisor") as supervisor_class:
+                    supervisor_class.return_value.status.return_value = {"runtime": {"running": False}}
+                    self.assertEqual(main(["status"]), 0)
+            kwargs = supervisor_class.call_args.kwargs
+            project_root = Path(__import__("muse.autonomous_runtime", fromlist=["main"]).__file__).resolve().parents[2]
+            expected = {
+                "task_db": project_root / "data/tasks/muse.sqlite3",
+                "routine_db": project_root / "data/routines/muse.sqlite3",
+                "state_db": project_root / "data/autonomy/runtime.sqlite3",
+                "improvement_db": project_root / "data/improvements/muse.sqlite3",
+                "knowledge_db": project_root / "data/research/knowledge.sqlite3",
+                "reminder_db": project_root / "data/reminders/muse.sqlite3",
+            }
+            for key, path in expected.items():
+                self.assertEqual(Path(kwargs[key]), path)
+                self.assertTrue(Path(kwargs[key]).is_absolute())
+            self.assertEqual(kwargs["workspace"], project_root)
 
     def test_feedback_reviewer_stays_pending_without_second_model_configuration(self):
         with tempfile.TemporaryDirectory() as directory:

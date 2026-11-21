@@ -41,7 +41,7 @@ class FFmpegSkillContractTests(unittest.TestCase):
                 return SimpleNamespace(returncode=0, stdout="ffmpeg version 8.1.1", stderr="")
             flag = args[1]
             if flag == "-filters":
-                text = "Filters:\n ... scale\n ... crop\n"
+                text = "Filters:\n ... scale\n ... crop\n ... pad\n ... fps\n"
             elif flag == "-encoders":
                 text = "Encoders:\n V....D h264_amf\n V....D libx264\n"
             elif flag == "-decoders":

@@ -18,6 +18,7 @@ from muse.task_queue import TaskQueue
 from muse.progress import ProgressEventStore
 from muse.failure_taxonomy import FailureDescriptor, MuseTaskError, classify_failure
 from muse.resource_governor import ResourcePolicy, probe_host_resources
+from muse.model_call_context import model_call_scope
 
 Handler = Callable[[dict[str, Any]], Any]
 
@@ -47,6 +48,120 @@ class WorkerExecutionContext:
             raise PermissionError("Worker task lease expiry is invalid") from exc
         if expiry.tzinfo is None or expiry.astimezone(timezone.utc) <= datetime.now(timezone.utc):
             raise PermissionError("Worker task lease has expired")
+
+    def complete_contextual_inquiry_review_only(
+        self, encrypted_review_result: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Submit only a DPAPI envelope through the dedicated review-only transaction.
+
+        This deliberately does not return a generic Worker result or call
+        TaskQueue.finish(); the queue transition independently fences the lease
+        and validates the decrypted result before attaching ciphertext.
+        """
+        self.assert_current_lease()
+        with TaskQueue(self.database) as queue:
+            task = queue.get(self.task_id)
+            if task is None:
+                raise PermissionError("Worker task no longer exists")
+            if task.get("status") != "running" or task.get("lease_owner") != self.worker_id:
+                raise PermissionError("Worker execution context no longer owns this task lease")
+            return queue.complete_contextual_inquiry_review_only(
+                self.task_id,
+                worker_id=self.worker_id,
+                expected_updated_at=task["updated_at"],
+                encrypted_review_result=encrypted_review_result,
+            )
+
+
+def run_contextual_inquiry_review_once(
+    database: str | Path,
+    task_id: str,
+    handler: Any,
+    *,
+    lease_seconds: int = 300,
+) -> dict[str, Any] | None:
+    """Run one explicitly authorized case review without generic Worker completion.
+
+    The handler must opt in with accepts_execution_context = True and expose
+    execute_review(inquiry, *, execution_context). It must return only a
+    DPAPI envelope. Failures leave the manual-recovery Ticket leased until expiry;
+    this function never writes handler output through TaskQueue.finish().
+    """
+    if not isinstance(task_id, str) or not task_id.strip() or len(task_id) > 128:
+        raise ValueError("task_id must be non-empty text of at most 128 characters")
+    if isinstance(lease_seconds, bool) or not isinstance(lease_seconds, int) or lease_seconds < 5:
+        raise ValueError("lease_seconds must be an integer of at least 5")
+    execute_review = getattr(handler, "execute_review", None)
+    if getattr(handler, "accepts_execution_context", False) is not True or not callable(execute_review):
+        raise PermissionError("contextual review requires an explicitly opted-in trusted handler")
+
+    worker_id = uuid.uuid4().hex
+    with TaskQueue(database) as queue:
+        pending = queue.get(task_id)
+        if pending is None:
+            raise KeyError(task_id)
+        if pending.get("recovery_policy") != "manual":
+            raise PermissionError("contextual review Tickets must use manual lease recovery")
+        claimed = queue.claim_contextual_inquiry_review_only(
+            task_id,
+            worker_id=worker_id,
+            lease_seconds=lease_seconds,
+            expected_updated_at=pending["updated_at"],
+        )
+
+    if claimed is None:
+        return None
+    execution_context = WorkerExecutionContext(
+        task_id=task_id,
+        worker_id=worker_id,
+        database=str(Path(database).resolve()),
+    )
+    from muse.contextual_inquiry_bridge import load_encrypted_case_for_review
+
+    with TaskQueue(database) as queue:
+        inquiry = load_encrypted_case_for_review(queue, task_id, worker_id=worker_id)
+
+    heartbeat_stop = threading.Event()
+
+    def keep_lease_alive() -> None:
+        interval = max(0.25, lease_seconds / 3)
+        while not heartbeat_stop.wait(interval):
+            try:
+                with TaskQueue(database) as heartbeat_queue:
+                    renewed = heartbeat_queue.heartbeat(
+                        task_id, worker_id=worker_id, lease_seconds=lease_seconds,
+                    )
+                if renewed is None:
+                    return
+            except Exception:
+                return
+
+    heartbeat_thread = threading.Thread(target=keep_lease_alive, daemon=True)
+    heartbeat_thread.start()
+    try:
+        with model_call_scope(database, task_id=task_id, agent_id=None, project_id="muse"):
+            encrypted_result = execute_review(inquiry, execution_context=execution_context)
+        if not isinstance(encrypted_result, dict):
+            raise TypeError("contextual review handler must return a DPAPI envelope")
+    except Exception:
+        _record_progress(
+            database, task_id, "failed",
+            "Contextual inquiry review did not complete; manual lease recovery is required.",
+            error_code="contextual_inquiry.review_handler_failed",
+        )
+        raise RuntimeError(
+            "contextual inquiry review handler failed; no result was attached and manual lease recovery is required"
+        ) from None
+    finally:
+        heartbeat_stop.set()
+        heartbeat_thread.join(timeout=max(1.0, lease_seconds))
+
+    completed = execution_context.complete_contextual_inquiry_review_only(encrypted_result)
+    _record_progress(
+        database, task_id, "completed",
+        "Contextual inquiry review result attached; waiting for separate human approval.",
+    )
+    return completed
 
 def echo_handler(payload: dict[str, Any]) -> dict[str, Any]:
     """Safe built-in example handler; performs no external side effects."""
@@ -270,9 +385,22 @@ def run_once(
     review_gate: Any | None = None,
     lease_seconds: int = 60,
     task_id: str | None = None,
+    agent_id: str | None = None,
+    agent_registry_database: str | Path | None = None,
 ) -> dict[str, Any] | None:
     registry = dict(DEFAULT_HANDLERS if handlers is None else handlers)
     worker_id = uuid.uuid4().hex
+    if (agent_id is None) != (agent_registry_database is None):
+        raise ValueError("agent_id and agent_registry_database must be supplied together")
+    if agent_id is not None:
+        if task_id is None:
+            raise ValueError("agent-attributed Worker execution requires an explicit task_id")
+        from muse.agent_registry import AgentRegistry
+        with AgentRegistry(agent_registry_database) as agents:
+            registered_agent = agents.get(agent_id)
+        if (registered_agent is None or registered_agent.get("enabled") is not True
+                or registered_agent.get("current_task_id") != task_id):
+            raise PermissionError("Agent attribution requires an enabled registered Agent currently assigned to this exact task")
     with TaskQueue(database) as queue:
         task = queue.claim_next(worker_id=worker_id, lease_seconds=lease_seconds, task_id=task_id)
         if task is None:
@@ -328,20 +456,23 @@ def run_once(
         heartbeat_thread = threading.Thread(target=keep_lease_alive, daemon=True)
         heartbeat_thread.start()
         try:
-            task_handler = getattr(handler, "execute_task", None)
-            if getattr(handler, "accepts_execution_context", False) is True:
-                execution_context = WorkerExecutionContext(
-                    task_id=task["id"], worker_id=worker_id, database=str(Path(database).resolve()),
-                )
-                execution_context.assert_current_lease()
-                if callable(task_handler):
-                    result = task_handler(
-                        task["payload"], task_id=task["id"], execution_context=execution_context,
+            with model_call_scope(
+                database, task_id=task["id"], agent_id=agent_id, project_id="muse"
+            ):
+                task_handler = getattr(handler, "execute_task", None)
+                if getattr(handler, "accepts_execution_context", False) is True:
+                    execution_context = WorkerExecutionContext(
+                        task_id=task["id"], worker_id=worker_id, database=str(Path(database).resolve()),
                     )
+                    execution_context.assert_current_lease()
+                    if callable(task_handler):
+                        result = task_handler(
+                            task["payload"], task_id=task["id"], execution_context=execution_context,
+                        )
+                    else:
+                        result = handler(task["payload"], execution_context=execution_context)
                 else:
-                    result = handler(task["payload"], execution_context=execution_context)
-            else:
-                result = task_handler(task["payload"], task_id=task["id"]) if callable(task_handler) else handler(task["payload"])
+                    result = task_handler(task["payload"], task_id=task["id"]) if callable(task_handler) else handler(task["payload"])
             status = "succeeded"
             if kind == "approved_code_change" and isinstance(result, dict) and result.get("status") != "implemented":
                 status = "failed"
@@ -353,6 +484,29 @@ def run_once(
                     "retryable": False,
                     "recovery_guidance": "Inspect test evidence, independent review findings, and the evolution journal before proposing a new change.",
                 }
+            if kind == "open_design_run":
+                persistence = result.get("artifact_evidence_persistence") if isinstance(result, dict) else None
+                if not isinstance(persistence, dict) or persistence.get("status") != "persisted":
+                    incomplete = isinstance(persistence, dict) and persistence.get("status") == "incomplete"
+                    error_type = persistence.get("error_type") if isinstance(persistence, dict) else None
+                    retryable = not incomplete and error_type in {"OperationalError", "TimeoutError", "OSError", "ConnectionError"}
+                    status = "failed"
+                    failure_code = (
+                        "open_design.artifact_evidence_incomplete"
+                        if incomplete else "open_design.evidence_persistence_failed"
+                    )
+                    recovery_guidance = (
+                        "The Open Design run completed but its artifact bundle is empty, truncated, or has skipped files. Inspect the run and project output; do not retry this Ticket expecting a new run because its requestId is stable. After correcting the source output, submit a new explicitly approved task with a new task ID."
+                        if incomplete else
+                        "Inspect the artifact-evidence persistence error; repair the Research Wiki database or evidence validation issue, then retry the approved task without creating a new Open Design run."
+                    )
+                    result = {
+                        **(result if isinstance(result, dict) else {}),
+                        "error_code": failure_code,
+                        "failure_category": "execution" if incomplete else "storage",
+                        "retryable": retryable,
+                        "recovery_guidance": recovery_guidance,
+                    }
             if kind in review_required_kinds:
                 if review_gate is None:
                     raise MuseTaskError("review.required", category="review", retryable=False, guidance="Configure a trusted independent reviewer before retrying this task.")

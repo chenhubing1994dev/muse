@@ -78,6 +78,7 @@ class ChatResponse:
     model: str
     content: str
     usage: dict[str, int] = field(default_factory=dict)
+    usage_recorded: bool = False
 
 
 @runtime_checkable
@@ -334,13 +335,28 @@ class LMStudioAdapter:
         return self._descriptor
 
     def chat(self, request: ChatRequest) -> ChatResponse:
-        content = self.client.chat(
-            request.messages,
-            temperature=request.temperature,
-            max_tokens=request.max_tokens,
-        )
+        detailed_chat = getattr(self.client, "chat_with_usage", None)
+        if callable(detailed_chat):
+            result = detailed_chat(
+                request.messages,
+                temperature=request.temperature,
+                max_tokens=request.max_tokens,
+            )
+            content, model, usage = result.content, result.model, result.usage
+            usage_recorded = getattr(result, "usage_recorded", False) is True
+        else:
+            # Keep compatibility with injected test clients and legacy adapters.
+            content = self.client.chat(
+                request.messages,
+                temperature=request.temperature,
+                max_tokens=request.max_tokens,
+            )
+            model, usage = self.client.model or "auto", {}
+            usage_recorded = False
         return ChatResponse(
             provider_id=self.descriptor.provider_id,
-            model=self.client.model or "auto",
+            model=model,
             content=content,
+            usage=usage,
+            usage_recorded=usage_recorded,
         )

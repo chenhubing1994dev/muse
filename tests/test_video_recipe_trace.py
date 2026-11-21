@@ -168,7 +168,8 @@ class VideoRecipeTraceTests(unittest.TestCase):
             product_id = "b" * 32
             version_id = "c" * 20
             manifest_hash = "d" * 64
-            mp4_hash = "e" * 64
+            video_bytes = b"visual review master fixture"
+            mp4_hash = hashlib.sha256(video_bytes).hexdigest()
             package_hash = "f" * 64
             recipe_hash = "a" * 64
             brief = self._brief()
@@ -188,12 +189,26 @@ class VideoRecipeTraceTests(unittest.TestCase):
                     version_id=version_id, mp4_sha256=mp4_hash, package_sha256=package_hash,
                     manifest_sha256=manifest_hash,
                 )
-            release_dir = products_root / product_id / version_id / "publish-package-v1"
+            product_dir = products_root / product_id / version_id
+            release_dir = product_dir / "publish-package-v1"
             release_dir.mkdir(parents=True)
+            (product_dir / "video.mp4").write_bytes(video_bytes)
+            contact_sheet = (
+                b"\x89PNG\r\n\x1a\n" + (13).to_bytes(4, "big") + b"IHDR"
+                + (640).to_bytes(4, "big") + (480).to_bytes(4, "big") + b"fixture"
+            )
+            (release_dir / "contact-sheet.png").write_bytes(contact_sheet)
+            sheet_hash = hashlib.sha256(contact_sheet).hexdigest()
             quality_report = {
                 "schema_version": 1, "overall_status": "blocked_pending_human_review",
-                "can_publish": False, "blocking_items": ["editorial_and_fact_review"],
-                "checks": {"editorial_and_fact_review": {"status": "pending"}},
+                "can_publish": False, "blocking_items": ["editorial_and_fact_review", "visual_anomaly_review"],
+                "checks": {
+                    "editorial_and_fact_review": {"status": "pending"},
+                    "visual_content_review": {"status": "not_recorded"},
+                    "visual_anomaly_review": {"status": "heuristics_only_review_required", "contact_sheet": {
+                        "status": "available", "sha256": sheet_hash, "human_review_required": True,
+                    }},
+                },
             }
             quality_report_bytes = json.dumps(quality_report, sort_keys=True).encode("utf-8")
             quality_report_hash = hashlib.sha256(quality_report_bytes).hexdigest()
@@ -211,8 +226,27 @@ class VideoRecipeTraceTests(unittest.TestCase):
                 "source_video_sha256": mp4_hash, "muse_product_zip_sha256": package_hash,
                 "release_state": "draft_only", "can_publish": False,
                 "release_quality_report": quality_report,
-                "files": {"release-quality-report.json": quality_report_hash},
+                "files": {
+                    "video.mp4": mp4_hash, "contact-sheet.png": sheet_hash,
+                    "release-quality-report.json": quality_report_hash,
+                },
             }), encoding="utf-8")
+            from muse.video_human_review import (
+                CHECKLIST_KEYS, VisualReviewLedger, validate_visual_review_payload,
+                verify_visual_review_evidence,
+            )
+            visual_evidence = verify_visual_review_evidence(
+                product_dir, product_id, version_id, product_dir / "video.mp4",
+            )
+            review_payload = validate_visual_review_payload({
+                "decision": "approved", "reviewer": "Trace Test Editor",
+                "reviewer_role": "video_editor",
+                "rationale": "Reviewed the complete video and all contact sheet keyframes.",
+                "checklist": {key: True for key in CHECKLIST_KEYS},
+                "confirmation": "RECORD-VISUAL-REVIEW",
+            })
+            with VisualReviewLedger(root / "data" / "reviews" / "visual-content-reviews.sqlite3") as ledger:
+                visual_record = ledger.append(product_id, version_id, review_payload, visual_evidence)
             verified = {
                 "validated": True, "recipe_sha256": recipe_hash,
                 "manifest_sha256": manifest_hash, "mp4_sha256": mp4_hash,
@@ -227,7 +261,111 @@ class VideoRecipeTraceTests(unittest.TestCase):
             self.assertEqual(trace["release_review"]["overall_status"], "blocked_pending_human_review")
             self.assertEqual(trace["release_review"]["blocking_items"], ["editorial_and_fact_review"])
             self.assertEqual(trace["release_review"]["quality_report_sha256"], quality_report_hash)
+            self.assertTrue(trace["release_review"]["visual_content_review_live_overlay"])
+            self.assertEqual(trace["release_review"]["checks"]["visual_content_review"]["record_id"], visual_record["record_id"])
+            self.assertEqual(trace["release_review"]["checks"]["visual_content_review"]["status"], "verified_human_review_digest_scope_bound")
             self.assertEqual(trace["release_review"]["official_publish_api"], "not_called")
+            self.assertFalse(trace["release_review"]["can_publish"])
+
+
+    def test_generic_visual_evidence_overlay_never_claims_release_ready(self):
+        import hashlib
+        from muse.video_human_review import (
+            CHECKLIST_KEYS, VisualReviewLedger, validate_visual_review_payload,
+            verify_visual_review_evidence,
+        )
+        from muse.video_visual_evidence import create_visual_review_evidence_pack
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            initiatives_db = root / "data" / "initiatives" / "muse.sqlite3"
+            products_root = root / "data" / "products"
+            product_id, version_id = "e" * 32, "f" * 20
+            recipe_hash, manifest_hash, package_hash = "a" * 64, "d" * 64, "f" * 64
+            video_bytes = bytes.fromhex("000000186674797069736f6d66697874757265")
+            video_hash = hashlib.sha256(video_bytes).hexdigest()
+            brief = self._brief()
+            with InitiativeStore(initiatives_db) as store:
+                initiative = store.propose(
+                    "Generic evidence trace", kind="creative_output", creator_value="trace",
+                    concept=json.dumps({"creator_brief": {"video": brief}}),
+                    first_step="trace", expected_output="trace",
+                )
+                store.start_video_attempt(
+                    "generic-evidence-trace", mode="prompt_to_video",
+                    initiative_id=initiative["id"], recipe_sha256=recipe_hash,
+                )
+                store.mark_video_attempt_running("generic-evidence-trace")
+                store.complete_video_attempt(
+                    "generic-evidence-trace", initiative_id=initiative["id"],
+                    product_id=product_id, version_id=version_id,
+                    mp4_sha256=video_hash, package_sha256=package_hash,
+                    manifest_sha256=manifest_hash,
+                )
+
+            product_dir = products_root / product_id / version_id
+            product_dir.mkdir(parents=True)
+            video = product_dir / "video.mp4"
+            video.write_bytes(video_bytes)
+            qa = {"schema_version": 1, "status": "passed", "path": "video.mp4",
+                  "artifact_sha256": video_hash}
+            qa_path = product_dir / "qa-report.json"
+            qa_path.write_text(json.dumps(qa), encoding="utf-8")
+            product_manifest = {
+                "product_kind": "video_creator", "initiative_id": product_id,
+                "version_id": version_id, "status": "testing",
+                "quality_gate": {"status": "passed", "passed": True, "ready_to_publish": False},
+                "files": {
+                    "video.mp4": video_hash,
+                    "qa-report.json": hashlib.sha256(qa_path.read_bytes()).hexdigest(),
+                },
+            }
+            (product_dir / "manifest.json").write_text(json.dumps(product_manifest), encoding="utf-8")
+
+            def fake_contact_sheet(source, target, **kwargs):
+                target.write_bytes(
+                    b"\x89PNG\r\n\x1a\n" + (13).to_bytes(4, "big") + b"IHDR"
+                    + (640).to_bytes(4, "big") + (480).to_bytes(4, "big") + b"fixture"
+                )
+                return {"status": "completed", "width": 640, "height": 480, "image_decode": "passed"}
+
+            verified = {
+                "validated": True, "recipe_sha256": recipe_hash,
+                "manifest_sha256": manifest_hash, "mp4_sha256": video_hash,
+                "package_sha256": package_hash,
+                "quality_gate": {"status": "passed", "passed": True, "ready_to_publish": False},
+            }
+            with patch("muse.video_product_builder.VideoProductBuilder.verify_path", return_value=verified):
+                pack = create_visual_review_evidence_pack(
+                    products_root, product_id, version_id, contact_sheet_factory=fake_contact_sheet,
+                )
+                self.assertEqual(pack["status"], "available")
+                evidence = verify_visual_review_evidence(product_dir, product_id, version_id, video)
+                payload = validate_visual_review_payload({
+                    "decision": "approved", "reviewer": "Trace Editor",
+                    "reviewer_role": "video_editor",
+                    "rationale": "Reviewed the complete video and its contact sheet carefully.",
+                    "checklist": {key: True for key in CHECKLIST_KEYS},
+                    "confirmation": "RECORD-VISUAL-REVIEW",
+                })
+                with VisualReviewLedger(
+                    "data/reviews/visual-content-reviews.sqlite3", workspace_root=root,
+                ) as ledger:
+                    ledger.append(product_id, version_id, payload, evidence)
+                self.assertTrue((root / "data" / "reviews" / "visual-content-reviews.sqlite3").is_file())
+                self.assertTrue((product_dir / "visual-review-evidence-v1").is_dir())
+                trace = build_video_recipe_trace(root, "generic-evidence-trace")
+                trace = build_video_recipe_trace(root, "generic-evidence-trace")
+
+            self.assertTrue(trace["chain_consistent"])
+            self.assertEqual(trace["release_review"]["status"], "not_prepared")
+            self.assertTrue(trace["release_review"].get("visual_content_review_live_overlay"), trace["release_review"])
+            self.assertEqual(trace["release_review"]["overall_status"], "blocked_pending_release_package")
+            self.assertEqual(trace["release_review"]["blocking_items"], ["release_package_not_prepared"])
+            self.assertEqual(
+                trace["release_review"]["checks"]["visual_content_review"]["status"],
+                "verified_human_review_digest_scope_bound",
+            )
             self.assertFalse(trace["release_review"]["can_publish"])
 
 if __name__ == "__main__":

@@ -12,12 +12,12 @@ import json
 import os
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from muse.autonomous_runtime import AutonomousSupervisor, RuntimeStateStore
-
+from muse.autonomous_runtime import AutonomousSupervisor, RuntimeStateStore, _pid_alive
 
 class DaemonError(RuntimeError):
     """A lifecycle action could not be performed safely."""
@@ -142,60 +142,99 @@ class MuseDaemonController:
     def resume(self) -> dict[str, Any]:
         return self._control("resume", "running")
 
+    STOP_GRACE_SECONDS = 5.0
+    STOP_POLL_SECONDS = 0.1
+
     def stop(self) -> dict[str, Any]:
         result = self._control("stop", "stopping")
-        # The supervisor observes 'stopping' via its control watcher, but a
-        # long routine/tick can delay that by minutes. As an operator-facing
-        # control, also signal the managed process we spawned so "stop" means
-        # the machine actually stops doing work. Failures are non-fatal: the
-        # SQLite control state remains authoritative and the runtime watchdog
-        # will still refuse to claim new work.
-        pid = (self._read_lease() or {}).get("pid")
+        lease = self._read_lease() or {}
+        pid = lease.get("pid")
         signalled = False
-        if isinstance(pid, int) and pid > 0 and self._pid_alive(pid):
-            self._signal_stop(pid)
-            signalled = True
-        # Once no live owner remains, close the lease cleanly so the next
-        # start does not inherit a stale 'stopping' row.
-        if signalled and not self.status()["running"]:
-            import sqlite3
-            conn = sqlite3.connect(self.state_db, timeout=10)
-            try:
-                conn.execute(
-                    "UPDATE autonomous_runtime SET state='stopped', owner_id=NULL, pid=NULL, updated_at=? "
-                    "WHERE singleton=1", (_stamp(),),
-                )
-                conn.commit()
-            finally:
-                conn.close()
-            lease = self._read_lease()
-            if lease:
-                lease["stopped_at"] = _stamp()
-                self._write_lease(lease)
-        return {**result, "signal_sent": signalled, **self.status()}
+        stop_mode = "already_stopped"
+        if isinstance(pid, int) and pid > 0 and self._runtime_owner_matches(pid) and self._pid_matches_lease(pid, lease):
+            if self._wait_for_owner_exit(pid, self.STOP_GRACE_SECONDS):
+                stop_mode = "graceful_exit"
+            elif self._runtime_owner_matches(pid) and self._pid_matches_lease(pid, lease):
+                # Re-check both the authoritative SQLite owner and Windows
+                # process creation identity immediately before force termination.
+                self._signal_stop(pid)
+                signalled = True
+                stop_mode = "forced_after_timeout"
+            elif self._runtime_owner_record_matches(pid):
+                stop_mode = "owner_identity_unverified_or_process_exited"
+            else:
+                stop_mode = "owner_changed_during_timeout"
+        elif isinstance(pid, int) and pid > 0:
+            stop_mode = "pid_or_owner_mismatch"
+        # Never manufacture a stopped DB row after force termination. The
+        # Supervisor's own finally/release path remains authoritative.
+        return {**result, "signal_sent": signalled, "stop_mode": stop_mode, **self.status()}
 
-    @staticmethod
-    def _pid_alive(pid: int | None) -> bool:
-        if not isinstance(pid, int) or pid <= 0:
+    def _runtime_owner_record_matches(self, pid: int) -> bool:
+        """True only while SQLite still names this PID as the active owner."""
+        with RuntimeStateStore(self.state_db) as state:
+            current = state.status()
+        return bool(current.get("owner_id")) and current.get("pid") == pid
+
+    def _runtime_owner_matches(self, pid: int) -> bool:
+        with RuntimeStateStore(self.state_db) as state:
+            current = state.status()
+        return bool(current.get("running")) and bool(current.get("owner_id")) and current.get("pid") == pid and self._pid_alive(pid)
+
+    def _pid_matches_lease(self, pid: int, lease: dict[str, Any]) -> bool:
+        """Fail closed unless Windows process creation time matches our lease."""
+        if os.name != "nt" or not isinstance(lease.get("started_at"), str):
             return False
         try:
             import ctypes
-            kernel = ctypes.windll.kernel32
-            handle = kernel.OpenProcess(0x1000, False, pid)
+            from ctypes import wintypes
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            class FILETIME(ctypes.Structure):
+                _fields_ = [("low", wintypes.DWORD), ("high", wintypes.DWORD)]
+            kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            kernel32.OpenProcess.restype = wintypes.HANDLE
+            kernel32.GetProcessTimes.argtypes = [
+                wintypes.HANDLE, ctypes.POINTER(FILETIME), ctypes.POINTER(FILETIME),
+                ctypes.POINTER(FILETIME), ctypes.POINTER(FILETIME),
+            ]
+            kernel32.GetProcessTimes.restype = wintypes.BOOL
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            kernel32.CloseHandle.restype = wintypes.BOOL
+            created, exited, kernel, user = FILETIME(), FILETIME(), FILETIME(), FILETIME()
+            handle = kernel32.OpenProcess(0x1000, False, pid)
             if not handle:
                 return False
             try:
-                code = ctypes.c_ulong()
-                kernel.GetExitCodeProcess(handle, ctypes.byref(code))
-                return code.value == 259
+                ok = kernel32.GetProcessTimes(
+                    handle, ctypes.byref(created), ctypes.byref(exited),
+                    ctypes.byref(kernel), ctypes.byref(user),
+                )
+                if not ok:
+                    return False
             finally:
-                kernel.CloseHandle(handle)
-        except (OSError, AttributeError):
-            try:
-                os.kill(pid, 0)
-                return True
-            except OSError:
+                kernel32.CloseHandle(handle)
+            ticks = (created.high << 32) | created.low
+            process_started = ticks / 10_000_000 - 11_644_473_600
+            lease_started = datetime.fromisoformat(lease["started_at"]).timestamp()
+            return abs(process_started - lease_started) <= 5.0
+        except (OSError, AttributeError, TypeError, ValueError, OverflowError):
+            return False
+
+    def _wait_for_owner_exit(self, pid: int, timeout_seconds: float) -> bool:
+        """Wait for the owner row to be released; a dead PID alone is not graceful."""
+        deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+        while self._runtime_owner_record_matches(pid):
+            if not self._pid_alive(pid):
                 return False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(self.STOP_POLL_SECONDS, remaining))
+        return True
+
+    @staticmethod
+    def _pid_alive(pid: int | None) -> bool:
+        return _pid_alive(pid)
 
     @staticmethod
     def _signal_stop(pid: int) -> None:
@@ -209,7 +248,6 @@ class MuseDaemonController:
                 os.kill(pid, 15)
         except (OSError, subprocess.SubprocessError):
             pass
-
     def _control(self, action: str, target: str) -> dict[str, Any]:
         current = self.status()
         with RuntimeStateStore(self.state_db) as state:
@@ -246,6 +284,7 @@ class MuseDaemonController:
             return {}
 
     def _write_lease(self, value: dict[str, Any]) -> None:
+        self._lease_path().parent.mkdir(parents=True, exist_ok=True)
         self._lease_path().write_text(
             json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
         )

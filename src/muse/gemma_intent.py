@@ -6,6 +6,7 @@ import logging
 import os
 import queue
 import threading
+from contextvars import copy_context
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -266,7 +267,11 @@ class LMStudioGemmaIntentClassifier:
                 with self._lock:
                     self._active = False
 
-        threading.Thread(target=work, name="muse-lmstudio-gemma-intent", daemon=True).start()
+        context = copy_context()
+        threading.Thread(
+            target=context.run, args=(work,),
+            name="muse-lmstudio-gemma-intent", daemon=True,
+        ).start()
         try:
             ok, payload = result_queue.get(timeout=self.timeout_seconds)
         except queue.Empty:

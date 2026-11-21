@@ -110,6 +110,46 @@ class ValueForgeTests(unittest.TestCase):
             result["candidates"][0]["evidence_refs"], ["https://example.com/one"]
         )
 
+    def test_capability_radar_adapter_scores_operational_recurrence_not_market_demand(self) -> None:
+        result = self.forge.evaluate_capability_radar_result(
+            {
+                "signals_seen": [
+                    {"key": "task_failure", "count": 4, "priority": 90, "confidence": 0.8}
+                ],
+                "created": [{"id": "proposal-1", "signal_key": "task_failure", "priority": 90}],
+                "existing": [],
+                "trend": {
+                    "status": "compared",
+                    "direction": "worsening",
+                    "signals": {"task_failure": {"current": 4, "previous": 2, "delta": 2}},
+                },
+            }
+        )
+        self.assertEqual(result["epistemic_status"], "hypothesis_only")
+        self.assertEqual(result["recurrence_scope"], "operational_signal_across_non_overlapping_windows")
+        self.assertFalse(result["market_demand_inferred"])
+        evaluation = result["evaluations"][0]
+        self.assertEqual(evaluation["proposal_id"], "proposal-1")
+        self.assertEqual(evaluation["signal_key"], "task_failure")
+        self.assertTrue(evaluation["recurrence_observed"])
+        self.assertEqual(evaluation["evaluation"]["ratings"]["recurrence"], 2)
+        self.assertEqual(evaluation["evaluation"]["ratings"]["evidence_quality"], 3)
+        self.assertEqual(evaluation["evaluation"]["evidence_state"], "hypothesis_only")
+
+    def test_capability_radar_adapter_is_conservative_without_a_prior_window(self) -> None:
+        result = self.forge.evaluate_capability_radar_result(
+            {
+                "signals_seen": [{"key": "test_failure", "count": 1, "priority": 85}],
+                "created": [{"id": "proposal-2", "signal_key": "test_failure", "priority": 85}],
+                "existing": [],
+                "trend": {"status": "insufficient_data", "signals": {}},
+            }
+        )
+        evaluation = result["evaluations"][0]
+        self.assertFalse(evaluation["recurrence_observed"])
+        self.assertEqual(evaluation["evaluation"]["ratings"]["recurrence"], 1)
+        self.assertEqual(evaluation["evaluation"]["ratings"]["evidence_quality"], 2)
+        self.assertFalse(result["market_demand_inferred"])
     def test_initiative_bridge_creates_draft_without_dispatch(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             with InitiativeStore(Path(directory) / "initiatives.sqlite3") as store:

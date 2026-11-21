@@ -12,7 +12,7 @@ import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SOURCE_ROOT = PROJECT_ROOT / "src"
@@ -21,6 +21,7 @@ if str(SOURCE_ROOT) not in sys.path:
 
 from muse.gemma_intent import LMStudioGemmaIntentClassifier
 from muse.intent import classify_request
+from muse.model_call_context import current_model_call_context, model_call_scope
 from muse.task_queue import TaskQueue
 from muse.conversations import ConversationStore
 
@@ -30,6 +31,14 @@ DEFAULT_LMSTUDIO_URL = "http://127.0.0.1:1234/v1"
 DEFAULT_CONVERSATION_DATABASE = PROJECT_ROOT / "data" / "conversations" / "muse.sqlite3"
 MAX_CHATGPT_EXPORT_BYTES = 100 * 1024 * 1024
 MAX_IMPORTED_MESSAGE_CHARS = 20_000
+
+
+def _with_project_usage(database: str | Path, operation: Callable[[], Any]) -> Any:
+    """Attribute standalone CLI model calls to Muse without shadowing real task context."""
+    if current_model_call_context() is not None:
+        return operation()
+    with model_call_scope(database, task_id=None, agent_id=None, project_id="muse"):
+        return operation()
 
 
 def _extract_chatgpt_messages(conversation: dict[str, Any], *, max_messages: int) -> list[dict[str, Any]]:
@@ -260,7 +269,7 @@ def command_classify(args: argparse.Namespace) -> int:
     except ValueError:
         _json({"ok": False, "error": "invalid_or_non_loopback_endpoint", "execution": "not_started"})
         return 2
-    result = classifier.classify(args.request)
+    result = _with_project_usage(DEFAULT_DATABASE, lambda: classifier.classify(args.request))
     if result is None:
         _json({
             "ok": False, "classification": None,
@@ -278,7 +287,7 @@ def command_classify(args: argparse.Namespace) -> int:
 
 def command_route(args: argparse.Namespace) -> int:
     _configure_local_model(args.base_url, args.model, args.timeout)
-    result = classify_request(args.request)
+    result = _with_project_usage(DEFAULT_DATABASE, lambda: classify_request(args.request))
     _json({
         "ok": True, "source": result.get("classifier_source", "deterministic_rules"),
         "advisory_only": result.get("classifier_source") == "optional_local_gemma",
@@ -287,37 +296,127 @@ def command_route(args: argparse.Namespace) -> int:
     return 0
 
 
+def _submit_request_matches(
+    task: dict[str, Any], *, idempotency_key: str, title: str,
+    request_identity: dict[str, Any], priority: int, estimated_seconds: int,
+) -> bool:
+    existing_payload = task.get("payload")
+    if not isinstance(existing_payload, dict):
+        return False
+    # Queue-owned lifecycle fields and advisory classifier output are not request identity.
+    stored_identity = {
+        key: value for key, value in existing_payload.items()
+        if not key.startswith("_") and key != "intent"
+    }
+    return (
+        task.get("idempotency_key") == idempotency_key
+        and task.get("title") == title.strip()
+        and stored_identity == request_identity
+        and task.get("priority") == priority
+        and task.get("estimated_seconds") == estimated_seconds
+        and task.get("recovery_policy") == "manual"
+    )
+
+
+def _submit_intent_source(task: dict[str, Any]) -> str:
+    stored_payload = task.get("payload")
+    stored_intent = stored_payload.get("intent") if isinstance(stored_payload, dict) else None
+    if isinstance(stored_intent, dict):
+        source = stored_intent.get("classifier_source", "deterministic_rules")
+        if isinstance(source, str) and source:
+            return source
+    return "deterministic_rules"
+
+
 def command_submit(args: argparse.Namespace) -> int:
-    _configure_local_model(args.base_url, args.model, args.timeout)
-    intent = classify_request(args.request)
-    request_key = args.request_id or uuid.uuid4().hex
-    payload = {
-        "goal": args.request,
+    request = getattr(args, "request", None)
+    if not isinstance(request, str) or not request.strip():
+        _json({"ok": False, "error": "invalid_request", "execution": "not_started"})
+        return 2
+    request_id = getattr(args, "request_id", None)
+    if request_id is not None and (
+        not isinstance(request_id, str)
+        or not request_id
+        or request_id != request_id.strip()
+        or len(request_id) > 180
+        or any(ord(char) < 32 or ord(char) == 127 for char in request_id)
+    ):
+        _json({"ok": False, "error": "invalid_request_id", "execution": "not_started"})
+        return 2
+    title = getattr(args, "title", None) or request[:120]
+    if not isinstance(title, str) or not title.strip():
+        _json({"ok": False, "error": "invalid_title", "execution": "not_started"})
+        return 2
+
+    request_key = request_id or uuid.uuid4().hex
+    idempotency_key = "chatgpt-bridge:" + request_key
+    request_identity = {
+        "goal": request,
         "source": "chatgpt_webcodex_bridge",
-        "intent": intent,
         "approval_required": True,
         "execution_authorized": False,
     }
+
+    # Fast replay path: a durable Ticket must remain replayable even when the
+    # optional local classifier/LM Studio is unavailable or has changed models.
+    with TaskQueue(args.database) as queue:
+        existing = queue.get_by_idempotency_key(idempotency_key)
+        if existing is not None:
+            if not _submit_request_matches(
+                existing, idempotency_key=idempotency_key, title=title,
+                request_identity=request_identity, priority=args.priority,
+                estimated_seconds=args.estimated_seconds,
+            ):
+                _json({
+                    "ok": False, "error": "request_id_conflict",
+                    "request_id": request_key, "task_id": existing["id"],
+                    "execution": "not_started",
+                })
+                return 2
+            approval_pending = existing["status"] == "waiting_approval"
+            _json({
+                "ok": True, "request_id": request_key, "task_id": existing["id"],
+                "status": existing["status"], "approval_required": approval_pending,
+                "intent_source": _submit_intent_source(existing),
+                "next_action": (
+                    "explicit_human_approval_required" if approval_pending else "existing_ticket_reused"
+                ),
+                "execution": "not_started",
+            })
+            return 0
+
+    _configure_local_model(args.base_url, args.model, args.timeout)
+    intent = _with_project_usage(args.database, lambda: classify_request(request))
+    payload = request_identity | {"intent": intent}
     with TaskQueue(args.database) as queue:
         task = queue.enqueue(
-            args.title or args.request[:120],
-            payload,
-            priority=args.priority,
+            title, payload, priority=args.priority,
             estimated_seconds=args.estimated_seconds,
-            recovery_policy="manual",
-            idempotency_key="chatgpt-bridge:" + request_key,
+            recovery_policy="manual", idempotency_key=idempotency_key,
             require_approval=True,
         )
+        # A concurrent submit may have won between the replay lookup and enqueue.
+        if not _submit_request_matches(
+            task, idempotency_key=idempotency_key, title=title,
+            request_identity=request_identity, priority=args.priority,
+            estimated_seconds=args.estimated_seconds,
+        ):
+            _json({
+                "ok": False, "error": "request_id_conflict",
+                "request_id": request_key, "task_id": task["id"],
+                "execution": "not_started",
+            })
+            return 2
+        intent_source = _submit_intent_source(task)
     _json({
-        "ok": True,
-        "task_id": task["id"],
-        "status": task["status"],
-        "approval_required": True,
-        "intent_source": intent.get("classifier_source", "deterministic_rules"),
+        "ok": True, "request_id": request_key, "task_id": task["id"],
+        "status": task["status"], "approval_required": True,
+        "intent_source": intent_source,
         "next_action": "explicit_human_approval_required",
         "execution": "not_started",
     })
     return 0
+
 
 
 def command_approve(args: argparse.Namespace) -> int:

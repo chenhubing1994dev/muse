@@ -15,6 +15,7 @@ from muse.conversations import ConversationStore
 from muse.memory import MemoryStore
 from muse.memory_extraction import LocalMemoryCandidateExtractor
 from muse.model_client import LMStudioClient, ModelError
+from muse.model_call_context import current_model_call_context, model_call_scope
 
 
 def is_loopback_endpoint(base_url: str) -> bool:
@@ -41,6 +42,7 @@ def run_turn(
     model: ChatModel,
     *,
     memory_database: str | Path | None = "data/memory/muse.sqlite3",
+    usage_database: str | Path = "data/tasks/muse.sqlite3",
     propose_memories: bool = False,
 ) -> dict[str, Any]:
     if propose_memories and memory_database is None:
@@ -58,9 +60,16 @@ def run_turn(
             memory=memory,
             memory_candidate_extractor=extractor,
         )
-        result = assistant.reply(thread_id, message)
+        if current_model_call_context() is not None:
+            result = assistant.reply(thread_id, message)
+        else:
+            # Standalone chat and opt-in memory extraction are project work, not fake task/agent work.
+            with model_call_scope(usage_database, task_id=None, agent_id=None, project_id="muse"):
+                result = assistant.reply(thread_id, message)
         checkpoint = conversations.load(thread_id)
         return {**result, "messages": checkpoint["messages"]}
+
+
 
 
 def main() -> int:

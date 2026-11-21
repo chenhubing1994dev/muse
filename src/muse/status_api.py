@@ -203,6 +203,12 @@ def build_capabilities(capability_db: str | Path) -> list[dict[str, Any]]:
     return [{key: item.get(key) for key in fields} for item in items]
 
 
+def build_agent_org_chart(agent_db: str | Path, *, limit: int = 500) -> dict[str, object]:
+    """Return the bounded, display-safe reporting tree without exposing runtime secrets."""
+    with AgentRegistry(agent_db) as registry:
+        return registry.org_chart(limit=limit)
+
+
 def build_agents(agent_db: str | Path, *, limit: int = 100) -> list[dict[str, Any]]:
     """Return display-safe Agent state and aggregate outcome metrics."""
     with AgentRegistry(agent_db) as registry:
@@ -1146,6 +1152,21 @@ def create_status_server(
                 )
             if result.get("recipe_sha256") != payload.get("recipe_sha256"):
                 raise RuntimeError("video product recipe fingerprint does not match the submitted attempt")
+            visual_review_evidence = {"status": "unavailable", "reason": "product_store_not_configured", "can_publish": False}
+            if products_path is not None:
+                try:
+                    from muse.video_visual_evidence import create_visual_review_evidence_pack
+                    inventory = discover_media_tools()
+                    media_tools = {item.tool_id: item.executable for item in inventory.tools}
+                    visual_review_evidence = create_visual_review_evidence_pack(
+                        products_path, result["initiative_id"], result["version_id"],
+                        ffmpeg_path=media_tools.get("ffmpeg"), ffprobe_path=media_tools.get("ffprobe"),
+                    )
+                except Exception as evidence_error:
+                    visual_review_evidence = {
+                        "status": "unavailable", "reason": str(evidence_error)[:240],
+                        "can_publish": False, "human_review_required": True,
+                    }
             if initiatives_path is not None:
                 with InitiativeStore(initiatives_path) as attempts:
                     attempts.complete_video_attempt(
@@ -1154,7 +1175,7 @@ def create_status_server(
                         mp4_sha256=result["mp4_sha256"], package_sha256=result["package_sha256"],
                         manifest_sha256=result.get("manifest_sha256"),
                     )
-            outcome = {"status": "succeeded", "product": {
+            outcome = {"status": "succeeded", "visual_review_evidence": visual_review_evidence, "product": {
                 "initiative_id": result["initiative_id"], "version_id": result["version_id"],
                 "title": result["title"], "kind": "video_creator",
                 "creator_initiative_id": result["creator_initiative_id"],
@@ -1241,6 +1262,51 @@ def create_status_server(
                     self._send(200, {"api_version": 1, **build_gpu_resource_status(gpu_resource_path)})
                 elif parsed.path == "/api/v1/overview":
                     self._send(200, {"api_version": 1, **build_overview(task_path, progress_path)})
+                elif parsed.path == "/api/v1/contextual-inquiry-reviews":
+                    limit = int(parse_qs(parsed.query).get("limit", ["50"])[0])
+                    if not 1 <= limit <= 100:
+                        raise ValueError("limit must be between 1 and 100")
+                    from muse.task_queue import TaskQueue
+                    with TaskQueue(task_path) as queue:
+                        tasks = queue.list_tasks(kind="contextual_inquiry_review", limit=limit)
+                    reviews = []
+                    for task in tasks:
+                        payload = task.get("payload")
+                        if (
+                            task.get("status") == "waiting_approval"
+                            and isinstance(payload, dict)
+                            and payload.get("case_context_envelope_stored") is True
+                            and payload.get("case_context_attached") is True
+                            and payload.get("requires_context_reentry") is False
+                            and payload.get("context_status") == "validated_attached"
+                            and payload.get("long_term_storage_performed") is False
+                            and isinstance(payload.get("review_result_envelope"), dict)
+                            and "_approved" not in payload and "_result" not in payload
+                            and task.get("lease_owner") is None
+                            and task.get("lease_expires_at") is None
+                            and isinstance(task.get("id"), str)
+                            and re.fullmatch(r"[0-9a-f]{32}", task["id"])
+                        ):
+                            reviews.append({
+                                "task_id": task["id"],
+                                "created_at": task.get("created_at"),
+                                "updated_at": task.get("updated_at"),
+                            })
+                    self._send(200, {"api_version": 1, "count": len(reviews), "reviews": reviews})
+                elif re.fullmatch(r"/api/v1/contextual-inquiry-reviews/[0-9a-f]{32}", parsed.path):
+                    from muse.task_queue import TaskQueue
+                    task_id = parsed.path.rsplit("/", 1)[-1]
+                    try:
+                        with TaskQueue(task_path) as queue:
+                            review = queue.load_contextual_inquiry_review_result(task_id)
+                    except KeyError:
+                        self._send(404, {"error": "contextual inquiry review not found"})
+                    except PermissionError:
+                        self._send(409, {"error": "contextual inquiry review is not ready for human review"})
+                    except Exception:
+                        self._send(503, {"error": "contextual inquiry review result is unavailable"})
+                    else:
+                        self._send(200, {"api_version": 1, "task_id": task_id, "review": review})
                 elif parsed.path == "/api/v1/events/stream":
                     # Finite SSE batches keep each connection below the 5s socket budget.
                     cursor = self.headers.get("Last-Event-ID", "")
@@ -1463,14 +1529,16 @@ def create_status_server(
                 elif parsed.path == "/api/v1/agents":
                     if agent_path is None:
                         agents = []
+                        org_chart = {"nodes": [], "edges": [], "total": 0, "truncated": False, "unresolved_parent_count": 0}
                     else:
                         limit = int(parse_qs(parsed.query).get("limit", ["100"])[0])
                         if not 1 <= limit <= 200:
                             raise ValueError("limit must be between 1 and 200")
                         agents = build_agents(agent_path, limit=limit)
+                        org_chart = build_agent_org_chart(agent_path, limit=500)
                     self._send(200, {
                         "api_version": 1, "registry_configured": agent_path is not None,
-                        "count": len(agents), "agents": agents,
+                        "count": len(agents), "agents": agents, "org_chart": org_chart,
                     })
                 elif parsed.path == "/api/v1/inspirations":
                     if knowledge_path is None:
@@ -1550,13 +1618,13 @@ def create_status_server(
                     if products_path is None:
                         self._send(503, {"error": "product store is not configured"})
                         return
-                    match = re.fullmatch(r"/api/v1/products/([0-9a-f]{32})/([0-9a-f]{20})/(download|preview|video|subtitle-review)", parsed.path)
+                    match = re.fullmatch(r"/api/v1/products/([0-9a-f]{32})/([0-9a-f]{20})/(download|preview|video|subtitle-review|contact-sheet|visual-review|revision-brief)", parsed.path)
                     if not match:
                         self._send(400, {"error": "invalid product path"})
                         return
                     initiative_id, version, action = match.groups()
                     try:
-                        _, manifest, files = _verified_product_files(products_path, initiative_id, version)
+                        product_dir, manifest, files = _verified_product_files(products_path, initiative_id, version)
                     except FileNotFoundError:
                         self._send(404, {"error": "product not found"})
                         return
@@ -1564,6 +1632,103 @@ def create_status_server(
                         self._send(409, {"error": "product integrity check failed"})
                         return
                     is_video = manifest.get("product_kind") == "video_creator"
+                    if action == "revision-brief":
+                        if not is_video:
+                            self._send(404, {"error": "video product not found"})
+                            return
+                        try:
+                            from muse.video_human_review import VisualReviewLedger, verify_visual_review_evidence, build_visual_revision_brief
+                            evidence = verify_visual_review_evidence(product_dir, initiative_id, version, files["video.mp4"][0])
+                            with VisualReviewLedger("data/reviews/visual-content-reviews.sqlite3", workspace_root=workspace_root) as ledger:
+                                records = ledger.list_reviews(initiative_id, version)
+                            latest = records[-1] if records else None
+                            status = None
+                            if latest is not None:
+                                from muse.video_publish_package import _review_record_status
+                                status = _review_record_status(
+                                    latest, category="visual_content", initiative_id=initiative_id,
+                                    version_id=version, video_sha256=evidence["video_sha256"],
+                                    required_artifacts=evidence["artifact_sha256"],
+                                    release_manifest_sha256=evidence["release_manifest_sha256"],
+                                )
+                                if status == "evidence_mismatch_or_incomplete":
+                                    self._send(409, {"error": "revision brief source evidence is no longer valid"})
+                                    return
+                            brief = build_visual_revision_brief(latest) if latest else None
+                            if brief is not None:
+                                brief["evidence_status"] = status
+                            self._send(200, {"api_version": 1, "active": brief is not None, "brief": brief,
+                                             "can_auto_modify_source": False, "new_version_created": False})
+                        except FileNotFoundError:
+                            self._send(404, {"error": "verified contact sheet is required"})
+                        except (OSError, ValueError, KeyError, TypeError, sqlite3.Error):
+                            self._send(409, {"error": "revision brief evidence or review history is invalid"})
+                        return
+                    if action == "visual-review":
+                        if not is_video:
+                            self._send(404, {"error": "video product not found"})
+                            return
+                        from muse.video_human_review import VisualReviewLedger, verify_visual_review_evidence
+                        try:
+                            evidence = verify_visual_review_evidence(
+                                product_dir, initiative_id, version, files["video.mp4"][0],
+                            )
+                            ledger_path = "data/reviews/visual-content-reviews.sqlite3"
+                            with VisualReviewLedger(ledger_path, workspace_root=workspace_root) as ledger:
+                                records = ledger.list_reviews(initiative_id, version)
+                            from muse.video_publish_package import _review_record_status
+                            for record in records:
+                                record["evidence_status"] = _review_record_status(
+                                    record, category="visual_content", initiative_id=initiative_id,
+                                    version_id=version, video_sha256=evidence["video_sha256"],
+                                    required_artifacts=evidence["artifact_sha256"],
+                                    release_manifest_sha256=evidence["release_manifest_sha256"],
+                                )
+                            self._send(200, {
+                                "api_version": 1, "identity_assurance": "self_asserted_local_session",
+                                "evidence": {
+                                    "video_sha256": evidence["video_sha256"],
+                                    "artifact_sha256": evidence["artifact_sha256"],
+                                    "release_manifest_sha256": evidence["release_manifest_sha256"],
+                                },
+                                "count": len(records), "reviews": records,
+                            })
+                        except FileNotFoundError:
+                            self._send(404, {"error": "verified contact sheet is required before visual review"})
+                        except (OSError, ValueError, KeyError, TypeError, sqlite3.Error):
+                            self._send(409, {"error": "visual review evidence is unavailable or mismatched"})
+                        return
+                    if action == "contact-sheet":
+                        if not is_video:
+                            self._send(404, {"error": "video contact sheet not found"})
+                            return
+                        try:
+                            from muse.video_human_review import verify_visual_review_evidence
+                            evidence = verify_visual_review_evidence(
+                                product_dir, initiative_id, version, files["video.mp4"][0],
+                            )
+                            sheet_path = Path(evidence["contact_sheet_path"])
+                            if sheet_path.is_symlink() or not sheet_path.is_file():
+                                raise FileNotFoundError("verified contact sheet not found")
+                            sheet_bytes = sheet_path.read_bytes()
+                            if len(sheet_bytes) > 10 * 1024 * 1024:
+                                self._send(413, {"error": "contact sheet evidence exceeds the read limit"})
+                                return
+                        except FileNotFoundError:
+                            self._send(404, {"error": "verified contact sheet not found"})
+                            return
+                        except (OSError, ValueError, KeyError, TypeError):
+                            self._send(409, {"error": "contact sheet evidence is missing or mismatched"})
+                            return
+                        self.send_response(200)
+                        self.send_header("Content-Type", "image/png")
+                        self.send_header("Content-Length", str(len(sheet_bytes)))
+                        self.send_header("Content-Disposition", 'inline; filename="contact-sheet.png"')
+                        self.send_header("Cache-Control", "no-store")
+                        self.send_header("X-Content-Type-Options", "nosniff")
+                        self.end_headers()
+                        self.wfile.write(sheet_bytes)
+                        return
                     if action == "subtitle-review":
                         if not is_video:
                             self._send(404, {"error": "video product not found"})
@@ -1731,6 +1896,62 @@ def create_status_server(
                     self._send(400, {"error": str(exc)})
                 except Exception:
                     self._send(503, {"error": "creative studio operation unavailable"})
+                return
+            visual_review_match = re.fullmatch(
+                r"/api/v1/products/([0-9a-f]{32})/([0-9a-f]{20})/visual-review",
+                parsed.path,
+            )
+            if visual_review_match:
+                if products_path is None:
+                    self._send(503, {"error": "product store is not configured"})
+                    return
+                from muse.video_human_review import (
+                    VisualReviewEvidenceError, VisualReviewLedger,
+                    validate_visual_review_payload, verify_visual_review_evidence,
+                )
+                try:
+                    if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json":
+                        self._send(415, {"error": "application/json required"})
+                        return
+                    length = int(self.headers.get("Content-Length", "0"))
+                    if length < 1 or length > 64 * 1024:
+                        raise ValueError("request body must contain 1-65536 bytes")
+                    raw = self.rfile.read(length)
+                    if len(raw) != length:
+                        raise ValueError("incomplete request body")
+                    payload = validate_visual_review_payload(json.loads(raw.decode("utf-8")))
+                    initiative_id, version = visual_review_match.groups()
+                    product_dir, manifest, files = _verified_product_files(products_path, initiative_id, version)
+                    if manifest.get("product_kind") != "video_creator":
+                        self._send(404, {"error": "video product not found"})
+                        return
+                    evidence = verify_visual_review_evidence(
+                        product_dir, initiative_id, version, files["video.mp4"][0],
+                    )
+                    ledger_path = "data/reviews/visual-content-reviews.sqlite3"
+                    with VisualReviewLedger(ledger_path, workspace_root=workspace_root) as ledger:
+                        record = ledger.append(initiative_id, version, payload, evidence)
+                    from muse.video_publish_package import _review_record_status
+                    record["evidence_status"] = _review_record_status(
+                        record, category="visual_content", initiative_id=initiative_id,
+                        version_id=version, video_sha256=evidence["video_sha256"],
+                        required_artifacts=evidence["artifact_sha256"],
+                        release_manifest_sha256=evidence["release_manifest_sha256"],
+                    )
+                    self._send(201, {
+                        "api_version": 1, "identity_assurance": "self_asserted_local_session",
+                        "record": record, "append_only": True, "digital_signature": False,
+                    })
+                except VisualReviewEvidenceError as exc:
+                    self._send(409, {"error": str(exc)})
+                except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+                    self._send(400, {"error": str(exc)})
+                except FileNotFoundError:
+                    self._send(404, {"error": "verified contact sheet is required before visual review"})
+                except (KeyError, TypeError):
+                    self._send(409, {"error": "visual review product evidence is incomplete"})
+                except (OSError, sqlite3.Error):
+                    self._send(503, {"error": "visual review ledger unavailable"})
                 return
             subtitle_approval_match = re.fullmatch(
                 r"/api/v1/products/([0-9a-f]{32})/([0-9a-f]{20})/subtitle-review/approve",

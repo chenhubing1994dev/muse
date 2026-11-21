@@ -15,9 +15,11 @@ import sys
 import subprocess
 import tempfile
 import zipfile
+from fractions import Fraction
+from contextlib import nullcontext
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Sequence
+from pathlib import Path, PurePosixPath
+from typing import Any, Callable, Mapping, Sequence
 
 from muse.media import discover_media_tools
 from muse.video_factory import AUDIO_EXTENSIONS, assemble_video_from_folder, discover_video_assets
@@ -62,6 +64,38 @@ def _probe_media_duration_seconds(path: Path, ffprobe_path: str, *, stream_type:
     if not math.isfinite(duration) or duration <= 0:
         raise VideoProductError(f"FFprobe returned an invalid {stream_type} duration")
     return duration
+
+
+
+
+def _probe_video_stream_metadata(path: Path, ffprobe_path: str) -> tuple[int, int, float, int]:
+    """Read actual video dimensions, frame rate and decoded frame count from FFprobe."""
+    result = subprocess.run(
+        [ffprobe_path, "-v", "error", "-select_streams", "v:0", "-count_frames",
+         "-show_entries", "stream=codec_type,width,height,avg_frame_rate,r_frame_rate,nb_read_frames,nb_frames",
+         "-of", "json", str(path)],
+        capture_output=True, text=True, timeout=90, check=False,
+    )
+    if result.returncode != 0:
+        raise VideoProductError("FFprobe could not inspect video stream metadata: " + str((result.stderr or "")[-500:]))
+    try:
+        document = json.loads(result.stdout)
+        streams = document.get("streams") if isinstance(document, dict) else None
+        stream = next(
+            item for item in streams
+            if isinstance(item, dict) and item.get("codec_type") == "video"
+        )
+        width = int(stream["width"])
+        height = int(stream["height"])
+        raw_rate = stream.get("avg_frame_rate") or stream.get("r_frame_rate")
+        frame_rate = float(Fraction(raw_rate))
+        raw_frames = stream.get("nb_read_frames") or stream.get("nb_frames")
+        frames = int(raw_frames)
+    except (TypeError, ValueError, KeyError, StopIteration, AttributeError, ZeroDivisionError):
+        raise VideoProductError("FFprobe did not return usable video dimensions, frame rate and frame count") from None
+    if width <= 0 or height <= 0 or not math.isfinite(frame_rate) or frame_rate <= 0 or frames <= 0:
+        raise VideoProductError("FFprobe returned invalid video stream metadata")
+    return width, height, frame_rate, frames
 
 
 def _validate_narration_timeline(video_duration: float, narration_duration: float, *, tolerance_seconds: float = 0.0) -> dict[str, Any]:
@@ -685,6 +719,79 @@ class VideoProductBuilder:
             if staging.exists():
                 shutil.rmtree(staging, ignore_errors=True)
 
+    def _resolve_attempt_staging_directory(self, supplied: str | Path) -> Path:
+        raw = Path(supplied)
+        candidate = raw if raw.is_absolute() else self.workspace / raw
+        if any(part in {".", ".."} for part in candidate.parts[1:]):
+            raise VideoProductError("attempt staging directory must not traverse directories")
+        # Inspect the caller-supplied path before resolving it, then compare canonical
+        # paths. This handles Windows 8.3 aliases without weakening symlink checks.
+        supplied_cursor = Path(candidate.anchor)
+        for part in candidate.parts[1:]:
+            supplied_cursor = supplied_cursor / part
+            try:
+                supplied_info = supplied_cursor.lstat()
+            except FileNotFoundError as exc:
+                raise VideoProductError("attempt staging directory must already exist") from exc
+            if (supplied_cursor.is_symlink()
+                    or bool(getattr(supplied_info, "st_file_attributes", 0) & 0x400)):
+                raise VideoProductError("attempt staging path must not contain symlinks or reparse points")
+        root = self.workspace.resolve(strict=True)
+        try:
+            resolved_candidate = candidate.resolve(strict=True)
+            relative = resolved_candidate.relative_to(root)
+        except (OSError, ValueError) as exc:
+            raise VideoProductError("attempt staging directory must be inside the workspace") from exc
+        parts = relative.parts
+        if (len(parts) not in {3, 4} or parts[:2] != ("data", "video_attempt_staging")
+                or not re.fullmatch(r"[0-9a-f]{32}", parts[2])
+                or (len(parts) == 4 and not re.fullmatch(r"epoch_[1-9][0-9]{0,8}", parts[3]))):
+            raise VideoProductError(
+                "attempt staging directory must be data/video_attempt_staging/<attempt_id>[/epoch_<lease_epoch>]"
+            )
+        current = root
+        for part in parts:
+            current = current / part
+            try:
+                info = current.lstat()
+            except FileNotFoundError as exc:
+                raise VideoProductError("attempt staging directory must already exist") from exc
+            if (current.is_symlink() or bool(getattr(info, "st_file_attributes", 0) & 0x400)
+                    or not current.is_dir()):
+                raise VideoProductError("attempt staging path must contain only regular directories")
+        resolved = current.resolve(strict=True)
+        if resolved != current or not resolved.is_relative_to(root):
+            raise VideoProductError("attempt staging directory escapes the workspace")
+        return resolved
+
+
+    def _resolve_checkpoint_scene_artifact(self, relative_path: str) -> Path:
+        if (not isinstance(relative_path, str) or not relative_path or len(relative_path) > 1024
+                or "\\" in relative_path or ":" in relative_path):
+            raise VideoProductError("resume artifact path must be a bounded workspace-relative POSIX path")
+        relative = PurePosixPath(relative_path)
+        if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
+            raise VideoProductError("resume artifact path must not be absolute or traverse directories")
+        root = self.workspace.resolve(strict=True)
+        current = root
+        for part in relative.parts:
+            current = current / part
+            try:
+                info = current.lstat()
+            except FileNotFoundError as exc:
+                raise VideoProductError("resume artifact is missing") from exc
+            if current.is_symlink() or bool(getattr(info, "st_file_attributes", 0) & 0x400):
+                raise VideoProductError("resume artifact path must not contain symlinks or reparse points")
+        resolved = current.resolve(strict=True)
+        info = resolved.stat()
+        if (not resolved.is_relative_to(root) or not resolved.is_file()
+                or info.st_size <= 12 or info.st_size > _MAX_PRODUCT_BYTES):
+            raise VideoProductError("resume artifact must be a regular bounded MP4 inside the workspace")
+        with resolved.open("rb") as stream:
+            if stream.read(12)[4:8] != b"ftyp":
+                raise VideoProductError("resume artifact is not a valid MP4 container")
+        return resolved
+
     def build_from_scenes(
         self, title: str, scenes: list[dict[str, Any]], *, negative_prompt: str = "",
         aspect_ratio: str = "16:9", steps: int = 8, timeout_seconds: int = 1800,
@@ -694,6 +801,11 @@ class VideoProductBuilder:
         narration_evidence_contract: dict[str, Any] | None = None,
         creator_initiative_id: str | None = None, evolution_cycle_id: str | None = None,
         recipe_sha256: str | None = None,
+        staging_directory: str | Path | None = None,
+        resume_scene_metadata: Mapping[str, Mapping[str, Any]] | None = None,
+        reusable_step_ids: Sequence[str] = (),
+        scene_checkpoint_callback: Callable[[str, Path, Mapping[str, Any]], Any] | None = None,
+        scene_generation_guard: Callable[[str], Any] | None = None,
     ) -> dict[str, Any]:
         """Generate 2-20 independent local Wan shots, concatenate, then package once."""
         recipe_sha256 = _resolve_recipe_sha256(self.workspace, creator_initiative_id, recipe_sha256)
@@ -747,6 +859,39 @@ class VideoProductBuilder:
                 raise ValueError("narration_evidence_contract requires narration_script")
             _revalidate_claim_grounded_contract(self.workspace, narration_evidence_contract)
 
+        if resume_scene_metadata is None:
+            resume_map: dict[str, Mapping[str, Any]] = {}
+        elif isinstance(resume_scene_metadata, Mapping):
+            resume_map = dict(resume_scene_metadata)
+        else:
+            raise ValueError("resume_scene_metadata must be a mapping")
+        if (isinstance(reusable_step_ids, (str, bytes))
+                or not isinstance(reusable_step_ids, Sequence)):
+            raise ValueError("reusable_step_ids must be a sequence of unique scene step IDs")
+        reusable_ids = tuple(reusable_step_ids)
+        if (any(not isinstance(item, str) or not re.fullmatch(r"shot_[0-9]{3}", item) for item in reusable_ids)
+                or len(reusable_ids) != len(set(reusable_ids))
+                or any(not isinstance(key, str) for key in resume_map)
+                or set(resume_map) != set(reusable_ids)):
+            raise ValueError("reusable_step_ids must exactly match resume_scene_metadata keys")
+        expected_scene_ids = {f"shot_{index:03d}" for index in range(1, len(normalized) + 1)}
+        if not set(reusable_ids) <= expected_scene_ids:
+            raise ValueError("reusable_step_ids contain a scene outside the current request")
+        if scene_generation_guard is not None and not callable(scene_generation_guard):
+            raise ValueError("scene_generation_guard must be callable")
+        checkpoint_mode = bool(resume_map or reusable_ids or scene_checkpoint_callback is not None)
+        if checkpoint_mode:
+            if staging_directory is None or not callable(scene_checkpoint_callback):
+                raise ValueError("checkpoint mode requires an attempt staging directory and scene callback")
+            if narration_script is not None:
+                raise VideoProductError(
+                    "scene checkpoint resume is not enabled with narration because TTS dynamically reallocates scene durations"
+                )
+        if staging_directory is None:
+            staging_context = tempfile.TemporaryDirectory(prefix=".muse-wan-scenes-", dir=self.workspace)
+        else:
+            staging_context = nullcontext(self._resolve_attempt_staging_directory(staging_directory))
+
         inventory = discover_media_tools()
         tools = {item.tool_id: item.executable for item in inventory.tools}
         ffmpeg, ffprobe = tools.get("ffmpeg"), tools.get("ffprobe")
@@ -754,7 +899,7 @@ class VideoProductBuilder:
             raise VideoProductError("FFmpeg and FFprobe are required for multi-scene generation")
         from muse.wan_video import generate_wan21_t2v
 
-        with tempfile.TemporaryDirectory(prefix=".muse-wan-scenes-", dir=self.workspace) as temporary_dir:
+        with staging_context as temporary_dir:
             staging = Path(temporary_dir)
             effective_scenes = normalized
             narration_audio: Path | None = None
@@ -762,9 +907,9 @@ class VideoProductBuilder:
             narration_asr: dict[str, Any] | None = None
             subtitle_path: Path | None = None
             if narration_script is not None:
-                from muse.cantonese_tts import synthesize_cantonese_with_runtime
+                from muse.cantonese_tts import synthesize_cantonese_segments_with_runtime
                 narration_audio = staging / "voiceover.wav"
-                narration_synthesis = synthesize_cantonese_with_runtime(
+                narration_synthesis = synthesize_cantonese_segments_with_runtime(
                     narration_script, narration_audio, model_dir=narration_model_dir,
                     packages_dir=self.workspace / ".muse-canto-tts-py314", quality="duration_filter",
                 )
@@ -794,17 +939,58 @@ class VideoProductBuilder:
             total_frames = 0
             for scene in effective_scenes:
                 index = scene["order"]
+                step_id = f"shot_{index:03d}"
                 clip_path = staging / f"shot_{index:02d}.mp4"
-                result = generate_wan21_t2v(
-                    scene["prompt"], clip_path, negative_prompt=negative_prompt,
-                    aspect_ratio=aspect_ratio, duration_seconds=scene["duration_seconds"],
-                    steps=steps, seed=scene["seed"], timeout_seconds=timeout_seconds,
-                    resource_db=self.workspace / "data" / "gpu-resources.sqlite3",
-                    workspace=self.workspace,
-                )
-                if result.get("status") != "completed" or not clip_path.is_file():
+                reused = step_id in reusable_ids
+                if reused:
+                    entry = resume_map.get(step_id)
+                    if not isinstance(entry, Mapping):
+                        raise VideoProductError(f"resume metadata for {step_id} must be an object")
+                    artifact_relative_path = entry.get("artifact_relative_path")
+                    generation = entry.get("generation")
+                    if not isinstance(generation, Mapping) or generation.get("status") != "completed":
+                        raise VideoProductError(f"resume metadata for {step_id} lacks completed generation metadata")
+                    source_clip = self._resolve_checkpoint_scene_artifact(artifact_relative_path)
+                    attempt_staging_root = staging.parent if re.fullmatch(r"epoch_[1-9][0-9]{0,8}", staging.name) else staging
+                    try:
+                        source_clip.relative_to(attempt_staging_root)
+                    except ValueError as exc:
+                        raise VideoProductError(f"resume artifact for {step_id} is outside this Attempt staging directory") from exc
+                    result = dict(generation)
+                    clip_path = source_clip
+                    generation_status = "reused"
+                else:
+                    if clip_path.exists() or clip_path.is_symlink():
+                        info = clip_path.lstat()
+                        if (clip_path.is_symlink() or bool(getattr(info, "st_file_attributes", 0) & 0x400)
+                                or not clip_path.is_file()):
+                            raise VideoProductError(f"uncheckpointed scene output {index} is not a regular file")
+                        # An output without a persisted checkpoint is untrusted after a crash.
+                        clip_path.unlink()
+                    if scene_generation_guard is not None:
+                        scene_generation_guard(step_id)
+                    result = generate_wan21_t2v(
+                        scene["prompt"], clip_path, negative_prompt=negative_prompt,
+                        aspect_ratio=aspect_ratio, duration_seconds=scene["duration_seconds"],
+                        steps=steps, seed=scene["seed"], timeout_seconds=timeout_seconds,
+                        resource_db=self.workspace / "data" / "gpu-resources.sqlite3",
+                        workspace=self.workspace,
+                    )
+                    generation_status = "generated"
+                if not isinstance(result, Mapping) or result.get("status") != "completed" or not clip_path.is_file():
                     raise VideoProductError(f"Wan scene {index} did not produce a completed MP4; refusing partial delivery")
-                signature = (result.get("width"), result.get("height"), float(result.get("fps") or 0))
+                clip_info = clip_path.lstat()
+                if (clip_path.is_symlink() or bool(getattr(clip_info, "st_file_attributes", 0) & 0x400)
+                        or not clip_path.is_file() or clip_info.st_size <= 12
+                        or clip_info.st_size > _MAX_PRODUCT_BYTES):
+                    raise VideoProductError(f"Wan scene {index} output is not a regular bounded MP4")
+                with clip_path.open("rb") as stream:
+                    if stream.read(12)[4:8] != b"ftyp":
+                        raise VideoProductError(f"Wan scene {index} output is not an MP4 container")
+                raw_fps = result.get("fps")
+                if isinstance(raw_fps, bool) or not isinstance(raw_fps, (int, float)) or not math.isfinite(raw_fps):
+                    raise VideoProductError(f"Wan scene {index} returned invalid frame rate")
+                signature = (result.get("width"), result.get("height"), float(raw_fps))
                 if (isinstance(signature[0], bool) or not isinstance(signature[0], int)
                         or isinstance(signature[1], bool) or not isinstance(signature[1], int)
                         or signature[0] <= 0 or signature[1] <= 0 or signature[2] <= 0):
@@ -819,11 +1005,29 @@ class VideoProductBuilder:
                 frames = result.get("frames")
                 if isinstance(frames, bool) or not isinstance(frames, int) or frames <= 0:
                     raise VideoProductError(f"Wan scene {index} returned invalid frame count")
+                if checkpoint_mode:
+                    probed_width, probed_height, probed_fps, probed_frames = _probe_video_stream_metadata(clip_path, ffprobe)
+                    if ((probed_width, probed_height, probed_frames) != (signature[0], signature[1], frames)
+                            or abs(probed_fps - signature[2]) > max(0.001, signature[2] * 0.0001)):
+                        raise VideoProductError(
+                            f"Wan scene {index} FFprobe stream metadata does not match generation metadata"
+                        )
+                    signature = (probed_width, probed_height, probed_fps)
+                    frames = probed_frames
                 total_frames += frames
+                if not reused and checkpoint_mode:
+                    generation_metadata = {
+                        "status": "completed",
+                        "prompt_id": result.get("prompt_id"),
+                        "model": result.get("model", "Wan 2.1 T2V 1.3B"),
+                        "width": signature[0], "height": signature[1],
+                        "fps": signature[2], "frames": frames,
+                    }
+                    scene_checkpoint_callback(step_id, clip_path, generation_metadata)
                 clip_paths.append(clip_path)
                 scene_records.append({
                     "order": index, "prompt": scene["prompt"], "prompt_id": result.get("prompt_id"),
-                    "seed": scene["seed"], "generation_status": "generated",
+                    "seed": scene["seed"], "generation_status": generation_status,
                     "source_file": clip_path.name, "duration_seconds": measured_duration,
                     "frames": frames, "width": signature[0], "height": signature[1], "fps": signature[2],
                 })
@@ -1606,11 +1810,11 @@ class VideoProductBuilder:
             raise ValueError("narration_script must contain 1-20000 characters")
         if any(key in package_options for key in ("narration_path", "narration_script", "subtitle_path", "narration_asr")):
             raise ValueError("narration and ASR assets are managed by the Cantonese narration wrapper")
-        from muse.cantonese_tts import synthesize_cantonese_with_runtime
+        from muse.cantonese_tts import synthesize_cantonese_segments_with_runtime
 
         with tempfile.TemporaryDirectory(prefix=".muse-cantonese-", dir=self.workspace) as temporary_dir:
             audio_path = Path(temporary_dir) / "voiceover.wav"
-            synthesis = synthesize_cantonese_with_runtime(
+            synthesis = synthesize_cantonese_segments_with_runtime(
                 narration_script, audio_path, model_dir=model_dir,
                 packages_dir=self.workspace / ".muse-canto-tts-py314", quality="duration_filter",
             )

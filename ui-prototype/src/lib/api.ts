@@ -17,6 +17,8 @@ export interface AgentEffectiveness {
 export interface AgentRecord {
   agent_id: string;
   display_name?: string | null;
+  title?: string | null;
+  reports_to?: string | null;
   role?: string | null;
   source?: string | null;
   status: AgentStatus;
@@ -51,11 +53,31 @@ export interface HealthResponse {
   agent_registry_configured?: boolean;
 }
 
+export interface AgentOrgChartNode {
+  agent_id: string;
+  title: string;
+  role: string;
+  display_name: string;
+  status: string;
+  enabled: boolean;
+  reports_to: string | null;
+  capabilities: string[];
+}
+
+export interface AgentOrgChartResponse {
+  nodes: AgentOrgChartNode[];
+  edges: Array<{ manager_id: string; report_id: string }>;
+  total: number;
+  truncated: boolean;
+  unresolved_parent_count: number;
+}
+
 export interface AgentsResponse {
   api_version: number;
   registry_configured?: boolean;
   count?: number;
   agents: AgentRecord[];
+  org_chart?: AgentOrgChartResponse;
 }
 
 export interface QueueTask {
@@ -67,6 +89,29 @@ export interface QueueTask {
   lease_expires_at?: string | null;
   attempts: number;
   depends_on?: string[];
+}
+
+export interface ContextualInquiryReviewSummary {
+  task_id: string;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface ContextualInquiryReviewFinding {
+  finding_id: string;
+  statement: string;
+  observation_refs: string[];
+  hypothesis_refs: string[];
+  assessment: "support_candidate" | "counter_candidate" | "unresolved";
+  rationale: string;
+}
+
+export interface ContextualInquiryReviewResult {
+  schema_version: 1;
+  inquiry_id: string;
+  summary: string;
+  findings: ContextualInquiryReviewFinding[];
+  unknowns: string[];
 }
 
 export interface QueueSnapshot {
@@ -81,7 +126,6 @@ export interface QueueSnapshot {
   active: QueueTask[];
   active_truncated: boolean;
 }
-
 export interface WorkerRecord {
   worker_id: string;
   state: "active" | "stopped";
@@ -560,7 +604,7 @@ export interface VideoRecipeTrace {
   candidate: { candidate_id: string | null; recipe_sha256: string | null; creator_brief_sha256: string | null; brief_fingerprint_matches_attempt: boolean; mapping_status: string | null };
   approval: { ticket_id: string | null; status: string; human_decision_verified: boolean; decision_actor: string | null; brief_matches_creator_brief?: boolean; attempt_matches_ticket?: boolean };
   product: { status: string; product_id?: string; version_id?: string; manifest_sha256?: string; manifest_matches_attempt?: boolean; recipe_matches_attempt?: boolean; mp4_sha256?: string; package_sha256?: string; quality_gate?: Record<string, unknown> };
-  release_review: { status: string; can_publish: false; editorial_and_fact_review?: string; visual_and_model_rights_review?: string; privacy_and_person_release_review?: string; account_authorization?: string; official_publish_api?: string; quality_report_matches_package?: boolean; quality_report_sha256?: string | null; overall_status?: string; blocking_items?: string[]; checks?: Record<string, { status: string; evidence?: string; [key: string]: unknown }> };
+  release_review: { status: string; can_publish: false; editorial_and_fact_review?: string; visual_and_model_rights_review?: string; privacy_and_person_release_review?: string; account_authorization?: string; official_publish_api?: string; quality_report_matches_package?: boolean; quality_report_sha256?: string | null; overall_status?: string; blocking_items?: string[]; checks?: Record<string, { status: string; evidence?: string; contact_sheet?: { status: string; evidence?: string | null; sha256?: string | null; human_review_required?: boolean }; [key: string]: unknown }> };
   chain_consistent: boolean; execution: string; publishing: "not_performed";
 }
 export interface VideoEngineStatus {
@@ -780,10 +824,51 @@ export interface MemPalaceStatusResponse {
   private_content_exposed: false;
 }
 
+export interface VisualReviewRecord {
+  schema_version: number;
+  record_id: string;
+  category: "visual_content";
+  decision: "approved" | "changes_requested" | "rejected";
+  reviewer: { label: string; role: string; identity_assurance: "self_asserted_local_session" };
+  reviewed_at: string;
+  subject: { initiative_id: string; version_id: string; video_sha256: string; artifact_sha256: Record<string, string>; release_manifest_sha256?: string };
+  checklist: Record<string, boolean>;
+  evidence_refs: string[];
+  rationale: string;
+  review_sha256: string;
+  evidence_status?: string;
+  findings?: VisualReviewFinding[];
+}
+export interface VisualReviewFinding {
+  timecode_ms: number;
+  shot_id: string;
+  severity: "blocker" | "major" | "minor";
+  category: "framing" | "continuity" | "visual_artifact" | "subtitle" | "audio" | "other";
+  description: string;
+  expected_fix: string;
+}
+export interface VisualRevisionBrief {
+  brief_id: string; source_review_id: string; source_review_sha256: string;
+  source_version: string; source_video_sha256: string; created_at: string; status: "open";
+  tasks: Array<VisualReviewFinding & { task_id: string; status: "open" }>;
+  evidence_status?: string;
+}
+export interface VisualReviewPayload {
+  decision: "approved" | "changes_requested" | "rejected";
+  reviewer: string;
+  reviewer_role: string;
+  rationale: string;
+  checklist: Record<string, boolean>;
+  confirmation: "RECORD-VISUAL-REVIEW";
+  findings?: VisualReviewFinding[];
+}
+
 export interface ApiClient {
   health(): Promise<HealthResponse>;
   agents(): Promise<AgentsResponse>;
   overview(): Promise<OverviewResponse>;
+  contextualInquiryReviews(limit?: number): Promise<{ api_version: number; count: number; reviews: ContextualInquiryReviewSummary[] }>;
+  contextualInquiryReviewResult(taskId: string): Promise<{ api_version: number; task_id: string; review: ContextualInquiryReviewResult }>;
   mempalaceStatus(): Promise<MemPalaceStatusResponse>;
   feedback(limit?: number): Promise<{ api_version: number; count: number; feedback: FeedbackRecord[] }>;
   improvements(): Promise<{ api_version: number; count: number; proposals: ImprovementProposal[] }>;
@@ -821,6 +906,10 @@ export interface ApiClient {
   downloadProduct(initiativeId: string, versionId: string): Promise<Blob>;
   previewProduct(initiativeId: string, versionId: string): Promise<Blob>;
   downloadVideo(initiativeId: string, versionId: string): Promise<Blob>;
+  videoContactSheet(initiativeId: string, versionId: string): Promise<Blob>;
+  visualReviews(initiativeId: string, versionId: string): Promise<{ api_version: number; identity_assurance: string; evidence: { video_sha256: string; artifact_sha256: Record<string, string>; release_manifest_sha256: string }; count: number; reviews: VisualReviewRecord[] }>;
+  visualRevisionBrief(initiativeId: string, versionId: string): Promise<{ api_version: number; active: boolean; brief: VisualRevisionBrief | null; can_auto_modify_source: false; new_version_created: false }>;
+  submitVisualReview(initiativeId: string, versionId: string, payload: VisualReviewPayload): Promise<{ api_version: number; identity_assurance: string; record: VisualReviewRecord; append_only: true; digital_signature: false }>;
   subtitleReview(initiativeId: string, versionId: string): Promise<{ api_version: number; review: SubtitleReviewDocument }>;
   approveSubtitleReview(initiativeId: string, versionId: string, payload: { reviewed_segment_indexes: number[]; corrections: Array<{ segment_index: number; corrected_text: string }>; reviewer: string; reviewer_id: string; reviewer_role: string; rationale: string; evidence_refs: string[]; confirmation: string }): Promise<{ api_version: number; product: { initiative_id: string; version_id: string; validated: boolean; status: string; quality_gate?: ProductQualityGate } }>;  createVideoProduct(payload: { mode?: "local_assets" | "prompt_to_video"; source?: string; title: string; prompt?: string; negative_prompt?: string; duration_seconds?: number; steps?: number; seed?: number; creator_initiative_id?: string; evolution_cycle_id?: string; audio?: string; audio_mode?: "music" | "narration"; aspect_ratio?: "16:9" | "9:16" | "1:1"; fps?: number; image_seconds?: number; encoder?: "auto" | "amf" | "software"; motion_profile?: "none" | "brand_intro_outro" | "brand_scene_transitions" }): Promise<{ api_version: number; job: { id: string; status: string } }>;  videoJob(id: string): Promise<{ api_version: number; job: VideoJobRecord }>;
   submitInspiration(value: { content: string; allow_external_research: boolean; title?: string; tags?: string[]; research_domains?: string[]; source?: "chatgpt_daily_inspiration" | "muse_local_dashboard" | "user_manual" }): Promise<{ api_version: number; inspiration: InspirationRecord }>;

@@ -152,6 +152,49 @@ class GemmaIntentTests(unittest.TestCase):
         self.assertEqual(client.messages[0]["role"], "system")
         classifier.unload()
 
+    def test_lmstudio_classifier_propagates_model_usage_context_to_worker_thread(self):
+        from muse.model_call_context import current_model_call_context, model_call_scope, record_current_model_usage
+        from muse.usage_ledger import UsageLedger
+
+        observed_contexts = []
+        test_case = self
+
+        class ContextAwareClient:
+            def chat(self, _messages, **_kwargs):
+                context = current_model_call_context()
+                observed_contexts.append(context)
+                test_case.assertIsNotNone(context)
+                test_case.assertTrue(record_current_model_usage(
+                    "lmstudio", "intent-local-model",
+                    {"prompt_tokens": 17, "completion_tokens": 5, "total_tokens": 22},
+                ))
+                return json.dumps({
+                    "domain": "software", "capability": "coding",
+                    "confidence": 0.93, "rationale": "A coding request.",
+                })
+
+        classifier = LMStudioGemmaIntentClassifier(
+            base_url="http://127.0.0.1:1234/v1", timeout_seconds=2,
+            client=ContextAwareClient(),
+        )
+        database = Path(self.temp.name) / "tasks.sqlite3"
+        with model_call_scope(
+            database, task_id="intent-task-123", agent_id="intent-agent-456", project_id="muse",
+        ):
+            result = classifier.classify("help with a software task")
+        self.assertEqual(result["capability"], "coding")
+        self.assertEqual(len(observed_contexts), 1)
+        self.assertEqual(observed_contexts[0].task_id, "intent-task-123")
+        self.assertEqual(observed_contexts[0].agent_id, "intent-agent-456")
+        with UsageLedger(Path(self.temp.name) / "model_usage.sqlite3") as ledger:
+            events = ledger.list_events(task_id="intent-task-123", limit=10)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["provider_id"], "lmstudio")
+        self.assertEqual(events[0]["model"], "intent-local-model")
+        self.assertEqual(events[0]["input_tokens"], 17)
+        self.assertEqual(events[0]["output_tokens"], 5)
+        self.assertEqual(events[0]["attribution_status"], "complete")
+
     def test_lmstudio_backend_rejects_non_loopback_endpoint(self):
         with self.assertRaises(ValueError):
             LMStudioGemmaIntentClassifier(base_url="http://example.com/v1")

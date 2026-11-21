@@ -1,5 +1,6 @@
 $ErrorActionPreference = 'Stop'
 $Root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+Set-Location -LiteralPath $Root
 $Python = Join-Path $Root '.venv\Scripts\python.exe'
 if (-not (Test-Path $Python)) { throw "Muse Python environment not found: $Python" }
 $env:PYTHONPATH = Join-Path $Root 'src'

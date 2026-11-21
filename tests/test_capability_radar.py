@@ -25,9 +25,20 @@ class CapabilityRadarTests(unittest.TestCase):
             second = scan_capabilities(task_db, improvement_db)
 
             self.assertEqual(len(first["created"]), 1)
+            self.assertEqual(first["value_forge"]["epistemic_status"], "hypothesis_only")
+            self.assertFalse(first["value_forge"]["market_demand_inferred"])
+            self.assertFalse(first["value_forge"]["dispatch_started"])
+            self.assertTrue(first["value_forge"]["requires_human_review"])
+            self.assertEqual(len(first["value_forge"]["evaluations"]), 1)
             self.assertEqual(first["created"][0]["status"], "proposed")
             self.assertEqual(second["created"], [])
             self.assertEqual(len(second["existing"]), 1)
+            self.assertEqual(len(second["value_forge"]["evaluations"]), 1)
+            self.assertEqual(
+                second["value_forge"]["evaluations"][0]["proposal_id"],
+                first["created"][0]["id"],
+            )
+            self.assertEqual(second["existing"][0]["signal_key"], first["created"][0]["signal_key"])
             with ImprovementStore(improvement_db) as store:
                 proposal = store.get(first["created"][0]["id"])
             serialized = str(proposal)

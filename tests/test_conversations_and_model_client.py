@@ -54,7 +54,11 @@ class ModelClientTests(unittest.TestCase):
                 request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 self.server.received_messages = request["messages"]
                 self.server.received_chat_template_kwargs = request.get("chat_template_kwargs")
-                body = json.dumps({"choices": [{"message": {"content": "local test reply"}}]}).encode()
+                body = json.dumps({
+                    "model": "test-local-model", "choices": [{"message": {"content": "local test reply"}}],
+                    "usage": {"prompt_tokens": 12, "completion_tokens": 7, "total_tokens": 19,
+                              "ignored_private_field": "must-not-be-retained"},
+                }).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
@@ -71,10 +75,68 @@ class ModelClientTests(unittest.TestCase):
                 chat_template_kwargs={"enable_thinking": False},
             )
             self.assertEqual(client.list_models()[0]["id"], "test-local-model")
+            detailed = client.chat_with_usage([{"role": "user", "content": "hello"}])
+            self.assertEqual(detailed.content, "local test reply")
+            self.assertEqual(detailed.model, "test-local-model")
+            self.assertEqual(detailed.usage, {"prompt_tokens": 12, "completion_tokens": 7, "total_tokens": 19})
             reply = client.chat([{"role": "user", "content": "hello"}])
             self.assertEqual(reply, "local test reply")
             self.assertEqual(server.received_messages[0]["content"], "hello")
             self.assertEqual(server.received_chat_template_kwargs, {"enable_thinking": False})
+        finally:
+            server.shutdown()
+            thread.join(timeout=2)
+            server.server_close()
+
+    def test_bypass_proxies_uses_a_direct_opener(self) -> None:
+        import json
+        from unittest.mock import MagicMock, patch
+
+        with (
+            patch("urllib.request.build_opener") as build_opener,
+            patch("urllib.request.urlopen") as global_urlopen,
+        ):
+            opener = MagicMock()
+            opener.open.return_value.__enter__.return_value.read.return_value = json.dumps(
+                {"data": [{"id": "loopback-only"}]}
+            ).encode("utf-8")
+            build_opener.return_value = opener
+            client = LMStudioClient(
+                "http://127.0.0.1:1234/v1",
+                bypass_proxies=True,
+            )
+            self.assertEqual(client.list_models()[0]["id"], "loopback-only")
+            build_opener.assert_called_once()
+            self.assertEqual(build_opener.call_args.args[0].proxies, {})
+            opener.open.assert_called_once()
+            global_urlopen.assert_not_called()
+
+    def test_bypass_proxies_rejects_redirect_without_forwarding_prompt(self) -> None:
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        from threading import Thread
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                self.server.request_count += 1
+                self.send_response(307)
+                self.send_header("Location", "http://example.invalid/collect")
+                self.end_headers()
+
+            def log_message(self, *_: object) -> None:
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        server.request_count = 0
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            client = LMStudioClient(
+                f"http://127.0.0.1:{server.server_port}/v1",
+                model="local-review-model", timeout=2, bypass_proxies=True,
+            )
+            with self.assertRaises(ModelError):
+                client.chat([{"role": "user", "content": "private case content"}])
+            self.assertEqual(server.request_count, 1)
         finally:
             server.shutdown()
             thread.join(timeout=2)

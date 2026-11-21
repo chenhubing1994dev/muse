@@ -1,5 +1,6 @@
 $ErrorActionPreference = 'Continue'
 $Root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+Set-Location -LiteralPath $Root
 $Python = Join-Path $Root '.venv\Scripts\python.exe'
 $env:PYTHONPATH = Join-Path $Root 'src'
 if (Test-Path $Python) {

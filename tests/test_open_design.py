@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from io import StringIO
 import sqlite3
 import tempfile
 import unittest
@@ -8,11 +9,13 @@ import uuid
 from pathlib import Path
 from unittest.mock import patch
 
+from muse.initiative_engine import InitiativeStore
 from muse.open_design import (
     APPROVED_WRITE_TOOLS,
     NEVER_ALLOW_TOOLS,
     READ_ONLY_TOOLS,
     OpenDesignAdapter,
+    main,
 )
 from muse.task_queue import TaskQueue
 
@@ -24,6 +27,15 @@ class FakeMCPClient:
 
     def list_tools(self, *, timeout_seconds=None):
         return list(self.state["catalog"])
+    def list_resources(self, *, timeout_seconds=None):
+        return list(self.state.get("resources", []))
+
+    def read_resource(self, uri, *, timeout_seconds=None):
+        if uri not in {item["uri"] for item in self.state.get("resources", [])}:
+            raise ValueError("resource not found")
+        self.state["resource_reads"].append(uri)
+        return {"contents": [{"uri": uri, "mimeType": "text/markdown", "text": self.state["resource_text"].get(uri, "")}]}
+
 
     def call_tool(self, name, arguments, *, approved=False, timeout_seconds=None):
         if name not in self.allowed_tools:
@@ -48,13 +60,22 @@ class FakeMCPClient:
         elif name == "list_agents":
             payload = {"agents": [{"id": "opencode", "name": "OpenCode", "version": "1.19.3"}]}
         elif name == "list_skills":
-            payload = {"skills": [{"id": "web-research"}]}
+            payload = {"skills": self.state.get("skills", [{"id": "web-research"}])}
         elif name == "list_plugins":
-            payload = {"plugins": []}
+            payload = {"plugins": self.state.get("plugins", [])}
         elif name == "start_run":
             payload = {"runId": "run-123"}
         elif name == "get_run":
             payload = {"status": "succeeded", "previewUrl": "http://127.0.0.1:7456/preview", "artifacts": []}
+        elif name == "get_artifact":
+            payload = {
+                "projectId": arguments["project"], "projectName": "Existing project",
+                "entryFile": "index.html", "truncated": False, "skippedFileCount": 0,
+                "files": [
+                    {"name": "index.html", "mime": "text/html", "binary": False, "content": "<h1>Muse</h1>", "size": 12},
+                    {"name": "assets/logo.png", "mime": "image/png", "binary": True, "content": None, "size": 128},
+                ],
+            }
         else:
             payload = {"ok": True}
         return {"content": [{"type": "text", "text": json.dumps(payload)}]}
@@ -100,6 +121,18 @@ class OpenDesignAdapterTests(unittest.TestCase):
         self.state = {
             "catalog": make_catalog(), "calls": [],
             "projects": [{"id": "project-1", "name": "Existing project"}],
+            "skills": [{"id": "web-research", "name": "Web research"}],
+            "plugins": [{"id": "pitch-deck", "title": "Pitch deck", "kind": "scenario", "tags": ["deck"]}],
+            "resources": [
+                {"uri": "od://design-systems/muse/DESIGN.md", "name": "Design system: Muse", "mimeType": "text/markdown"},
+                {"uri": "od://skills/web-research/SKILL.md", "name": "Skill: Web research", "mimeType": "text/markdown"},
+                {"uri": "file:///C:/secret.txt", "name": "Out of scope"},
+            ],
+            "resource_text": {
+                "od://design-systems/muse/DESIGN.md": "# Muse Design System\\nUse restrained indigo.",
+                "od://skills/web-research/SKILL.md": "# Web Research\\nVerify sources.",
+            },
+            "resource_reads": [],
             "list_projects_visible": False,
         }
 
@@ -115,6 +148,7 @@ class OpenDesignAdapterTests(unittest.TestCase):
             allowed_agents=("opencode",),
             client_factory=factory,
             sleep=lambda _seconds: None,
+            require_running_daemon=False,
         )
 
     def tearDown(self) -> None:
@@ -129,6 +163,17 @@ class OpenDesignAdapterTests(unittest.TestCase):
         self.assertEqual(result["project_source"], "local_db_verified")
         self.assertEqual(result["agents"][0]["id"], "opencode")
         self.assertEqual(result["skills_count"], 1)
+        self.assertEqual(result["skills"][0]["id"], "web-research")
+        self.assertEqual(result["plugins_count"], 1)
+        self.assertEqual(result["plugins"][0]["id"], "pitch-deck")
+        self.assertEqual(result["resources_count"], 2)
+        self.assertEqual(len(self.adapter.list_resources()), 2)
+        design = self.adapter.read_resource("od://design-systems/muse/DESIGN.md")
+        self.assertIn("restrained indigo", design["contents"][0]["text"])
+        self.assertEqual(self.state["resource_reads"], ["od://design-systems/muse/DESIGN.md"])
+        with self.assertRaises(PermissionError):
+            self.adapter.read_resource("file:///C:/secret.txt")
+
         self.assertTrue(set(result["read_only_tools"]).issubset(READ_ONLY_TOOLS))
         self.assertTrue(set(result["gated_write_tools"]).issubset(APPROVED_WRITE_TOOLS))
         self.assertTrue(set(result["blocked_destructive_tools"]).issubset(NEVER_ALLOW_TOOLS))
@@ -161,25 +206,71 @@ class OpenDesignAdapterTests(unittest.TestCase):
             self.adapter.call_write("delete_project", {"project": "project-1", "confirm": True}, approved=True)
         self.assertEqual(self.state["calls"], [])
 
-    def test_write_path_traversal_is_rejected_before_mcp_transport(self) -> None:
-        with self.assertRaises(ValueError):
+    def _direct_write_test_adapter(self) -> OpenDesignAdapter:
+        return OpenDesignAdapter(
+            workspace=self.workspace,
+            database=self.database,
+            command=("Open Design.exe", "daemon-cli.mjs", "mcp"),
+            daemon_url="http://127.0.0.1:7456",
+            data_dir=self.data_dir,
+            allowed_agents=("opencode",),
+            client_factory=lambda **kwargs: FakeMCPClient(self.state, **kwargs),
+            require_running_daemon=False,
+            direct_file_writes_enabled=True,
+            expected_version="test-fixture",
+        )
+
+    def test_direct_file_writes_are_disabled_by_default(self) -> None:
+        with self.assertRaises(PermissionError):
             self.adapter.call_write(
+                "create_artifact", {"project": "project-1", "name": "index.html"}, approved=True,
+            )
+        with self.assertRaises(PermissionError):
+            self.adapter.call_write(
+                "write_file", {"project": "project-1", "path": "index.html", "content": "x"},
+                approved=True, overwrite_approved=True,
+            )
+        self.assertEqual(self.state["calls"], [])
+
+    def test_direct_file_writes_require_exact_version_pin(self) -> None:
+        with self.assertRaises(ValueError):
+            OpenDesignAdapter(
+                workspace=self.workspace,
+                database=self.database,
+                command=("Open Design.exe", "daemon-cli.mjs", "mcp"),
+                daemon_url="http://127.0.0.1:7456",
+                data_dir=self.data_dir,
+                client_factory=lambda **kwargs: FakeMCPClient(self.state, **kwargs),
+                require_running_daemon=False,
+                direct_file_writes_enabled=True,
+            )
+
+    def test_write_path_traversal_is_rejected_before_mcp_transport(self) -> None:
+        adapter = self._direct_write_test_adapter()
+        with self.assertRaises(ValueError):
+            adapter.call_write(
                 "write_file", {"project": "project-1", "path": "../outside.txt", "content": "x"},
                 approved=True, overwrite_approved=True,
             )
         self.assertEqual(self.state["calls"], [])
 
     def test_write_file_requires_separate_overwrite_approval(self) -> None:
+        adapter = self._direct_write_test_adapter()
         args = {"project": "project-1", "path": "index.html", "content": "<h1>Draft</h1>"}
         with self.assertRaises(PermissionError):
-            self.adapter.call_write("write_file", args, approved=True)
-        self.adapter.call_write("write_file", args, approved=True, overwrite_approved=True)
+            adapter.call_write("write_file", args, approved=True)
+        adapter.call_write("write_file", args, approved=True, overwrite_approved=True)
         self.assertTrue(any(call[0] == "write_file" for call in self.state["calls"]))
+
+    def test_resource_read_rejects_uri_not_in_live_catalog(self) -> None:
+        with self.assertRaises(PermissionError):
+            self.adapter.read_resource("od://design-systems/not-installed/DESIGN.md")
+        self.assertEqual(self.state["resource_reads"], [])
 
     def test_enqueue_run_uses_muse_queue_and_waits_for_approval(self) -> None:
         task = self.adapter.enqueue_run(
             project_id="project-1", prompt="Create a research showcase",
-            agent="opencode", skill="web-research",
+            agent="opencode", skill="web-research", plugin="pitch-deck",
         )
         self.assertEqual(task["status"], "waiting_approval")
         self.assertEqual(task["payload"]["kind"], "open_design_run")
@@ -188,10 +279,57 @@ class OpenDesignAdapterTests(unittest.TestCase):
         with TaskQueue(self.database) as queue:
             same = self.adapter.enqueue_run(
                 project_id="project-1", prompt="Create a research showcase",
-                agent="opencode", skill="web-research",
+                agent="opencode", skill="web-research", plugin="pitch-deck",
             )
             self.assertEqual(same["id"], task["id"])
             self.assertEqual(queue.get(task["id"])["status"], "waiting_approval")
+        self.assertEqual(task["payload"]["plugin"], "pitch-deck")
+
+    def test_design_system_is_hashed_into_approval_and_injected_at_execution(self) -> None:
+        task = self.adapter.enqueue_run(
+            project_id="project-1", prompt="Create a showcase", agent="opencode",
+            design_system_uri="od://design-systems/muse/DESIGN.md",
+        )
+        reference = task["payload"]["design_system"]
+        expected = __import__("hashlib").sha256(
+            self.state["resource_text"]["od://design-systems/muse/DESIGN.md"].encode("utf-8")
+        ).hexdigest()
+        self.assertEqual(reference["sha256"], expected)
+        with TaskQueue(self.database) as queue:
+            approved = queue.approve(task["id"], approved_by="owner")
+        result = self.adapter.execute_task(approved["payload"], task_id=task["id"])
+        start = next(call for call in self.state["calls"] if call[0] == "start_run")
+        self.assertIn("Use restrained indigo", start[1]["prompt"])
+        self.assertEqual(result["design_system_evidence"], reference)
+
+    def test_design_system_change_after_approval_blocks_run(self) -> None:
+        task = self.adapter.enqueue_run(
+            project_id="project-1", prompt="Create a showcase", agent="opencode",
+            design_system_uri="od://design-systems/muse/DESIGN.md",
+        )
+        with TaskQueue(self.database) as queue:
+            approved = queue.approve(task["id"], approved_by="owner")
+        self.state["resource_text"]["od://design-systems/muse/DESIGN.md"] = "# Changed"
+        with self.assertRaises(PermissionError):
+            self.adapter.execute_task(approved["payload"], task_id=task["id"])
+        self.assertFalse(any(call[0] == "start_run" for call in self.state["calls"]))
+
+    def test_enqueue_run_rejects_unavailable_skill_and_plugin(self) -> None:
+        with self.assertRaises(ValueError):
+            self.adapter.enqueue_run(
+                project_id="project-1", prompt="Build a page", agent="opencode",
+                skill="not-installed",
+            )
+        with self.assertRaises(ValueError):
+            self.adapter.enqueue_run(
+                project_id="project-1", prompt="Build a page", agent="opencode",
+                plugin="not-installed",
+            )
+        self.assertFalse(any(call[0] == "start_run" for call in self.state["calls"]))
+
+    def test_list_skills_reads_only_the_requested_catalog(self) -> None:
+        self.assertEqual(self.adapter.list_skills()[0]["id"], "web-research")
+        self.assertEqual([call[0] for call in self.state["calls"]], ["list_skills"])
 
     def test_enqueue_run_rejects_agent_without_explicit_allowlist(self) -> None:
         adapter = OpenDesignAdapter(
@@ -244,7 +382,13 @@ class OpenDesignAdapterTests(unittest.TestCase):
             "_approval": {"approved_by": "owner"},
         }
         result = self.adapter.execute_task(payload, task_id=task_id)
-        start_call = next(call for call in self.state["calls"] if call[0] == "start_run")
+        first_start = next(call for call in self.state["calls"] if call[0] == "start_run")
+        self.adapter.execute_task(payload, task_id=task_id)
+        start_calls = [call for call in self.state["calls"] if call[0] == "start_run"]
+        self.assertEqual(len(start_calls), 2)
+        self.assertEqual(start_calls[0][1]["requestId"], start_calls[1][1]["requestId"])
+        self.assertEqual(start_calls[0][1], start_calls[1][1])
+        start_call = first_start
         poll_call = next(call for call in self.state["calls"] if call[0] == "get_run")
         self.assertTrue(start_call[2])
         self.assertEqual(start_call[1]["requestId"], str(uuid.UUID(hex=task_id)))
@@ -252,6 +396,73 @@ class OpenDesignAdapterTests(unittest.TestCase):
         self.assertEqual(poll_call[1]["runId"], "run-123")
         self.assertEqual(result["status"], "completed")
         self.assertEqual(result["preview_url"], "http://127.0.0.1:7456/preview")
+        evidence = result["artifact_evidence"]
+        self.assertTrue(evidence["complete"])
+        self.assertEqual(evidence["file_count"], 2)
+        self.assertEqual(evidence["files"][0]["sha256"], __import__("hashlib").sha256(b"<h1>Muse</h1>").hexdigest())
+        self.assertIsNone(evidence["files"][1]["sha256"])
+
+    def test_artifact_evidence_rejects_project_mismatch(self) -> None:
+        payload = {"projectId": "other-project", "files": [], "truncated": False}
+        with patch.object(self.adapter, "call_read_only", return_value={
+            "content": [{"type": "text", "text": json.dumps(payload)}],
+        }):
+            with self.assertRaises(Exception):
+                self.adapter.collect_artifact_evidence("project-1")
+
+    def test_execute_task_rejects_skill_removed_after_approval(self) -> None:
+        task = self.adapter.enqueue_run(
+            project_id="project-1", prompt="Create a research showcase",
+            agent="opencode", skill="web-research",
+        )
+        with TaskQueue(self.database) as queue:
+            approved = queue.approve(task["id"], approved_by="owner")
+        self.state["skills"] = []
+        with self.assertRaises(ValueError):
+            self.adapter.execute_task(approved["payload"], task_id=task["id"])
+        self.assertFalse(any(call[0] == "start_run" for call in self.state["calls"]))
+
+    def test_read_only_mcp_requires_existing_healthy_daemon(self) -> None:
+        adapter = OpenDesignAdapter(
+            workspace=self.workspace,
+            database=self.database,
+            command=("Open Design.exe", "daemon-cli.mjs", "mcp"),
+            daemon_url="http://127.0.0.1:7456",
+            data_dir=self.data_dir,
+            client_factory=lambda **kwargs: FakeMCPClient(self.state, **kwargs),
+        )
+        with patch.object(adapter, "_read_daemon_health", side_effect=ConnectionError("daemon offline")):
+            with patch("muse.open_design.subprocess.Popen") as popen:
+                with self.assertRaises(ConnectionError):
+                    adapter.list_skills()
+                popen.assert_not_called()
+        self.assertEqual(self.state["calls"], [])
+
+    def test_cli_enqueue_run_passes_design_system_uri_into_approval_payload(self) -> None:
+        output = StringIO()
+        with InitiativeStore(self.workspace / "data" / "initiatives" / "muse.sqlite3") as initiatives:
+            initiative = initiatives.propose(
+                "CLI linked initiative", kind="creative_output",
+                creator_value="Persist Open Design artifact evidence",
+                concept="Link generated files to the Research Wiki",
+                first_step="Queue an approved Open Design run",
+                expected_output="A Research Wiki bundle linked to this initiative",
+            )
+        initiative_id = initiative["id"]
+        uri = "od://design-systems/muse/DESIGN.md"
+        with patch("muse.open_design.OpenDesignAdapter.from_installed", return_value=self.adapter):
+            with patch("muse.open_design.sys.stdout", output):
+                exit_code = main([
+                    "--workspace", str(self.workspace), "--database", str(self.database),
+                    "enqueue-run", "--project", "project-1", "--agent", "opencode",
+                    "--prompt", "Create a Muse landing page", "--design-system-uri", uri,
+                    "--initiative-id", initiative_id,
+                ])
+        self.assertEqual(exit_code, 0)
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["payload"]["design_system"]["uri"], uri)
+        self.assertEqual(result["payload"]["initiative_id"], initiative_id)
+        self.assertEqual(len(result["payload"]["design_system"]["sha256"]), 64)
 
     def test_from_installed_uses_packaged_electron_node_mode(self) -> None:
         install = self.workspace / "Open Design"
@@ -280,6 +491,9 @@ class OpenDesignAdapterTests(unittest.TestCase):
         self.assertEqual(adapter.environment["ELECTRON_RUN_AS_NODE"], "1")
         self.assertEqual(adapter.environment["OD_DATA_DIR"], str(data.resolve()))
         self.assertEqual(adapter.allowed_agents, frozenset())
+        self.assertTrue(adapter.require_running_daemon)
+        self.assertFalse(adapter.direct_file_writes_enabled)
+        self.assertIsNone(adapter.expected_version)
 
 
     def test_auto_start_spawns_detached_loopback_daemon(self) -> None:

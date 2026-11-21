@@ -145,6 +145,14 @@
       ]
     },
     {
+      "stage_id": "shot_generation",
+      "role": "developer",
+      "objective": "生成单个动态镜头并校验镜头素材身份与输出",
+      "capability_hints": [
+        "comfyui_generation"
+      ]
+    },
+    {
       "stage_id": "assemble",
       "role": "operator",
       "objective": "按时间线组合画面、旁白、音乐、字幕与图形，生成候选母版",

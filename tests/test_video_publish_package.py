@@ -9,7 +9,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 from muse.video_product_builder import VideoProductBuilder
-from muse.video_publish_package import VideoPublishPackageError, build_publish_package
+from muse.video_publish_package import (
+    VideoPublishPackageError,
+    build_publish_package,
+    build_publish_package_with_generated_contact_sheet,
+)
 
 
 class VideoPublishPackageTests(unittest.TestCase):
@@ -128,6 +132,196 @@ class VideoPublishPackageTests(unittest.TestCase):
         self.assertIn("account_authorization", quality_report["blocking_items"])
         self.assertFalse(manifest["can_publish"])
         self.assertEqual(set(manifest["platforms"]), {"youtube_shorts", "tiktok", "instagram_reels", "bilibili"})
+
+    def test_contact_sheet_is_included_and_hash_bound_as_visual_review_evidence(self):
+        self._create_generation()
+        contact = self.root / "data" / "prometheus" / "sample" / "contact.png"
+        contact.write_bytes(b"\x89PNG\r\n\x1a\n" + (13).to_bytes(4, "big") + b"IHDR" + (800).to_bytes(4, "big") + (600).to_bytes(4, "big"))
+        result = build_publish_package(self.root, self.source_dir, contact_sheet="data/prometheus/sample/contact.png")
+        out = self.root / result["output_dir"]
+        self.assertTrue((out / "contact-sheet.png").is_file())
+        report = json.loads((out / "release-quality-report.json").read_text(encoding="utf-8"))
+        visual = report["checks"]["visual_anomaly_review"]["contact_sheet"]
+        self.assertEqual(visual["status"], "available")
+        self.assertEqual(visual["sha256"], hashlib.sha256(contact.read_bytes()).hexdigest())
+        self.assertTrue(visual["human_review_required"])
+        self.assertEqual(report["checks"]["visual_content_review"]["status"], "not_recorded")
+        self.assertFalse(report["can_publish"])
+        with zipfile.ZipFile(out / "publish-package.zip") as archive:
+            self.assertIn("contact-sheet.png", archive.namelist())
+
+    def test_prior_package_visual_review_is_not_inherited_by_next_release_package(self):
+        from muse.video_human_review import (
+            VisualReviewLedger, validate_visual_review_payload,
+            verify_visual_review_evidence, CHECKLIST_KEYS,
+        )
+        generation = self._create_generation()
+        contact = self.root / "data" / "prometheus" / "sample" / "contact.png"
+        contact.write_bytes(
+            b"\x89PNG\r\n\x1a\n" + (13).to_bytes(4, "big") + b"IHDR"
+            + (800).to_bytes(4, "big") + (600).to_bytes(4, "big") + b"fixture"
+        )
+        initiative_id, version_id = generation["product"]["initiative_id"], generation["product"]["version_id"]
+        product_dir = self.root / "data" / "products" / initiative_id / version_id
+        first = build_publish_package(
+            self.root, self.source_dir, output_dir=product_dir / "publish-package-v1",
+            contact_sheet="data/prometheus/sample/contact.png",
+        )
+        evidence = verify_visual_review_evidence(
+            product_dir, initiative_id, version_id, self.video,
+        )
+        payload = validate_visual_review_payload({
+            "decision": "approved", "reviewer": "Local Editor", "reviewer_role": "video_editor",
+            "rationale": "Reviewed the complete video and every sampled keyframe carefully.",
+            "checklist": {key: True for key in CHECKLIST_KEYS},
+            "confirmation": "RECORD-VISUAL-REVIEW",
+        })
+        with VisualReviewLedger(self.root / "data" / "reviews" / "visual-content-reviews.sqlite3") as ledger:
+            ledger.append(initiative_id, version_id, payload, evidence)
+        second = build_publish_package(
+            self.root, self.source_dir, output_dir=product_dir / "publish-package-v2",
+            contact_sheet="data/prometheus/sample/contact.png",
+        )
+        report = json.loads((self.root / second["output_dir"] / "release-quality-report.json").read_text(encoding="utf-8"))
+        self.assertEqual(
+            report["checks"]["visual_content_review"]["status"],
+            "not_recorded",
+        )
+        self.assertNotEqual(
+            report["checks"]["visual_anomaly_review"]["status"],
+            "verified_human_review_digest_scope_bound",
+        )
+        self.assertFalse(report["can_publish"])
+        self.assertIn("account_authorization", report["blocking_items"])
+
+    def test_generated_contact_sheet_is_packaged_and_temp_evidence_is_cleaned(self):
+        self._create_generation()
+        inventory = type("Inventory", (), {"tools": [
+            type("Tool", (), {"tool_id": "ffmpeg", "executable": "ffmpeg.exe"})(),
+            type("Tool", (), {"tool_id": "ffprobe", "executable": "ffprobe.exe"})(),
+        ]})()
+        png = (
+            b"\x89PNG\r\n\x1a\n" + (13).to_bytes(4, "big") + b"IHDR"
+            + (640).to_bytes(4, "big") + (480).to_bytes(4, "big") + b"fixture"
+        )
+        def generate(source, output, **kwargs):
+            self.assertEqual(Path(source).resolve(), self.video.resolve())
+            self.assertEqual(kwargs["ffmpeg_path"], "ffmpeg.exe")
+            self.assertEqual(kwargs["ffprobe_path"], "ffprobe.exe")
+            Path(output).write_bytes(png)
+            return {"status": "completed", "image_decode": "passed"}
+
+        with patch("muse.media.discover_media_tools", return_value=inventory):
+            with patch("muse.video_contact_sheet.create_contact_sheet", side_effect=generate):
+                result = build_publish_package_with_generated_contact_sheet(self.root, self.source_dir)
+
+        out = self.root / result["output_dir"]
+        self.assertTrue((out / "contact-sheet.png").is_file())
+        product_relative = json.loads((self.source_dir / "generation.json").read_text(encoding="utf-8"))["product"]["relative_path"]
+        self.assertEqual(result["output_dir"], (Path(product_relative) / "publish-package-v1").as_posix())
+        self.assertEqual((out / "contact-sheet.png").read_bytes(), png)
+        self.assertFalse(any(self.source_dir.glob(".muse-contact-sheet-*")))
+        manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(
+            manifest["files"]["contact-sheet.png"],
+            hashlib.sha256(png).hexdigest(),
+        )
+        self.assertFalse(result["can_publish"])
+
+    def test_optional_contact_sheet_failure_is_explicit_and_keeps_draft_non_publishable(self):
+        from muse.video_publish_package import build_publish_package_with_optional_generated_contact_sheet
+
+        self._create_generation()
+        inventory = type("Inventory", (), {"tools": []})()
+        with patch("muse.media.discover_media_tools", return_value=inventory):
+            result = build_publish_package_with_optional_generated_contact_sheet(self.root, self.source_dir)
+
+        self.assertEqual(result["contact_sheet_generation"]["status"], "unavailable")
+        self.assertIn("FFmpeg and FFprobe", result["contact_sheet_generation"]["reason"])
+        self.assertTrue(result["contact_sheet_generation"]["human_review_required"])
+        self.assertFalse(result["can_publish"])
+        out = self.root / result["output_dir"]
+        self.assertFalse((out / "contact-sheet.png").exists())
+        quality = json.loads((out / "release-quality-report.json").read_text(encoding="utf-8"))
+        self.assertEqual(quality["checks"]["visual_anomaly_review"]["contact_sheet"]["status"], "not_provided")
+    def test_optional_contact_sheet_timeout_is_explicit_and_keeps_draft_non_publishable(self):
+        import subprocess
+        from muse.video_publish_package import build_publish_package_with_optional_generated_contact_sheet
+
+        self._create_generation()
+        inventory = type("Inventory", (), {"tools": [
+            type("Tool", (), {"tool_id": "ffmpeg", "executable": "ffmpeg.exe"})(),
+            type("Tool", (), {"tool_id": "ffprobe", "executable": "ffprobe.exe"})(),
+        ]})()
+        with patch("muse.media.discover_media_tools", return_value=inventory):
+            with patch("muse.video_contact_sheet.create_contact_sheet",
+                       side_effect=subprocess.TimeoutExpired("ffmpeg", 30)):
+                result = build_publish_package_with_optional_generated_contact_sheet(self.root, self.source_dir)
+
+        self.assertEqual(result["contact_sheet_generation"]["status"], "unavailable")
+        self.assertIn("timed out", result["contact_sheet_generation"]["reason"].lower())
+        self.assertTrue(result["contact_sheet_generation"]["human_review_required"])
+        self.assertFalse(result["can_publish"])
+        self.assertFalse((self.root / result["output_dir"] / "contact-sheet.png").exists())
+
+    def test_optional_contact_sheet_success_records_hash_bound_evidence(self):
+        from muse.video_publish_package import build_publish_package_with_optional_generated_contact_sheet
+
+        self._create_generation()
+        inventory = type("Inventory", (), {"tools": [
+            type("Tool", (), {"tool_id": "ffmpeg", "executable": "ffmpeg.exe"})(),
+            type("Tool", (), {"tool_id": "ffprobe", "executable": "ffprobe.exe"})(),
+        ]})()
+        png = (b"\x89PNG\r\n\x1a\n" + (13).to_bytes(4, "big") + b"IHDR"
+               + (640).to_bytes(4, "big") + (480).to_bytes(4, "big") + b"fixture")
+        def generate(source, output, **kwargs):
+            self.assertEqual(Path(source).resolve(), self.video.resolve())
+            Path(output).write_bytes(png)
+            return {"status": "completed", "image_decode": "passed"}
+
+        with patch("muse.media.discover_media_tools", return_value=inventory):
+            with patch("muse.video_contact_sheet.create_contact_sheet", side_effect=generate):
+                result = build_publish_package_with_optional_generated_contact_sheet(self.root, self.source_dir)
+
+        self.assertEqual(result["contact_sheet_generation"]["status"], "completed")
+        self.assertEqual(result["contact_sheet_generation"]["sha256"], hashlib.sha256(png).hexdigest())
+        self.assertFalse(result["can_publish"])
+        out = self.root / result["output_dir"]
+        manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["files"]["contact-sheet.png"], hashlib.sha256(png).hexdigest())
+
+    def test_contact_sheet_rejects_non_png(self):
+        self._create_generation()
+        contact = self.root / "data" / "prometheus" / "sample" / "not-image.png"
+        contact.write_bytes(b"not a png")
+        with self.assertRaisesRegex(VideoPublishPackageError, "valid PNG"):
+            build_publish_package(self.root, self.source_dir, contact_sheet="data/prometheus/sample/not-image.png")
+    def test_visual_content_review_digest_binds_contact_sheet_hash(self):
+        from muse.video_publish_package import _json_bytes, _review_record_status
+
+        video_hash = hashlib.sha256(b"video-v1").hexdigest()
+        sheet_hash = hashlib.sha256(b"contact-sheet-v1").hexdigest()
+        required = {"video.mp4": video_hash, "contact-sheet.png": sheet_hash}
+        manifest_hash = hashlib.sha256(b"release-manifest-v1").hexdigest()
+        record = {
+            "schema_version": 1, "category": "visual_content", "decision": "approved",
+            "reviewer": {"id": "editor-2", "role": "video_editor"},
+            "reviewed_at": "2026-11-21T10:00:00+00:00",
+            "subject": {"initiative_id": "initiative-1", "version_id": "version-1",
+                        "video_sha256": video_hash, "artifact_sha256": required,
+                        "release_manifest_sha256": manifest_hash},
+            "evidence_refs": ["contact-sheet.png#all-frames"],
+            "rationale": "Checked framing, missing subjects, and shot continuity.",
+        }
+        record["review_sha256"] = hashlib.sha256(_json_bytes(record)).hexdigest()
+        args = {"category": "visual_content", "initiative_id": "initiative-1",
+                "version_id": "version-1", "video_sha256": video_hash,
+                "required_artifacts": required}
+        args["release_manifest_sha256"] = manifest_hash
+        self.assertEqual(_review_record_status(record, **args), "verified_human_review_digest_scope_bound")
+        changed = {**required, "contact-sheet.png": "0" * 64}
+        self.assertEqual(_review_record_status(record, **{**args, "required_artifacts": changed}),
+                         "evidence_mismatch_or_incomplete")
 
     def test_release_review_record_is_bound_to_reviewer_scope_and_exact_artifact_hashes(self):
         from muse.video_publish_package import _json_bytes, _review_record_status

@@ -89,6 +89,33 @@ class HerdrEventStream:
                 return HerdrEventResult(False, self.sequence, reason="stale_heartbeat")
             self.sequence = sequence
             return HerdrEventResult(True, self.sequence, event_type="heartbeat")
+        # The Core schema emits `missed` as its own notification method,
+        # not as an `event` whose params.type is `missed`.
+        if method == "missed":
+            if not isinstance(params, dict):
+                return HerdrEventResult(False, self.sequence, event_type="missed", needs_reconcile=True, reason="invalid_missed")
+            try:
+                sequence = _sequence(params.get("seq"))
+            except ValueError:
+                return HerdrEventResult(False, self.sequence, event_type="missed", needs_reconcile=True, reason="invalid_sequence")
+            if sequence <= self.sequence:
+                return HerdrEventResult(False, self.sequence, event_type="missed", reason="duplicate_or_stale")
+            terminals = params.get("terminals")
+            if not isinstance(terminals, list):
+                return HerdrEventResult(False, self.sequence, event_type="missed", needs_reconcile=True, reason="missed_without_snapshot")
+            replacement: dict[str, str] = {}
+            for record in terminals:
+                if not isinstance(record, dict):
+                    continue
+                terminal_id = _terminal_id(record)
+                if terminal_id is not None:
+                    replacement[terminal_id] = _reported_state(
+                        record.get("status"), reported=record.get("reported", False)
+                    )
+            self.statuses = replacement
+            self.sequence = sequence
+            return HerdrEventResult(True, sequence, event_type="missed", snapshot_replaced=True)
+
         if method != "event" or not isinstance(params, dict):
             return HerdrEventResult(False, self.sequence, needs_reconcile=True, reason="unexpected_message")
         try:

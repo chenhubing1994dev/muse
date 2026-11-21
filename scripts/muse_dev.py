@@ -18,8 +18,14 @@ SOURCE_ROOT = PROJECT_ROOT / "src"
 if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
-from muse import chatgpt_bridge  # noqa: E402
 from muse.terminal_runtime import HerdrCoreProvider, PsmuxProvider  # noqa: E402
+
+
+def _load_chatgpt_bridge():
+    """Import the Commander bridge only for Commander commands."""
+    from muse import chatgpt_bridge
+
+    return chatgpt_bridge
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -40,7 +46,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     run.add_argument("--cwd", default=".", help="project-relative working directory")
     run.add_argument("--session", default=adapter.DEFAULT_SESSION)
-    run.add_argument("--timeout", type=int, default=120, help="execution timeout in seconds (1..7200)")
+    run.add_argument("--timeout", type=int, default=600, help="execution timeout in seconds (1..7200)")
 
     inspect = commands.add_parser("inspect", help="inspect psmux windows and active job")
     inspect.add_argument("--session", default=adapter.DEFAULT_SESSION)
@@ -68,29 +74,29 @@ def _parser() -> argparse.ArgumentParser:
     commander_commands = commander.add_subparsers(dest="commander_action", required=True)
 
     commander_list = commander_commands.add_parser("list", help="show payload-free TaskQueue status")
-    commander_list.add_argument("--database", default=str(chatgpt_bridge.DEFAULT_DATABASE))
+    commander_list.add_argument("--database", default=None)
     commander_list.add_argument("--limit", type=int, default=20, choices=range(1, 201))
 
     commander_status = commander_commands.add_parser("status", help="inspect one Ticket without exposing its payload")
     commander_status.add_argument("--task-id", required=True)
-    commander_status.add_argument("--database", default=str(chatgpt_bridge.DEFAULT_DATABASE))
+    commander_status.add_argument("--database", default=None)
     commander_status.add_argument("--events-limit", type=int, default=20)
 
     commander_submit = commander_commands.add_parser("submit", help="create an approval-gated Commander Ticket")
     commander_submit.add_argument("--request", required=True)
     commander_submit.add_argument("--request-id", required=True, help="stable idempotency key; required to prevent duplicate submissions")
     commander_submit.add_argument("--title")
-    commander_submit.add_argument("--database", default=str(chatgpt_bridge.DEFAULT_DATABASE))
+    commander_submit.add_argument("--database", default=None)
     commander_submit.add_argument("--priority", type=int, default=50, choices=range(0, 101))
     commander_submit.add_argument("--estimated-seconds", type=int, default=900)
-    commander_submit.add_argument("--base-url", default=chatgpt_bridge.DEFAULT_LMSTUDIO_URL)
+    commander_submit.add_argument("--base-url", default=None)
     commander_submit.add_argument("--model", default=None)
     commander_submit.add_argument("--timeout", type=int, default=20, choices=range(1, 31))
 
     commander_approve = commander_commands.add_parser("approve", help="record human approval; does not dispatch")
     commander_approve.add_argument("--task-id", required=True)
     commander_approve.add_argument("--approved-by", required=True)
-    commander_approve.add_argument("--database", default=str(chatgpt_bridge.DEFAULT_DATABASE))
+    commander_approve.add_argument("--database", default=None)
     return parser
 
 
@@ -143,13 +149,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0 if observation.available else 2
     elif args.action == "commander":
         try:
+            bridge = _load_chatgpt_bridge()
+            if args.database is None:
+                args.database = str(bridge.DEFAULT_DATABASE)
+            if getattr(args, "base_url", None) is None:
+                args.base_url = bridge.DEFAULT_LMSTUDIO_URL
             if args.commander_action == "list":
-                return chatgpt_bridge.command_task_list(args)
+                return bridge.command_task_list(args)
             if args.commander_action == "status":
-                return chatgpt_bridge.command_task_status(args)
+                return bridge.command_task_status(args)
             if args.commander_action == "submit":
-                return chatgpt_bridge.command_submit(args)
-            return chatgpt_bridge.command_approve(args)
+                return bridge.command_submit(args)
+            return bridge.command_approve(args)
         except (OSError, ValueError, RuntimeError, PermissionError) as exc:
             print(json.dumps({"ok": False, "error": type(exc).__name__, "message": str(exc)[:300]}, ensure_ascii=True))
             return 2

@@ -6,7 +6,281 @@ import unittest
 from muse.task_queue import TaskQueue
 
 
+
 class TaskQueueTests(unittest.TestCase):
+
+
+    def _create_claimed_contextual_review(self, queue: TaskQueue):
+        import hashlib
+        from muse.contextual_inquiry import ContextualInquiry, Hypothesis, Observation, SourceKind
+
+        inquiry = ContextualInquiry(
+            "queue-review-case", "Review a bounded case.",
+            observations=(Observation("obs-1", SourceKind.USER_QUOTE, "Private observation.", "source:1"),),
+            hypotheses=(Hypothesis(
+                "hyp-1", "A tentative hypothesis.", ("obs-1",), confidence=0.4,
+                falsification_condition="Independent evidence contradicts it.",
+            ),),
+        )
+        case_envelope = {
+            "version": 1, "protection": "windows-dpapi-current-user",
+            "ciphertext_b64": "Y2FzZS1jaXBoZXJ0ZXh0",
+        }
+        task = queue.enqueue(
+            "Contextual inquiry review",
+            {
+                "kind": "contextual_inquiry_review",
+                "case_context_attached": False,
+                "case_context_envelope_stored": True,
+                "case_context_envelope": case_envelope,
+                "context_status": "encrypted_pending_handler",
+                "requires_context_reentry": True,
+                "long_term_storage_performed": False,
+            },
+            require_approval=True,
+            idempotency_key=(
+                "contextual-inquiry-review:"
+                + hashlib.sha256(inquiry.inquiry_id.encode("utf-8")).hexdigest()
+            ),
+        )
+        authorized = queue.authorize_contextual_inquiry_review_only(
+            task["id"], authorized_by="operator", expected_updated_at=task["updated_at"],
+        )
+        claimed = queue.claim_contextual_inquiry_review_only(
+            task["id"], worker_id="review-worker",
+            expected_updated_at=authorized["task"]["updated_at"],
+        )
+        return claimed, inquiry, case_envelope
+
+    def _review_result_envelope_and_plaintext(self, inquiry):
+        import json
+
+        result = {
+            "schema_version": 1,
+            "inquiry_id": inquiry.inquiry_id,
+            "summary": "Review remains provisional.",
+            "findings": [{
+                "finding_id": "finding-1",
+                "statement": "The observation is a candidate, not a verdict.",
+                "observation_refs": ["obs-1"],
+                "hypothesis_refs": ["hyp-1"],
+                "assessment": "unresolved",
+                "rationale": "Independent corroboration is still required.",
+            }],
+            "unknowns": ["Whether an independent source corroborates the claim."],
+        }
+        plaintext = json.dumps(
+            result, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
+        ).encode("utf-8")
+        envelope = {
+            "version": 1, "protection": "windows-dpapi-current-user",
+            "ciphertext_b64": "cmV2aWV3LXJlc3VsdC1jaXBoZXJ0ZXh0",
+        }
+        return envelope, plaintext
+
+    def test_contextual_review_result_is_attached_encrypted_and_returns_to_human_approval(self) -> None:
+        import json
+        from unittest.mock import patch
+        from muse.contextual_inquiry_security import _serialize_contextual_inquiry
+
+        with tempfile.TemporaryDirectory() as directory:
+            with TaskQueue(Path(directory) / "tickets.sqlite3") as queue:
+                claimed, inquiry, case_envelope = self._create_claimed_contextual_review(queue)
+                result_envelope, result_plaintext = self._review_result_envelope_and_plaintext(inquiry)
+                case_plaintext = _serialize_contextual_inquiry(inquiry)
+
+                def decrypt(envelope):
+                    if envelope == case_envelope:
+                        return case_plaintext
+                    if envelope == result_envelope:
+                        return result_plaintext
+                    raise ValueError("unexpected test envelope")
+
+                with patch("muse.contextual_inquiry_security.unprotect_case_bytes", side_effect=decrypt):
+                    completed = queue.complete_contextual_inquiry_review_only(
+                        claimed["id"], worker_id="review-worker",
+                        expected_updated_at=claimed["updated_at"],
+                        encrypted_review_result=result_envelope,
+                    )
+
+                self.assertEqual(completed["status"], "waiting_approval")
+                self.assertIsNone(completed["lease_owner"])
+                self.assertIsNone(completed["lease_expires_at"])
+                self.assertEqual(completed["payload"]["review_result_envelope"], result_envelope)
+                self.assertTrue(completed["payload"]["case_context_attached"])
+                self.assertFalse(completed["payload"]["requires_context_reentry"])
+                self.assertEqual(completed["payload"]["context_status"], "validated_attached")
+                self.assertNotIn("_result", completed["payload"])
+                self.assertNotIn("_approved", completed["payload"])
+                self.assertNotIn(result_plaintext.decode("utf-8"), json.dumps(completed["payload"]))
+                events = queue.events(claimed["id"])
+                attached = [event for event in events if event["event_type"] == "contextual_inquiry.context_attached"]
+                self.assertEqual(len(attached), 1)
+                self.assertEqual(attached[0]["actor"], "contextual-inquiry-review-handler")
+                self.assertEqual(attached[0]["payload"], {"attachment_state": "validated"})
+                self.assertNotIn(result_plaintext.decode("utf-8"), json.dumps(events))
+
+                approved = queue.approve(claimed["id"], approved_by="human-operator")
+                self.assertEqual(approved["status"], "queued")
+                self.assertTrue(approved["payload"]["_approved"])
+
+    def test_contextual_review_result_reader_is_read_only_and_requires_completed_review(self) -> None:
+        import json
+        from unittest.mock import patch
+        from muse.contextual_inquiry_security import _serialize_contextual_inquiry
+
+        with tempfile.TemporaryDirectory() as directory:
+            with TaskQueue(Path(directory) / "tickets.sqlite3") as queue:
+                claimed, inquiry, case_envelope = self._create_claimed_contextual_review(queue)
+                with self.assertRaisesRegex(PermissionError, "not ready for human review"):
+                    queue.load_contextual_inquiry_review_result(claimed["id"])
+
+                result_envelope, result_plaintext = self._review_result_envelope_and_plaintext(inquiry)
+                case_plaintext = _serialize_contextual_inquiry(inquiry)
+
+                def decrypt(envelope):
+                    if envelope == case_envelope:
+                        return case_plaintext
+                    if envelope == result_envelope:
+                        return result_plaintext
+                    raise ValueError("unexpected test envelope")
+
+                with patch("muse.contextual_inquiry_security.unprotect_case_bytes", side_effect=decrypt):
+                    completed = queue.complete_contextual_inquiry_review_only(
+                        claimed["id"], worker_id="review-worker",
+                        expected_updated_at=claimed["updated_at"],
+                        encrypted_review_result=result_envelope,
+                    )
+                    before_events = queue.events(claimed["id"])
+                    result = queue.load_contextual_inquiry_review_result(claimed["id"])
+                    after = queue.get(claimed["id"])
+                    after_events = queue.events(claimed["id"])
+
+                self.assertEqual(result, json.loads(result_plaintext))
+                self.assertEqual(after["updated_at"], completed["updated_at"])
+                self.assertEqual(after_events, before_events)
+                self.assertNotIn(result_plaintext.decode("utf-8"), json.dumps(after["payload"]))
+                self.assertNotIn(result_plaintext.decode("utf-8"), json.dumps(after_events))
+
+                queue.approve(claimed["id"], approved_by="human-operator")
+                with self.assertRaisesRegex(PermissionError, "not ready for human review"):
+                    queue.load_contextual_inquiry_review_result(claimed["id"])
+
+    def test_contextual_review_result_reader_rejects_missing_claim_audit(self) -> None:
+        from unittest.mock import patch
+        from muse.contextual_inquiry_security import _serialize_contextual_inquiry
+
+        with tempfile.TemporaryDirectory() as directory:
+            with TaskQueue(Path(directory) / "tickets.sqlite3") as queue:
+                claimed, inquiry, case_envelope = self._create_claimed_contextual_review(queue)
+                result_envelope, result_plaintext = self._review_result_envelope_and_plaintext(inquiry)
+                case_plaintext = _serialize_contextual_inquiry(inquiry)
+
+                def decrypt(envelope):
+                    return case_plaintext if envelope == case_envelope else result_plaintext
+
+                with patch("muse.contextual_inquiry_security.unprotect_case_bytes", side_effect=decrypt):
+                    queue.complete_contextual_inquiry_review_only(
+                        claimed["id"], worker_id="review-worker",
+                        expected_updated_at=claimed["updated_at"],
+                        encrypted_review_result=result_envelope,
+                    )
+                queue._connection.execute(
+                    "DELETE FROM task_events WHERE task_id = ? AND event_type = ?",
+                    (claimed["id"], "assignment.contextual_review_only_claimed"),
+                )
+                queue._connection.commit()
+                with patch("muse.contextual_inquiry_security.unprotect_case_bytes", side_effect=decrypt):
+                    with self.assertRaisesRegex(PermissionError, "claim audit"):
+                        queue.load_contextual_inquiry_review_result(claimed["id"])
+
+    def test_contextual_review_result_rejects_wrong_worker_stale_revision_and_expired_lease(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with TaskQueue(Path(directory) / "tickets.sqlite3") as queue:
+                claimed, inquiry, _ = self._create_claimed_contextual_review(queue)
+                envelope, _ = self._review_result_envelope_and_plaintext(inquiry)
+                with self.assertRaisesRegex(PermissionError, "current Worker lease owner"):
+                    queue.complete_contextual_inquiry_review_only(
+                        claimed["id"], worker_id="other-worker",
+                        expected_updated_at=claimed["updated_at"], encrypted_review_result=envelope,
+                    )
+                with self.assertRaisesRegex(RuntimeError, "revision conflict"):
+                    queue.complete_contextual_inquiry_review_only(
+                        claimed["id"], worker_id="review-worker",
+                        expected_updated_at=claimed["updated_at"] + "-stale",
+                        encrypted_review_result=envelope,
+                    )
+                queue._connection.execute(
+                    "UPDATE tasks SET lease_expires_at = ? WHERE id = ?",
+                    ("2000-01-01T00:00:00+00:00", claimed["id"]),
+                )
+                queue._connection.commit()
+                expired = queue.get(claimed["id"])
+                with self.assertRaisesRegex(PermissionError, "lease has expired"):
+                    queue.complete_contextual_inquiry_review_only(
+                        claimed["id"], worker_id="review-worker",
+                        expected_updated_at=expired["updated_at"], encrypted_review_result=envelope,
+                    )
+                self.assertEqual(queue.get(claimed["id"])["status"], "running")
+
+    def test_contextual_review_result_rejects_invalid_plaintext_without_partial_attachment(self) -> None:
+        from unittest.mock import patch
+        from muse.contextual_inquiry_security import _serialize_contextual_inquiry
+
+        with tempfile.TemporaryDirectory() as directory:
+            with TaskQueue(Path(directory) / "tickets.sqlite3") as queue:
+                claimed, inquiry, case_envelope = self._create_claimed_contextual_review(queue)
+                result_envelope, _ = self._review_result_envelope_and_plaintext(inquiry)
+                case_plaintext = _serialize_contextual_inquiry(inquiry)
+                with patch(
+                    "muse.contextual_inquiry_security.unprotect_case_bytes",
+                    side_effect=lambda envelope: case_plaintext if envelope == case_envelope else b"not-json",
+                ):
+                    with self.assertRaisesRegex(Exception, "not valid JSON"):
+                        queue.complete_contextual_inquiry_review_only(
+                            claimed["id"], worker_id="review-worker",
+                            expected_updated_at=claimed["updated_at"],
+                            encrypted_review_result=result_envelope,
+                        )
+                unchanged = queue.get(claimed["id"])
+                self.assertEqual(unchanged["status"], "running")
+                self.assertNotIn("review_result_envelope", unchanged["payload"])
+                self.assertFalse(any(
+                    event["event_type"] == "contextual_inquiry.context_attached"
+                    for event in queue.events(claimed["id"])
+                ))
+
+
+    def test_contextual_review_result_rejects_verdict_promotion(self) -> None:
+        import json
+        from unittest.mock import patch
+        from muse.contextual_inquiry_security import CaseProtectionError, _serialize_contextual_inquiry
+
+        with tempfile.TemporaryDirectory() as directory:
+            with TaskQueue(Path(directory) / "tickets.sqlite3") as queue:
+                claimed, inquiry, case_envelope = self._create_claimed_contextual_review(queue)
+                result_envelope, result_plaintext = self._review_result_envelope_and_plaintext(inquiry)
+                result = json.loads(result_plaintext)
+                result["findings"][0]["assessment"] = "verified"
+                invalid_plaintext = json.dumps(
+                    result, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
+                ).encode("utf-8")
+                case_plaintext = _serialize_contextual_inquiry(inquiry)
+
+                def decrypt(envelope):
+                    return case_plaintext if envelope == case_envelope else invalid_plaintext
+
+                with patch("muse.contextual_inquiry_security.unprotect_case_bytes", side_effect=decrypt):
+                    with self.assertRaisesRegex(CaseProtectionError, "cannot promote evidence"):
+                        queue.complete_contextual_inquiry_review_only(
+                            claimed["id"], worker_id="review-worker",
+                            expected_updated_at=claimed["updated_at"],
+                            encrypted_review_result=result_envelope,
+                        )
+                unchanged = queue.get(claimed["id"])
+                self.assertEqual(unchanged["status"], "running")
+                self.assertNotIn("review_result_envelope", unchanged["payload"])
+
     def test_task_survives_reopening_database(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "tasks.sqlite3"

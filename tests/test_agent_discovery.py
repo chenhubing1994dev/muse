@@ -34,7 +34,7 @@ class AgentDiscoveryTests(unittest.TestCase):
     def test_valid_local_health_response_registers_metadata_but_disabled_by_default_example(self) -> None:
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self):
-                body = json.dumps({"status": "ok", "agent_id": "researcher", "role": "research", "capabilities": ["web.search"]}).encode()
+                body = json.dumps({"status": "ok", "agent_id": "researcher", "role": "research", "capabilities": ["web.search"], "model_id": "spoofed-health-model"}).encode()
                 self.send_response(200)
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
@@ -45,13 +45,15 @@ class AgentDiscoveryTests(unittest.TestCase):
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
-            self.config.write_text(json.dumps({"agents": [{"agent_id": "researcher", "health_url": f"http://127.0.0.1:{server.server_port}/health", "enabled": True}]}))
+            self.config.write_text(json.dumps({"agents": [{"agent_id": "researcher", "health_url": f"http://127.0.0.1:{server.server_port}/health", "enabled": True, "model_family": "anthropic", "model_id": "anthropic/claude-sonnet-4"}]}))
             result = discover_configured_agents(self.config, self.registry)
             self.assertEqual(result["discovered"], ["researcher"])
             self.assertEqual(result["executed_programs"], 0)
             agent = self.registry.get("researcher")
             self.assertEqual(agent["status"], "online")
             self.assertEqual(agent["capabilities"], ["web.search"])
+            self.assertEqual(agent["model_family"], "anthropic")
+            self.assertEqual(agent["model_id"], "anthropic/claude-sonnet-4")
         finally:
             server.shutdown()
             server.server_close()
