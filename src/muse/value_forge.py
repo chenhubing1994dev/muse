@@ -262,6 +262,9 @@ class ValueForge:
 
         evaluations: list[dict[str, Any]] = []
         for proposal in proposals:
+            proposal_id = proposal.get("id")
+            if proposal.get("status") in {"approved", "rejected", "implemented", "rolled_back"}:
+                continue
             metadata = proposal.get("metadata")
             metadata = metadata if isinstance(metadata, Mapping) else {}
             signal_key = proposal.get("signal_key") or metadata.get("signal_key")
@@ -304,7 +307,6 @@ class ValueForge:
                 "evaluation": evaluated["evaluation"],
                 "evidence_refs": evaluated["evidence_refs"],
             })
-
         evaluations.sort(key=lambda item: item["proposal_id"])
         return {
             "schema_version": 1,

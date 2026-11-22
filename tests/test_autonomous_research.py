@@ -347,9 +347,11 @@ class AutonomousResearchTests(unittest.TestCase):
                     external_ref="creator-inspired-test-seed",
                     metadata={
                         "epistemic_status": "creator_inspired_hypothesis_only",
-                        "review_state": "not_researched",                        "allow_external_research": True,
+                        "review_state": "not_researched",
+                        "allow_external_research": True,
                         "creator_context_is_evidence": False,
                         "requires_support_and_counter_evidence": True,
+                        "symbolic_framework_id": "qimen",
                     },
                     status="proposed",
                 )
@@ -368,9 +370,14 @@ class AutonomousResearchTests(unittest.TestCase):
             topic = engine._next_topic()
             self.assertEqual(topic["topic_origin"], "creator_inspired_hypothesis_backlog")
             self.assertEqual(topic["creator_inspired_hypothesis_node_id"], candidate["id"])
+            self.assertEqual(topic["symbolic_lens"], "qimen")
+            self.assertEqual(topic["symbolic_framework_id"], "qimen")
+            self.assertEqual(topic["symbolic_framework_attribution"], "source_metadata")
             self.assertIn("independent evidence", topic["support_query"])
             self.assertIn("counterevidence", topic["counter_query"])
             result = engine.run_once()
+            self.assertEqual(result["report"]["symbolic_framework_id"], "qimen")
+            self.assertEqual(result["report"]["symbolic_framework_attribution"], "source_metadata")
             self.assertEqual(result["report"]["creator_inspired_hypothesis_review_state"],
                              "researched_needs_independent_review")
             self.assertEqual(result["report"]["creator_inspired_hypothesis_persistence_status"],
@@ -381,8 +388,9 @@ class AutonomousResearchTests(unittest.TestCase):
                 self.assertEqual(reviewed["metadata"]["review_state"], "researched_needs_independent_review")
                 self.assertTrue(reviewed["metadata"]["requires_support_and_counter_evidence"])
                 idea_node = knowledge.get_node(result["report"]["idea_id"])
+                self.assertEqual(idea_node["metadata"]["symbolic_framework_id"], "qimen")
+                self.assertEqual(idea_node["metadata"]["symbolic_framework_attribution"], "source_metadata")
                 cross_metadata = idea_node["metadata"]["symbolic_cross_system"]
-                self.assertEqual(cross_metadata["framework_ids"], ["iching", "qimen", "ziwei", "liu_ren"])
                 self.assertEqual(cross_metadata["epistemic_status"], "symbolic_hypothesis_only")
                 self.assertNotIn("systems", cross_metadata)
                 self.assertLess(len(json.dumps(idea_node["metadata"], ensure_ascii=False).encode("utf-8")), 16000)
@@ -391,6 +399,45 @@ class AutonomousResearchTests(unittest.TestCase):
                          if node.get("metadata", {}).get("epistemic_status") == "symbolic_hypothesis_only"]),
                     0,
                 )
+
+    def test_creator_candidate_preserves_each_core_symbolic_framework_provenance(self):
+        frameworks = ("iching", "qimen", "ziwei", "liu_ren")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidates = {}
+            with ResearchKnowledgeStore(root / "knowledge.sqlite3") as knowledge:
+                for framework_id in (*frameworks, "unknown-tradition"):
+                    candidate = knowledge.upsert_node(
+                        "claim", f"Symbolic creator candidate: {framework_id}",
+                        summary="A symbolic research hypothesis requiring independent support and counter-evidence.",
+                        external_ref=f"creator-symbolic-framework:{framework_id}",
+                        metadata={
+                            "epistemic_status": "creator_inspired_hypothesis_only",
+                            "review_state": "not_researched",
+                            "allow_external_research": True,
+                            "creator_context_is_evidence": False,
+                            "requires_support_and_counter_evidence": True,
+                            "symbolic_framework_id": framework_id,
+                        },
+                        status="proposed",
+                    )
+                    candidates[framework_id] = candidate["id"]
+            engine = AutonomousResearchEngine(
+                evidence_db=root / "evidence.sqlite3", knowledge_db=root / "knowledge.sqlite3",
+                progress_db=root / "progress.sqlite3", reminder_db=root / "reminders.sqlite3",
+                search=FakeSearch(), reader=FakeReader(), resource_aware=False,
+            )
+            for framework_id in frameworks:
+                topic = engine._next_topic(preferred_key="creator-hypothesis-review:" + candidates[framework_id])
+                self.assertEqual(topic["symbolic_lens"], framework_id)
+                self.assertEqual(topic["symbolic_framework_id"], framework_id)
+                self.assertEqual(topic["symbolic_framework_source_value"], framework_id)
+                self.assertEqual(topic["symbolic_framework_attribution"], "source_metadata")
+            unknown = engine._next_topic(preferred_key="creator-hypothesis-review:" + candidates["unknown-tradition"])
+            self.assertEqual(unknown["symbolic_lens"], "iching")
+            self.assertIsNone(unknown["symbolic_framework_id"])
+            self.assertEqual(unknown["symbolic_framework_source_value"], "unknown-tradition")
+            self.assertEqual(unknown["symbolic_framework_attribution"], "unrecognized_source_metadata")
 
     def test_frontier_research_topics_have_support_and_counter_queries(self):
         topics = {item["key"]: item for item in RESEARCH_TOPICS}
@@ -1363,11 +1410,15 @@ class AutonomousResearchTests(unittest.TestCase):
             result = engine.run_once()
             self.assertEqual(result["topic_key"], "symbolic-hypothesis-review:" + candidate["id"])
             self.assertEqual(result["report"]["symbolic_hypothesis_node_id"], candidate["id"])
-            self.assertEqual(result["report"]["symbolic_hypothesis_review_state"], "researched_needs_independent_review")
+            self.assertEqual(result["report"]["symbolic_framework_id"], "tarot")
+            self.assertEqual(result["report"]["symbolic_framework_attribution"], "source_metadata")
             self.assertIn("Which scenario branches", result["report"]["question"])
             with ResearchKnowledgeStore(root / "knowledge.sqlite3") as knowledge:
                 stored = next(item for item in knowledge.list_nodes(node_type="claim", limit=100)
                               if item["id"] == candidate["id"])
+                idea_node = knowledge.get_node(result["report"]["idea_id"])
+                self.assertEqual(idea_node["metadata"]["symbolic_framework_id"], "tarot")
+                self.assertEqual(idea_node["metadata"]["symbolic_framework_attribution"], "source_metadata")
                 self.assertEqual(stored["status"], "proposed")
                 self.assertEqual(stored["metadata"]["review_state"], "researched_needs_independent_review")
                 self.assertEqual(stored["provenance"], [])
@@ -1852,6 +1903,49 @@ class AutonomousResearchTests(unittest.TestCase):
             with ProgressEventStore(progress_db) as progress:
                 events = list(reversed(progress.list_events(category="evolution", subject_id=cycle_id, limit=20)))
             self.assertEqual(events[-1]["event"], "completed")
+
+    def test_stop_after_report_checkpoint_defers_later_persistence_until_resume(self):
+        from threading import Event
+        from muse.research_knowledge import ResearchKnowledgeStore
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            engine = AutonomousResearchEngine(
+                evidence_db=root / "evidence.sqlite3", knowledge_db=root / "knowledge.sqlite3",
+                progress_db=root / "tasks.sqlite3", reminder_db=root / "reminders.sqlite3",
+                workspace=root, search=FakeSearch(), reader=FakeReader(), resource_aware=False,
+            )
+            stop_event = Event()
+            original_persist = engine._persist_report
+            persist_calls = []
+
+            def persist_then_stop(*args, **kwargs):
+                path = original_persist(*args, **kwargs)
+                persist_calls.append(path)
+                stop_event.set()
+                return path
+
+            with patch.object(engine, "_persist_report", side_effect=persist_then_stop), \
+                 patch.object(engine, "_persist_creator_inspired_hypotheses", wraps=engine._persist_creator_inspired_hypotheses) as persist_hypotheses:
+                interrupted = engine.run_once(stop_event=stop_event)
+                self.assertEqual(interrupted["status"], "interrupted")
+                self.assertEqual(len(persist_calls), 1)
+                persist_hypotheses.assert_not_called()
+                cycle_id, topic_key = engine._interrupted_cycle_checkpoint()
+                self.assertEqual(cycle_id, interrupted["evolution_cycle_id"])
+                self.assertEqual(topic_key, interrupted["topic_key"])
+
+            with ResearchKnowledgeStore(root / "knowledge.sqlite3") as knowledge:
+                ideas = [item for item in knowledge.list_nodes(node_type="idea", limit=50)
+                         if item.get("metadata", {}).get("autonomous_topic_key") == topic_key]
+                self.assertEqual(len(ideas), 1)
+                inspired = [item for item in knowledge.list_nodes(node_type="claim", limit=100)
+                            if item.get("external_ref", "").startswith("creator-inspired-hypothesis:")]
+                self.assertEqual(inspired, [])
+            resumed = engine.run_once()
+            self.assertEqual(resumed["status"], "completed")
+            self.assertEqual(resumed["evolution_cycle_id"], cycle_id)
+            self.assertEqual(resumed["topic_key"], topic_key)
 
     def test_two_completed_research_cycles_start_fresh_topics_and_persist_terminal_events(self):
         from muse.progress import ProgressEventStore

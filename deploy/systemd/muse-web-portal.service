@@ -1,0 +1,42 @@
+[Unit]
+Description=Muse HTTPS Server Web Portal
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=muse
+Group=muse
+WorkingDirectory=/opt/muse
+Environment=PYTHONPATH=/opt/muse/src
+EnvironmentFile=/etc/muse/web-portal.env
+StateDirectory=muse-web-portal
+StateDirectoryMode=0700
+UMask=0077
+ExecStartPre=/usr/bin/test -r /opt/muse/data/tasks/muse.sqlite3
+ExecStartPre=/usr/bin/test -r /opt/muse/data/progress/muse.sqlite3
+ExecStartPre=/usr/bin/test -r /opt/muse/data/capabilities/muse.sqlite3
+ExecStartPre=/usr/bin/test -r /opt/muse/data/plugins/registry.sqlite3
+ExecStartPre=/usr/bin/test -r /etc/muse/tls/fullchain.pem
+ExecStartPre=/usr/bin/test -r /etc/muse/tls/private-key.pem
+ExecStart=/opt/muse/.venv/bin/python -m muse.web_portal --task-db /opt/muse/data/tasks/muse.sqlite3 --progress-db /opt/muse/data/progress/muse.sqlite3 --capability-db /opt/muse/data/capabilities/muse.sqlite3 --plugin-db /opt/muse/data/plugins/registry.sqlite3 --session-db /var/lib/muse-web-portal/sessions.sqlite3 --cert /etc/muse/tls/fullchain.pem --key /etc/muse/tls/private-key.pem --origin https://muse.example.com --static-dir /opt/muse/web-portal --bind 127.0.0.1 --port 8443
+KillSignal=SIGINT
+TimeoutStopSec=30s
+Restart=on-failure
+RestartSec=5s
+LimitNOFILE=4096
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectKernelLogs=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/opt/muse/data /var/lib/muse-web-portal
+
+[Install]
+WantedBy=multi-user.target

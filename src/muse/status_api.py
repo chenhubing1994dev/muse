@@ -6,6 +6,10 @@ import hashlib
 import hmac
 import math
 import json
+import csv
+import io
+import subprocess
+import sys
 import os
 import tomllib
 from contextlib import closing
@@ -28,7 +32,6 @@ from muse.capability_radar import scan_capabilities
 from muse.workflow_profiles import WorkflowController
 from muse.research_knowledge import ResearchKnowledgeStore
 from muse.product_builder import LocalProductBuilder, ProductBuildError
-from muse.video_product_builder import VideoProductBuilder, VideoProductError
 from muse.media import discover_media_tools
 from muse.video_engines import inspect_video_engines
 from muse.cyber_cosmos import (
@@ -41,6 +44,34 @@ from muse.cyber_cosmos import (
     run_yijing_inquiry,
 )
 from datetime import datetime, timezone
+
+
+class VideoProductBuilder:
+    """Lazy compatibility facade: keep unrelated dashboard APIs importable if video extras are broken."""
+
+    def __init__(self, workspace):
+        self.workspace = Path(workspace)
+
+    def _implementation(self):
+        from muse.video_product_builder import VideoProductBuilder as Implementation
+        return Implementation(self.workspace)
+
+    def build_from_prompt(self, *args, **kwargs):
+        return self._implementation().build_from_prompt(*args, **kwargs)
+
+    def package_approved_subtitle_revision(self, *args, **kwargs):
+        return self._implementation().package_approved_subtitle_revision(*args, **kwargs)
+
+    def _source(self, *args, **kwargs):
+        return self._implementation()._source(*args, **kwargs)
+
+    @staticmethod
+    def verify_path(*args, **kwargs):
+        from muse.video_product_builder import VideoProductBuilder as Implementation
+        return Implementation.verify_path(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._implementation(), name)
 
 
 def _allowed_origin(origin: str | None) -> bool:
@@ -193,6 +224,286 @@ def build_overview(task_db: str | Path, progress_db: str | Path) -> dict[str, An
         workers = progress.list_workers(limit=50)
         events = progress.list_events(limit=20)
     return {"queue": queue_snapshot, "workers": workers, "recent_events": events, "workflow_runs": workflows}
+
+_DASHBOARD_FILE_CACHE: dict[tuple[str, int], tuple[float, dict[str, Any]]] = {}
+_DASHBOARD_FILE_CACHE_LOCK = Lock()
+
+def _dashboard_file_inventory(workspace_root: Path, *, limit: int = 160) -> dict[str, Any]:
+    """Return a bounded, allowlisted project file inventory; never read file contents."""
+    cache_key = (str(workspace_root.resolve()), limit)
+    with _DASHBOARD_FILE_CACHE_LOCK:
+        cached = _DASHBOARD_FILE_CACHE.get(cache_key)
+        if cached is not None and cached[0] > time.monotonic():
+            return dict(cached[1])
+    allowed_roots = ("docs", "scripts", "tests", "src/muse", "ui-prototype", "workflows")
+    root_files = ("README.md", "AGENTS.md", "pyproject.toml")
+    excluded_parts = {
+        ".git", ".venv", "node_modules", "__pycache__", "data", "models",
+        "third_party", "vault", "logs", "tmp", ".muse-backups",
+    }
+    excluded_suffixes = {
+        ".sqlite", ".sqlite3", ".db", ".log", ".pem", ".p12", ".pfx",
+        ".key", ".env", ".bak",
+    }
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add_file(candidate: Path) -> None:
+        try:
+            if candidate.is_symlink() or not candidate.is_file():
+                return
+            relative = candidate.relative_to(workspace_root).as_posix()
+            parts = Path(relative).parts
+            if any(part in excluded_parts or part.startswith(".") for part in parts):
+                return
+            lowered = candidate.name.casefold()
+            if lowered.endswith(tuple(excluded_suffixes)) or any(
+                marker in lowered for marker in ("secret", "credential", "password", "token")
+            ):
+                return
+            resolved = candidate.resolve(strict=True)
+            resolved.relative_to(workspace_root)
+            stat = candidate.stat()
+        except (OSError, ValueError):
+            return
+        if relative in seen:
+            return
+        seen.add(relative)
+        rows.append({
+            "path": relative,
+            "size_bytes": stat.st_size,
+            "modified_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+        })
+
+    for name in root_files:
+        add_file(workspace_root / name)
+    for relative_root in allowed_roots:
+        directory = workspace_root / relative_root
+        if directory.is_symlink() or not directory.is_dir():
+            continue
+        try:
+            candidates = directory.rglob("*")
+            for candidate in candidates:
+                add_file(candidate)
+        except OSError:
+            continue
+    rows.sort(key=lambda item: item["path"].casefold())
+    result = {
+        "status": "available",
+        "count": len(rows),
+        "items": rows[:limit],
+        "truncated": len(rows) > limit,
+        "content_included": False,
+    }
+    with _DASHBOARD_FILE_CACHE_LOCK:
+        _DASHBOARD_FILE_CACHE[cache_key] = (time.monotonic() + 60.0, result)
+    return result
+
+
+_DASHBOARD_TASK_STATUS_CACHE: tuple[float, dict[str, Any]] | None = None
+_DASHBOARD_TASK_STATUS_LOCK = Lock()
+
+
+def _dashboard_scheduled_tasks(*, platform_name: str | None = None, command_runner=None) -> dict[str, Any]:
+    global _DASHBOARD_TASK_STATUS_CACHE
+    cacheable = platform_name is None and command_runner is None
+    if cacheable:
+        with _DASHBOARD_TASK_STATUS_LOCK:
+            cached = _DASHBOARD_TASK_STATUS_CACHE
+            if cached is not None and cached[0] > time.monotonic():
+                return dict(cached[1])
+    result = _query_dashboard_scheduled_tasks(platform_name=platform_name, command_runner=command_runner)
+    if cacheable:
+        with _DASHBOARD_TASK_STATUS_LOCK:
+            _DASHBOARD_TASK_STATUS_CACHE = (time.monotonic() + 30.0, result)
+    return result
+
+
+def _query_dashboard_scheduled_tasks(*, platform_name: str | None = None, command_runner=None) -> dict[str, Any]:
+    """Read only the two documented Muse Task Scheduler entries using fixed argv."""
+    platform_value = platform_name if platform_name is not None else sys.platform
+    if platform_value != "win32":
+        return {"status": "unsupported", "items": [], "note": "Windows Task Scheduler is unavailable on this platform."}
+    runner = command_runner or subprocess.run
+    names = ("MuseAutonomousRuntime", "MuseDesktopDashboard")
+    items = []
+    for name in names:
+        try:
+            completed = runner(
+                ["schtasks.exe", "/Query", "/TN", name, "/FO", "CSV"],
+                capture_output=True, text=True, timeout=4, check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except (OSError, subprocess.SubprocessError):
+            return {"status": "unavailable", "items": items, "note": "Task Scheduler query failed."}
+        if completed.returncode != 0:
+            items.append({"name": name, "state": "not_registered", "next_run_time": None})
+            continue
+        try:
+            records = list(csv.reader(io.StringIO(completed.stdout or "")))
+        except (csv.Error, TypeError):
+            return {"status": "unavailable", "items": items, "note": "Task Scheduler returned an unreadable response."}
+        record = next((
+            row for row in records[1:]
+            if row and str(row[0]).strip().lstrip("\\").rstrip("\\") == name
+        ), None)
+        if record is None:
+            items.append({"name": name, "state": "not_registered", "next_run_time": None})
+            continue
+        raw_state = str(record[2] if len(record) > 2 else "").strip().casefold()
+        state = {
+            "running": "running", "ready": "ready", "disabled": "disabled",
+            "正在运行": "running", "就绪": "ready", "已禁用": "disabled", "禁用": "disabled",
+        }.get(raw_state, "unknown")
+        items.append({
+            "name": name,
+            "state": state,
+            "next_run_time": str(record[1] if len(record) > 1 else "").strip() or None,
+        })
+    return {"status": "available", "items": items, "note": "Ready/就绪 means registered and idle; Running/正在运行 means currently executing."}
+
+
+def _read_runner_snapshot(workspace_root: Path) -> dict[str, Any]:
+    """Read a redacted, timestamped WebCodex observation snapshot, never credentials."""
+    path = workspace_root / "data" / "dashboard" / "runner_snapshot.json"
+
+    def empty(status: str) -> dict[str, Any]:
+        return {
+            "status": status, "captured_at": None, "age_seconds": None,
+            "runner_status": "unknown", "connected": False,
+            "projects": [], "skills": [], "project_count": None,
+            "skill_count": None, "invalid_skill_count": None,
+            "active_job_count": None, "running_job_count": None,
+            "queued_job_count": None, "concurrency_limit": None,
+            "active_jobs": [], "skill_sources": [],
+            "mcp_servers": [], "plugins": [],
+        }
+
+    if path.is_symlink() or not path.is_file():
+        return empty("not_synced")
+    try:
+        path.resolve(strict=True).relative_to(workspace_root.resolve())
+    except (OSError, ValueError):
+        return empty("invalid")
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict) or raw.get("schema_version") != 1:
+            raise ValueError("unsupported snapshot")
+        captured = datetime.fromisoformat(str(raw["captured_at"]))
+        if captured.tzinfo is None:
+            captured = captured.replace(tzinfo=timezone.utc)
+        captured = captured.astimezone(timezone.utc)
+        age = max(0, int((datetime.now(timezone.utc) - captured).total_seconds()))
+
+        def safe_count(key: str) -> int | None:
+            value = raw.get(key)
+            return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+        projects = [
+            {"name": str(item["name"])[:80], "connected": item.get("connected") is True}
+            for item in raw.get("projects", [])
+            if isinstance(item, dict) and isinstance(item.get("name"), str)
+        ][:100]
+        skills = [
+            {"name": str(item["name"])[:100]}
+            for item in raw.get("skills", [])
+            if isinstance(item, dict) and isinstance(item.get("name"), str)
+        ][:100]
+        mcp_servers = [str(item)[:100] for item in raw.get("mcp_servers", []) if isinstance(item, str)][:50]
+        plugins = [str(item)[:100] for item in raw.get("plugins", []) if isinstance(item, str)][:50]
+        invalid_count = safe_count("invalid_skill_count") or 0
+        active_jobs = []
+        for item in raw.get("active_jobs", []):
+            if not isinstance(item, dict):
+                continue
+            kind = item.get("kind")
+            status = item.get("status")
+            elapsed = item.get("elapsed_secs")
+            if not isinstance(kind, str) or not isinstance(status, str):
+                continue
+            active_jobs.append({
+                "kind": kind[:60], "status": status[:24],
+                "elapsed_secs": elapsed if isinstance(elapsed, int) and not isinstance(elapsed, bool) and elapsed >= 0 else None,
+                "project": str(item.get("project", ""))[:80],
+            })
+        active_jobs = active_jobs[:30]
+        skill_sources = []
+        for item in raw.get("skill_sources", []):
+            if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+                continue
+            count = item.get("count")
+            invalid = item.get("invalid_count", 0)
+            skill_sources.append({
+                "name": item["name"][:80],
+                "count": count if isinstance(count, int) and not isinstance(count, bool) and count >= 0 else 0,
+                "invalid_count": invalid if isinstance(invalid, int) and not isinstance(invalid, bool) and invalid >= 0 else 0,
+            })
+        runner_status = raw.get("runner_status")
+        if runner_status not in {"online", "offline"}:
+            runner_status = "unknown"
+        return {
+            "status": "stale" if age > 900 else "fresh",
+            "captured_at": captured.isoformat(), "age_seconds": age,
+            "runner_status": runner_status, "connected": runner_status == "online",
+            "projects": projects, "skills": skills,
+            "project_count": len(projects), "skill_count": len(skills),
+            "invalid_skill_count": min(invalid_count, len(skills)),
+            "active_job_count": safe_count("active_job_count"),
+            "running_job_count": safe_count("running_job_count"),
+            "queued_job_count": safe_count("queued_job_count"),
+            "concurrency_limit": safe_count("concurrency_limit"),
+            "active_jobs": active_jobs, "skill_sources": skill_sources,
+            "mcp_servers": mcp_servers, "plugins": plugins,
+        }
+    except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+        return empty("invalid")
+
+
+
+def build_system_dashboard(
+    workspace_root: str | Path, capability_db: str | Path | None = None,
+    *, platform_name: str | None = None, command_runner=None,
+) -> dict[str, Any]:
+    """Build the unified read-only system dashboard from local sources and a timestamped Runner snapshot."""
+    root = Path(workspace_root).resolve()
+    runner = _read_runner_snapshot(root)
+    capabilities = []
+    capability_state = "not_configured"
+    if capability_db is not None:
+        database = Path(capability_db)
+        if database.is_file() and not database.is_symlink():
+            try:
+                capabilities = build_capabilities(database)
+                capability_state = "available"
+            except (OSError, sqlite3.Error, ValueError):
+                capability_state = "unavailable"
+    spaces = {
+        "status": "not_configured",
+        "count": 0,
+        "items": [],
+        "note": "Muse 当前没有独立 Space 注册表；本项目根目录是已确认的本地工作区。",
+    }
+    integrations = [
+        {"id": "webcodex_runner", "label": "WebCodex Runner", "status": "snapshot_only" if runner["status"] in {"fresh", "stale"} else "not_bridged", "detail": f"{runner['runner_status']} · {runner['active_job_count'] if runner['active_job_count'] is not None else 0} 个活跃任务；本地 API 仍未建立实时桥接。"},
+        {"id": "mcp", "label": "MCP 服务", "status": ("not_bridged" if runner["status"] not in {"fresh", "stale"} else "available" if runner["mcp_servers"] else "empty"), "detail": f"{len(runner['mcp_servers'])} 个已登记服务（快照）。"},
+        {"id": "plugins", "label": "Runner 插件", "status": ("not_bridged" if runner["status"] not in {"fresh", "stale"} else "available" if runner["plugins"] else "empty"), "detail": f"{len(runner['plugins'])} 个已登记插件（快照）。"},
+        {"id": "email", "label": "邮件", "status": "not_connected", "detail": "当前没有可验证的邮件连接器。"},
+    ]
+    return {
+        "api_version": 1,
+        "workspace": {"name": root.name, "status": "available"},
+        "files": _dashboard_file_inventory(root),
+        "spaces": spaces,
+        "runner": runner,
+        "projects": runner["projects"],
+        "skills": runner["skills"],
+        "local_capabilities": {"status": capability_state, "count": len(capabilities), "items": capabilities},
+        "scheduled_tasks": _dashboard_scheduled_tasks(platform_name=platform_name, command_runner=command_runner),
+        "integrations": integrations,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "read_only": True,
+    }
+
 
 
 def build_capabilities(capability_db: str | Path) -> list[dict[str, Any]]:
@@ -1068,7 +1379,7 @@ def create_status_server(
     port: int = 0, token: str | None = None,
     knowledge_db: str | Path | None = None, report_dir: str | Path | None = None,
     products_dir: str | Path | None = None, gpu_resource_db: str | Path | None = None,
-    memory_db: str | Path | None = None,
+    memory_db: str | Path | None = None, plugin_db: str | Path | None = None,
 ) -> tuple[BoundedStatusServer, str]:
     """Create a loopback API with bounded reads and narrow, authenticated feedback writes."""
     if isinstance(port, bool) or not isinstance(port, int) or not 0 <= port <= 65535:
@@ -1104,6 +1415,8 @@ def create_status_server(
         workspace_root = resolved_task_path.parent.resolve()
     products_workspace = products_path.parent.parent if products_path is not None else workspace_root
     memory_path = Path(memory_db) if memory_db is not None else workspace_root / "data" / "memory" / "muse.sqlite3"
+    companion_db_path = workspace_root / "data" / "companion" / "devices.sqlite3"
+    plugin_path = Path(plugin_db) if plugin_db is not None else workspace_root / "data" / "plugins" / "registry.sqlite3"
     studio_db = workspace_root / "data" / "studio" / "render-jobs.sqlite3"
     studio_db.parent.mkdir(parents=True, exist_ok=True)
     from muse.daemon_control import MuseDaemonController, DaemonError
@@ -1242,6 +1555,33 @@ def create_status_server(
                         "service": "muse-status-api", "status": "ok", "api_version": 1,
                         "agent_registry_configured": agent_path is not None,
                     })
+                elif parsed.path == "/api/v1/companion/pairings":
+                    from muse.companion_security import CompanionDeviceStore
+                    limit = int(parse_qs(parsed.query).get("limit", ["20"])[0])
+                    with CompanionDeviceStore(companion_db_path) as companion:
+                        self._send(200, {"api_version": 1, "pairings": companion.list_pending_pairings(limit=limit)})
+                elif parsed.path == "/api/v1/companion/devices":
+                    from muse.companion_security import CompanionDeviceStore
+                    limit = int(parse_qs(parsed.query).get("limit", ["50"])[0])
+                    with CompanionDeviceStore(companion_db_path) as companion:
+                        self._send(200, {"api_version": 1, "devices": companion.list_devices(limit=limit)})
+                elif parsed.path == "/api/v1/companion/audit":
+                    from muse.companion_security import CompanionDeviceStore
+                    limit = int(parse_qs(parsed.query).get("limit", ["100"])[0])
+                    with CompanionDeviceStore(companion_db_path) as companion:
+                        self._send(200, {"api_version": 1, "events": companion.list_audit_events(limit=limit)})
+                elif parsed.path == "/api/v1/plugins":
+                    from muse.plugin_platform import PluginRegistry
+                    limit = int(parse_qs(parsed.query).get("limit", ["100"])[0])
+                    with PluginRegistry(plugin_path) as plugins:
+                        self._send(200, {"api_version": 1, "plugins": plugins.list_plugins(limit=limit)})
+                elif parsed.path == "/api/v1/plugins/audit":
+                    from muse.plugin_platform import PluginRegistry
+                    limit = int(parse_qs(parsed.query).get("limit", ["100"])[0])
+                    with PluginRegistry(plugin_path) as plugins:
+                        self._send(200, {"api_version": 1, "events": plugins.list_audit_events(limit=limit)})
+                elif parsed.path == "/api/v1/system-dashboard":
+                    self._send(200, build_system_dashboard(workspace_root, capability_path))
                 elif parsed.path == "/api/v1/mempalace/status":
                     self._send(200, build_mempalace_status(workspace_root, memory_path))
                 elif parsed.path == "/api/v1/studio/styles":
@@ -1435,6 +1775,19 @@ def create_status_server(
                         "comfyui": engines["comfyui"],
                         "velorn": engines["velorn"],
                     })
+                elif parsed.path == "/api/v1/fusion/jobs":
+                    from muse.skill_fusion import SkillFusionService
+                    limit = int(parse_qs(parsed.query).get("limit", ["20"])[0])
+                    service = SkillFusionService(workspace_root, capability_path)
+                    self._send(200, {"api_version": 1, "jobs": service.list_recent(limit=limit)})
+                elif re.fullmatch(r"/api/v1/fusion/jobs/[a-f0-9]{32}", parsed.path):
+                    from muse.skill_fusion import SkillFusionService
+                    fusion_id = parsed.path.rsplit("/", 1)[-1]
+                    result = SkillFusionService(workspace_root, capability_path).get(fusion_id)
+                    if result is None:
+                        self._send(404, {"error": "fusion submission not found"})
+                    else:
+                        self._send(200, {"api_version": 1, "fusion": result})
                 elif parsed.path == "/api/v1/capabilities":
                     self._send(200, {"api_version": 1, "capabilities": build_capabilities(capability_path)})
                 elif parsed.path == "/api/v1/feedback":
@@ -1860,6 +2213,157 @@ def create_status_server(
                 self._send(401, {"error": "unauthorized"})
                 return
             parsed = urlsplit(self.path)
+            if parsed.path == "/api/v1/plugins/discover" or parsed.path.startswith("/api/v1/plugins/"):
+                from muse.plugin_platform import PluginError, PluginRegistry, commander_task_queue_adapter
+                if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json":
+                    self._send(415, {"error": "application/json required"})
+                    return
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                    if not 1 <= length <= 64 * 1024:
+                        raise ValueError("plugin request body must contain 1-65536 bytes")
+                    raw = self.rfile.read(length)
+                    if len(raw) != length:
+                        raise ValueError("incomplete request body")
+                    payload = json.loads(raw.decode("utf-8"))
+                    if not isinstance(payload, dict):
+                        raise ValueError("plugin request body must be a JSON object")
+                    with PluginRegistry(plugin_path) as plugins:
+                        if parsed.path == "/api/v1/plugins/discover":
+                            result = plugins.discover(payload)
+                            self._send(201, {"api_version": 1, "plugin": result})
+                        else:
+                            approve_match = re.fullmatch(r"/api/v1/plugins/([a-z0-9.-]{1,96})/approve", parsed.path)
+                            enable_match = re.fullmatch(r"/api/v1/plugins/([a-z0-9.-]{1,96})/enable", parsed.path)
+                            disable_match = re.fullmatch(r"/api/v1/plugins/([a-z0-9.-]{1,96})/disable", parsed.path)
+                            request_match = re.fullmatch(
+                                r"/api/v1/plugins/([a-z0-9.-]{1,96})/capabilities/([a-z0-9._-]{1,96})/request",
+                                parsed.path,
+                            )
+                            if approve_match:
+                                if payload != {"confirmation": "APPROVE-PLUGIN"}:
+                                    raise ValueError("explicit APPROVE-PLUGIN confirmation required")
+                                result = plugins.approve(approve_match.group(1), approved_by="local-host")
+                                self._send(200, {"api_version": 1, "plugin": result})
+                            elif enable_match:
+                                if payload != {"confirmation": "ENABLE-PLUGIN"}:
+                                    raise ValueError("explicit ENABLE-PLUGIN confirmation required")
+                                result = plugins.enable(enable_match.group(1), enabled_by="local-host")
+                                self._send(200, {"api_version": 1, "plugin": result})
+                            elif disable_match:
+                                if payload != {"confirmation": "DISABLE-PLUGIN"}:
+                                    raise ValueError("explicit DISABLE-PLUGIN confirmation required")
+                                result = plugins.disable(disable_match.group(1), disabled_by="local-host")
+                                self._send(200, {"api_version": 1, "plugin": result})
+                            elif request_match:
+                                if set(payload) != {"payload"} or not isinstance(payload["payload"], dict):
+                                    raise ValueError("capability request requires one JSON object field: payload")
+                                result = plugins.commander_request(
+                                    request_match.group(1), request_match.group(2), payload["payload"],
+                                    enqueue=commander_task_queue_adapter(task_path), requested_by="local-host",
+                                )
+                                self._send(202, {"api_version": 1, **result})
+                            else:
+                                self._send(404, {"error": "plugin operation not found"})
+                except PluginError as exc:
+                    self._send(409, {"error": str(exc)})
+                except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+                    self._send(400, {"error": str(exc)})
+                except Exception:
+                    self._send(503, {"error": "plugin management operation unavailable"})
+                return
+            if parsed.path.startswith("/api/v1/companion/"):
+                from muse.companion_security import CompanionDeviceStore, CompanionSecurityError
+                if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json":
+                    self._send(415, {"error": "application/json required"})
+                    return
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                    if not 1 <= length <= 8192:
+                        raise ValueError("request body must contain 1-8192 bytes")
+                    raw = self.rfile.read(length)
+                    if len(raw) != length:
+                        raise ValueError("incomplete request body")
+                    payload = json.loads(raw.decode("utf-8"))
+                    if not isinstance(payload, dict):
+                        raise ValueError("request body must be a JSON object")
+                    with CompanionDeviceStore(companion_db_path) as companion:
+                        if parsed.path == "/api/v1/companion/pairing/start":
+                            if set(payload) - {"expires_in_seconds"}:
+                                raise ValueError("unsupported pairing start fields")
+                            challenge = companion.create_pairing_challenge(
+                                expires_in_seconds=payload.get("expires_in_seconds", 180),
+                            )
+                            self._send(201, {"api_version": 1, "challenge": challenge})
+                        else:
+                            approve_match = re.fullmatch(r"/api/v1/companion/pairings/([a-f0-9]{32})/approve", parsed.path)
+                            deny_match = re.fullmatch(r"/api/v1/companion/pairings/([a-f0-9]{32})/deny", parsed.path)
+                            revoke_match = re.fullmatch(r"/api/v1/companion/devices/([a-f0-9]{32})/revoke", parsed.path)
+                            if payload:
+                                raise ValueError("this operation does not accept request fields")
+                            if approve_match:
+                                result = companion.approve_pairing(approve_match.group(1), approved_by="local-host")
+                                self._send(200, {"api_version": 1, "pairing": result})
+                            elif deny_match:
+                                changed = companion.deny_pairing(deny_match.group(1), denied_by="local-host")
+                                self._send(200 if changed else 404, {"api_version": 1, "denied": changed})
+                            elif revoke_match:
+                                changed = companion.revoke_device(revoke_match.group(1), revoked_by="local-host")
+                                self._send(200 if changed else 404, {"api_version": 1, "revoked": changed})
+                            else:
+                                self._send(404, {"error": "companion operation not found"})
+                except CompanionSecurityError as exc:
+                    self._send(409, {"error": str(exc)})
+                except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+                    self._send(400, {"error": str(exc)})
+                except Exception:
+                    self._send(503, {"error": "companion management operation unavailable"})
+                return
+            if parsed.path == "/api/v1/fusion/submit" or re.fullmatch(r"/api/v1/fusion/jobs/[a-f0-9]{32}/(?:approve|rollback)", parsed.path):
+                from muse.skill_fusion import FusionError, SkillFusionService
+                if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json":
+                    self._send(415, {"error": "application/json required"})
+                    return
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                    if not 1 <= length <= 12 * 1024 * 1024:
+                        raise ValueError("request body must contain 1-12582912 bytes")
+                    raw = self.rfile.read(length)
+                    if len(raw) != length:
+                        raise ValueError("incomplete request body")
+                    payload = json.loads(raw.decode("utf-8"))
+                    if not isinstance(payload, dict):
+                        raise ValueError("request body must be a JSON object")
+                    service = SkillFusionService(workspace_root, capability_path)
+                    if parsed.path == "/api/v1/fusion/submit":
+                        if set(payload) - {"source_url", "archive_base64", "file_name"}:
+                            raise ValueError("unsupported fusion submission fields")
+                        result = service.submit(
+                            source_url=payload.get("source_url"),
+                            archive_base64=payload.get("archive_base64"),
+                            file_name=payload.get("file_name"),
+                        )
+                        self._send(201, result)
+                    else:
+                        operation = parsed.path.rsplit("/", 1)[-1]
+                        expected_confirmation = "FUSE-CAPABILITIES" if operation == "approve" else "ROLLBACK-FUSION"
+                        if set(payload) != {"confirmation"} or payload.get("confirmation") != expected_confirmation:
+                            raise ValueError("explicit fusion operation confirmation is required")
+                        fusion_id = parsed.path.split("/")[-2]
+                        if operation == "approve":
+                            result = service.approve(fusion_id, approved_by="local-user")
+                        else:
+                            result = service.rollback(fusion_id, rolled_back_by="local-user")
+                        self._send(200, result)
+                except FusionError as exc:
+                    self._send(409, {"error": str(exc)})
+                except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+                    self._send(400, {"error": str(exc)})
+                except (OSError, sqlite3.Error):
+                    self._send(503, {"error": "fusion storage is unavailable"})
+                except Exception:
+                    self._send(503, {"error": "fusion operation unavailable"})
+                return
             # ── Creative Studio: local style-driven video studio ──
             if parsed.path in {
                 "/api/v1/studio/search-media", "/api/v1/studio/generate-script",
@@ -2018,12 +2522,13 @@ def create_status_server(
                     self._send(400, {"error": str(exc)})
                 except FileNotFoundError:
                     self._send(404, {"error": "matching subtitle review or product not found"})
-                except VideoProductError as exc:
-                    self._send(409, {"error": str(exc)})
                 except (OSError, sqlite3.Error):
                     self._send(503, {"error": "subtitle review approval unavailable"})
-                except Exception:
-                    self._send(503, {"error": "subtitle review approval unavailable"})
+                except Exception as exc:
+                    if type(exc).__name__ == "VideoProductError":
+                        self._send(409, {"error": str(exc)})
+                    else:
+                        self._send(503, {"error": "subtitle review approval unavailable"})
                 return
             # ── Bounded local runtime lifecycle + reproducible pipeline control ──
             if parsed.path in {

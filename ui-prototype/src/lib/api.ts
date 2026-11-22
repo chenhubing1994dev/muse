@@ -1,5 +1,6 @@
 import {
   createApiClient as createClient,
+  createCompanionRemoteClient as createRemoteCompanionClient,
   resolveDesktopConnection as resolveConnection,
 } from "../../api.js";
 
@@ -46,6 +47,39 @@ export interface MuseEvent {
 export interface ApiConnection {
   baseUrl: string;
   token: string;
+}
+
+export interface CompanionPairing {
+  request_id: string;
+  device_name: string;
+  device_fingerprint: string;
+  created_at: number;
+  expires_at: number;
+  status: "pending" | "approved";
+  approved_at: number | null;
+}
+export interface CompanionDevice {
+  device_id: string;
+  device_name: string;
+  device_fingerprint: string;
+  permissions: string[];
+  created_at: number;
+  revoked_at: number | null;
+  revoked_by: string | null;
+  status: "active" | "revoked";
+}
+export interface CompanionAuditEvent {
+  event_id: string;
+  device_id: string | null;
+  event_type: string;
+  actor: string;
+  details: Record<string, unknown>;
+  created_at: number;
+}
+export interface CompanionPairingChallenge {
+  challenge_id: string;
+  code: string;
+  expires_at: number;
 }
 
 export interface HealthResponse {
@@ -824,6 +858,39 @@ export interface MemPalaceStatusResponse {
   private_content_exposed: false;
 }
 
+export interface SystemDashboardResponse {
+  api_version: 1;
+  workspace: { name: string; status: string };
+  files: { status: string; count: number; items: Array<{ path: string; size_bytes: number; modified_at: string }>; truncated: boolean; content_included: false };
+  spaces: { status: string; count: number; items: unknown[]; note: string };
+  runner: {
+    status: string; captured_at: string | null; age_seconds: number | null;
+    runner_status: string; connected: boolean;
+    project_count: number | null; skill_count: number | null; invalid_skill_count: number | null;
+    active_job_count: number | null; running_job_count: number | null; queued_job_count: number | null; concurrency_limit: number | null;
+    active_jobs: Array<{ kind: string; status: string; elapsed_secs: number | null; project: string }>;
+    skill_sources: Array<{ name: string; count: number; invalid_count: number }>;
+    projects: Array<{ name: string; connected: boolean }>;
+    skills: Array<{ name: string }>;
+    mcp_servers: string[]; plugins: string[];
+  };
+  projects: Array<{ name: string; connected: boolean }>;
+  skills: Array<{ name: string }>;
+  local_capabilities: {
+    status: string; count: number;
+    items: Array<{ capability_id: string; domain?: string; name?: string; description?: string; status?: string; trust?: string }>;
+  };
+  scheduled_tasks: {
+    status: string; note: string;
+    items: Array<{ name: string; state: string; next_run_time: string | null }>;
+  };
+  integrations: Array<{ id: string; label: string; status: string; detail: string }>;
+  generated_at: string;
+  read_only: true;
+}
+
+
+
 export interface VisualReviewRecord {
   schema_version: number;
   record_id: string;
@@ -863,13 +930,41 @@ export interface VisualReviewPayload {
   findings?: VisualReviewFinding[];
 }
 
+export interface FusionCapability {
+  id: string; domain: string; name: string; description: string; confidence: number;
+  signals: string[]; execution_state: "not_executed";
+}
+export interface FusionRecord {
+  fusion_id: string; status: string;
+  source: { kind: "url" | "archive"; label: string; sha256: string };
+  analysis: {
+    file_count: number; languages: Record<string, number>; manifests: string[];
+    license_file_present: boolean; license_status: string; capabilities: FusionCapability[];
+    integration_edges: Array<{ from: string; to: string; relationship: string; activation: string }>;
+    matched_existing_capabilities: Array<{ candidate_id: string; capability_id: string; name: string; status: string; relationship: string }>;
+  };
+  safety: { external_code_executed: false; dependencies_installed: false; activation: string };
+  registered_capability_ids?: string[]; activation?: string; approved_by?: string; duplicate?: boolean;
+}
 export interface ApiClient {
+  companionPairings(limit?: number): Promise<{ api_version: 1; pairings: CompanionPairing[] }>;
+  companionDevices(limit?: number): Promise<{ api_version: 1; devices: CompanionDevice[] }>;
+  companionAudit(limit?: number): Promise<{ api_version: 1; events: CompanionAuditEvent[] }>;
+  startCompanionPairing(expiresInSeconds?: number): Promise<{ api_version: 1; challenge: CompanionPairingChallenge }>;
+  approveCompanionPairing(requestId: string): Promise<{ api_version: 1; pairing: CompanionPairing }>;
+  denyCompanionPairing(requestId: string): Promise<{ api_version: 1; denied: boolean }>;
+  revokeCompanionDevice(deviceId: string): Promise<{ api_version: 1; revoked: boolean }>;
   health(): Promise<HealthResponse>;
   agents(): Promise<AgentsResponse>;
   overview(): Promise<OverviewResponse>;
   contextualInquiryReviews(limit?: number): Promise<{ api_version: number; count: number; reviews: ContextualInquiryReviewSummary[] }>;
   contextualInquiryReviewResult(taskId: string): Promise<{ api_version: number; task_id: string; review: ContextualInquiryReviewResult }>;
   mempalaceStatus(): Promise<MemPalaceStatusResponse>;
+  systemDashboard(): Promise<SystemDashboardResponse>;
+  fusionJobs(limit?: number): Promise<{ api_version: 1; jobs: FusionRecord[] }>;
+  submitFusion(payload: { source_url?: string; archive_base64?: string; file_name?: string }): Promise<{ api_version: 1; fusion: FusionRecord }>;
+  approveFusion(fusionId: string): Promise<{ api_version: 1; fusion: FusionRecord }>;
+  rollbackFusion(fusionId: string): Promise<{ api_version: 1; fusion: FusionRecord }>;
   feedback(limit?: number): Promise<{ api_version: number; count: number; feedback: FeedbackRecord[] }>;
   improvements(): Promise<{ api_version: number; count: number; proposals: ImprovementProposal[] }>;
   selfImprovement(): Promise<{ api_version: number } & SelfImprovementStatus>;
@@ -925,6 +1020,53 @@ export interface ApiClient {
 
 export const createApiClient = (connection: ApiConnection): ApiClient =>
   createClient(connection) as ApiClient;
+
+export interface CompanionRemoteClientOptions {
+  baseUrl: string;
+  fetchImpl?: typeof fetch;
+  cryptoImpl?: Crypto;
+  timeoutMs?: number;
+}
+
+export interface CompanionRemoteEvent {
+  id: string;
+  category: string;
+  event: string;
+  created_at: number;
+  error_code?: string | null;
+}
+
+export interface CompanionRemoteStatus {
+  api_version: 1;
+  host: { status: string; read_only: boolean };
+  commander: { queue_counts: Record<string, number> };
+  workers: { active: number; stale: number };
+  device: { device_id: string; permissions: string[] };
+  generated_at: number;
+}
+
+export interface CompanionRemoteEventBatch {
+  api_version: 1;
+  reset: boolean;
+  events: CompanionRemoteEvent[];
+}
+
+export interface CompanionRemoteClient {
+  requestPairing(input: { challengeId: string; code: string; deviceName?: string }): Promise<{ requestId: string; status: string; expiresAt: number }>;
+  claim(): Promise<{ deviceId: string; permissions: string[] }>;
+  getStatus(): Promise<CompanionRemoteStatus>;
+  getEvents(cursor?: string): Promise<CompanionRemoteEventBatch>;
+  forget(): void;
+  readonly baseUrl: string;
+  readonly isPaired: boolean;
+  readonly hasPendingPairing: boolean;
+  readonly pendingRequestId: string | null;
+  readonly deviceId: string | null;
+  readonly permissions: string[];
+}
+
+export const createCompanionRemoteClient = createRemoteCompanionClient as
+  (options: CompanionRemoteClientOptions) => CompanionRemoteClient;
 
 export const resolveDesktopConnection = async (): Promise<ApiConnection> =>
   (await resolveConnection()) as ApiConnection;

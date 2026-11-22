@@ -30,6 +30,7 @@
 
   let maximized = false;
   let host: "tauri" | "browser" = "browser";
+  let mobileCompanion = false;
   let invoke: ((cmd: string) => Promise<unknown>) | null = null;
   let appWindow: {
     minimize: () => Promise<void>;
@@ -58,8 +59,16 @@
       const current = getCurrentWindow();
       if (!current) return;
       if (disposed) return;
+      const invokeCommand = tauri?.core?.invoke ?? null;
+      const isMobileCompanion = invokeCommand
+        ? await invokeCommand("is_mobile_companion").then((value) => value === true).catch(() => false)
+        : false;
+      if (isMobileCompanion) {
+        mobileCompanion = true;
+        return;
+      }
       appWindow = current;
-      invoke = tauri?.core?.invoke ?? null;
+      invoke = invokeCommand;
       host = "tauri";
       maximized = await current.isMaximized().catch(() => false);
       unlisten = await current
@@ -136,7 +145,7 @@
     <button class="win-btn is-close" type="button" onclick={() => run("close")} title="关闭" aria-label="关闭窗口">
       <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3 3l6 6M9 3l-6 6" /></svg>
     </button>
-  {:else}
+  {:else if !mobileCompanion}
     <span class="win-btn is-inert" aria-hidden="true"><svg viewBox="0 0 12 12"><path d="M2.5 6h7" /></svg></span>
     <span class="win-btn is-inert" aria-hidden="true"><svg viewBox="0 0 12 12"><rect x="2.6" y="2.6" width="6.8" height="6.8" /></svg></span>
     <span class="win-btn is-inert" aria-hidden="true"><svg viewBox="0 0 12 12"><path d="M3 3l6 6M9 3l-6 6" /></svg></span>

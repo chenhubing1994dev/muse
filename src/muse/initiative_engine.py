@@ -6,6 +6,7 @@ waiting for a direct task. Proposals are durable and can progress into prototype
 from __future__ import annotations
 
 import json
+import hashlib
 import sqlite3
 import uuid
 import re
@@ -226,6 +227,53 @@ class InitiativeStore:
             CREATE TRIGGER IF NOT EXISTS initiative_video_stage_checkpoints_no_delete
                 BEFORE DELETE ON initiative_video_stage_checkpoints
                 BEGIN SELECT RAISE(ABORT,'video stage checkpoints are append-only'); END;
+            CREATE TABLE IF NOT EXISTS initiative_video_admission_grants(
+                grant_id TEXT PRIMARY KEY CHECK(length(grant_id)=32),
+                grant_key TEXT NOT NULL UNIQUE CHECK(length(grant_key)=64),
+                attempt_id TEXT NOT NULL REFERENCES initiative_video_attempts(attempt_id) ON DELETE RESTRICT,
+                worker_id TEXT NOT NULL,
+                lease_epoch INTEGER NOT NULL CHECK(lease_epoch>=1),
+                lease_expires_at REAL NOT NULL,
+                recipe_sha256 TEXT NOT NULL CHECK(length(recipe_sha256)=64),
+                input_sha256 TEXT NOT NULL CHECK(length(input_sha256)=64),
+                dag_sha256 TEXT NOT NULL CHECK(length(dag_sha256)=64),
+                batch_id TEXT NOT NULL,
+                batch_fingerprint TEXT NOT NULL CHECK(length(batch_fingerprint)=64),
+                handler_digest TEXT NOT NULL CHECK(length(handler_digest)=64),
+                resource_digest TEXT NOT NULL CHECK(length(resource_digest)=64),
+                cost_digest TEXT NOT NULL CHECK(length(cost_digest)=64),
+                approval_task_id TEXT NOT NULL,
+                approval_event_id TEXT NOT NULL,
+                approved_by TEXT NOT NULL,
+                scope TEXT NOT NULL,
+                role TEXT NOT NULL,
+                required_capabilities_json TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('active','consumed','revoked','expired')),
+                created_at REAL NOT NULL,
+                expires_at REAL NOT NULL,
+                consumed_at REAL,
+                revoked_at REAL,
+                expired_at REAL,
+                revoke_reason TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_video_admission_grants_attempt
+                ON initiative_video_admission_grants(attempt_id,status,expires_at);
+            CREATE TABLE IF NOT EXISTS initiative_video_admission_grant_events(
+                sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                grant_id TEXT NOT NULL REFERENCES initiative_video_admission_grants(grant_id) ON DELETE RESTRICT,
+                event_type TEXT NOT NULL CHECK(event_type IN ('created','consumed','revoked','expired')),
+                actor TEXT NOT NULL,
+                details_json TEXT NOT NULL DEFAULT '{}',
+                created_at REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_video_admission_grant_events_timeline
+                ON initiative_video_admission_grant_events(grant_id,sequence);
+            CREATE TRIGGER IF NOT EXISTS video_admission_grant_events_no_update
+                BEFORE UPDATE ON initiative_video_admission_grant_events
+                BEGIN SELECT RAISE(ABORT,'video admission grant events are append-only'); END;
+            CREATE TRIGGER IF NOT EXISTS video_admission_grant_events_no_delete
+                BEFORE DELETE ON initiative_video_admission_grant_events
+                BEGIN SELECT RAISE(ABORT,'video admission grant events are append-only'); END;
         """)
         self._migrate_video_stage_checkpoint_schema()
         self.connection.execute("""CREATE INDEX IF NOT EXISTS idx_video_stage_checkpoints_step_history
@@ -988,6 +1036,298 @@ class InitiativeStore:
     def _validate_video_stage_digest(value, field):
         if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
             raise ValueError(f"{field} must be a lowercase SHA-256 digest")
+
+    @staticmethod
+    def _decode_video_admission_grant(row):
+        if row is None:
+            return None
+        item = dict(row)
+        item["required_capabilities"] = json.loads(item.pop("required_capabilities_json"))
+        return item
+
+    @staticmethod
+    def _validate_video_admission_grant_id(grant_id):
+        if not isinstance(grant_id, str) or not re.fullmatch(r"[0-9a-f]{32}", grant_id):
+            raise ValueError("grant_id must be a 32-character lowercase hex identifier")
+
+    @staticmethod
+    def _validate_video_admission_grant_fields(
+        *, worker_id, lease_epoch, input_sha256, dag_sha256, batch_id,
+        batch_fingerprint, handler_digest, resource_digest, cost_digest,
+        approval_task_id, approval_event_id, approved_by, scope, role,
+        required_capabilities,
+    ):
+        if not isinstance(worker_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", worker_id):
+            raise ValueError("worker_id must be 1-64 safe identifier characters")
+        if isinstance(lease_epoch, bool) or not isinstance(lease_epoch, int) or lease_epoch < 1:
+            raise ValueError("lease_epoch must be a positive integer")
+        if not isinstance(batch_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", batch_id):
+            raise ValueError("batch_id must be a 1-128 character safe identifier")
+        for value, field in (
+            (input_sha256, "input_sha256"), (dag_sha256, "dag_sha256"),
+            (batch_fingerprint, "batch_fingerprint"), (handler_digest, "handler_digest"),
+            (resource_digest, "resource_digest"), (cost_digest, "cost_digest"),
+        ):
+            InitiativeStore._validate_video_stage_digest(value, field)
+        for value, field in ((approval_task_id, "approval_task_id"), (approval_event_id, "approval_event_id")):
+            if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", value):
+                raise ValueError(f"{field} must be 1-128 safe identifier characters")
+        if not isinstance(approved_by, str) or not approved_by.strip() or len(approved_by) > 200 or any(ord(ch) < 32 for ch in approved_by):
+            raise ValueError("approved_by must be non-empty bounded text")
+        if not isinstance(scope, str) or not re.fullmatch(r"[a-z][a-z0-9_.:-]{0,127}", scope):
+            raise ValueError("scope must be a lowercase scoped identifier")
+        if not isinstance(role, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", role):
+            raise ValueError("role must be a lowercase role identifier")
+        if (not isinstance(required_capabilities, (list, tuple)) or not required_capabilities
+                or len(required_capabilities) > 64):
+            raise ValueError("required_capabilities must contain 1-64 capability identifiers")
+        capabilities = []
+        for capability in required_capabilities:
+            if not isinstance(capability, str) or not re.fullmatch(r"[a-z][a-z0-9_.:-]{0,127}", capability):
+                raise ValueError("required_capabilities contains an invalid capability identifier")
+            if capability in capabilities:
+                raise ValueError("required_capabilities must be unique")
+            capabilities.append(capability)
+        return sorted(capabilities)
+
+    def create_video_admission_grant(
+        self, attempt_id, *, worker_id, lease_epoch, input_sha256, dag_sha256,
+        batch_id, batch_fingerprint, handler_digest, resource_digest, cost_digest,
+        approval_task_id, approval_event_id, approved_by, scope, role,
+        required_capabilities, ttl_seconds=60, now=None,
+    ):
+        """Bind a short-lived one-shot capability grant to the current Attempt lease and approval evidence.
+
+        The Worker must verify the latest TaskQueue human.decision before calling this method.
+        InitiativeStore intentionally does not open or trust the separate TaskQueue database.
+        """
+        self._validate_video_attempt_id(attempt_id)
+        capabilities = self._validate_video_admission_grant_fields(
+            worker_id=worker_id, lease_epoch=lease_epoch, input_sha256=input_sha256,
+            dag_sha256=dag_sha256, batch_id=batch_id, batch_fingerprint=batch_fingerprint,
+            handler_digest=handler_digest, resource_digest=resource_digest, cost_digest=cost_digest,
+            approval_task_id=approval_task_id, approval_event_id=approval_event_id,
+            approved_by=approved_by, scope=scope, role=role,
+            required_capabilities=required_capabilities,
+        )
+        if isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int) or not 1 <= ttl_seconds <= 300:
+            raise ValueError("ttl_seconds must be between 1 and 300")
+        current = time.time() if now is None else now
+        if isinstance(current, bool) or not isinstance(current, (int, float)) or not math.isfinite(float(current)):
+            raise ValueError("now must be a finite timestamp")
+        current = float(current)
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            attempt = self.connection.execute(
+                "SELECT * FROM initiative_video_attempts WHERE attempt_id=?", (attempt_id,)
+            ).fetchone()
+            if attempt is None:
+                raise KeyError(attempt_id)
+            lease_expiry = float(attempt["lease_expires_at"] or 0)
+            if (attempt["status"] != "running" or attempt["worker_id"] != worker_id
+                    or int(attempt["attempt_count"] or 0) != lease_epoch
+                    or lease_expiry <= current):
+                raise ValueError("admission grant requires the current owning worker and an unexpired lease epoch")
+            if not attempt["recipe_sha256"] or attempt["approval_task_id"] != approval_task_id:
+                raise ValueError("admission grant approval task and recipe must match the current Attempt")
+            binding = {
+                "attempt_id": attempt_id, "worker_id": worker_id, "lease_epoch": lease_epoch,
+                "lease_expires_at": lease_expiry, "recipe_sha256": attempt["recipe_sha256"],
+                "input_sha256": input_sha256, "dag_sha256": dag_sha256, "batch_id": batch_id,
+                "batch_fingerprint": batch_fingerprint, "handler_digest": handler_digest,
+                "resource_digest": resource_digest, "cost_digest": cost_digest,
+                "approval_task_id": approval_task_id, "approval_event_id": approval_event_id,
+                "approved_by": approved_by.strip(), "scope": scope, "role": role,
+                "required_capabilities": capabilities,
+            }
+            grant_key = hashlib.sha256(json.dumps(
+                binding, sort_keys=True, separators=(",", ":"), allow_nan=False,
+            ).encode("utf-8")).hexdigest()
+            existing = self.connection.execute(
+                "SELECT * FROM initiative_video_admission_grants WHERE grant_key=?", (grant_key,)
+            ).fetchone()
+            if existing is not None:
+                if existing["status"] == "active" and float(existing["expires_at"]) > current:
+                    self.connection.commit()
+                    return self._decode_video_admission_grant(existing)
+                raise ValueError("matching admission grant was already consumed, revoked, or expired")
+            expires_at = min(lease_expiry, current + ttl_seconds)
+            grant_id = uuid.uuid4().hex
+            self.connection.execute(
+                """INSERT INTO initiative_video_admission_grants
+                (grant_id,grant_key,attempt_id,worker_id,lease_epoch,lease_expires_at,recipe_sha256,
+                 input_sha256,dag_sha256,batch_id,batch_fingerprint,handler_digest,resource_digest,
+                 cost_digest,approval_task_id,approval_event_id,approved_by,scope,role,
+                 required_capabilities_json,status,created_at,expires_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'active',?,?)""",
+                (grant_id, grant_key, attempt_id, worker_id, lease_epoch, lease_expiry,
+                 attempt["recipe_sha256"], input_sha256, dag_sha256, batch_id, batch_fingerprint,
+                 handler_digest, resource_digest, cost_digest, approval_task_id, approval_event_id,
+                 approved_by.strip(), scope, role,
+                 json.dumps(capabilities, separators=(",", ":")), current, expires_at),
+            )
+            self.connection.execute(
+                "INSERT INTO initiative_video_admission_grant_events(grant_id,event_type,actor,details_json,created_at) VALUES(?,?,?,?,?)",
+                (grant_id, "created", approved_by.strip(), json.dumps({"scope": scope, "role": role, "lease_epoch": lease_epoch}, sort_keys=True), current),
+            )
+            self.connection.commit()
+            return self._decode_video_admission_grant(self.connection.execute(
+                "SELECT * FROM initiative_video_admission_grants WHERE grant_id=?", (grant_id,)
+            ).fetchone())
+        except Exception:
+            self.connection.rollback()
+            raise
+
+    def consume_video_admission_grant(
+        self, grant_id, *, attempt_id, worker_id, lease_epoch, recipe_sha256,
+        input_sha256, dag_sha256, batch_id, batch_fingerprint, handler_digest,
+        resource_digest, cost_digest, approval_task_id, approval_event_id,
+        approved_by, scope, role, required_capabilities, now=None,
+    ):
+        """Atomically consume a matching one-shot grant while revalidating the live lease and every binding."""
+        self._validate_video_admission_grant_id(grant_id)
+        self._validate_video_attempt_id(attempt_id)
+        capabilities = self._validate_video_admission_grant_fields(
+            worker_id=worker_id, lease_epoch=lease_epoch, input_sha256=input_sha256,
+            dag_sha256=dag_sha256, batch_id=batch_id, batch_fingerprint=batch_fingerprint,
+            handler_digest=handler_digest, resource_digest=resource_digest, cost_digest=cost_digest,
+            approval_task_id=approval_task_id, approval_event_id=approval_event_id,
+            approved_by=approved_by, scope=scope, role=role,
+            required_capabilities=required_capabilities,
+        )
+        self._validate_video_stage_digest(recipe_sha256, "recipe_sha256")
+        current = time.time() if now is None else now
+        if isinstance(current, bool) or not isinstance(current, (int, float)) or not math.isfinite(float(current)):
+            raise ValueError("now must be a finite timestamp")
+        current = float(current)
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            grant = self.connection.execute(
+                "SELECT * FROM initiative_video_admission_grants WHERE grant_id=?", (grant_id,)
+            ).fetchone()
+            if grant is None:
+                raise KeyError(grant_id)
+            if grant["status"] != "active":
+                raise ValueError("admission grant is not active or has already been consumed")
+            if float(grant["expires_at"]) <= current:
+                raise ValueError("admission grant has expired")
+            attempt = self.connection.execute(
+                "SELECT * FROM initiative_video_attempts WHERE attempt_id=?", (attempt_id,)
+            ).fetchone()
+            if attempt is None:
+                raise KeyError(attempt_id)
+            lease_expiry = float(attempt["lease_expires_at"] or 0)
+            if (attempt["status"] != "running" or attempt["worker_id"] != worker_id
+                    or int(attempt["attempt_count"] or 0) != lease_epoch
+                    or lease_expiry <= current or lease_expiry != float(grant["lease_expires_at"])):
+                raise ValueError("admission grant requires the same current unexpired Attempt lease epoch")
+            expected = {
+                "attempt_id": attempt_id, "worker_id": worker_id, "lease_epoch": lease_epoch,
+                "recipe_sha256": recipe_sha256, "input_sha256": input_sha256,
+                "dag_sha256": dag_sha256, "batch_id": batch_id,
+                "batch_fingerprint": batch_fingerprint, "handler_digest": handler_digest,
+                "resource_digest": resource_digest, "cost_digest": cost_digest,
+                "approval_task_id": approval_task_id, "approval_event_id": approval_event_id,
+                "approved_by": approved_by.strip(), "scope": scope, "role": role,
+                "required_capabilities_json": json.dumps(capabilities, separators=(",", ":")),
+            }
+            if attempt["recipe_sha256"] != recipe_sha256 or attempt["approval_task_id"] != approval_task_id:
+                raise ValueError("admission grant recipe or approval task no longer matches the Attempt")
+            if any(grant[key] != value for key, value in expected.items()):
+                raise ValueError("admission grant binding does not match the requested execution")
+            cursor = self.connection.execute(
+                "UPDATE initiative_video_admission_grants SET status='consumed',consumed_at=? WHERE grant_id=? AND status='active' AND expires_at>?",
+                (current, grant_id, current),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("admission grant was consumed or revoked concurrently")
+            self.connection.execute(
+                "INSERT INTO initiative_video_admission_grant_events(grant_id,event_type,actor,details_json,created_at) VALUES(?,?,?,?,?)",
+                (grant_id, "consumed", worker_id, json.dumps({"scope": scope, "role": role, "lease_epoch": lease_epoch}, sort_keys=True), current),
+            )
+            self.connection.commit()
+            return self._decode_video_admission_grant(self.connection.execute(
+                "SELECT * FROM initiative_video_admission_grants WHERE grant_id=?", (grant_id,)
+            ).fetchone())
+        except Exception:
+            self.connection.rollback()
+            raise
+
+    def revoke_video_admission_grant(self, grant_id, *, actor, reason, now=None):
+        self._validate_video_admission_grant_id(grant_id)
+        if not isinstance(actor, str) or not actor.strip() or len(actor) > 200:
+            raise ValueError("actor must be non-empty bounded text")
+        if not isinstance(reason, str) or not re.fullmatch(r"[a-z][a-z0-9_.-]{0,79}", reason):
+            raise ValueError("reason must be a stable lowercase revocation code")
+        current = time.time() if now is None else now
+        if isinstance(current, bool) or not isinstance(current, (int, float)) or not math.isfinite(float(current)):
+            raise ValueError("now must be a finite timestamp")
+        current = float(current)
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.connection.execute(
+                "SELECT * FROM initiative_video_admission_grants WHERE grant_id=?", (grant_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(grant_id)
+            if row["status"] == "consumed":
+                raise ValueError("consumed admission grants cannot be revoked")
+            if row["status"] in {"revoked", "expired"}:
+                self.connection.commit()
+                return self._decode_video_admission_grant(row)
+            self.connection.execute(
+                "UPDATE initiative_video_admission_grants SET status='revoked',revoked_at=?,revoke_reason=? WHERE grant_id=? AND status='active'",
+                (current, reason, grant_id),
+            )
+            self.connection.execute(
+                "INSERT INTO initiative_video_admission_grant_events(grant_id,event_type,actor,details_json,created_at) VALUES(?,?,?,?,?)",
+                (grant_id, "revoked", actor.strip(), json.dumps({"reason": reason}, sort_keys=True), current),
+            )
+            self.connection.commit()
+            return self._decode_video_admission_grant(self.connection.execute(
+                "SELECT * FROM initiative_video_admission_grants WHERE grant_id=?", (grant_id,)
+            ).fetchone())
+        except Exception:
+            self.connection.rollback()
+            raise
+
+    def expire_video_admission_grant(self, grant_id, *, now=None):
+        self._validate_video_admission_grant_id(grant_id)
+        current = time.time() if now is None else now
+        if isinstance(current, bool) or not isinstance(current, (int, float)) or not math.isfinite(float(current)):
+            raise ValueError("now must be a finite timestamp")
+        current = float(current)
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.connection.execute(
+                "SELECT * FROM initiative_video_admission_grants WHERE grant_id=?", (grant_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(grant_id)
+            if row["status"] == "active" and min(float(row["expires_at"]), float(row["lease_expires_at"])) <= current:
+                self.connection.execute(
+                    "UPDATE initiative_video_admission_grants SET status='expired',expired_at=? WHERE grant_id=? AND status='active'",
+                    (current, grant_id),
+                )
+                self.connection.execute(
+                    "INSERT INTO initiative_video_admission_grant_events(grant_id,event_type,actor,details_json,created_at) VALUES(?,?,?,?,?)",
+                    (grant_id, "expired", "system", "{}", current),
+                )
+            self.connection.commit()
+            return self._decode_video_admission_grant(self.connection.execute(
+                "SELECT * FROM initiative_video_admission_grants WHERE grant_id=?", (grant_id,)
+            ).fetchone())
+        except Exception:
+            self.connection.rollback()
+            raise
+
+    def list_video_admission_grant_events(self, grant_id):
+        self._validate_video_admission_grant_id(grant_id)
+        rows = self.connection.execute(
+            "SELECT * FROM initiative_video_admission_grant_events WHERE grant_id=? ORDER BY sequence",
+            (grant_id,),
+        ).fetchall()
+        return [{**dict(row), "details": json.loads(row["details_json"])} for row in rows]
 
     def record_video_stage_checkpoint(
         self, attempt_id, *, worker_id, lease_epoch, dag_sha256, batch_id,

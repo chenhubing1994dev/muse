@@ -17,7 +17,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 from muse.capability_radar import scan_capabilities
 from muse.autonomous_research import AutonomousResearchEngine
@@ -304,7 +304,19 @@ class AutonomousSupervisor:
         workspace: str | Path | None = None,
         conversation_db: str | Path = "data/conversations/muse.sqlite3",
         contextual_review_handler: Any | None = None,
+        video_admission_provider: Any | None = None,
+        video_admission_request_factory: Callable[..., Any] | None = None,
     ) -> None:
+        if (video_admission_provider is None) != (video_admission_request_factory is None):
+            raise ValueError("video admission provider and request factory must be injected together")
+        if video_admission_provider is not None and not callable(
+            getattr(video_admission_provider, "issue_video_admission_grant", None)
+        ):
+            raise ValueError("video_admission_provider must issue persisted Commander grants")
+        if video_admission_request_factory is not None and not callable(video_admission_request_factory):
+            raise ValueError("video_admission_request_factory must be callable")
+        self.video_admission_provider = video_admission_provider
+        self.video_admission_request_factory = video_admission_request_factory
         self.task_db = Path(task_db)
         self.routine_db = Path(routine_db)
         self.state_db = Path(state_db)
@@ -340,7 +352,11 @@ class AutonomousSupervisor:
         if self._stop_event is not None and self._stop_event.is_set():
             return {"status": "stopping", "claimed": False}
         from muse.video_task_worker import VideoTaskWorker
-        return VideoTaskWorker(self.workspace, worker_id="commander-video-worker").run_once()
+        return VideoTaskWorker(
+            self.workspace, worker_id="commander-video-worker",
+            admission_provider=self.video_admission_provider,
+            admission_request_factory=self.video_admission_request_factory,
+        ).run_once()
 
     def _knowledge_lint(self, _payload: dict[str, Any]) -> dict[str, Any]:
         if not self.knowledge_db.is_file():

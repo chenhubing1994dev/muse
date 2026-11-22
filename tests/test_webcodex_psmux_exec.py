@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import sys
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -8,6 +9,7 @@ from unittest.mock import patch
 from scripts import webcodex_psmux_exec as adapter
 
 
+@unittest.skipUnless(sys.platform == "win32", "WebCodex PSMUX executes Windows PowerShell jobs")
 class PsmuxExecAdapterTests(unittest.TestCase):
     def test_build_job_script_redirects_all_streams_and_records_exit_code(self):
         output = Path("C:/tmp/output.log")

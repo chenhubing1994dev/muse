@@ -56,6 +56,23 @@ class VideoStudioBatch:
     plan: CommanderPlan
     input_sha256: str | None = None
 
+
+    @property
+    def role(self) -> str:
+        wanted = set(self.step_ids)
+        roles = {step.role for step in self.plan.steps if step.step_id in wanted}
+        if len(roles) != 1:
+            raise ValueError("video batch must contain exactly one execution role")
+        return next(iter(roles))
+
+    @property
+    def required_capabilities(self) -> tuple[str, ...]:
+        wanted = set(self.step_ids)
+        return tuple(sorted({
+            capability for step in self.plan.steps if step.step_id in wanted
+            for capability in step.required_capabilities
+        }))
+
     def as_dict(self) -> dict[str, Any]:
         stage_by_step_id = dict(self.step_stage_ids)
         return {
@@ -63,6 +80,8 @@ class VideoStudioBatch:
             "checkpoint_key_template": self.checkpoint_key_template,
             "dag_sha256": self.dag_sha256,
             "batch_fingerprint": self.batch_fingerprint,
+            "role": self.role,
+            "required_capabilities": list(self.required_capabilities),
             "input_sha256": self.input_sha256,
             "step_stage_ids": dict(self.step_stage_ids),
             "index": self.index,
@@ -525,13 +544,29 @@ def build_video_studio_batches(
         fingerprint_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")).hexdigest()
     capacity = max_steps - 1  # One step is reserved for the durable-checkpoint entry gate.
-    chunks = [ordered[offset:offset + capacity] for offset in range(0, len(ordered), capacity)]
+    chunks: list[list[PlannedStep]] = []
+    current_chunk: list[PlannedStep] = []
+    current_role: str | None = None
+    for step in ordered:
+        if current_chunk and (step.role != current_role or len(current_chunk) >= capacity):
+            chunks.append(current_chunk)
+            current_chunk = []
+            current_role = None
+        if not current_chunk:
+            current_role = step.role
+        current_chunk.append(step)
+    if current_chunk:
+        chunks.append(current_chunk)
     positions = {step.step_id: index for index, step in enumerate(ordered)}
     prior_ids: set[str] = set()
     batches: list[VideoStudioBatch] = []
 
     for index, chunk in enumerate(chunks, start=1):
         chunk_ids = {step.step_id for step in chunk}
+        chunk_roles = {step.role for step in chunk}
+        if len(chunk_roles) != 1:
+            raise ValueError("generated video batch must contain exactly one execution role")
+        batch_role = next(iter(chunk_roles))
         external_dependencies = {
             dep for step in chunk for dep in step.depends_on if dep not in chunk_ids
         }
@@ -573,6 +608,7 @@ def build_video_studio_batches(
         step_stage_ids = tuple((step.step_id, _stage_id_for_step(step)) for step in chunk)
         batch_fingerprint_payload = {
             "dag_sha256": fingerprint,
+            "role": batch_role,
             "batch_index": index,
             "batch_total": len(chunks),
             "max_steps": max_steps,
@@ -599,7 +635,7 @@ def build_video_studio_batches(
         )
         batches.append(VideoStudioBatch(
             batch_id=f"vbatch_{fingerprint[:16]}_{index:03d}",
-            checkpoint_key_template=f"video-studio:{{attempt_id}}:{fingerprint[:32]}:{index:03d}",
+            checkpoint_key_template=f"video-studio:{{attempt_id}}:{fingerprint}:{batch_fingerprint}:{index:03d}",
             dag_sha256=fingerprint,
             batch_fingerprint=batch_fingerprint,
             input_sha256=input_sha256,

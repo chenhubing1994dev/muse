@@ -132,15 +132,31 @@ class VideoPromptStudioAdapterTests(unittest.TestCase):
         self.assertEqual(result["worker_handoff"]["status"], "blocked")
         self.assertIn("scene_dependency_order_not_worker_safe:opening", result["worker_handoff"]["blockers"])
 
-    def test_worker_handoff_blocks_per_scene_negative_prompt_instead_of_dropping_it(self):
+    def test_worker_handoff_preserves_per_scene_negative_prompts(self):
         spec = sample_spec()
+        spec["negative_prompt"] = "避免全片文字"
         spec["scenes"][0]["negative_prompt"] = "避免额外人物"
+        result = compose_video_studio_package(spec, "animated_explainer")
+        handoff = result["worker_handoff"]
+
+        self.assertEqual(handoff["status"], "ready_for_review")
+        candidate = handoff["creator_brief_video"]
+        self.assertEqual(candidate["negative_prompt"], "避免全片文字")
+        self.assertEqual(candidate["scenes"][0]["negative_prompt"], "避免额外人物")
+        self.assertNotIn("negative_prompt", candidate["scenes"][1])
+        self.assertEqual(handoff["execution"], "not_started")
+        self.assertEqual(handoff["commander_submission"], "not_submitted")
+
+    def test_worker_handoff_blocks_combined_per_scene_negative_prompt_over_limit(self):
+        spec = sample_spec()
+        spec["negative_prompt"] = "g" * 600
+        spec["scenes"][0]["negative_prompt"] = "s" * 401
         result = compose_video_studio_package(spec, "animated_explainer")
         handoff = result["worker_handoff"]
 
         self.assertEqual(handoff["status"], "blocked")
         self.assertIsNone(handoff["creator_brief_video"])
-        self.assertIn("per_scene_negative_prompt_not_supported:opening", handoff["blockers"])
+        self.assertIn("combined_scene_negative_prompt_exceeds_1000_characters:opening", handoff["blockers"])
 
     def test_worker_handoff_blocks_wan_scene_duration_outside_one_to_five_seconds(self):
         spec = sample_spec()

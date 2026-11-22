@@ -1,0 +1,29 @@
+{
+  "name": "Muse Prometheus Portal",
+  "short_name": "Muse",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#080d1d",
+  "theme_color": "#080d1d",
+  "description": "Secure Muse portal for research, knowledge, inspiration and Commander-gated plugins",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

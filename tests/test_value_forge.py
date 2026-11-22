@@ -150,6 +150,23 @@ class ValueForgeTests(unittest.TestCase):
         self.assertEqual(evaluation["evaluation"]["ratings"]["recurrence"], 1)
         self.assertEqual(evaluation["evaluation"]["ratings"]["evidence_quality"], 2)
         self.assertFalse(result["market_demand_inferred"])
+    def test_capability_radar_adapter_ignores_terminal_proposals(self) -> None:
+        result = self.forge.evaluate_capability_radar_result(
+            {
+                "signals_seen": [{"key": "task_failure", "count": 3}],
+                "created": [],
+                "existing": [
+                    {"id": "rejected-1", "signal_key": "task_failure", "status": "rejected"},
+                    {"id": "done-1", "signal_key": "task_failure", "status": "implemented"},
+                    {"id": "rolled-back-1", "signal_key": "task_failure", "status": "rolled_back"},
+                    {"id": "approved-1", "signal_key": "task_failure", "status": "approved"},
+                    {"id": "open-1", "signal_key": "task_failure", "status": "researching"},
+                ],
+                "trend": {"status": "insufficient_data", "signals": {}},
+            }
+        )
+        self.assertEqual([item["proposal_id"] for item in result["evaluations"]], ["open-1"])
+
     def test_initiative_bridge_creates_draft_without_dispatch(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             with InitiativeStore(Path(directory) / "initiatives.sqlite3") as store:

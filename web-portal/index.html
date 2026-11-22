@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#080d1d">
+  <meta name="description" content="Muse 多端智能中枢">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Muse">
+  <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="stylesheet" href="/styles.css">
+  <title>MUSE · PROMETHEUS</title>
+</head>
+<body>
+  <div class="ambient"></div>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="Muse home"><span class="sigil">✧</span><span><b>MUSE</b><small>PROMETHEUS CORE</small></span></a>
+    <div class="connection"><i></i><span id="connection-state">SECURE PORTAL</span></div>
+    <button id="logout" class="quiet hidden" type="button">退出</button>
+  </header>
+  <main>
+    <section id="login-view" class="login-wrap">
+      <div class="login-card">
+        <div class="orb">✧</div>
+        <p class="eyebrow">UNIFIED INTELLIGENCE GATEWAY</p>
+        <h1>唤醒 Muse</h1>
+        <p class="muted">安全连接你的研究、知识、灵感与智能体中枢。</p>
+        <form id="login-form">
+          <label for="password">服务器访问密码</label>
+          <input id="password" type="password" autocomplete="current-password" minlength="16" required>
+          <button class="primary" type="submit">安全进入 <span>↗</span></button>
+          <p id="login-error" class="error" role="alert"></p>
+        </form>
+        <div class="security-note">HTTPS · Same-origin session · Manifest intake · Commander approval gate</div>
+      </div>
+    </section>
+    <section id="dashboard" class="hidden">
+      <div class="hero">
+        <div><p class="eyebrow">THE LIVING COMMANDER</p><h1>奇经八脉 · 统一中枢</h1><p class="muted">研究、学习、灵感、知识与进化，在同一条指挥链中汇流。</p></div>
+        <button id="refresh" class="quiet" type="button">↻ 刷新</button>
+      </div>
+      <div class="metrics" id="metrics">
+        <article class="metric"><small>排队任务</small><strong id="queued">—</strong><span>QUEUED</span></article>
+        <article class="metric"><small>运行任务</small><strong id="running">—</strong><span>RUNNING</span></article>
+        <article class="metric"><small>待审批</small><strong id="approval">—</strong><span>APPROVAL</span></article>
+        <article class="metric"><small>在线智能体</small><strong id="agents">—</strong><span>AGENTS</span></article>
+      </div>
+      <div class="grid">
+        <section class="panel wide"><div class="panel-head"><div><p class="eyebrow">COMMANDER STREAM</p><h2>近期星轨</h2></div><span class="live">LIVE SNAPSHOT</span></div><div id="events" class="events"><p class="muted">正在读取…</p></div></section>
+        <section class="panel wide"><div class="panel-head"><div><p class="eyebrow">COMMANDER TASK LEDGER</p><h2>任务账本</h2></div><span class="pill">只显示安全元数据</span></div><div id="task-list" class="task-list"><p class="muted">正在读取…</p></div></section>
+        <section class="panel"><div class="panel-head"><div><p class="eyebrow">AGENT CONSTELLATION</p><h2>智能体星系</h2></div></div><div id="agent-list" class="agent-list"><p class="muted">正在读取…</p></div></section>
+        <section class="panel"><div class="panel-head"><div><p class="eyebrow">INSPIRATION ENGINE</p><h2>灵感脉冲</h2></div></div><div id="inspirations" class="inspirations"><p class="muted">正在读取…</p></div></section>
+        <section class="panel wide inspiration-workbench">
+          <div class="panel-head"><div><p class="eyebrow">IDEA → RESEARCH → KNOWLEDGE → EVOLUTION</p><h2>灵感捕获与演化工作台</h2></div><span class="pill">Evidence before certainty</span></div>
+          <form id="inspiration-create-form" class="plugin-form inspiration-form">
+            <label for="inspiration-title">灵感标题（可选）</label>
+            <input id="inspiration-title" type="text" maxlength="80" autocomplete="off" placeholder="为这条灵感起一个标题">
+            <label for="inspiration-content">灵感内容（最多 2,000 字）</label>
+            <textarea id="inspiration-content" rows="5" maxlength="2000" required placeholder="记录观察、问题、直觉或待验证的假设……"></textarea>
+            <label for="inspiration-external-research">研究联网权限</label>
+            <select id="inspiration-external-research">
+              <option value="false" selected>仅使用本地知识（默认）</option>
+              <option value="true">允许本条灵感进行外部联网检索</option>
+            </select>
+            <p class="muted">易经、紫微、奇门、大六壬只用于生成灵感假设，不作为事实证据。启动演化后会整理支持证据、反面证据与改进提案；不会自动执行代码修改或启动视频任务。</p>
+            <button class="quiet" type="submit">收录到灵感池</button>
+            <p id="inspiration-submit-result" class="form-result" role="status" aria-live="polite"></p>
+          </form>
+          <p id="inspiration-workflow-result" class="form-result" role="status" aria-live="polite"></p>
+        </section>
+
+        <section class="panel"><div class="panel-head"><div><p class="eyebrow">RESEARCH WIKI</p><h2>知识星图</h2></div><span class="pill">Evidence graph</span></div><div id="knowledge" class="inspirations"><p class="muted">正在读取…</p></div></section>
+        <section class="panel wide"><div class="panel-head"><div><p class="eyebrow">PLUGIN ECOSYSTEM</p><h2>插件超融合中心</h2></div><span class="pill">Commander governed</span></div><div id="plugins" class="plugin-grid"><p class="muted">正在读取…</p></div></section>
+        <form id="plugin-discover-form" class="plugin-form">
+          <label for="plugin-manifest">插件 Manifest JSON（最大 64 KiB）</label>
+          <textarea id="plugin-manifest" rows="9" spellcheck="false" autocomplete="off" required placeholder='{"schema_version":1,"id":"research.cross-check","name":"Research Cross-check","version":"1.0.0","description":"Cross-check research claims.","publisher":"local-review","dependencies":{},"capabilities":[{"id":"research","description":"Submit a research request.","risk":"research","permissions":["commander.enqueue","research.read"]}]}'></textarea>
+          <p class="muted">只登记为 discovered 待审核候选；不批准、不启用、不下载，也不会执行插件代码。</p>
+          <button class="quiet" type="submit">提交为待审核候选</button>
+          <p id="plugin-submit-result" class="empty" role="status" aria-live="polite"></p>
+        </form>
+      </div>
+      <footer><span>MUSE · PROMETHEUS</span><span id="updated">—</span><span>插件发现仅登记候选；激活与执行仍由本机审批</span></footer>
+    </section>
+  </main>
+  <script src="/app.js" defer></script>
+</body>
+</html>

@@ -977,5 +977,101 @@ class InitiativeStoreTests(unittest.TestCase):
                     "SELECT COUNT(*) FROM initiative_video_stage_checkpoints"
                 ).fetchone()[0], 1)
 
+    def _make_admission_grant_fixture(self, store, *, attempt_id="admission-grant-attempt", worker_id="grant-worker", now=1000):
+        store.start_video_attempt(
+            attempt_id, mode="prompt_to_video", approval_task_id="approval-task-1",
+            recipe_sha256="1" * 64,
+        )
+        attempt = store.claim_next_video_attempt(worker_id, lease_seconds=120, now=now)
+        fields = {
+            "input_sha256": "2" * 64, "dag_sha256": "3" * 64,
+            "batch_id": "batch_001", "batch_fingerprint": "4" * 64,
+            "handler_digest": "5" * 64, "resource_digest": "6" * 64,
+            "cost_digest": "7" * 64, "approval_task_id": "approval-task-1",
+            "approval_event_id": "event-001", "approved_by": "creator",
+            "scope": "video_studio", "role": "video_producer",
+            "required_capabilities": ["video.generate", "video.probe"],
+        }
+        grant = store.create_video_admission_grant(
+            attempt_id, worker_id=worker_id, lease_epoch=attempt["attempt_count"],
+            **fields, ttl_seconds=30, now=now + 1,
+        )
+        consume_fields = {
+            **fields, "attempt_id": attempt_id, "worker_id": worker_id,
+            "lease_epoch": attempt["attempt_count"], "recipe_sha256": "1" * 64,
+        }
+        return attempt, fields, grant, consume_fields
+
+    def test_video_admission_grant_binds_current_lease_and_is_one_shot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with InitiativeStore(Path(directory) / "initiatives.sqlite3") as store:
+                attempt, fields, grant, consume_fields = self._make_admission_grant_fixture(store)
+                self.assertEqual(grant["status"], "active")
+                self.assertEqual(grant["lease_epoch"], attempt["attempt_count"])
+                self.assertEqual(grant["lease_expires_at"], attempt["lease_expires_at"])
+                self.assertEqual(grant["required_capabilities"], ["video.generate", "video.probe"])
+                consumed = store.consume_video_admission_grant(grant["grant_id"], **consume_fields, now=1002)
+                self.assertEqual(consumed["status"], "consumed")
+                self.assertEqual(
+                    [event["event_type"] for event in store.list_video_admission_grant_events(grant["grant_id"])],
+                    ["created", "consumed"],
+                )
+                with self.assertRaisesRegex(ValueError, "not active"):
+                    store.consume_video_admission_grant(grant["grant_id"], **consume_fields, now=1003)
+                with self.assertRaisesRegex(ValueError, "already consumed"):
+                    store.create_video_admission_grant(
+                        attempt["attempt_id"], worker_id="grant-worker", lease_epoch=1,
+                        **fields, ttl_seconds=30, now=1003,
+                    )
+
+    def test_video_admission_grant_rejects_digest_scope_capability_and_lease_mismatch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with InitiativeStore(Path(directory) / "initiatives.sqlite3") as store:
+                attempt, _fields, grant, consume_fields = self._make_admission_grant_fixture(store)
+                for changed in (
+                    {**consume_fields, "input_sha256": "8" * 64},
+                    {**consume_fields, "scope": "other_scope"},
+                    {**consume_fields, "required_capabilities": ["video.generate"]},
+                    {**consume_fields, "lease_epoch": 2},
+                ):
+                    with self.assertRaises(ValueError):
+                        store.consume_video_admission_grant(grant["grant_id"], **changed, now=1002)
+                self.assertEqual(store.get_video_attempt(attempt["attempt_id"])["status"], "running")
+                self.assertEqual(
+                    store.consume_video_admission_grant(grant["grant_id"], **consume_fields, now=1002)["status"],
+                    "consumed",
+                )
+
+    def test_video_admission_grant_revoke_and_expiry_are_terminal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with InitiativeStore(Path(directory) / "initiatives.sqlite3") as store:
+                _attempt, _fields, grant, consume_fields = self._make_admission_grant_fixture(store)
+                revoked = store.revoke_video_admission_grant(
+                    grant["grant_id"], actor="creator", reason="approval_revoked", now=1002,
+                )
+                self.assertEqual(revoked["status"], "revoked")
+                with self.assertRaisesRegex(ValueError, "not active"):
+                    store.consume_video_admission_grant(grant["grant_id"], **consume_fields, now=1003)
+            with InitiativeStore(Path(directory) / "expired.sqlite3") as store:
+                _attempt, _fields, grant, consume_fields = self._make_admission_grant_fixture(
+                    store, attempt_id="expired-admission-grant",
+                )
+                expired = store.expire_video_admission_grant(grant["grant_id"], now=1032)
+                self.assertEqual(expired["status"], "expired")
+                with self.assertRaisesRegex(ValueError, "not active"):
+                    store.consume_video_admission_grant(grant["grant_id"], **consume_fields, now=1033)
+
+    def test_video_admission_grant_is_invalidated_when_lease_expiry_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with InitiativeStore(Path(directory) / "initiatives.sqlite3") as store:
+                attempt, _fields, grant, consume_fields = self._make_admission_grant_fixture(store)
+                renewed = store.renew_video_attempt_lease(
+                    attempt["attempt_id"], worker_id="grant-worker", lease_epoch=1,
+                    lease_seconds=180, now=1002,
+                )
+                self.assertNotEqual(renewed["lease_expires_at"], grant["lease_expires_at"])
+                with self.assertRaisesRegex(ValueError, "same current unexpired Attempt lease epoch"):
+                    store.consume_video_admission_grant(grant["grant_id"], **consume_fields, now=1003)
+
 if __name__ == "__main__":
     unittest.main()

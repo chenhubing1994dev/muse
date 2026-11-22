@@ -6,6 +6,8 @@ schedulers, never auto-approves code patches, and respects allow_external_resear
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import hashlib
 import json
 import re
@@ -20,6 +22,10 @@ from muse.improvement import ImprovementStore
 from muse.philosophy import PhilosophyStore
 from muse.pipeline_control import PipelineController
 from muse.research_knowledge import ResearchKnowledgeStore
+from muse.conversations import ConversationStore
+from muse.inspiration import InspirationEngine, build_symbolic_inspiration_pack
+from muse.memory import MemoryStore
+import uuid
 
 VIRAL_BLUEPRINT_ACT_MODES = (
     "hook_radar",
@@ -45,6 +51,285 @@ def _store_paths(workspace: Path) -> dict[str, Path]:
         "report_dir": data / "research" / "reports",
         "dossiers_dir": data / "improvements" / "dossiers",
         "blueprints_dir": data / "prometheus" / "blueprints",
+        "inspiration_briefs_dir": data / "prometheus" / "inspiration_briefs",
+    }
+
+
+
+def _build_inspiration_context(
+    *, workspace: Path, paths: dict[str, Path], inspiration: dict[str, Any],
+    allow_external_research: bool,
+) -> dict[str, Any]:
+    """Fuse local User Track/dialogue/Research Wiki context, then persist a private local brief.
+
+    Only the four core symbolic hypothesis seeds are emitted to the research graph and
+    blueprint. Raw User Track memories and conversation text never enter public queries,
+    video blueprints, or Commander ticket payloads.
+    """
+    goal = f"{inspiration.get('title', '')}\n{inspiration.get('summary', '')}".strip()[:4000]
+    if not goal:
+        raise ValueError("inspiration must contain a title or summary")
+    with MemoryStore(paths["memory_db"]) as memory, ConversationStore(paths["conversation_db"]) as conversations, ResearchKnowledgeStore(paths["knowledge_db"]) as knowledge:
+        brief = InspirationEngine(
+            memory, conversations=conversations, research_knowledge=knowledge,
+        ).build_brief(
+            goal, project="muse", creator_intent=str(inspiration.get("summary") or "")[:2000],
+        )
+        pack = build_symbolic_inspiration_pack(goal[:2000])
+        selected = [item for item in pack if item["id"] in {"iching", "qimen", "ziwei", "liu_ren"}]
+        candidate_ids: list[str] = []
+        for item in selected:
+            candidate_digest = hashlib.sha256(
+                f"{inspiration['id']}|{item['id']}|{goal}".encode("utf-8")
+            ).hexdigest()
+            external_ref = "inspiration-engine:sha256:" + candidate_digest
+            existing_row = knowledge.connection.execute(
+                "SELECT id FROM knowledge_nodes WHERE external_ref=? AND deleted_at IS NULL",
+                (external_ref,),
+            ).fetchone()
+            existing = knowledge.get_node(existing_row["id"]) if existing_row else None
+            if existing and existing["status"] in {"supported", "refuted", "contested", "superseded"}:
+                candidate = existing
+            else:
+                old_metadata = dict(existing.get("metadata") or {}) if existing else {}
+                metadata = {
+                    **old_metadata,
+                    "origin": "inspiration_engine_generated_candidate",
+                    "epistemic_status": "creator_inspired_hypothesis_only",
+                    "creator_context_is_evidence": False,
+                    "is_evidence": False,
+                    "is_prediction": False,
+                    "review_state": old_metadata.get("review_state", "not_researched"),
+                    "allow_external_research": bool(allow_external_research),
+                    "symbolic_framework_id": item["id"],
+                    "application_question": item["application_question"],
+                    "falsification_rule": item["falsification_rule"],
+                    "validation_plan": item["validation_plan"],
+                    "parent_inspiration_id": inspiration["id"],
+                    "generated_by": "muse.inspiration_evolution",
+                    "private_context_exported": False,
+                }
+                candidate = knowledge.upsert_node(
+                    "claim", f"{inspiration.get('title', 'Muse 灵感')}｜{item['name']}视角假设",
+                    summary=item["hypothesis_seed"], external_ref=external_ref,
+                    metadata=metadata,
+                    provenance=("muse.inspiration_engine", f"creator-inspiration:{inspiration['id']}"),
+                    status=existing["status"] if existing else "proposed",
+                )
+            knowledge.add_edge(
+                candidate["id"], inspiration["id"], "inspired_by",
+                metadata={"framework_id": item["id"], "epistemic_status": "symbolic_hypothesis_only", "is_evidence": False},
+            )
+            candidate_ids.append(candidate["id"])
+
+    brief["private_storage_contract"] = {
+        "storage_scope": "local_workspace_only",
+        "user_track_memory_exported": False,
+        "conversation_context_exported": False,
+        "video_blueprint_contains_private_context": False,
+        "public_research_queries_include_private_context": False,
+        "automatic_user_memory_write": False,
+    }
+    encoded = json.dumps(brief, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+    brief_digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    brief_dir = paths["inspiration_briefs_dir"]
+    if brief_dir.is_symlink():
+        raise ValueError("private inspiration brief directory must not be a symlink")
+    brief_dir.mkdir(parents=True, exist_ok=True)
+    target = brief_dir / f"{inspiration['id']}-{brief_digest[:16]}.json"
+    if target.is_symlink():
+        raise ValueError("private inspiration brief target must not be a symlink")
+    if not target.exists():
+        temporary = brief_dir / f".{target.name}.{uuid.uuid4().hex}.tmp"
+        temporary.write_text(encoded, encoding="utf-8")
+        temporary.replace(target)
+    symbolic_inspiration = [{
+        "id": item["id"], "name": item["name"], "tradition": item["tradition"],
+        "application_question": item["application_question"],
+        "hypothesis_seed": item["hypothesis_seed"],
+        "falsification_rule": item["falsification_rule"],
+        "validation_plan": item["validation_plan"],
+        "epistemic_status": "symbolic_hypothesis_only", "is_evidence": False,
+    } for item in selected]
+    return {
+        "brief_path": target.relative_to(workspace).as_posix(),
+        "brief_sha256": brief_digest, "brief_status": "ready",
+        "user_memory_match_count": int(brief.get("memory_match_count", 0)),
+        "conversation_context_count": sum(
+            1 for item in brief.get("multi_source_context", []) if item.get("source_type") == "dialogue"
+        ),
+        "candidate_ids": candidate_ids, "symbolic_inspiration": symbolic_inspiration,
+        "private_context_exported": False,
+    }
+
+
+def _run_optional_business_bridge(
+    *,
+    workspace: Path,
+    paths: dict[str, Path],
+    report: dict[str, Any],
+    report_path: str | None,
+    inspiration_id: str,
+    business_brief: Mapping[str, Any] | None,
+    business_ratings: Mapping[str, int] | None,
+    business_database: str | Path | None,
+    business_currency: str,
+    estimated_price_minor: int | None,
+    estimated_cost_minor: int | None,
+) -> dict[str, Any]:
+    """Create a business pilot candidate only from complete, explicit caller inputs."""
+    supplied = {
+        "business_brief": business_brief is not None,
+        "business_ratings": business_ratings is not None,
+        "business_database": business_database is not None,
+    }
+    if not any(supplied.values()):
+        return {"status": "not_requested", "candidate_created": False}
+    missing = [name for name, present in supplied.items() if not present]
+    if missing:
+        return {
+            "status": "blocked_incomplete_opt_in",
+            "candidate_created": False,
+            "missing_inputs": missing,
+            "market_demand_inferred": False,
+            "willingness_to_pay_inferred": False,
+        }
+    try:
+        database_path = Path(business_database).expanduser()
+        if not database_path.is_absolute():
+            database_path = workspace / database_path
+        if not str(database_path).strip() or database_path.name in {"", ".", ".."}:
+            raise ValueError("business_database must be a concrete database file path")
+        workspace_root = workspace.resolve()
+        data_root = workspace_root / "data"
+        business_root = data_root / "business"
+        if data_root.is_symlink() or business_root.is_symlink() or database_path.is_symlink():
+            return {
+                "status": "blocked_symlink_path",
+                "candidate_created": False,
+                "error_type": "ValueError",
+            }
+        resolved_business_root = business_root.resolve()
+        resolved_database = database_path.resolve()
+        if (not resolved_business_root.is_relative_to(workspace_root)
+                or not resolved_database.is_relative_to(resolved_business_root)):
+            return {
+                "status": "blocked_database_outside_business_dir",
+                "candidate_created": False,
+                "error_type": "ValueError",
+            }
+        protected_paths = {
+            path.resolve() for path in paths.values()
+            if isinstance(path, Path) and path.suffix in {".sqlite3", ".db"}
+        }
+        if resolved_database in protected_paths:
+            return {
+                "status": "blocked_database_collision",
+                "candidate_created": False,
+                "error_type": "ValueError",
+            }
+        from muse.research_business_bridge import create_candidate_from_research_report
+        bridge_result = create_candidate_from_research_report(
+            report,
+            business_brief,
+            business_ratings,
+            business_database=database_path,
+            report_path=report_path or "",
+            currency=business_currency,
+            estimated_price_minor=estimated_price_minor,
+            estimated_cost_minor=estimated_cost_minor,
+        )
+    except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
+        return {
+            "status": "invalid_input" if isinstance(exc, (TypeError, ValueError)) else "failed",
+            "candidate_created": False,
+            "error_type": type(exc).__name__,
+            "market_demand_inferred": False,
+            "willingness_to_pay_inferred": False,
+        }
+
+    opportunity = bridge_result.get("opportunity")
+    if not isinstance(opportunity, Mapping) or not isinstance(opportunity.get("id"), str):
+        return {
+            "status": "candidate_created_but_unlinked",
+            "candidate_created": True,
+            "error_type": "InvalidBridgeResult",
+            "market_demand_inferred": False,
+            "willingness_to_pay_inferred": False,
+        }
+    opportunity_id = opportunity["id"]
+    wiki_idea_id = None
+    try:
+        with ResearchKnowledgeStore(paths["knowledge_db"]) as knowledge:
+            external_ref = f"business-opportunity:{opportunity_id}"
+            existing_row = knowledge.connection.execute(
+                "SELECT id FROM knowledge_nodes WHERE external_ref=? AND deleted_at IS NULL",
+                (external_ref,),
+            ).fetchone()
+            existing = knowledge.get_node(existing_row["id"]) if existing_row else None
+            metadata = {
+                **(dict(existing.get("metadata") or {}) if existing else {}),
+                "origin": "research_business_bridge",
+                "business_opportunity_id": opportunity_id,
+                "business_opportunity_status": bridge_result.get("opportunity_status", "candidate"),
+                "research_assumption_evidence_id": bridge_result.get("research_assumption_evidence_id"),
+                "research_report_sha256": bridge_result.get("research_report_sha256"),
+                "market_demand_inferred": False,
+                "willingness_to_pay_inferred": False,
+                "customer_validation_required": True,
+                "requires_human_review": True,
+                "initiative_created": False,
+                "dispatch_started": False,
+                "publishing_started": False,
+                "gpu_work_started": False,
+            }
+            idea = knowledge.upsert_node(
+                "idea",
+                str(opportunity.get("title") or "Research business pilot candidate")[:200],
+                summary="A caller-framed business pilot candidate exists in the separate Business Opportunity ledger. Customer validation and human review remain required.",
+                external_ref=external_ref,
+                metadata=metadata,
+                provenance=("muse.research_business_bridge", f"creator-inspiration:{inspiration_id}"),
+                status=existing["status"] if existing else "proposed",
+            )
+            knowledge.add_edge(
+                idea["id"], inspiration_id, "inspired_by",
+                metadata={"business_opportunity_id": opportunity_id, "candidate_only": True},
+            )
+            wiki_idea_id = idea["id"]
+    except (OSError, sqlite3.Error, TypeError, ValueError, KeyError) as exc:
+        return {
+            "status": "candidate_created_graph_link_failed",
+            "candidate_created": True,
+            "opportunity_id": opportunity_id,
+            "opportunity_status": bridge_result.get("opportunity_status"),
+            "error_type": type(exc).__name__,
+            "market_demand_inferred": False,
+            "willingness_to_pay_inferred": False,
+            "customer_validation_required": True,
+            "requires_human_review": True,
+            "initiative_created": False,
+            "dispatch_started": False,
+            "publishing_started": False,
+            "gpu_work_started": False,
+        }
+    return {
+        "status": bridge_result.get("status", "opportunity_resolved"),
+        "candidate_created": True,
+        "opportunity_id": opportunity_id,
+        "opportunity_status": bridge_result.get("opportunity_status"),
+        "research_wiki_idea_id": wiki_idea_id,
+        "research_assumption_evidence_id": bridge_result.get("research_assumption_evidence_id"),
+        "research_report_sha256": bridge_result.get("research_report_sha256"),
+        "pricing_state": bridge_result.get("pricing_state", "not_provided"),
+        "market_demand_inferred": False,
+        "willingness_to_pay_inferred": False,
+        "customer_validation_required": True,
+        "requires_human_review": True,
+        "initiative_created": False,
+        "dispatch_started": False,
+        "publishing_started": False,
+        "gpu_work_started": False,
     }
 
 
@@ -314,6 +599,7 @@ def compile_viral_video_blueprint(
     report: dict[str, Any] | None,
     dossiers: list[dict[str, Any]],
     evolution_cycle_id: str | None = None,
+    symbolic_inspiration: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], Path]:
     """Compile researched findings + counter-evidence into a high-retention 6-act video blueprint."""
     blueprints_dir.mkdir(parents=True, exist_ok=True)
@@ -474,6 +760,7 @@ def compile_viral_video_blueprint(
         "hook_3s": hook_headline,
         "hook_caption": hook_text,
         "evidence_coverage_score": coverage_score,
+        "symbolic_inspiration": list(symbolic_inspiration or []),
         "acts": acts,
         "source_notes": {
             "title": citations[0]["title"] if citations else raw_title,
@@ -579,6 +866,12 @@ def evolve_inspiration_closed_loop(
     reader: Any = None,
     synthesizer: Any = None,
     claim_reviewer: Any = None,
+    business_brief: Mapping[str, Any] | None = None,
+    business_ratings: Mapping[str, int] | None = None,
+    business_database: str | Path | None = None,
+    business_currency: str = "USD",
+    estimated_price_minor: int | None = None,
+    estimated_cost_minor: int | None = None,
 ) -> dict[str, Any]:
     """Run closed-loop Inspiration -> Research -> Self-Improvement -> Video Blueprint (+ optional Commander jobs)."""
     root = Path(workspace).resolve()
@@ -601,7 +894,10 @@ def evolve_inspiration_closed_loop(
             if not content:
                 raise ValueError("create_if_missing.content must not be empty")
             title = str(create_if_missing.get("title") or content.splitlines()[0][:80]).strip()
-            allow_external = bool(create_if_missing.get("allow_external_research", False))
+            allow_external_value = create_if_missing.get("allow_external_research", False)
+            if not isinstance(allow_external_value, bool):
+                raise TypeError("allow_external_research must be a boolean")
+            allow_external = allow_external_value
             tags = [str(x).strip()[:60] for x in (create_if_missing.get("tags") or []) if str(x).strip()][:12]
             domains = [str(x).strip()[:60] for x in (create_if_missing.get("research_domains") or []) if str(x).strip()][:12]
             digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
@@ -638,6 +934,10 @@ def evolve_inspiration_closed_loop(
 
     assert target_node is not None
     allow_external = target_node.get("metadata", {}).get("allow_external_research") is True
+    inspiration_context = _build_inspiration_context(
+        workspace=root, paths=paths, inspiration=target_node,
+        allow_external_research=allow_external,
+    )
     preferred_key = f"creator-hypothesis-review:{target_node['id']}"
     report: dict[str, Any] = {}
     report_path: str | None = None
@@ -726,8 +1026,17 @@ def evolve_inspiration_closed_loop(
         report=report,
         dossiers=dossiers,
         evolution_cycle_id=evolution_cycle_id or None,
+        symbolic_inspiration=inspiration_context["symbolic_inspiration"],
     )
     rel_blueprint = blueprint_path.relative_to(root).as_posix()
+
+    business_bridge = _run_optional_business_bridge(
+        workspace=root, paths=paths, report=report, report_path=report_path,
+        inspiration_id=target_node["id"], business_brief=business_brief,
+        business_ratings=business_ratings, business_database=business_database,
+        business_currency=business_currency, estimated_price_minor=estimated_price_minor,
+        estimated_cost_minor=estimated_cost_minor,
+    )
 
     with ResearchKnowledgeStore(paths["knowledge_db"]) as knowledge:
         latest = knowledge.get_node(target_node["id"]) or target_node
@@ -737,6 +1046,12 @@ def evolve_inspiration_closed_loop(
             "evolution_stage": "blueprint_ready",
             "blueprint_path": rel_blueprint,
             "improvement_proposal_ids": linked_proposal_ids,
+            "inspiration_brief_path": inspiration_context["brief_path"],
+            "inspiration_brief_sha256": inspiration_context["brief_sha256"],
+            "symbolic_candidate_ids": inspiration_context["candidate_ids"],
+            "private_context_exported": False,
+            "business_bridge_status": business_bridge["status"],
+            "business_opportunity_id": business_bridge.get("opportunity_id"),
             "research_report_path": report_path or meta.get("research_report_path", ""),
             "last_evolved_at": datetime.now(timezone.utc).isoformat(),
         })
@@ -774,9 +1089,17 @@ def evolve_inspiration_closed_loop(
         "evidence_coverage_score": report.get("evidence_coverage_score", 0),
         "improvement_proposals": dossiers,
         "improvement_proposal_ids": linked_proposal_ids,
+        "inspiration_brief_path": inspiration_context["brief_path"],
+        "inspiration_brief_sha256": inspiration_context["brief_sha256"],
+        "inspiration_brief_status": inspiration_context["brief_status"],
+        "symbolic_candidate_ids": inspiration_context["candidate_ids"],
+        "user_memory_match_count": inspiration_context["user_memory_match_count"],
+        "conversation_context_count": inspiration_context["conversation_context_count"],
+        "private_context_exported": False,
         "approval_required": True,
         "automatic_code_changes": False,
         "blueprint_path": rel_blueprint,
         "blueprint_title": blueprint["title"],
         "queued_video_jobs": queued_jobs,
+        "business_bridge": business_bridge,
     }

@@ -15,7 +15,7 @@ from unittest.mock import patch
 from muse.agent_registry import AgentRegistry
 from muse.capabilities import CapabilityRegistry
 from muse.progress import ProgressEventStore
-from muse.status_api import _find_product_subtitle_review, build_agents, build_agent_org_chart, build_capabilities, build_initiative_timeline, build_mempalace_status, build_overview, build_products, build_improvement_detail, create_status_server
+from muse.status_api import _find_product_subtitle_review, build_agents, build_agent_org_chart, build_capabilities, build_initiative_timeline, build_mempalace_status, build_overview, build_products, build_improvement_detail, build_system_dashboard, create_status_server
 from muse.improvement import ImprovementStore
 from muse.task_queue import TaskQueue
 from muse.commander_planner import CommanderPlanner
@@ -1914,6 +1914,266 @@ class StatusApiTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join(timeout=3)
+
+    def test_system_dashboard_inventory_is_allowlisted_and_reports_unbridged_sources(self):
+        root = Path(self.temp.name)
+        (root / "docs").mkdir()
+        (root / "docs" / "PROGRESS.md").write_text("safe", encoding="utf-8")
+        (root / "config").mkdir()
+        (root / "config" / "credentials.json").write_text("do-not-list", encoding="utf-8")
+        (root / "data").mkdir()
+        (root / "data" / "private.sqlite3").write_bytes(b"private")
+        payload = build_system_dashboard(root, platform_name="linux")
+        self.assertEqual(payload["api_version"], 1)
+        self.assertEqual(payload["workspace"]["name"], root.name)
+        listed = {item["path"] for item in payload["files"]["items"]}
+        self.assertIn("docs/PROGRESS.md", listed)
+        self.assertNotIn("config/credentials.json", listed)
+        self.assertNotIn("data/private.sqlite3", listed)
+        self.assertEqual(payload["spaces"]["status"], "not_configured")
+        self.assertEqual(payload["runner"]["status"], "not_synced")
+        self.assertEqual(payload["scheduled_tasks"]["status"], "unsupported")
+        statuses = {item["id"]: item["status"] for item in payload["integrations"]}
+        self.assertEqual(statuses["webcodex_runner"], "not_bridged")
+        self.assertEqual(statuses["email"], "not_connected")
+
+    def test_system_dashboard_reads_runner_snapshot_and_separates_external_catalogs(self):
+        from datetime import datetime, timezone
+        root = Path(self.temp.name)
+        snapshot_path = root / "data" / "dashboard" / "runner_snapshot.json"
+        snapshot_path.parent.mkdir(parents=True)
+        snapshot_path.write_text(json.dumps({
+            "schema_version": 1,
+            "captured_at": datetime.now(timezone.utc).isoformat(),
+            "projects": [{"name": "Muse", "connected": True}],
+            "skills": [{"name": "test-skill"}, {"name": "broken-skill"}],
+            "invalid_skill_count": 1,
+            "mcp_servers": [],
+            "plugins": [],
+        }), encoding="utf-8")
+        payload = build_system_dashboard(root, platform_name="linux")
+        self.assertEqual(payload["runner"]["status"], "fresh")
+        self.assertEqual(payload["runner"]["project_count"], 1)
+        self.assertEqual(payload["runner"]["skill_count"], 2)
+        self.assertEqual(payload["runner"]["invalid_skill_count"], 1)
+        self.assertEqual(payload["runner"]["projects"][0]["name"], "Muse")
+        self.assertEqual(payload["integrations"][1]["status"], "empty")
+        self.assertEqual(payload["integrations"][1]["detail"], "0 个已登记服务（快照）。")
+
+    def test_system_dashboard_reports_live_windows_task_scheduler_state(self):
+        from subprocess import CompletedProcess
+        output = '"任务名","下次运行时间","模式"\r\n"\\MuseAutonomousRuntime","N/A","就绪"\r\n'
+        with patch("muse.status_api.subprocess.run", return_value=CompletedProcess([], 0, output, "")) as runner:
+            payload = build_system_dashboard(self.temp.name, platform_name="win32")
+        self.assertEqual(payload["scheduled_tasks"]["status"], "available")
+        self.assertEqual(payload["scheduled_tasks"]["items"][0]["name"], "MuseAutonomousRuntime")
+        self.assertEqual(payload["scheduled_tasks"]["items"][0]["state"], "ready")
+        self.assertEqual(runner.call_count, 2)
+
+    def test_system_dashboard_endpoint_is_authenticated_and_read_only(self):
+        server, token = create_status_server(
+            task_db=self.task_db, progress_db=self.progress_db, capability_db=self.capability_db,
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        try:
+            with self.assertRaises(HTTPError) as denied:
+                urlopen(base + "/api/v1/system-dashboard", timeout=3)
+            self.assertEqual(denied.exception.code, 401)
+            denied.exception.close()
+            request = Request(base + "/api/v1/system-dashboard", headers={"Authorization": "Bearer " + token})
+            with urlopen(request, timeout=3) as response:
+                payload = json.loads(response.read())
+            self.assertEqual(response.status, 200)
+            self.assertEqual(payload["api_version"], 1)
+            self.assertIn("files", payload)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
+    def test_companion_host_management_is_local_bearer_gated_and_revocable(self):
+        import time
+        from muse.companion_security import CompanionDeviceStore
+
+        server, desktop_token = create_status_server(
+            task_db=self.task_db, progress_db=self.progress_db,
+            capability_db=self.capability_db, agent_db=self.agent_db,
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        companion_db = Path(self.temp.name) / "data" / "companion" / "devices.sqlite3"
+        try:
+            with self.assertRaises(HTTPError) as unauthorized:
+                urlopen(base + "/api/v1/companion/devices", timeout=3)
+            self.assertEqual(unauthorized.exception.code, 401)
+            unauthorized.exception.close()
+
+            start = Request(
+                base + "/api/v1/companion/pairing/start",
+                data=json.dumps({"expires_in_seconds": 60}).encode("utf-8"),
+                headers={"Authorization": f"Bearer {desktop_token}", "Content-Type": "application/json"},
+                method="POST",
+            )
+            with urlopen(start, timeout=3) as response:
+                self.assertEqual(response.status, 201)
+                challenge = json.loads(response.read())["challenge"]
+
+            claim_secret = "local-test-claim-secret-" * 2
+            with CompanionDeviceStore(companion_db) as companion:
+                request = companion.request_pairing(
+                    challenge["challenge_id"], challenge["code"],
+                    device_name="Muse Test Phone", device_fingerprint="a" * 64,
+                    claim_secret=claim_secret, now=time.time(),
+                )
+
+            approve = Request(
+                base + f"/api/v1/companion/pairings/{request['request_id']}/approve",
+                data=b"{}", headers={
+                    "Authorization": f"Bearer {desktop_token}", "Content-Type": "application/json",
+                }, method="POST",
+            )
+            with urlopen(approve, timeout=3) as response:
+                self.assertEqual(response.status, 200)
+                self.assertEqual(json.loads(response.read())["pairing"]["status"], "approved")
+
+            with CompanionDeviceStore(companion_db) as companion:
+                claimed = companion.claim_pairing(request["request_id"], claim_secret)
+            devices_request = Request(
+                base + "/api/v1/companion/devices",
+                headers={"Authorization": f"Bearer {desktop_token}"},
+            )
+            with urlopen(devices_request, timeout=3) as response:
+                devices = json.loads(response.read())["devices"]
+            self.assertEqual(len(devices), 1)
+            self.assertEqual(devices[0]["device_id"], claimed["device_id"])
+            self.assertNotIn(claimed["token"], json.dumps(devices))
+
+            revoke = Request(
+                base + f"/api/v1/companion/devices/{claimed['device_id']}/revoke",
+                data=b"{}", headers={
+                    "Authorization": f"Bearer {desktop_token}", "Content-Type": "application/json",
+                }, method="POST",
+            )
+            with urlopen(revoke, timeout=3) as response:
+                self.assertTrue(json.loads(response.read())["revoked"])
+
+            with urlopen(devices_request, timeout=3) as response:
+                revoked = json.loads(response.read())["devices"]
+            self.assertEqual(revoked[0]["status"], "revoked")
+
+            with self.assertRaises(HTTPError) as device_token_denied:
+                urlopen(Request(
+                    base + "/api/v1/companion/devices",
+                    headers={"Authorization": f"Bearer {claimed['token']}"},
+                ), timeout=3)
+            self.assertEqual(device_token_denied.exception.code, 401)
+            device_token_denied.exception.close()
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
+class PluginPlatformStatusApiTests(unittest.TestCase):
+    def test_plugin_discovery_approval_enable_and_commander_request_are_host_only(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            task_db = root / "tasks.sqlite3"
+            plugin_db = root / "plugins" / "registry.sqlite3"
+            server, token = create_status_server(
+                task_db=task_db, progress_db=root / "progress.sqlite3",
+                capability_db=root / "capabilities.sqlite3", plugin_db=plugin_db,
+            )
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_address[1]}"
+            headers = {"Authorization": f"Bearer {token}"}
+            manifest = {
+                "schema_version": 1,
+                "id": "research.cross-check",
+                "name": "Research Cross-check",
+                "version": "1.0.0",
+                "description": "Create a research request for Commander review.",
+                "publisher": "Muse test",
+                "dependencies": {},
+                "capabilities": [{
+                    "id": "research",
+                    "description": "Collect research and counter-evidence.",
+                    "risk": "research",
+                    "permissions": ["research.read", "network.public_research", "commander.enqueue"],
+                }],
+            }
+
+            def post(path: str, payload: dict, *, extra_headers: dict | None = None):
+                request_headers = {
+                    **headers, "Content-Type": "application/json",
+                    **(extra_headers or {}),
+                }
+                request = Request(
+                    base + path, data=json.dumps(payload).encode("utf-8"),
+                    headers=request_headers, method="POST",
+                )
+                return urlopen(request, timeout=5)
+
+            try:
+                with self.assertRaises(HTTPError) as denied:
+                    urlopen(base + "/api/v1/plugins", timeout=3)
+                self.assertEqual(denied.exception.code, 401)
+                denied.exception.close()
+
+                with urlopen(Request(base + "/api/v1/plugins", headers=headers), timeout=3) as response:
+                    self.assertEqual(json.loads(response.read())["plugins"], [])
+
+                with post("/api/v1/plugins/discover", manifest) as response:
+                    self.assertEqual(response.status, 201)
+                    self.assertEqual(json.loads(response.read())["plugin"]["status"], "discovered")
+
+                with self.assertRaises(HTTPError) as missing_confirmation:
+                    post("/api/v1/plugins/research.cross-check/approve", {})
+                self.assertEqual(missing_confirmation.exception.code, 400)
+                missing_confirmation.exception.close()
+
+                with post("/api/v1/plugins/research.cross-check/approve", {
+                    "confirmation": "APPROVE-PLUGIN",
+                }) as response:
+                    self.assertEqual(json.loads(response.read())["plugin"]["status"], "approved")
+
+                with post("/api/v1/plugins/research.cross-check/enable", {
+                    "confirmation": "ENABLE-PLUGIN",
+                }) as response:
+                    self.assertEqual(json.loads(response.read())["plugin"]["status"], "enabled")
+
+                with post("/api/v1/plugins/research.cross-check/capabilities/research/request", {
+                    "payload": {"topic": "Muse knowledge graph"},
+                }) as response:
+                    queued = json.loads(response.read())
+                    self.assertEqual(response.status, 202)
+                    self.assertEqual(queued["status"], "queued_for_commander_approval")
+                    task_id = queued["commander_result"]["task_id"]
+
+                with TaskQueue(task_db) as queue:
+                    task = queue.get(task_id)
+                self.assertEqual(task["status"], "waiting_approval")
+                self.assertFalse(task["payload"]["execution_enabled"])
+                self.assertTrue(task["payload"]["execution_adapter_required"])
+
+                with urlopen(Request(base + "/api/v1/plugins/audit", headers=headers), timeout=3) as response:
+                    events = json.loads(response.read())["events"]
+                self.assertEqual([event["event_type"] for event in reversed(events)], [
+                    "plugin.discovered", "plugin.approved", "plugin.enabled",
+                ])
+
+                with post("/api/v1/plugins/research.cross-check/disable", {
+                    "confirmation": "DISABLE-PLUGIN",
+                }) as response:
+                    self.assertEqual(json.loads(response.read())["plugin"]["status"], "disabled")
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=3)
+
 
 if __name__ == "__main__":
     unittest.main()

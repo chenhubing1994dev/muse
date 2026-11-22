@@ -139,18 +139,20 @@ class VideoCheckpointAdapterTests(unittest.TestCase):
     def test_reuses_only_predecessor_safe_checkpoints_with_matching_input_and_artifact_bytes(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            batch = build_video_studio_batches(self._plan(), max_steps=3)[0]
+            batches = build_video_studio_batches(self._plan(), max_steps=3)
+            preflight_batch = next(batch for batch in batches if "preflight" in batch.step_ids)
+            shot_batch = next(batch for batch in batches if "shot_001" in batch.step_ids)
             with InitiativeStore(root / "initiatives.sqlite3") as store:
                 store.start_video_attempt(
                     "adapter-attempt", mode="prompt_to_video",
                     approval_task_id="commander-approval-adapter", recipe_sha256="1" * 64,
                 )
                 store.claim_next_video_attempt("adapter-worker", lease_seconds=120)
-                self._write_checkpoint(store, "adapter-attempt", batch, "preflight", root, "artifacts/preflight.bin", "2" * 64)
-                self._write_checkpoint(store, "adapter-attempt", batch, "shot_001", root, "artifacts/shot.bin", "3" * 64)
+                self._write_checkpoint(store, "adapter-attempt", preflight_batch, "preflight", root, "artifacts/preflight.bin", "2" * 64)
+                self._write_checkpoint(store, "adapter-attempt", shot_batch, "shot_001", root, "artifacts/shot.bin", "3" * 64)
 
                 result = evaluate_video_checkpoint_resume(
-                    (batch,), store, attempt_id="adapter-attempt", worker_id="adapter-worker",
+                    batches, store, attempt_id="adapter-attempt", worker_id="adapter-worker",
                     lease_epoch=1, workspace_root=root,
                     expected_input_sha256={"preflight": "2" * 64, "shot_001": "3" * 64},
                 )
@@ -161,7 +163,7 @@ class VideoCheckpointAdapterTests(unittest.TestCase):
 
                 (root / "artifacts" / "preflight.bin").write_bytes(b"tampered")
                 tampered = evaluate_video_checkpoint_resume(
-                    (batch,), store, attempt_id="adapter-attempt", worker_id="adapter-worker",
+                    batches, store, attempt_id="adapter-attempt", worker_id="adapter-worker",
                     lease_epoch=1, workspace_root=root,
                     expected_input_sha256={"preflight": "2" * 64, "shot_001": "3" * 64},
                 )
@@ -230,7 +232,9 @@ class VideoCheckpointAdapterTests(unittest.TestCase):
     def test_artifact_writer_requires_commander_approval_and_persists_only_verified_evidence(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            batch = build_video_studio_batches(self._plan(), max_steps=3)[0]
+            batches = build_video_studio_batches(self._plan(), max_steps=3)
+            preflight_batch = next(batch for batch in batches if "preflight" in batch.step_ids)
+            shot_batch = next(batch for batch in batches if "shot_001" in batch.step_ids)
             preflight = root / "artifacts" / "preflight.bin"
             preflight.parent.mkdir(parents=True)
             preflight.write_bytes(b"completed preflight")
@@ -245,13 +249,13 @@ class VideoCheckpointAdapterTests(unittest.TestCase):
                 store.claim_next_video_attempt("adapter-worker", lease_seconds=120)
                 with patch("muse.video_task_worker.VideoTaskWorker._commander_approval_is_valid", return_value=True):
                     result = record_video_checkpoint_artifact(
-                        batch, store, object(), batches=(batch,), expected_input_sha256=expected,
+                        preflight_batch, store, object(), batches=batches, expected_input_sha256=expected,
                         attempt_id="writer-approved-attempt", worker_id="adapter-worker", lease_epoch=1,
                         step_id="preflight", workspace_root=root,
                         artifact_relative_path="artifacts/preflight.bin", input_sha256="b" * 64,
                     )
                     shot_result = record_video_checkpoint_artifact(
-                        batch, store, object(), batches=(batch,), expected_input_sha256=expected,
+                        shot_batch, store, object(), batches=batches, expected_input_sha256=expected,
                         attempt_id="writer-approved-attempt", worker_id="adapter-worker", lease_epoch=1,
                         step_id="shot_001", workspace_root=root,
                         artifact_relative_path="artifacts/shot.bin", input_sha256="c" * 64,
@@ -269,7 +273,7 @@ class VideoCheckpointAdapterTests(unittest.TestCase):
                 self.assertFalse(result["dispatch_started"])
                 self.assertEqual(result["checkpoint"]["output_sha256"], hashlib.sha256(b"completed preflight").hexdigest())
                 resume = evaluate_video_checkpoint_resume(
-                    (batch,), store, attempt_id="writer-approved-attempt", worker_id="adapter-worker",
+                    batches, store, attempt_id="writer-approved-attempt", worker_id="adapter-worker",
                     lease_epoch=1, workspace_root=root, expected_input_sha256=expected,
                 )
                 self.assertEqual(resume["verified_steps"], ["preflight", "shot_001"])
@@ -320,7 +324,11 @@ class VideoCheckpointAdapterTests(unittest.TestCase):
                 self.assertEqual(resumed.resume_scene_metadata["shot_001"]["frames"], 32)
                 self.assertEqual(resumed.reusable_step_ids, ("shot_001",))
                 self.assertEqual(resumed.resume_scene_metadata["shot_001"]["prompt_id"], "scene-prompt-1")
-
+                artifact_entry = resumed.resume_scene_artifacts["shot_001"]
+                self.assertTrue(artifact_entry["artifact_relative_path"].endswith(f"{attempt_id}/shot_001.mp4"))
+                self.assertEqual(artifact_entry["generation"]["prompt_id"], "scene-prompt-1")
+                with self.assertRaises(TypeError):
+                    artifact_entry["artifact_relative_path"] = "tampered.mp4"
     def test_rejected_old_epoch_checkpoint_can_be_replaced_but_same_epoch_cannot(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

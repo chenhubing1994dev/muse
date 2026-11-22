@@ -74,7 +74,8 @@ def _build_cantonese_narration_prosody_record(
             or backend_capabilities != ["pause_after"]
             or not isinstance(applied_controls, list) or set(applied_controls) - {"pause_after"}
             or not isinstance(unsupported_controls, list)
-            or synthesis.get("segment_count") != len(payload)):
+            or synthesis.get("segment_count") != len(payload)
+            or synthesis.get("waveform_pause_accounting_verified") is not True):
         raise VideoProductError("structured narration runtime returned incomplete or inconsistent evidence")
 
     segment_records: list[dict[str, Any]] = []
@@ -108,6 +109,9 @@ def _build_cantonese_narration_prosody_record(
 
     if synthesis.get("inserted_pause_frames") != total_pause_frames:
         raise VideoProductError("structured narration total pause frames do not match per-segment evidence")
+    if synthesis.get("waveform_pause_verified") is not bool(total_pause_frames):
+        raise VideoProductError("structured narration waveform pause verification does not match requested pauses")
+
     record = {
         "schema": "muse.narration.prosody.runtime.v1",
         "backend": "canto-tts-nano",
@@ -115,7 +119,7 @@ def _build_cantonese_narration_prosody_record(
         "audio_effects_verified": False,
         "backend_runtime_validation": "passed",
         "waveform_pause_accounting_verified": True,
-        "waveform_pause_verified": total_pause_frames > 0,
+        "waveform_pause_verified": synthesis.get("waveform_pause_verified") is True,
         "human_listening_review_required": True,
         "requires_acoustic_review": True,
         "script_sha256": hashlib.sha256(narration_script.encode("utf-8")).hexdigest(),
@@ -135,6 +139,8 @@ def _build_cantonese_narration_prosody_record(
         },
     }
     return record
+
+
 
 
 def _probe_media_duration_seconds(path: Path, ffprobe_path: str, *, stream_type: str) -> float:
@@ -901,7 +907,7 @@ class VideoProductBuilder:
         resume_scene_metadata: Mapping[str, Mapping[str, Any]] | None = None,
         reusable_step_ids: Sequence[str] = (),
         scene_checkpoint_callback: Callable[[str, Path, Mapping[str, Any]], Any] | None = None,
-        scene_generation_guard: Callable[[str], Any] | None = None,
+        scene_generation_guard: Callable[..., Any] | None = None,
     ) -> dict[str, Any]:
         """Generate 2-20 independent local Wan shots, concatenate, then package once."""
         recipe_sha256 = _resolve_recipe_sha256(self.workspace, creator_initiative_id, recipe_sha256)
@@ -920,11 +926,19 @@ class VideoProductBuilder:
         normalized: list[dict[str, Any]] = []
         planned_total = 0.0
         for index, scene in enumerate(scenes, start=1):
-            if not isinstance(scene, dict) or set(scene) - {"prompt", "duration_seconds", "seed"}:
+            if not isinstance(scene, dict) or set(scene) - {"prompt", "duration_seconds", "seed", "negative_prompt"}:
                 raise ValueError("each scene must contain only prompt, duration_seconds and optional seed")
             scene_prompt = scene.get("prompt")
             duration = scene.get("duration_seconds")
             seed = scene.get("seed")
+            scene_negative_prompt = scene.get("negative_prompt", "")
+            if not isinstance(scene_negative_prompt, str) or len(scene_negative_prompt) > 1000:
+                raise ValueError(f"scene {index} negative_prompt must be at most 1000 characters")
+            effective_negative_prompt = "\n".join(
+                item for item in (negative_prompt, scene_negative_prompt) if item
+            )
+            if len(effective_negative_prompt) > 1000:
+                raise ValueError(f"scene {index} combined negative_prompt exceeds 1000 characters")
             if not isinstance(scene_prompt, str) or not scene_prompt.strip() or len(scene_prompt.strip()) > 2000:
                 raise ValueError(f"scene {index} prompt must contain 1-2000 characters")
             if (isinstance(duration, bool) or not isinstance(duration, (int, float))
@@ -935,8 +949,12 @@ class VideoProductBuilder:
             if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed <= 2**32 - 1:
                 raise ValueError(f"scene {index} seed must be an unsigned 32-bit integer")
             planned_total += float(duration)
-            normalized.append({"order": index, "prompt": scene_prompt.strip(),
-                               "duration_seconds": float(duration), "seed": seed})
+            normalized.append({
+                "order": index, "prompt": scene_prompt.strip(),
+                "duration_seconds": float(duration), "seed": seed,
+                "negative_prompt": scene_negative_prompt,
+                "effective_negative_prompt": effective_negative_prompt,
+            })
         if planned_total > 60:
             raise ValueError("multi-scene preview duration must not exceed 60 seconds")
         if narration_script is not None:
@@ -1080,14 +1098,18 @@ class VideoProductBuilder:
                             raise VideoProductError(f"uncheckpointed scene output {index} is not a regular file")
                         # An output without a persisted checkpoint is untrusted after a crash.
                         clip_path.unlink()
+                    wan_options: dict[str, Any] = {}
                     if scene_generation_guard is not None:
-                        scene_generation_guard(step_id)
+                        wan_options["admission_guard"] = (
+                            lambda lease_context, current_step=step_id, current_scene=scene:
+                            scene_generation_guard(current_step, current_scene, lease_context)
+                        )
                     result = generate_wan21_t2v(
-                        scene["prompt"], clip_path, negative_prompt=negative_prompt,
+                        scene["prompt"], clip_path, negative_prompt=scene["effective_negative_prompt"],
                         aspect_ratio=aspect_ratio, duration_seconds=scene["duration_seconds"],
                         steps=steps, seed=scene["seed"], timeout_seconds=timeout_seconds,
                         resource_db=self.workspace / "data" / "gpu-resources.sqlite3",
-                        workspace=self.workspace,
+                        workspace=self.workspace, **wan_options,
                     )
                     generation_status = "generated"
                 if not isinstance(result, Mapping) or result.get("status") != "completed" or not clip_path.is_file():
@@ -1140,6 +1162,7 @@ class VideoProductBuilder:
                 clip_paths.append(clip_path)
                 scene_records.append({
                     "order": index, "prompt": scene["prompt"], "prompt_id": result.get("prompt_id"),
+                    "negative_prompt": scene["effective_negative_prompt"],
                     "seed": scene["seed"], "generation_status": generation_status,
                     "source_file": clip_path.name, "duration_seconds": measured_duration,
                     "frames": frames, "width": signature[0], "height": signature[1], "fps": signature[2],
@@ -1230,6 +1253,7 @@ class VideoProductBuilder:
         narration_asr_model_dir: str | Path | None = None,
         narration_evidence_contract: dict[str, Any] | None = None,
         recipe_sha256: str | None = None,
+        generation_guard: Callable[[Any], Any] | None = None,
     ) -> dict[str, Any]:
         """Generate one local Wan 2.1 clip and optionally package verified Cantonese narration."""
         recipe_sha256 = _resolve_recipe_sha256(self.workspace, creator_initiative_id, recipe_sha256)
@@ -1268,8 +1292,9 @@ class VideoProductBuilder:
             raise ValueError("narration_evidence_contract requires narration_script")
         if narration_evidence_contract is not None:
             _revalidate_claim_grounded_contract(self.workspace, narration_evidence_contract)
+        if generation_guard is not None and not callable(generation_guard):
+            raise ValueError("generation_guard must be callable")
         from muse.wan_video import generate_wan21_t2v
-
         settings = {
             "model": "Wan 2.1 T2V 1.3B", "aspect_ratio": aspect_ratio,
             "duration_seconds": float(duration_seconds), "steps": steps, "seed": seed,
@@ -1310,12 +1335,15 @@ class VideoProductBuilder:
         try:
             base_rendered = staging / "base-video.mp4"
             rendered = staging / "video.mp4"
+            wan_options: dict[str, Any] = {}
+            if generation_guard is not None:
+                wan_options["admission_guard"] = generation_guard
             generated = generate_wan21_t2v(
                 prompt.strip(), base_rendered, negative_prompt=negative_prompt,
                 aspect_ratio=aspect_ratio, duration_seconds=float(duration_seconds),
                 steps=steps, seed=seed, timeout_seconds=timeout_seconds,
                 resource_db=self.workspace / "data" / "gpu-resources.sqlite3",
-                workspace=self.workspace,
+                workspace=self.workspace, **wan_options,
             )
             if generated.get("status") != "completed" or not base_rendered.is_file():
                 raise VideoProductError("local Wan generation did not return a completed MP4")

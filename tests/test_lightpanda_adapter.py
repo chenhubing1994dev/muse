@@ -114,6 +114,14 @@ class LightpandaBrowserAdapterTests(unittest.TestCase):
         ):
             route_handler(unsafe_route)
         unsafe_route.abort.assert_called_once()
+        browser.new_context.assert_called_once_with(service_workers="block")
+        context.route_web_socket.assert_called_once()
+        websocket_handler = context.route_web_socket.call_args.args[1]
+        unsafe_websocket = Mock()
+        websocket_handler(unsafe_websocket)
+        unsafe_websocket.close.assert_called_once_with(
+            code=1008, reason="WebSocket access is disabled for public research capture",
+        )
         context.close.assert_called_once()
         browser.close.assert_called_once()
 

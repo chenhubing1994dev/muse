@@ -13,6 +13,7 @@ import re
 import stat
 import shutil
 from pathlib import Path, PurePosixPath
+from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 
 _MAX_ARTIFACT_BYTES = 2 * 1024 * 1024 * 1024
@@ -506,6 +507,7 @@ class VideoSceneCheckpointSession:
             expected_input_sha256=self.expected_input_sha256,
         )
         self.resume_scene_metadata: dict[str, dict[str, Any]] = {}
+        resume_artifacts: dict[str, Mapping[str, Any]] = {}
         self.execution_eligible = False
         self.dispatch_started = False
         self.reusable_step_ids = tuple(self.resume["reusable_steps"])
@@ -516,7 +518,20 @@ class VideoSceneCheckpointSession:
             generation = metadata.get("generation") if isinstance(metadata, dict) else None
             if not isinstance(generation, dict) or generation.get("status") != "completed":
                 raise ValueError(f"checkpoint {step_id} lacks trusted generation metadata")
+            artifact_relative_path = metadata.get("artifact_relative_path") if isinstance(metadata, dict) else None
+            if not isinstance(artifact_relative_path, str) or not artifact_relative_path:
+                raise ValueError(f"checkpoint {step_id} lacks a verified artifact path")
             self.resume_scene_metadata[step_id] = dict(generation)
+            resume_artifacts[step_id] = MappingProxyType({
+                "artifact_relative_path": artifact_relative_path,
+                "generation": MappingProxyType(dict(generation)),
+            })
+        self._resume_scene_artifacts = MappingProxyType(resume_artifacts)
+
+    @property
+    def resume_scene_artifacts(self) -> Mapping[str, Mapping[str, Any]]:
+        """Read-only mapping of verified artifact paths and generation metadata."""
+        return self._resume_scene_artifacts
 
     def record(
         self,

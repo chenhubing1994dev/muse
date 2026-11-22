@@ -1,7 +1,155 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createApiClient, resolveDesktopConnection } from "./api.js";
+import { createApiClient, createCompanionRemoteClient, resolveDesktopConnection } from "./api.js";
+import { createHash, createHmac, webcrypto } from "node:crypto";
 const token = "test-token-that-is-long-enough-for-the-api";
+
+test("Companion host management client uses only authenticated local management routes", async () => {
+  const calls = [];
+  const client = createApiClient({
+    baseUrl: "http://127.0.0.1:8765", token,
+    fetchImpl: async (url, options) => {
+      calls.push({ url: String(url), options });
+      return { ok: true, json: async () => ({ api_version: 1, pairings: [], devices: [], events: [], challenge: { challenge_id: "a".repeat(32), code: "one-time-code", expires_at: 123 }, pairing: { request_id: "b".repeat(32), status: "approved" }, denied: true, revoked: true }) };
+    },
+  });
+  await client.companionPairings(12);
+  await client.companionDevices(20);
+  await client.companionAudit(30);
+  await client.startCompanionPairing(60);
+  await client.approveCompanionPairing("b".repeat(32));
+  await client.denyCompanionPairing("b".repeat(32));
+  await client.revokeCompanionDevice("c".repeat(32));
+  assert.deepEqual(calls.map((call) => call.url), [
+    "http://127.0.0.1:8765/api/v1/companion/pairings?limit=12",
+    "http://127.0.0.1:8765/api/v1/companion/devices?limit=20",
+    "http://127.0.0.1:8765/api/v1/companion/audit?limit=30",
+    "http://127.0.0.1:8765/api/v1/companion/pairing/start",
+    "http://127.0.0.1:8765/api/v1/companion/pairings/" + "b".repeat(32) + "/approve",
+    "http://127.0.0.1:8765/api/v1/companion/pairings/" + "b".repeat(32) + "/deny",
+    "http://127.0.0.1:8765/api/v1/companion/devices/" + "c".repeat(32) + "/revoke",
+  ]);
+  assert.equal(calls[3].options.method, "POST");
+  assert.deepEqual(JSON.parse(calls[3].options.body), { expires_in_seconds: 60 });
+  for (const call of calls) assert.equal(call.options.headers.Authorization, "Bearer " + token);
+  assert.throws(() => client.startCompanionPairing(30), RangeError);
+  assert.throws(() => client.approveCompanionPairing("../bad"), /编号无效/);
+  assert.throws(() => client.revokeCompanionDevice("../bad"), /编号无效/);
+  assert.throws(() => client.companionDevices(201), RangeError);
+});
+
+test("Companion remote client performs HTTPS-only pairing and HMAC-signed read requests without desktop Bearer", async () => {
+  const calls = [];
+  const deviceId = "a".repeat(32);
+  const deviceToken = "device-token-secret-value-that-is-long-enough";
+  const client = createCompanionRemoteClient({
+    baseUrl: "https://muse.example.com:8766",
+    cryptoImpl: webcrypto,
+    fetchImpl: async (url, options) => {
+      const parsed = new URL(String(url));
+      calls.push({ url: String(url), options });
+      if (parsed.pathname.endsWith("/pairing/request")) {
+        return { ok: true, status: 202, json: async () => ({
+          api_version: 1,
+          pairing: { request_id: "b".repeat(32), status: "pending", expires_at: 2000000000 },
+        }) };
+      }
+      if (parsed.pathname.endsWith("/pairing/claim")) {
+        return { ok: true, status: 200, json: async () => ({
+          api_version: 1,
+          device: { device_id: deviceId, token: deviceToken, permissions: ["events.read", "status.read"] },
+        }) };
+      }
+      if (parsed.pathname.endsWith("/status")) {
+        return { ok: true, status: 200, json: async () => ({
+          api_version: 1, host: { status: "online", read_only: true },
+        }) };
+      }
+      return { ok: true, status: 200, json: async () => ({
+        api_version: 1, reset: false, events: [],
+      }) };
+    },
+  });
+
+  const pairing = await client.requestPairing({
+    challengeId: "c".repeat(32), code: "one-time-host-challenge-code",
+    deviceName: "Muse iPhone",
+  });
+  assert.equal(pairing.requestId, "b".repeat(32));
+  assert.equal(client.hasPendingPairing, true);
+  const pairingBody = JSON.parse(calls[0].options.body);
+  assert.equal(pairingBody.challenge_id, "c".repeat(32));
+  assert.match(pairingBody.claim_secret, /^[A-Za-z0-9_-]{43}$/);
+  assert.match(pairingBody.device_fingerprint, /^[a-f0-9]{64}$/);
+
+  await client.claim();
+  assert.equal(client.isPaired, true);
+  assert.equal(client.hasPendingPairing, false);
+  assert.deepEqual(client.permissions, ["events.read", "status.read"]);
+  const status = await client.getStatus();
+  assert.equal(status.host.status, "online");
+  await client.getEvents("d".repeat(32));
+
+  assert.equal(calls.length, 4);
+  for (const call of calls) {
+    const options = call.options;
+    assert.equal(options.credentials, "omit");
+    assert.equal(options.mode, "cors");
+    assert.equal(options.cache, "no-store");
+    assert.equal(options.redirect, "error");
+    assert.equal(options.referrerPolicy, "no-referrer");
+    assert.equal(options.headers.Authorization, undefined);
+  }
+
+  const emptyBodyHash = createHash("sha256").update(Buffer.alloc(0)).digest("hex");
+  for (const call of calls.slice(2)) {
+    const headers = call.options.headers;
+    const path = new URL(call.url).pathname;
+    const cursor = headers["Last-Event-ID"] || "";
+    const canonical = [
+      "muse-companion-v1", deviceId, headers["X-Muse-Session-ID"],
+      headers["X-Muse-Nonce"], headers["X-Muse-Timestamp"],
+      "GET", path, cursor, emptyBodyHash,
+    ].join("\n");
+    const expected = createHmac("sha256", deviceToken).update(canonical).digest("hex");
+    assert.equal(headers["X-Muse-Signature"], expected);
+    assert.match(headers["X-Muse-Session-ID"], /^[a-f0-9]{32}$/);
+    assert.match(headers["X-Muse-Nonce"], /^[A-Za-z0-9_-]{32}$/);
+  }
+  assert.equal(calls[3].options.headers["Last-Event-ID"], "d".repeat(32));
+
+  client.forget();
+  assert.equal(client.isPaired, false);
+  await assert.rejects(client.getStatus(), /尚未完成配对/);
+});
+
+test("Companion remote client rejects HTTP, userinfo, and non-root Host URLs", () => {
+  const options = { fetchImpl: async () => { throw new Error("must not fetch"); }, cryptoImpl: webcrypto };
+  assert.throws(() => createCompanionRemoteClient({ ...options, baseUrl: "http://muse.example.com" }), /HTTPS/);
+  assert.throws(() => createCompanionRemoteClient({ ...options, baseUrl: "https://user@muse.example.com" }), /HTTPS/);
+  assert.throws(() => createCompanionRemoteClient({ ...options, baseUrl: "https://muse.example.com/untrusted" }), /HTTPS/);
+  assert.throws(() => createCompanionRemoteClient({ ...options, baseUrl: "https://127.0.0.1:8766" }), /局域网/);
+  assert.throws(() => createCompanionRemoteClient({ ...options, baseUrl: "https://192.168.1.8:8766" }), /局域网/);
+  assert.throws(() => createCompanionRemoteClient({ ...options, baseUrl: "https://muse.local" }), /局域网/);
+  assert.throws(() => createCompanionRemoteClient({ ...options, baseUrl: "https://muse.local." }), /局域网/);
+  assert.throws(() => createCompanionRemoteClient({ ...options, baseUrl: "https://localhost." }), /局域网/);
+});
+
+test("Companion host filtering parses IPv6 ranges without rejecting public DNS names", () => {
+  const options = { fetchImpl: async () => { throw new Error("must not fetch"); }, cryptoImpl: webcrypto };
+  for (const baseUrl of ["https://fc.example.com", "https://fe80.example.com", "https://fda.example.com"]) {
+    assert.doesNotThrow(() => createCompanionRemoteClient({ ...options, baseUrl }), baseUrl);
+  }
+  for (const baseUrl of [
+    "https://[::]", "https://[::1]", "https://[fc00::1]", "https://[fd12:3456::1]",
+    "https://[fe80::1]", "https://[ff02::1]", "https://[::ffff:192.168.1.8]",
+  ]) {
+    assert.throws(() => createCompanionRemoteClient({ ...options, baseUrl }), /局域网/, baseUrl);
+  }
+  assert.doesNotThrow(() => createCompanionRemoteClient({
+    ...options, baseUrl: "https://[2001:4860:4860::8888]",
+  }));
+});
 
 test("API client sends bearer token and disables cache", async () => {
   const calls = [];
@@ -33,7 +181,8 @@ test("API client refuses non-loopback hosts and unsafe base URLs", () => {
   assert.throws(
     () => createApiClient({ baseUrl: "http://localhost:8765/untrusted", token }),
     /同源控制台/,
-  );  assert.throws(
+  );
+  assert.throws(
     () => createApiClient({ baseUrl: "http://localhost:8765", token, timeoutMs: 50 }),
     RangeError,
   );
@@ -231,7 +380,8 @@ test("claim dossier validates id and evidence limit and uses authenticated read-
   const result = await client.knowledgeClaimDossier("e".repeat(32), 24);
   assert.equal(result.dossier.claim_id, "e".repeat(32));
   assert.equal(calls[0].url, "http://127.0.0.1:8765/api/v1/knowledge/claims/" + "e".repeat(32) + "/dossier?evidence_limit=24");
-  assert.equal(calls[0].options.method, "GET");  assert.equal(calls[0].options.headers.Authorization, "Bearer " + token);
+  assert.equal(calls[0].options.method, "GET");
+  assert.equal(calls[0].options.headers.Authorization, "Bearer " + token);
   assert.equal(calls[0].options.cache, "no-store");
 });
 
@@ -267,7 +417,8 @@ test("feedback submission sends only structured allowlisted fields through authe
   const result = await client.submitFeedback(body);
   assert.equal(result.feedback.severity, 4);
   assert.equal(calls[0].options.method, "POST");
-  assert.equal(calls[0].options.headers.Authorization, "Bearer " + token);  assert.equal(calls[0].options.headers["Content-Type"], "application/json");
+  assert.equal(calls[0].options.headers.Authorization, "Bearer " + token);
+  assert.equal(calls[0].options.headers["Content-Type"], "application/json");
   assert.deepEqual(JSON.parse(calls[0].options.body), body);
   assert.equal(calls[0].options.redirect, "error");
   assert.equal(calls[0].options.cache, "no-store");
@@ -614,6 +765,29 @@ test("MemPalace status uses an authenticated read-only local endpoint", async ()
   assert.equal(calls[0].options.cache, "no-store");
 });
 
+test("system dashboard uses the authenticated read-only local endpoint", async () => {
+  const calls = [];
+  const expected = {
+    api_version: 1,
+    runner: { status: "fresh", project_count: 4, skill_count: 34 },
+    files: { status: "available", count: 12, items: [], truncated: false, content_included: false },
+    scheduled_tasks: { status: "available", items: [] },
+    read_only: true,
+  };
+  const client = createApiClient({
+    baseUrl: "http://127.0.0.1:8765", token,
+    fetchImpl: async (url, options) => {
+      calls.push({ url: String(url), options });
+      return { ok: true, json: async () => expected };
+    },
+  });
+  assert.deepEqual(await client.systemDashboard(), expected);
+  assert.equal(calls[0].url, "http://127.0.0.1:8765/api/v1/system-dashboard");
+  assert.equal(calls[0].options.method, "GET");
+  assert.equal(calls[0].options.headers.Authorization, "Bearer " + token);
+  assert.equal(calls[0].options.cache, "no-store");
+});
+
 test("contextual inquiry review APIs use authenticated no-store reads and validate identifiers", async () => {
   const calls = [];
   const expected = { api_version: 1, count: 1, reviews: [{ task_id: "a".repeat(32), created_at: "2026-11-21T10:00:00Z", updated_at: "2026-11-21T10:05:00Z" }] };
@@ -740,3 +914,30 @@ test("evolveInspiration validates id and sends POST /api/v1/inspirations/evolve"
   assert.equal(JSON.parse(calls[0].options.body).enqueue_video, true);
   assert.throws(() => client.evolveInspiration({ inspiration_id: "bad-id" }), /编号无效/);
 });
+
+test("skill fusion client validates source and exposes submit, history and approval endpoints", async () => {
+  const calls = [];
+  const client = createApiClient({
+    baseUrl: "http://127.0.0.1:8765", token,
+    fetchImpl: async (url, options) => {
+      calls.push({ url: String(url), options });
+      return { ok: true, json: async () => ({ api_version: 1, jobs: [], fusion: { fusion_id: "a".repeat(32) } }) };
+    },
+  });
+  await client.fusionJobs(7);
+  await client.submitFusion({ source_url: "https://github.com/example/project" });
+  await client.approveFusion("a".repeat(32));
+  await client.rollbackFusion("a".repeat(32));
+  assert.equal(calls[0].url, "http://127.0.0.1:8765/api/v1/fusion/jobs?limit=7");
+  assert.equal(calls[1].url, "http://127.0.0.1:8765/api/v1/fusion/submit");
+  assert.equal(calls[1].options.method, "POST");
+  assert.equal(JSON.parse(calls[1].options.body).source_url, "https://github.com/example/project");
+  assert.equal(calls[2].url, "http://127.0.0.1:8765/api/v1/fusion/jobs/" + "a".repeat(32) + "/approve");
+  assert.equal(JSON.parse(calls[2].options.body).confirmation, "FUSE-CAPABILITIES");
+  assert.equal(calls[3].url, "http://127.0.0.1:8765/api/v1/fusion/jobs/" + "a".repeat(32) + "/rollback");
+  assert.equal(JSON.parse(calls[3].options.body).confirmation, "ROLLBACK-FUSION");
+  assert.throws(() => client.fusionJobs(0), RangeError);
+  assert.throws(() => client.submitFusion({ source_url: "https://github.com/example/project", archive_base64: "abc" }), /只提供一个/);
+  assert.throws(() => client.approveFusion("invalid"), /编号无效/);
+});
+

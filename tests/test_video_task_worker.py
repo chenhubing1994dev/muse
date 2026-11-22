@@ -7,13 +7,16 @@ import threading
 import unittest
 from pathlib import Path
 from threading import Event
+from types import SimpleNamespace
 from unittest.mock import patch
 
+from muse.commander_planner import CommanderPlan, PlannedStep
 from muse.initiative_engine import InitiativeStore
 from muse.task_queue import TaskQueue
+from muse.video_commander_admission import VideoAdmissionRequest
 from muse.video_task_worker import VideoTaskWorker, _VideoAttemptLeaseHeartbeat
 from muse.video_recipe_trace import build_video_recipe_trace
-
+from muse.video_studio import build_video_studio_batches
 
 class FakeVideoBuilder:
     def __init__(self, result=None, error=None):
@@ -25,19 +28,38 @@ class FakeVideoBuilder:
         }
         self.error = error
         self.calls = []
+        self.dispatched_steps = []
         self.verify_calls = []
         self.verify_overrides = {}
+        self.lease_context = SimpleNamespace(
+            lease_id="fake-gpu-lease", owner_id="fake-gpu-owner",
+            coordination={"mode": "test"}, assert_valid=lambda: None,
+        )
 
     def build_from_prompt(self, *args, **kwargs):
         self.calls.append((args, kwargs))
         if self.error:
             raise self.error
+        guard = kwargs.get("generation_guard")
+        if callable(guard):
+            guard(self.lease_context)
+        self.dispatched_steps.append("shot_001")
         return dict(self.result)
 
     def build_from_scenes(self, *args, **kwargs):
         self.calls.append((args, kwargs))
         if self.error:
             raise self.error
+        guard = kwargs.get("scene_generation_guard")
+        scenes = kwargs.get("scenes") or (args[1] if len(args) > 1 else [])
+        reusable = set(kwargs.get("reusable_step_ids", ()))
+        if callable(guard):
+            for index, scene in enumerate(scenes, start=1):
+                step_id = f"shot_{index:03d}"
+                if step_id not in reusable:
+                    if callable(guard):
+                        guard(step_id, scene, self.lease_context)
+                    self.dispatched_steps.append(step_id)
         return dict(self.result)
 
 
@@ -54,6 +76,58 @@ class FakeVideoBuilder:
         }
         verified.update(self.verify_overrides)
         return verified
+
+
+class FakeAdmissionProvider:
+    def __init__(self):
+        self.issued = []
+        self.requests = []
+
+    def issue_video_admission_grant(self, store, request):
+        grant = store.create_video_admission_grant(
+            request.attempt_id, worker_id=request.worker_id, lease_epoch=request.lease_epoch,
+            input_sha256=request.input_sha256, dag_sha256=request.dag_sha256,
+            batch_id=request.batch_id, batch_fingerprint=request.batch_fingerprint,
+            handler_digest=hashlib.sha256(b"test-handler").hexdigest(),
+            resource_digest=hashlib.sha256(b"test-resource").hexdigest(),
+            cost_digest=hashlib.sha256(b"test-cost").hexdigest(),
+            approval_task_id=request.approval_task_id, approval_event_id=request.approval_event_id,
+            approved_by=request.approved_by, scope=request.scope, role=request.role,
+            required_capabilities=request.required_capabilities, ttl_seconds=60,
+        )
+        self.issued.append(dict(grant))
+        self.requests.append(request)
+        return grant
+
+
+def fake_admission_request_factory(
+    *, attempt, video_brief, step_id, input_sha256, approval_evidence,
+    actual_handler, workspace_root, commander_plan, commander_batches,
+    admission_batch, scene_context, lease_context=None,
+):
+    batch = admission_batch
+    return VideoAdmissionRequest(
+        attempt_id=attempt["attempt_id"], worker_id=attempt["worker_id"],
+        lease_epoch=attempt["attempt_count"], recipe_sha256=attempt["recipe_sha256"],
+        input_sha256=input_sha256, dag_sha256=batch.dag_sha256, batch_id=batch.batch_id,
+        batch_fingerprint=batch.batch_fingerprint, scope="video_studio", role="developer",
+        required_capabilities=("comfyui_generation",),
+        approval_task_id=approval_evidence["approval_task_id"],
+        approval_event_id=approval_evidence["approval_event_id"],
+        approved_by=approval_evidence["approved_by"], approval_evidence=dict(approval_evidence),
+        batch=batch, plan=commander_plan, step_ids=(step_id,), all_batches=commander_batches,
+        expected_input_sha256={step_id: input_sha256}, workspace_root=Path(workspace_root).resolve(),
+        actual_handler=actual_handler,
+        resource_context={
+            "requested_generation": dict(scene_context),
+            "gpu_lease": ({
+                "status": "active", "lease_id": lease_context.lease_id,
+                "owner_id": lease_context.owner_id,
+                "coordination": dict(lease_context.coordination),
+            } if lease_context is not None else {"status": "missing"}),
+        },
+        cost_context={"requested_generation": dict(scene_context)},
+    )
 
 
 class VideoTaskWorkerTests(unittest.TestCase):
@@ -79,7 +153,9 @@ class VideoTaskWorkerTests(unittest.TestCase):
             store.start_video_attempt(
                 attempt_id, mode="prompt_to_video", initiative_id=initiative_id,
                 approval_task_id=ticket["id"],
-                recipe_sha256=video_brief.get("recipe_sha256"),
+                recipe_sha256=video_brief.get("recipe_sha256") or hashlib.sha256(
+                    json.dumps(video_brief, sort_keys=True, ensure_ascii=False).encode("utf-8")
+                ).hexdigest(),
             )
         return ticket["id"]
 
@@ -107,6 +183,163 @@ class VideoTaskWorkerTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def _worker(self, root=None, **kwargs):
+        provider = kwargs.pop("admission_provider", FakeAdmissionProvider())
+        request_factory = kwargs.pop("admission_request_factory", fake_admission_request_factory)
+        return VideoTaskWorker(
+            root or self.root, admission_provider=provider,
+            admission_request_factory=request_factory, **kwargs,
+        )
+
+
+    def test_worker_fails_closed_before_claim_when_commander_grant_provider_is_missing(self):
+        builder = FakeVideoBuilder()
+        result = VideoTaskWorker(self.root, builder=builder, worker_id="missing-admission").run_once()
+        self.assertEqual(result, {
+            "status": "blocked_admission", "claimed": False,
+            "reason": "commander_admission_provider_missing",
+        })
+        self.assertEqual(builder.calls, [])
+        with InitiativeStore(self.database) as store:
+            attempt = store.get_video_attempt("worker-test")
+        self.assertEqual(attempt["status"], "queued")
+
+    def test_worker_rejects_missing_live_gpu_lease_before_issuing_a_commander_grant(self):
+        builder = FakeVideoBuilder()
+        builder.lease_context = None
+        provider = FakeAdmissionProvider()
+        result = self._worker(
+            builder=builder, worker_id="missing-gpu-lease", admission_provider=provider,
+        ).run_once()
+        self.assertEqual(result["status"], "blocked_admission")
+        self.assertEqual(provider.issued, [])
+        self.assertEqual(provider.requests, [])
+        self.assertEqual(builder.dispatched_steps, [])
+        with InitiativeStore(self.database) as store:
+            attempt = store.get_video_attempt("worker-test")
+        self.assertEqual(attempt["status"], "queued")
+
+    def test_worker_consumes_one_shot_grant_per_scene_before_each_wan_dispatch(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = root / "data" / "initiatives" / "muse.sqlite3"
+            database.parent.mkdir(parents=True)
+            attempt_id = "e" * 32
+            video_brief = {
+                "title": "逐镜头授权测试", "prompt": "Two scenes",
+                "negative_prompt": "no artifacts", "aspect_ratio": "16:9",
+                "duration_seconds": 4, "steps": 8, "recipe_sha256": "b" * 64,
+                "scenes": [
+                    {"prompt": "First", "duration_seconds": 2, "seed": 1},
+                    {"prompt": "Second", "duration_seconds": 2, "seed": 2},
+                ],
+            }
+            with InitiativeStore(database) as store:
+                initiative = store.propose(
+                    "One-shot grant", kind="creative_output", creator_value="逐镜头授权",
+                    concept=json.dumps({"creator_brief": {"video": video_brief}}, ensure_ascii=False),
+                    first_step="逐镜头生成", expected_output="两镜头视频",
+                )
+            self._queue_approved_attempt(root, initiative["id"], attempt_id, video_brief)
+            lease_context = SimpleNamespace(
+                lease_id="wan-lease-test", owner_id="wan-owner-test",
+                coordination={"mode": "model_offline_supervisor_not_running"},
+                assert_valid=lambda: None,
+            )
+
+            class LeasePassingBuilder(FakeVideoBuilder):
+                def build_from_scenes(inner_self, *args, **kwargs):
+                    inner_self.calls.append((args, kwargs))
+                    scenes = kwargs.get("scenes") or (args[1] if len(args) > 1 else [])
+                    guard = kwargs["scene_generation_guard"]
+                    for index, scene in enumerate(scenes, start=1):
+                        guard(f"shot_{index:03d}", scene, lease_context)
+                        inner_self.dispatched_steps.append(f"shot_{index:03d}")
+                    return dict(inner_self.result)
+
+            captured_lease_contexts = []
+
+            def capturing_request_factory(**kwargs):
+                captured_lease_contexts.append(kwargs.get("lease_context"))
+                return fake_admission_request_factory(**kwargs)
+
+            builder = LeasePassingBuilder()
+            provider = FakeAdmissionProvider()
+            result = self._worker(
+                root, builder=builder, worker_id="grant-worker", admission_provider=provider,
+                admission_request_factory=capturing_request_factory,
+            ).run_once()
+            self.assertEqual(result["status"], "succeeded")
+            self.assertEqual(builder.dispatched_steps, ["shot_001", "shot_002"])
+            self.assertEqual(len(result["admission_grants_consumed"]), 2)
+            self.assertEqual(len(provider.issued), 2)
+            self.assertEqual(len(provider.requests), 2)
+            self.assertEqual(captured_lease_contexts, [lease_context, lease_context])
+            self.assertEqual(len({request.dag_sha256 for request in provider.requests}), 1)
+            self.assertEqual(
+                [request.batch.step_ids for request in provider.requests],
+                [("shot_001",), ("shot_002",)],
+            )
+            self.assertEqual(
+                [tuple(step.step_id for step in request.plan.steps) for request in provider.requests],
+                [("shot_001", "shot_002"), ("shot_001", "shot_002")],
+            )
+            self.assertTrue(all(
+                any(batch is request.batch for batch in request.all_batches)
+                and not request.batch.required_completed_steps
+                for request in provider.requests
+            ))
+            self.assertEqual(len({request.batch.batch_fingerprint for request in provider.requests}), 2)
+            with InitiativeStore(database) as store:
+                rows = store.connection.execute(
+                    "SELECT status, input_sha256 FROM initiative_video_admission_grants WHERE attempt_id=? ORDER BY created_at",                    (attempt_id,),
+                ).fetchall()
+            self.assertEqual(len(rows), 2)
+            self.assertEqual([row["status"] for row in rows], ["consumed", "consumed"])
+            self.assertTrue(all(len(row["input_sha256"]) == 64 for row in rows))
+
+    def test_worker_revokes_grant_if_commander_approval_changes_before_consume(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = root / "data" / "initiatives" / "muse.sqlite3"
+            database.parent.mkdir(parents=True)
+            attempt_id = "f" * 32
+            video_brief = {
+                "title": "授权撤销测试", "prompt": "One scene",
+                "aspect_ratio": "16:9", "duration_seconds": 2, "steps": 8,
+                "recipe_sha256": "c" * 64,
+            }
+            with InitiativeStore(database) as store:
+                initiative = store.propose(
+                    "Revoke grant", kind="creative_output", creator_value="审批撤销",
+                    concept=json.dumps({"creator_brief": {"video": video_brief}}, ensure_ascii=False),
+                    first_step="生成预览", expected_output="不应派发",
+                )
+            self._queue_approved_attempt(root, initiative["id"], attempt_id, video_brief)
+
+            class RevokingProvider(FakeAdmissionProvider):
+                def issue_video_admission_grant(inner_self, store, request):
+                    grant = super().issue_video_admission_grant(store, request)
+                    with TaskQueue(root / "data" / "tasks" / "muse.sqlite3") as queue:
+                        queue._record_event(
+                            request.approval_task_id, "human.decision", "test-operator",
+                            {"decision": "rejected"},
+                        )
+                        queue._connection.commit()
+                    return grant
+
+            builder = FakeVideoBuilder()
+            provider = RevokingProvider()
+            result = self._worker(root, builder=builder, worker_id="revoke-worker", admission_provider=provider).run_once()
+            self.assertEqual(result["status"], "blocked_admission")
+            self.assertEqual(builder.dispatched_steps, [])
+            self.assertEqual(result["admission_grants_consumed"], [])
+            with InitiativeStore(database) as store:
+                row = store.connection.execute(
+                    "SELECT status FROM initiative_video_admission_grants WHERE attempt_id=?", (attempt_id,),                ).fetchone()
+                attempt = store.get_video_attempt(attempt_id)
+            self.assertEqual(row["status"], "revoked")
+            self.assertEqual(attempt["status"], "queued")
 
     def test_lease_heartbeat_renews_the_exact_worker_epoch(self):
         renewed = Event()
@@ -178,7 +411,7 @@ class VideoTaskWorkerTests(unittest.TestCase):
 
         builder = FakeVideoBuilder()
         with patch("muse.video_task_worker._VideoAttemptLeaseHeartbeat", LostHeartbeat):
-            result = VideoTaskWorker(
+            result = self._worker(
                 self.root, builder=builder, worker_id="lost-lease-worker",
             ).run_once()
 
@@ -197,11 +430,14 @@ class VideoTaskWorkerTests(unittest.TestCase):
             database.parent.mkdir(parents=True)
             video_brief = {
                 "title": "多镜头测试", "prompt": "A concise summary of the story",
+                "negative_prompt": "避免全片出现文字",
                 "aspect_ratio": "16:9", "duration_seconds": 4, "steps": 8,
                 "recipe_sha256": "a" * 64,
                 "scenes": [
-                    {"prompt": "Opening: ancient observatory above clouds", "duration_seconds": 2},
-                    {"prompt": "Close-up: bronze armillary sphere at sunrise", "duration_seconds": 2},
+                    {"prompt": "Opening: ancient observatory above clouds", "duration_seconds": 2,
+                     "negative_prompt": "避免额外人物"},
+                    {"prompt": "Close-up: bronze armillary sphere at sunrise", "duration_seconds": 2,
+                     "negative_prompt": "避免错误星图"},
                 ],
             }
             with InitiativeStore(database) as store:
@@ -212,7 +448,7 @@ class VideoTaskWorkerTests(unittest.TestCase):
                 )
             self._queue_approved_attempt(root, item["id"], "e" * 32, video_brief)
             builder = FakeVideoBuilder()
-            result = VideoTaskWorker(root, builder=builder, worker_id="scene-worker").run_once()
+            result = self._worker(root, builder=builder, worker_id="scene-worker").run_once()
             self.assertEqual(result["status"], "succeeded", result)
             self.assertEqual(len(builder.calls), 1)
             args, kwargs = builder.calls[0]
@@ -221,7 +457,53 @@ class VideoTaskWorkerTests(unittest.TestCase):
             self.assertNotEqual(kwargs["scenes"][0]["seed"], kwargs["scenes"][1]["seed"])
             self.assertTrue(all(isinstance(scene["seed"], int) for scene in kwargs["scenes"]))
             self.assertEqual(kwargs["scenes"][0]["duration_seconds"], 2.0)
+            self.assertEqual(kwargs["negative_prompt"], "避免全片出现文字")
+            self.assertEqual(kwargs["scenes"][0]["negative_prompt"], "避免额外人物")
+            self.assertEqual(kwargs["scenes"][1]["negative_prompt"], "避免错误星图")
             self.assertFalse((root / "data" / "video_attempt_staging" / ("e" * 32)).exists())
+
+    def test_worker_rejects_combined_scene_negative_prompt_over_limit_before_builder(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = root / "data" / "initiatives" / "muse.sqlite3"
+            database.parent.mkdir(parents=True)
+            video_brief = {
+                "title": "负面提示词长度门禁", "prompt": "A two-shot story",
+                "negative_prompt": "g" * 600,
+                "aspect_ratio": "16:9", "duration_seconds": 4, "steps": 8,
+                "recipe_sha256": "a" * 64,
+                "scenes": [
+                    {"prompt": "Opening", "duration_seconds": 2, "negative_prompt": "s" * 401},
+                    {"prompt": "Closing", "duration_seconds": 2},
+                ],
+            }
+            with InitiativeStore(database) as store:
+                initiative = store.propose(
+                    "Negative prompt length", kind="creative_output", creator_value="reject overlong conditioning",
+                    concept=json.dumps({"creator_brief": {"video": video_brief}}, ensure_ascii=False),
+                    first_step="preflight", expected_output="blocked before builder",
+                )
+            self._queue_approved_attempt(root, initiative["id"], "a" * 32, video_brief)
+            builder = FakeVideoBuilder()
+            result = self._worker(root, builder=builder, worker_id="negative-limit-worker").run_once()
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(builder.calls, [])
+    def test_checkpoint_scene_fingerprint_changes_when_scene_negative_prompt_changes(self):
+        from muse.video_task_worker import _checkpoint_scene_fingerprint_inputs
+
+        original = [{
+            "prompt": "A bronze armillary sphere at sunrise", "duration_seconds": 2.0,
+            "seed": 101, "negative_prompt": "no extra people",
+        }]
+        changed = [{**original[0], "negative_prompt": "no labels or text"}]
+        self.assertNotEqual(
+            _checkpoint_scene_fingerprint_inputs(original),
+            _checkpoint_scene_fingerprint_inputs(changed),
+        )
+        self.assertEqual(
+            _checkpoint_scene_fingerprint_inputs([{"prompt": original[0]["prompt"], "duration_seconds": 2.0, "seed": 101}]),
+            [{"prompt": original[0]["prompt"], "duration_seconds": 2.0, "seed": 101}],
+        )
 
     def test_worker_persists_scene_checkpoint_and_reuses_it_after_retry(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -234,8 +516,10 @@ class VideoTaskWorkerTests(unittest.TestCase):
                 "aspect_ratio": "16:9", "duration_seconds": 4, "steps": 8,
                 "recipe_sha256": "b" * 64,
                 "scenes": [
-                    {"prompt": "Opening shot", "duration_seconds": 2, "seed": 101},
-                    {"prompt": "Closing shot", "duration_seconds": 2, "seed": 202},
+                    {"prompt": "Opening shot", "duration_seconds": 2, "seed": 101,
+                     "negative_prompt": "opening-only exclusion"},
+                    {"prompt": "Closing shot", "duration_seconds": 2, "seed": 202,
+                     "negative_prompt": "closing-only exclusion"},
                 ],
             }
             with InitiativeStore(database) as store:
@@ -256,6 +540,7 @@ class VideoTaskWorkerTests(unittest.TestCase):
             class CrashAfterFirstCheckpoint(FakeVideoBuilder):
                 def build_from_scenes(inner_self, *args, **kwargs):
                     inner_self.calls.append((args, kwargs))
+                    kwargs["scene_generation_guard"]("shot_001", kwargs["scenes"][0], inner_self.lease_context)
                     staging = Path(kwargs["staging_directory"])
                     first = staging / "shot_01.mp4"
                     first.write_bytes(artifact_bytes)
@@ -263,7 +548,7 @@ class VideoTaskWorkerTests(unittest.TestCase):
                     raise RuntimeError("simulated process interruption after durable first-shot checkpoint")
 
             builder = CrashAfterFirstCheckpoint()
-            first_result = VideoTaskWorker(root, builder=builder, worker_id="checkpoint-worker").run_once()
+            first_result = self._worker(root, builder=builder, worker_id="checkpoint-worker").run_once()
             self.assertEqual(first_result["status"], "failed")
             with InitiativeStore(database) as store:
                 failed_attempt = store.get_video_attempt(attempt_id)
@@ -276,6 +561,7 @@ class VideoTaskWorkerTests(unittest.TestCase):
             class ResumeSecondShot(FakeVideoBuilder):
                 def build_from_scenes(inner_self, *args, **kwargs):
                     inner_self.calls.append((args, kwargs))
+                    kwargs["scene_generation_guard"]("shot_002", kwargs["scenes"][1], inner_self.lease_context)
                     observed_resume["reusable_step_ids"] = tuple(kwargs.get("reusable_step_ids", ()))
                     observed_resume["resume_scene_metadata"] = dict(kwargs.get("resume_scene_metadata", {}))
                     observed_resume["staging_directory"] = str(kwargs.get("staging_directory"))
@@ -289,7 +575,7 @@ class VideoTaskWorkerTests(unittest.TestCase):
                     return dict(inner_self.result)
 
             resumed_builder = ResumeSecondShot()
-            second_result = VideoTaskWorker(
+            second_result = self._worker(
                 root, builder=resumed_builder, worker_id="checkpoint-worker",
             ).run_once()
             self.assertEqual(second_result["status"], "succeeded", second_result)
@@ -306,6 +592,21 @@ class VideoTaskWorkerTests(unittest.TestCase):
                 final_attempt = store.get_video_attempt(attempt_id)
                 self.assertEqual(final_attempt["status"], "succeeded")
                 self.assertEqual(final_attempt["attempt_count"], 2)
+
+    def test_commander_approval_evidence_returns_latest_event_identity(self):
+        with InitiativeStore(self.database) as store, TaskQueue(self.root / "data" / "tasks" / "muse.sqlite3") as queue:
+            attempt = store.get_video_attempt("worker-test")
+            evidence = VideoTaskWorker._commander_approval_evidence(store, queue, attempt)
+            events = [
+                event for event in queue.events(self.approval_task_id, limit=500)
+                if event.get("event_type") == "human.decision"
+            ]
+            self.assertIsNotNone(evidence)
+            self.assertEqual(evidence["approval_task_id"], self.approval_task_id)
+            self.assertEqual(evidence["approval_event_id"], events[-1]["event_id"])
+            self.assertEqual(evidence["approved_by"], "test-operator")
+            self.assertEqual(len(evidence["video_brief_sha256"]), 64)
+            self.assertTrue(VideoTaskWorker._commander_approval_is_valid(store, queue, attempt))
 
     def test_commander_approval_revocation_overrides_an_earlier_approval(self):
         with InitiativeStore(self.database) as store, TaskQueue(self.root / "data" / "tasks" / "muse.sqlite3") as queue:
@@ -344,24 +645,28 @@ class VideoTaskWorkerTests(unittest.TestCase):
                 def build_from_scenes(inner_self, *args, **kwargs):
                     inner_self.calls.append((args, kwargs))
                     guard = kwargs["scene_generation_guard"]
-                    guard("shot_001")
+                    guard("shot_001", None, inner_self.lease_context)
                     generated.append("shot_001")
-                    guard("shot_002")
+                    guard("shot_002", None, inner_self.lease_context)
                     generated.append("shot_002")
                     return dict(inner_self.result)
 
             builder = GuardAwareBuilder()
+            with InitiativeStore(database) as store, TaskQueue(root / "data" / "tasks" / "muse.sqlite3") as queue:
+                approval_attempt = store.get_video_attempt("d" * 32)
+                evidence = VideoTaskWorker._commander_approval_evidence(store, queue, approval_attempt)
             with patch.object(
-                VideoTaskWorker, "_commander_approval_is_valid",
-                side_effect=[True, True, True, False],
+                VideoTaskWorker, "_commander_approval_evidence",
+                side_effect=[evidence, evidence, evidence, evidence, None],
             ):
-                result = VideoTaskWorker(root, builder=builder, worker_id="approval-guard").run_once()
+                result = self._worker(root, builder=builder, worker_id="approval-guard").run_once()
 
-            self.assertEqual(result["status"], "failed")
+            self.assertEqual(result["status"], "blocked_admission")
             self.assertEqual(generated, ["shot_001"])
+            self.assertEqual(len(result["admission_grants_consumed"]), 1)
             with InitiativeStore(database) as store:
                 attempt = store.get_video_attempt("d" * 32)
-            self.assertEqual(attempt["status"], "failed")
+            self.assertEqual(attempt["status"], "queued")
 
     def test_single_prompt_guard_blocks_builder_after_commander_approval_is_revoked(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -385,13 +690,13 @@ class VideoTaskWorkerTests(unittest.TestCase):
                 VideoTaskWorker, "_commander_approval_is_valid",
                 side_effect=[True, True, False],
             ):
-                result = VideoTaskWorker(root, builder=builder, worker_id="single-approval").run_once()
+                result = self._worker(root, builder=builder, worker_id="single-approval").run_once()
 
-            self.assertEqual(result["status"], "failed")
+            self.assertEqual(result["status"], "blocked_admission")
             self.assertEqual(builder.calls, [])
             with InitiativeStore(database) as store:
                 attempt = store.get_video_attempt("9" * 32)
-            self.assertEqual(attempt["status"], "failed")
+            self.assertEqual(attempt["status"], "queued")
 
     def test_worker_rechecks_commander_approval_before_marking_product_succeeded(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -415,7 +720,7 @@ class VideoTaskWorkerTests(unittest.TestCase):
                 VideoTaskWorker, "_commander_approval_is_valid",
                 side_effect=[True, True, True, False],
             ):
-                result = VideoTaskWorker(root, builder=builder, worker_id="final-approval").run_once()
+                result = self._worker(root, builder=builder, worker_id="final-approval").run_once()
 
             self.assertEqual(result["status"], "blocked_approval")
             self.assertFalse(result["completion_recorded"])
@@ -425,7 +730,7 @@ class VideoTaskWorkerTests(unittest.TestCase):
 
     def test_worker_builds_one_queued_video_and_records_verified_artifact(self):
         builder = FakeVideoBuilder()
-        worker = VideoTaskWorker(self.root, builder=builder, worker_id="test-worker")
+        worker = self._worker(self.root, builder=builder, worker_id="test-worker")
         result = worker.run_once()
         self.assertEqual(result["status"], "succeeded")
         self.assertEqual(result["attempt_id"], "worker-test")
@@ -468,6 +773,11 @@ class VideoTaskWorkerTests(unittest.TestCase):
             class StagingBuilder(FakeVideoBuilder):
                 def build_from_scenes(inner_self, *args, **kwargs):
                     inner_self.calls.append((args, kwargs))
+                    guard = kwargs.get("scene_generation_guard")
+                    if callable(guard):
+                        for index, scene in enumerate(kwargs.get("scenes", ()), start=1):
+                            if f"shot_{index:03d}" not in set(kwargs.get("reusable_step_ids", ())):
+                                guard(f"shot_{index:03d}", scene, inner_self.lease_context)
                     staging = Path(kwargs["staging_directory"])
                     (staging / "retained-for-cleanup-error.bin").write_bytes(b"keep")
                     return dict(inner_self.result)
@@ -477,8 +787,7 @@ class VideoTaskWorkerTests(unittest.TestCase):
                 "muse.video_task_worker.cleanup_video_attempt_staging_directory",
                 side_effect=OSError("simulated cleanup failure"),
             ), self.assertLogs("muse.video_task_worker", level="WARNING"):
-                result = VideoTaskWorker(root, builder=builder, worker_id="cleanup-worker").run_once()
-
+                result = self._worker(root, builder=builder, worker_id="cleanup-worker").run_once()
             self.assertEqual(result["status"], "succeeded")
             with InitiativeStore(database) as store:
                 attempt = store.get_video_attempt(attempt_id)
@@ -495,9 +804,12 @@ class VideoTaskWorkerTests(unittest.TestCase):
                 started.set()
                 if not release.wait(5):
                     raise TimeoutError("test builder was not released")
+                guard = kwargs.get("generation_guard")
+                if callable(guard):
+                    guard(self.lease_context)
                 return dict(self.result)
 
-        worker = VideoTaskWorker(self.root, builder=BlockingBuilder(), worker_id="heartbeat-worker")
+        worker = self._worker(self.root, builder=BlockingBuilder(), worker_id="heartbeat-worker")
         worker.lease_renew_interval_seconds = 0.01
         original_renew = InitiativeStore.renew_video_attempt_lease
 
@@ -530,13 +842,16 @@ class VideoTaskWorkerTests(unittest.TestCase):
                 started.set()
                 if not release.wait(5):
                     raise TimeoutError("test builder was not released")
+                guard = kwargs.get("generation_guard")
+                if callable(guard):
+                    guard(self.lease_context)
                 return dict(self.result)
 
         def lose_lease(_store, *_args, **_kwargs):
             renewal_failed.set()
             raise ValueError("simulated lease ownership loss")
 
-        worker = VideoTaskWorker(self.root, builder=BlockingBuilder(), worker_id="lost-heartbeat-worker")
+        worker = self._worker(self.root, builder=BlockingBuilder(), worker_id="lost-heartbeat-worker")
         worker.lease_renew_interval_seconds = 0.01
         outcomes = []
         runner = threading.Thread(target=lambda: outcomes.append(worker.run_once()))
@@ -580,7 +895,7 @@ class VideoTaskWorkerTests(unittest.TestCase):
                 )
             self._queue_approved_attempt(root, initiative["id"], "recipe-e2e-attempt", video_brief)
             builder = FakeVideoBuilder()
-            result = VideoTaskWorker(root, builder=builder, worker_id="recipe-e2e-worker").run_once()
+            result = self._worker(root, builder=builder, worker_id="recipe-e2e-worker").run_once()
             self.assertEqual(result["status"], "succeeded")
             self.assertEqual(len(builder.calls), 1)
             with InitiativeStore(database) as store:
@@ -611,7 +926,7 @@ class VideoTaskWorkerTests(unittest.TestCase):
     def test_worker_fails_closed_when_builder_omits_manifest_digest(self):
         builder = FakeVideoBuilder()
         builder.result.pop("manifest_sha256")
-        result = VideoTaskWorker(self.root, builder=builder, worker_id="missing-manifest").run_once()
+        result = self._worker(self.root, builder=builder, worker_id="missing-manifest").run_once()
         self.assertEqual(result["status"], "failed")
         with InitiativeStore(self.database) as store:
             attempt = store.get_video_attempt("worker-test")
@@ -620,7 +935,7 @@ class VideoTaskWorkerTests(unittest.TestCase):
     def test_worker_fails_closed_when_builder_returns_invalid_manifest_digest(self):
         builder = FakeVideoBuilder()
         builder.result["manifest_sha256"] = "invalid"
-        result = VideoTaskWorker(self.root, builder=builder, worker_id="invalid-manifest").run_once()
+        result = self._worker(self.root, builder=builder, worker_id="invalid-manifest").run_once()
         self.assertEqual(result["status"], "failed")
         with InitiativeStore(self.database) as store:
             attempt = store.get_video_attempt("worker-test")
@@ -665,7 +980,7 @@ class VideoTaskWorkerTests(unittest.TestCase):
             self._queue_approved_attempt(root, item["id"], "claim-grounded-worker", concept["creator_brief"]["video"])
             builder = FakeVideoBuilder()
             with patch("muse.cantonese_tts.preflight_cantonese_tts_runtime", return_value={"status": "ready"}):
-                result = VideoTaskWorker(root, builder=builder, worker_id="claim-grounded-worker").run_once()
+                result = self._worker(root, builder=builder, worker_id="claim-grounded-worker").run_once()
             self.assertEqual(result["status"], "failed")
             self.assertEqual(result["error_type"], "RuntimeError")
             self.assertEqual(builder.calls, [])
@@ -740,7 +1055,7 @@ class VideoTaskWorkerTests(unittest.TestCase):
                     side_effect=persist_ready_contract,
                 ) as persist,
             ):
-                result = VideoTaskWorker(
+                result = self._worker(
                     root, builder=builder, worker_id="claim-grounded-ready-worker",
                 ).run_once()
 
@@ -779,7 +1094,7 @@ class VideoTaskWorkerTests(unittest.TestCase):
                 )
             self._queue_approved_attempt(root, item["id"], "canto-worker-test", concept["creator_brief"]["video"])
             builder = FakeVideoBuilder()
-            worker = VideoTaskWorker(root, builder=builder, worker_id="canto-worker")
+            worker = self._worker(root, builder=builder, worker_id="canto-worker")
             with patch("muse.cantonese_tts.preflight_cantonese_tts_runtime", return_value={"status": "ready"}) as preflight:
                 result = worker.run_once()
             preflight.assert_called_once()
@@ -791,6 +1106,67 @@ class VideoTaskWorkerTests(unittest.TestCase):
             self.assertIsNone(kwargs["narration_asr_model_dir"])
             self.assertIn("係㗎", kwargs["narration_script"])
             self.assertGreaterEqual(kwargs["narration_script"].count("。"), 2)
+            prosody = kwargs["narration_prosody_plan"]
+            self.assertEqual(len(prosody["segments"]), 3)
+            self.assertEqual(
+                [segment["text"] for segment in prosody["segments"]],
+                kwargs["narration_script"].splitlines(),
+            )
+            self.assertFalse(prosody["audio_effects_verified"])
+            self.assertTrue(all("emotion" in segment["unsupported_controls"] for segment in prosody["segments"]))
+
+    def test_multiscene_cantonese_narration_keeps_one_complete_commander_dag_for_each_grant(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = root / "data" / "initiatives" / "muse.sqlite3"
+            database.parent.mkdir(parents=True)
+            (root / ".muse-canto-tts-py314" / "canto_tts").mkdir(parents=True)
+            tts_model = root / "data" / "models" / "canto-tts-nano"
+            tts_model.mkdir(parents=True)
+            (tts_model / "browser_poc_manifest.json").write_text("{}", encoding="utf-8")
+            video_brief = {
+                "title": "多鏡頭粵語旁白授權測試",
+                "prompt": "A grounded two-scene test",
+                "aspect_ratio": "16:9", "duration_seconds": 4, "steps": 8,
+                "scenes": [
+                    {"prompt": "First verified scene", "duration_seconds": 2, "seed": 11},
+                    {"prompt": "Second verified scene", "duration_seconds": 2, "seed": 22},
+                ],
+                "narration": {
+                    "enabled": True, "language": "zh-HK", "style": "yujie_canto", "segments": 3,
+                    "research_text": "先介紹已知內容。再清楚說明仍待驗證的部分。",
+                    "inspiration": "沉穩知性，清晰可信。", "asr_enabled": False,
+                },
+            }
+            with InitiativeStore(database) as store:
+                initiative = store.propose(
+                    "多鏡頭旁白授權", kind="creative_output", creator_value="測試完整 DAG 授權",
+                    concept=json.dumps({"creator_brief": {"video": video_brief}}, ensure_ascii=False),
+                    first_step="逐鏡頭生成與粵語旁白", expected_output="兩鏡頭旁白影片",
+                )
+            self._queue_approved_attempt(
+                root, initiative["id"], "multiscene-canto-grant", video_brief,
+            )
+            builder = FakeVideoBuilder()
+            provider = FakeAdmissionProvider()
+            worker = self._worker(
+                root, builder=builder, worker_id="multiscene-canto-worker",
+                admission_provider=provider,
+            )
+            with patch("muse.cantonese_tts.preflight_cantonese_tts_runtime", return_value={"status": "ready"}):
+                result = worker.run_once()
+            self.assertEqual(result["status"], "succeeded")
+            self.assertEqual(builder.dispatched_steps, ["shot_001", "shot_002"])
+            self.assertEqual(len(provider.requests), 2)
+            self.assertEqual(len({request.dag_sha256 for request in provider.requests}), 1)
+            self.assertEqual(
+                [request.batch.step_ids for request in provider.requests],
+                [("shot_001",), ("shot_002",)],
+            )
+            self.assertEqual(
+                [tuple(step.step_id for step in request.plan.steps) for request in provider.requests],
+                [("shot_001", "shot_002"), ("shot_001", "shot_002")],
+            )
 
     def test_cantonese_tts_preflight_failure_stops_before_builder(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -813,7 +1189,7 @@ class VideoTaskWorkerTests(unittest.TestCase):
             self._queue_approved_attempt(root, item["id"], "canto-runtime-gate", concept["creator_brief"]["video"])
             builder = FakeVideoBuilder()
             with patch("muse.cantonese_tts.preflight_cantonese_tts_runtime", side_effect=RuntimeError("Python 3.14 TTS helper unavailable")):
-                result = VideoTaskWorker(root, builder=builder, worker_id="canto-worker").run_once()
+                result = self._worker(root, builder=builder, worker_id="canto-worker").run_once()
             self.assertEqual(result["status"], "failed")
             self.assertEqual(result["error_type"], "RuntimeError")
             self.assertEqual(builder.calls, [])
@@ -836,7 +1212,7 @@ class VideoTaskWorkerTests(unittest.TestCase):
                 )
             self._queue_approved_attempt(root, item["id"], "canto-missing-model", concept["creator_brief"]["video"])
             builder = FakeVideoBuilder()
-            result = VideoTaskWorker(root, builder=builder, worker_id="canto-worker").run_once()
+            result = self._worker(root, builder=builder, worker_id="canto-worker").run_once()
             self.assertEqual(result["status"], "failed")
             self.assertEqual(builder.calls, [])
             with InitiativeStore(database) as store:
@@ -855,7 +1231,7 @@ class VideoTaskWorkerTests(unittest.TestCase):
                 )
                 store.start_video_attempt("research-unapproved", mode="prompt_to_video", initiative_id=item["id"])
             builder = FakeVideoBuilder()
-            result = VideoTaskWorker(root, builder=builder).run_once()
+            result = self._worker(root, builder=builder).run_once()
             self.assertEqual(result["status"], "idle")
             self.assertTrue(result["approval_required"])
             self.assertEqual(builder.calls, [])
@@ -874,7 +1250,7 @@ class VideoTaskWorkerTests(unittest.TestCase):
     def test_pause_after_claim_releases_task_without_invoking_builder(self):
         builder = FakeVideoBuilder()
         checks = iter([False, True])
-        worker = VideoTaskWorker(
+        worker = self._worker(
             self.root, builder=builder, worker_id="test-worker",
             pause_check=lambda: next(checks),
         )
@@ -888,7 +1264,7 @@ class VideoTaskWorkerTests(unittest.TestCase):
 
     def test_builder_failure_is_durable_and_does_not_mark_product_succeeded(self):
         builder = FakeVideoBuilder(error=RuntimeError("ComfyUI unavailable"))
-        worker = VideoTaskWorker(self.root, builder=builder, worker_id="test-worker")
+        worker = self._worker(self.root, builder=builder, worker_id="test-worker")
         result = worker.run_once()
         self.assertEqual(result["status"], "failed")
         with InitiativeStore(self.database) as store:
@@ -913,7 +1289,7 @@ class VideoTaskWorkerTests(unittest.TestCase):
                 )
             return True
 
-        result = VideoTaskWorker(
+        result = self._worker(
             self.root, builder=FakeVideoBuilder(), worker_id="test-worker",
             pause_check=pause_after_reclaim,
         ).run_once()
@@ -941,10 +1317,13 @@ class VideoTaskWorkerTests(unittest.TestCase):
                         "replacement-worker", lease_seconds=3600, now=10_000_000_000,
                         attempt_id="worker-test",
                     )
+                guard = kwargs.get("generation_guard")
+                if callable(guard):
+                    guard(self.lease_context)
                 raise RuntimeError("simulated renderer failure after lease was reclaimed")
 
         builder = LeaseStealingBuilder(self.database)
-        result = VideoTaskWorker(self.root, builder=builder, worker_id="test-worker").run_once()
+        result = self._worker(self.root, builder=builder, worker_id="test-worker").run_once()
         self.assertEqual(result["status"], "lease_lost")
         self.assertFalse(result["failure_recorded"])
         self.assertEqual(builder.reclaimed["worker_id"], "replacement-worker")
@@ -979,7 +1358,7 @@ class VideoTaskWorkerTests(unittest.TestCase):
             attempt_id = "worker-trace-integration"
             ticket_id = self._queue_approved_attempt(root, initiative["id"], attempt_id, video_brief)
             builder = FakeVideoBuilder()
-            result = VideoTaskWorker(root, builder=builder, worker_id="trace-worker").run_once()
+            result = self._worker(root, builder=builder, worker_id="trace-worker").run_once()
             self.assertEqual(result["status"], "succeeded")
             self.assertEqual(result["attempt_id"], attempt_id)
             self.assertEqual(len(builder.calls), 1)

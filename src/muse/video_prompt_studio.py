@@ -30,8 +30,6 @@ def _build_worker_handoff_candidate(compiled: Mapping[str, Any]) -> dict[str, An
         total_duration += float(duration)
         if not 1 <= float(duration) <= 5:
             blockers.append(f"scene_duration_out_of_worker_range:{scene_id}")
-        if scene.get("negative_prompt") and not single_scene:
-            blockers.append(f"per_scene_negative_prompt_not_supported:{scene_id}")
         if any(dependency not in previous_scene_ids for dependency in scene.get("depends_on", [])):
             blockers.append(f"scene_dependency_order_not_worker_safe:{scene_id}")
         previous_scene_ids.add(scene_id)
@@ -48,6 +46,13 @@ def _build_worker_handoff_candidate(compiled: Mapping[str, Any]) -> dict[str, An
     )
     if len(single_scene_negative) > 1000:
         blockers.append("combined_single_scene_negative_prompt_exceeds_1000_characters")
+    if not single_scene:
+        for scene in scenes:
+            combined_scene_negative = "\n".join(
+                item for item in (storyboard["negative_prompt"], scene.get("negative_prompt", "")) if item
+            )
+            if len(combined_scene_negative) > 1000:
+                blockers.append(f"combined_scene_negative_prompt_exceeds_1000_characters:{scene['id']}")
     candidate = None
     if not blockers and single_scene:
         candidate = {
@@ -67,7 +72,11 @@ def _build_worker_handoff_candidate(compiled: Mapping[str, Any]) -> dict[str, An
             "duration_seconds": round(total_duration, 3),
             "steps": 8,
             "scenes": [
-                {"prompt": scene["prompt"], "duration_seconds": float(scene["duration_seconds"])}
+                {
+                    "prompt": scene["prompt"],
+                    "duration_seconds": float(scene["duration_seconds"]),
+                    **({"negative_prompt": scene["negative_prompt"]} if scene.get("negative_prompt") else {}),
+                }
                 for scene in scenes
             ],
         }

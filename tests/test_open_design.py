@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from io import StringIO
 import sqlite3
+import sys
 import tempfile
 import unittest
 import uuid
@@ -464,6 +465,7 @@ class OpenDesignAdapterTests(unittest.TestCase):
         self.assertEqual(result["payload"]["initiative_id"], initiative_id)
         self.assertEqual(len(result["payload"]["design_system"]["sha256"]), 64)
 
+    @unittest.skipUnless(sys.platform == "win32", "packaged Electron .exe mode is Windows-specific")
     def test_from_installed_uses_packaged_electron_node_mode(self) -> None:
         install = self.workspace / "Open Design"
         cli = install / "resources" / "app" / "prebundled" / "daemon" / "daemon-cli.mjs"

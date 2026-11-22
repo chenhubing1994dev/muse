@@ -194,7 +194,7 @@ def _synthesize_segments_with_engine(
     segments: list[dict[str, object]], output_path: str | Path, *,
     engine: Any, quality: str = "duration_filter",
 ) -> dict[str, object]:
-    """Synthesize ordered text segments and insert verified trailing PCM silence."""
+    """Synthesize ordered text segments and verify exact PCM silence between clips."""
     normalized = _normalize_cantonese_segment_payload(segments, max_segments=64)
     if quality not in {"single", "duration_filter"}:
         raise ValueError("quality must be single or duration_filter")
@@ -205,11 +205,14 @@ def _synthesize_segments_with_engine(
         raise CantoneseTTSError("segmented TTS output must be a WAV in an existing regular directory")
     if output.is_symlink():
         raise CantoneseTTSError("refusing to overwrite a symlink output")
+
     with tempfile.TemporaryDirectory(prefix=".muse-canto-segments-", dir=output.parent) as temp_name:
         staging = Path(temp_name)
         combined_frames: list[bytes] = []
         reference: tuple[int, int, int] | None = None
         total_pause_frames = 0
+        total_output_frames = 0
+        silence_ranges: list[tuple[int, int]] = []
         segment_metadata: list[dict[str, object]] = []
         for index, segment in enumerate(normalized):
             text = str(segment["text"])
@@ -244,17 +247,24 @@ def _synthesize_segments_with_engine(
                 raise CantoneseTTSError(f"segment {index} has an unsupported WAV format")
             if reference is None:
                 reference = signature
+            frame_size = params.nchannels * params.sampwidth
+            if len(frames) != params.nframes * frame_size:
+                raise CantoneseTTSError(f"segment {index} PCM frame count does not match its WAV header")
             combined_frames.append(frames)
+            total_output_frames += params.nframes
             silence_frames = params.framerate * pause_ms // 1000
             if silence_frames:
-                combined_frames.append(b"\x00" * silence_frames * params.nchannels * params.sampwidth)
+                silence_ranges.append((total_output_frames, silence_frames))
+                combined_frames.append(b"\x00" * silence_frames * frame_size)
                 total_pause_frames += silence_frames
+                total_output_frames += silence_frames
             segment_metadata.append({
                 "index": index,
                 "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
                 "pause_after_ms": pause_ms,
                 "inserted_pause_frames": silence_frames,
             })
+
         temporary = staging / "combined.wav"
         channels, sample_width, sample_rate = reference
         try:
@@ -264,11 +274,21 @@ def _synthesize_segments_with_engine(
                 audio.setframerate(sample_rate)
                 for frames in combined_frames:
                     audio.writeframesraw(frames)
+            with wave.open(str(temporary), "rb") as audio:
+                frame_count = audio.getnframes()
+                if frame_count != total_output_frames:
+                    raise CantoneseTTSError("assembled WAV frame count does not match the requested segment timeline")
+                for start_frame, pause_frames in silence_ranges:
+                    audio.setpos(start_frame)
+                    silence = audio.readframes(pause_frames)
+                    expected_bytes = pause_frames * channels * sample_width
+                    if len(silence) != expected_bytes or any(silence):
+                        raise CantoneseTTSError("assembled WAV failed exact zero-PCM pause verification")
         except (wave.Error, OSError) as exc:
-            raise CantoneseTTSError("could not assemble segmented Cantonese WAV") from exc
+            raise CantoneseTTSError("assembled WAV could not be reopened for waveform verification") from exc
         os.replace(temporary, output)
-    with wave.open(str(output), "rb") as audio:
-        frame_count = audio.getnframes()
+
+
     return {
         "status": "completed", "engine": "canto-tts-onnx-segmented",
         "model_repo": MODEL_REPO, "model_revision": MODEL_REVISION,
@@ -280,10 +300,14 @@ def _synthesize_segments_with_engine(
         "frames": frame_count, "duration_seconds": frame_count / SAMPLE_RATE,
         "bytes": output.stat().st_size, "output": str(output),
         "audio_sha256": _sha256_file(output),
+        "waveform_pause_accounting_verified": True,
+        "waveform_pause_verified": bool(silence_ranges),
         "applied_controls": ["pause_after"] if total_pause_frames else [],
         "backend_capabilities": ["pause_after"],
         "unsupported_controls": ["emotion", "rate_scale", "pitch_semitones", "breath_hint", "pause_before_ms"],
     }
+
+
 
 
 def _synthesize_cantonese_segments_local(
@@ -358,12 +382,13 @@ def _synthesize_cantonese_segments_payload_with_runtime(
                 or result.get("inserted_pause_frames") != expected_pause_frames
                 or result.get("applied_controls") != expected_applied
                 or result.get("backend_capabilities") != ["pause_after"]
+                or result.get("waveform_pause_accounting_verified") is not True
+                or result.get("waveform_pause_verified") is not bool(expected_pause_frames)
                 or result.get("audio_sha256") != audio_sha256
                 or result.get("sample_rate") != sample_rate
                 or result.get("channels") != channels
                 or result.get("frames") != frames):
             raise CantoneseTTSError("segmented TTS runtime metadata does not match the produced WAV and requested segments")
-
         os.replace(temporary_output, output)
         verified = dict(result)
         verified["output"] = str(output)

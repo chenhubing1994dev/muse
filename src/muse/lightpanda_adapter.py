@@ -166,7 +166,13 @@ class LightpandaBrowserAdapter:
                 browser = playwright.chromium.connect_over_cdp(
                     self.cdp_url, timeout=int(self.timeout_seconds * 1000),
                 )
-                context = browser.new_context()
+                context = browser.new_context(service_workers="block")
+                def guard_websocket(websocket: Any) -> None:
+                    websocket.close(
+                        code=1008, reason="WebSocket access is disabled for public research capture",
+                    )
+
+                context.route_web_socket("**/*", guard_websocket)
 
                 def guard_request(route: Any) -> None:
                     request_url = str(route.request.url)

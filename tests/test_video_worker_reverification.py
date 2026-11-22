@@ -9,6 +9,7 @@ from pathlib import Path
 from muse.initiative_engine import InitiativeStore
 from muse.task_queue import TaskQueue
 from muse.video_task_worker import VideoTaskWorker
+from test_video_task_worker import FakeAdmissionProvider, fake_admission_request_factory
 
 
 class ReverifyBuilder:
@@ -59,6 +60,7 @@ class VideoWorkerReverificationTests(unittest.TestCase):
             "aspect_ratio": "9:16",
             "duration_seconds": 2,
             "steps": 8,
+            "recipe_sha256": "a" * 64,
         }
         with InitiativeStore(database) as store:
             initiative = store.propose(
@@ -89,6 +91,7 @@ class VideoWorkerReverificationTests(unittest.TestCase):
             store.start_video_attempt(
                 attempt_id, mode="prompt_to_video",
                 initiative_id=initiative["id"], approval_task_id=ticket["id"],
+                recipe_sha256=video_brief["recipe_sha256"],
             )
         return database
 
@@ -97,7 +100,11 @@ class VideoWorkerReverificationTests(unittest.TestCase):
             root = Path(temporary)
             database = self._prepare(root, "reverify-success")
             builder = ReverifyBuilder()
-            result = VideoTaskWorker(root, builder=builder, worker_id="reverify-worker").run_once()
+            result = VideoTaskWorker(
+                root, builder=builder, worker_id="reverify-worker",
+                admission_provider=FakeAdmissionProvider(),
+                admission_request_factory=fake_admission_request_factory,
+            ).run_once()
             self.assertEqual(result["status"], "succeeded")
             self.assertEqual(
                 builder.verify_calls,
@@ -113,7 +120,11 @@ class VideoWorkerReverificationTests(unittest.TestCase):
                 root = Path(temporary)
                 database = self._prepare(root, f"reverify-{field}")
                 builder = ReverifyBuilder(mismatch=field)
-                result = VideoTaskWorker(root, builder=builder, worker_id="reverify-worker").run_once()
+                result = VideoTaskWorker(
+                    root, builder=builder, worker_id="reverify-worker",
+                    admission_provider=FakeAdmissionProvider(),
+                    admission_request_factory=fake_admission_request_factory,
+                ).run_once()
                 self.assertEqual(result["status"], "failed")
                 self.assertEqual(len(builder.verify_calls), 1)
                 with InitiativeStore(database) as store:

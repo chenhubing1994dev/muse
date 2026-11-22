@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "id": "research.cross-check",
+  "name": "Research Cross-check",
+  "version": "1.0.0",
+  "description": "Collect sources, counter-evidence and unresolved questions for a Muse research hypothesis.",
+  "publisher": "Muse example",
+  "dependencies": {},
+  "capabilities": [
+    {
+      "id": "research",
+      "description": "Create a research and counter-evidence request for Commander review.",
+      "risk": "research",
+      "permissions": [
+        "research.read",
+        "network.public_research",
+        "commander.enqueue"
+      ]
+    }
+  ]
+}

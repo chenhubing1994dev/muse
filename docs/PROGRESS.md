@@ -3613,5 +3613,89 @@ eady_to_publish=false。
 - 在 B335 Open Design Adapter 生命周期引用释放修复之后，另一专职 Session 通过官方 scripts/muse_dev.py → psmux 完成最新共享快照全量回归：Python 3.11 compileall 成功；unittest 2,268 tests / 0 failures / 0 errors / 1 skipped，耗时 205.694 秒，内层 psmux Job e23c2755202c483e9e0165e3681200aa 与外层 WebCodex Job wc_job_PolU-Owc3TQchuNk 均 exit 0。此结果取代 B336 的 2,266 项基线。
 - 本轮重新审计 VideoStudio：preview 已绑定 canonical storyboard SHA-256、DAG fingerprint、batch fingerprint，并能向既有 VideoStageCheckpoint Adapter 持久化 Attempt/worker/lease epoch/checkpoint 证据；但 preview 仍不提交 Commander Task。InitiativeStore 当前有 Attempt/lease/checkpoint 表与原子 claim/renew/release，却没有 DAG admission grant 的持久签发、撤销、过期和 one-shot consume API；Worker 现有人工审批只证明单个 Video Attempt，不等于 VideoStudio DAG grant。故两条路径仍未打通，execution_eligible=false 必须保持。
 - 发现现有 admission assessment 对 handler registry 仅验证 Mapping 中 capability 对应值 callable；它不是可信 handler identity / version / policy binding，也未绑定 resource budget 与审批事件。不可把 callable presence 升格为执行授权。后续需由 Commander/InitiativeStore owner 与 VideoStudio/Worker owner 共同落实同一持久契约，避免跨 Session 覆盖。
-- 旁白链重新确认：Worker 在 video_task_worker.py:318 将 generated_script.segments flatten 成纯文本；Builder 在 video_product_builder.py:912-915 调用 text-only synthesize_cantonese_segments_with_runtime()；当前结构化 prosody bridge 的完整性测试通过，但 payload 尚未进入 Runtime 消费路径，不能宣称情绪/语速/音高/呼吸等控制已生效。需要 TTS runtime owner 与 Worker/Builder owner 协同扩展明确的 structured-segment API，并对 unsupported controls 保持显式标记。
-- 本轮未修改其他 Session 拥有的 VideoStudio、InitiativeStore、Worker、Builder、TTS 文件；没有启动重复全量测试、没有加载 LM Studio 模型、没有开放 Agent allowlist、没有启动 GPU/ComfyUI/Wan 生成。
+- B337 中“结构化旁白尚未进入 Runtime”的结论仅代表当时快照，现已由 B340/B341 取代：Worker 已传递结构化 prosody plan，Builder 调用 structured-segment TTS Runtime；当前仅 pause_after 被实现和验证，情绪、语速、音高、呼吸、pause_before 仍明确 unsupported，audio_effects_verified=false。
+- 本轮在明确单写者边界下修改了 cantonese_tts.py、video_product_builder.py、video_task_worker.py 及对应测试；TTS/Builder 相关文件修改前已备份至 .muse-backups/structured-cantonese-tts-waveform-20261122。未修改 VideoStudio/InitiativeStore owner 文件；未加载 LM Studio 模型、未开放 Agent allowlist、未启动 GPU/ComfyUI/Wan 生成。
+
+## 2026-11-22｜B338 VideoPromptStudio → Worker Creator Brief 候选接线
+
+- VideoPromptStudio 已可将预览方案转换为 Worker Creator Brief 候选；单镜头保留并合并全局与镜头 negative_prompt。多镜头仅在 2–20 镜头、单镜头 1–5 秒、总时长不超过 60 秒、依赖只向前且没有逐镜头 negative_prompt/音频 cue 时标记 ready_for_review；不满足条件时明确 blocked，不静默丢字段、不派发任务。
+- BPM/节拍偏移/切点容差与音素时间轴尚未完成端到端渲染验证；该接线是候选转换，不代表 GPU 生成或自动执行授权。
+
+## 2026-11-22｜B339 视频提示词与 Worker/Builder/Checkpoint 集成回归
+
+- 通过官方 scripts/muse_dev.py → psmux 的 Python 3.11 同快照验证：VideoPromptStudio、Worker、Builder、Checkpoint Adapter、Visual Evidence、Narration Prosody 等 8 个模块 compileall + unittest **155/155 passed**，0 failures/errors/skips；Job wc_job_KUpd7ElKK8rqR9ZY exit 0。
+- VideoPromptStudio 输出仍是 preview/candidate；Worker handoff 只在受限单镜头或严格安全多镜头约束下 ready_for_review。未把预览状态升级成执行许可。
+
+## 2026-11-22｜B340 结构化粤语旁白贯通 Worker → Builder → TTS Runtime
+
+- 新增 public API synthesize_cantonese_segment_payload_with_runtime(segments, output_path, *, model_dir, packages_dir, quality='duration_filter')，保留旧 text API。输入只接受 text 与 pause_after_ms，最多 16 段；复用 Python 3.14 隔离 Runtime JSON segment transport，不重新拆分文本。
+- Runtime 返回逐段 text SHA-256、pause_after_ms、实际 pause frames、音频 SHA-256、backend_capabilities、applied_controls 与 unsupported_controls。Builder 校验脚本与分段文本、逐段哈希、停顿帧、音频哈希和 Runtime metadata 后才写入 narration_prosody evidence；Worker 将 NarrationGenerator 结构化 segments/prosody plan 传入 Builder。
+- 仅 pause_after 是当前后端能力；情绪、rate_scale、pitch_semitones、breath_hint、pause_before_ms 不冒充已生效。专项 TTS + Builder 72/72 passed；Worker + prosody bridge/integrity + Python 3.14 Runtime transport tests 51/51 passed。
+
+## 2026-11-22｜B341 粤语旁白 WAV 停顿读回验证与原子发布
+
+- 修复 waveform_pause_verified 仅由计划/metadata 推断的问题：逐段 WAV 的 header frame count 必须与 PCM byte length 一致；组装后在 staging 中重新打开 WAV，核对总帧数，并逐个 seek 到 pause range，验证读取长度准确且所有 PCM 字节均为零。验证通过后才 os.replace 到正式输出路径，失败不会发布未验证音频。
+- Builder 要求 waveform_pause_accounting_verified 与 waveform_pause_verified 和实际 pause 请求一致；human listening/acoustic review 仍然需要，audio_effects_verified 继续为 false。
+- 最新全仓回归：Python 3.11 compileall 扫描 src/muse、tests、scripts 全部 PASS；unittest **2,276 tests / 0 failures / 0 errors / 1 skipped**，耗时 206.565 秒。内层 psmux Job fd388c621f214c2fa1b1af223d6ca8bc 与外层 WebCodex Job wc_job_V73xTauUVO8j60Z9 均 exit 0。最新 6 模块交叉专项 123/123 passed。
+- 仍未闭环的 P0：VideoStudio DAG → Commander 持久 admission grant → Attempt/lease → Worker。只读快照尚未发现 InitiativeStore grant create/consume/revoke API；缺少一次性原子消费、撤销/过期和 handler identity/version/policy/resource binding。execution_eligible 必须保持 false，直到接口接线和真实端到端验收通过。
+- 真实 GPU/ComfyUI/Wan 视频生成、Open Design 非空 Artifact 读回、Research Wiki live 写入与浏览器视觉 QA 尚未验收。
+
+## 2026-11-22｜B342 Worker 审批证据身份提取与回归
+
+- Worker 新增 `_commander_approval_evidence()`，在既有审批复核基础上返回精确的 `approval_task_id`、最新 `approval_event_id`、`approved_by` 与 `video_brief_sha256`；原 `_commander_approval_is_valid()` 保留为兼容布尔接口。
+- 证据提取仍要求审批 Ticket 为 queued、kind/scope/initiative/attempt 一致、审批 Brief 与 Initiative 当前 Brief 摘要一致，并要求最新 `human.decision` 为 approved 且 actor 与批准人一致。TaskQueue.events 按时间正序返回（查询倒序后 reverse），因此以最后一条决策作为最新事件；撤销测试确认后续 rejected 覆盖先前 approved。
+- 清理审批 helper 中一条不可达的重复 return；通过官方 `scripts/muse_dev.py → psmux`、Python 3.11 交叉回归：Video Worker + Checkpoint Adapter + VideoStudio **63/63 passed**，0 failures/errors/skips，7.647 秒；inner psmux Job `1e5dd99d6f634436b7bd3705a66f2bf0` exit 0。
+- **仍未闭环的 P0**：InitiativeStore 尚无 DAG admission grant 的持久 create/bind、原子 one-shot consume、revoke/expiry API；Worker 目前只提取审批证据，不代表 Grant 已签发或消费。保持 `execution_eligible=false`，不启动真实 GPU 视频生成。
+
+
+## 2026-11-22｜B343 自主研究中断检查点与跨链回归
+
+- 修复自主研究报告持久化后的中断窗口：`_persist_report()` 返回后立即再次检查 `stop_event`；若此时收到停止信号，保留已落盘报告并以 `interrupted` 退出，不继续写入创作者灵感假设，避免恢复前出现半轮副作用。
+- 新增 `test_stop_after_report_checkpoint_defers_later_persistence_until_resume`，验证报告只落盘一次、后续假设写入被推迟、周期 ID 与主题 key 保持不变，并在恢复后完成同一周期。
+- Python 3.11 定向验证：`tests.test_autonomous_research` **63/63 passed**；自主研究 + TestRunner + 粤语 TTS 跨链回归 **83/83 passed**；6 个对应源码/测试文件 compileall 通过。两个验证任务均 exit 0。
+- 本记录仅代表定向回归，不代表全仓库回归；尚未执行真实 GPU/ComfyUI/Wan 渲染。VideoStudio DAG → Commander 持久 admission grant → Attempt/lease → Worker 的 P0 授权链仍未闭环，继续保持 `execution_eligible=false`，不绕过 InitiativeStore/Commander 所有权边界。
+
+
+## 2026-11-22｜B344 全仓回归与灵感/浏览器/状态 API 修复
+
+- 修复 `inspiration_evolution.py` 中 allow_external、tags、research_domains 三段赋值被粘连的问题；新增输入元数据的三项赋值恢复为独立语句，模块可正常编译。
+- Lightpanda 公共网页采集现在显式以 `service_workers="block"` 创建 BrowserContext，并拦截 WebSocket、以 close code 1008 拒绝连接；保留既有请求 URL 公网校验。相关安全回归通过。
+- `status_api` 在模块层暴露 `VideoProductBuilder`，使 API 视频构建/字幕审批路径可被测试注入；修复后相关 Status API 回归通过。
+- 4 个专项模块（Inspiration Evolution、InitiativeStore、Lightpanda、Status API）**94/94 passed**；8 个对应源码/测试文件 compileall 通过。
+- 使用项目自带 `scripts/validate_python_suite.py`、Python 3.11 完成全仓验证：compileall **PASS**；unittest **2,296 tests / 0 failures / 0 errors / 1 skipped**，耗时 284.732 秒，Job `wc_job_oc7I1bipLxD1eMaH` exit 0。
+- 全仓验证不代表真实 GPU/ComfyUI/Wan 渲染或自动发布已验收；VideoStudio DAG → Commander 持久 admission grant → Attempt/lease → Worker 的授权链仍是 P0，继续保持 `execution_eligible=false`，不绕过单写者边界。
+
+
+## 2026-11-22｜B345 VideoStudio Grant API 到 Commander Worker 的接线审计
+
+- 只读确认 InitiativeStore 已提供 `create_video_admission_grant`、`consume_video_admission_grant`、`revoke_video_admission_grant`、`expire_video_admission_grant`；Grant 绑定 Attempt/worker/lease epoch、recipe/input/DAG/batch、handler/resource/cost digest、approval task/event/actor、scope/role/capabilities，并在 SQLite 事务中一次性消费。
+- 当前仓库搜索未发现上述 Grant API 的生产调用点；`AutonomousSupervisor._video_worker()` 仍直接创建 `VideoTaskWorker(...).run_once()`。Worker 现有审批证据提取可校验人工批准身份，但尚未签发或消费 DAG Grant。
+- 因此真正缺口已收敛为 Commander runtime provider 注入与 Worker 在 Builder/GPU 前的 Grant 验证/消费，不应再重复实现 InitiativeStore 授权存储，也不得把 preview evaluator 的结果当成授权。
+- 本会话未拥有 `autonomous_runtime.py`/`_video_worker()` 的单写者范围，未修改这两个模块；需由 Commander runtime owner 与 VideoStudio/Worker owner 共同完成接线。保持 `execution_eligible=false`，不启动真实 GPU 生成。
+
+
+## 2026-11-22｜B346 四大象数体系灵感溯源贯通
+
+- 自主研究的 creator-hypothesis backlog 不再把所有创作者灵感候选硬编码为易经视角；现在读取来源 metadata 的 `symbolic_framework_id`，正确映射 `iching/qimen/ziwei/liu_ren`。未知体系保留受限的原始来源值并标记 `unrecognized_source_metadata`，不伪造体系归属；未提供体系时仅记录 `default_lens_only`。
+- symbolic-hypothesis backlog 同样保留框架 ID、原始来源值与归属状态；未知体系仍按既有 Tarot 通用视角回退，但不会把回退值伪装成原始体系。
+- 框架来源信息已贯穿动态研究主题 → 研究报告 → ResearchKnowledgeStore idea metadata → PhilosophyStore inspiration/reflection metadata；符号启发仍明确标记为非证据、非预测，不会因此晋升事实或原则。
+- Python 3.11 定向回归：`tests.test_autonomous_research` **64/64 passed**；`src/muse/autonomous_research.py` 与 `tests/test_autonomous_research.py` compileall 通过；验证 Job `wc_job_47edgCNpqS7LaUgE` exit 0。
+- 该结果是自主研究专项回归，不代表全仓测试；VideoStudio 的 Commander Grant 注入/消费仍待 runtime owner 接线，GPU 生成继续 fail-closed。
+
+## 2026-11-22｜B352 Server Web Portal 灵感闭环、插件能力请求、Commander 任务账本与 PWA 跨端图标
+
+- HTTPS Web Portal 已接通灵感捕获/演化代理、Manifest 候选登记、已启用插件能力请求与 Commander 任务账本；插件请求只经 commander_task_queue_adapter 进入唯一 Commander TaskQueue 的 waiting_approval，不执行第三方代码。
+- PluginHub 增加候选登记和能力请求 UI；浏览器不能 approve/enable/disable 插件。插件声明同步 CapabilityRegistry 时固定 needs_approval、executable=null、execution_enabled=false；只有完整且稳定的注册表快照才清理旧能力，超过 500 项或快照变化时跳过 stale sweep。
+- 写入口要求精确 HTTPS Origin/Host、登录 Cookie session、CSRF、严格 JSON 与 Content-Length 校验；拒绝重复 key、非有限数、超限请求体及非对象 payload。
+- PWA 新增 Apple 180×180、Android/桌面 192×192 与 512×512 PNG 图标；manifest、apple-touch-icon 声明与 Service Worker 缓存清单同步。
+- 专项回归 25/25 passed；全仓 Python 回归 2,385 passed、0 failed、0 errors、1 skipped；ui-prototype Node 测试 66/66 passed；web-portal app.js/sw.js Node syntax、manifest JSON、CSS 结构及 PNG CRC/解压完整性验证通过。
+- 尚未完成：插件签名与供应链信任、隔离 runtime/资源 broker、Commander Worker 正式执行适配器、Android/iOS/PC 实机验收、公网部署与证书验收。改动写入当前绑定的 Muse 项目工作区；未部署公网，未执行项目迁移或合并操作。项目不是 Git 仓库，使用逐文件读取、版本校验与自动化测试验证。
+
+
+## 2026-11-23｜B354 Tauri 桌面安装包与跨平台图标
+
+- 新增 `scripts/generate_tauri_icons.py`，生成 32/128/256/512 PNG、ICO、ICNS 共 6 个 Muse 图标资源；不引入额外 Python 依赖。
+- Tauri bundle 配置由关闭改为启用，`targets=all`，显式引用 Windows ICO、macOS ICNS 与 PNG 图标资源，为 Windows/macOS/Linux 桌面安装包构建准备配置。
+- 静态验证：Tauri 配置 JSON、图标引用存在性、PNG chunk CRC、ICO payload、ICNS 容器长度全部通过；Svelte 0 errors/0 warnings、Vite build 149 modules、Node 66/66。
+- 尚未完成 Rust/Tauri schema 校验与实际安装包构建：Runner 无 cargo/rustc/rustup；Android SDK/NDK/JDK 未配置，iOS 还需要 macOS/Xcode。未生成 APK/AAB、MSI/NSIS、DEB/RPM/AppImage 或 DMG，未进行实机验收。
+- 移动端 Companion 仍需完成安全配对闭环；公网服务器、域名与证书部署尚未执行。

@@ -280,6 +280,29 @@ class VideoProductBuilderTests(unittest.TestCase):
         with self.assertRaisesRegex(VideoProductError, "integrity"):
             self.builder.verify_path(self.root / "data" / "products", result["initiative_id"], result["version_id"])
 
+    def test_prompt_generation_guard_is_forwarded_inside_the_live_wan_gpu_lease(self):
+        lease = SimpleNamespace(
+            lease_id="wan-lease-prompt", owner_id="wan-owner-prompt",
+            coordination={"status": "ready"}, assert_valid=lambda: None,
+        )
+        guarded = []
+
+        def guard(received_lease):
+            guarded.append(received_lease)
+
+        def fake_generate(_prompt, _output_path, **kwargs):
+            kwargs["admission_guard"](lease)
+            raise RuntimeError("stop after lease-bound admission callback")
+
+        with patch("muse.wan_video.generate_wan21_t2v", side_effect=fake_generate):
+            with self.assertRaisesRegex(RuntimeError, "lease-bound admission callback"):
+                self.builder.build_from_prompt(
+                    "租约内授权测试", "一只狐狸穿过竹林", seed=123,
+                    generation_guard=guard,
+                )
+
+        self.assertEqual(guarded, [lease])
+
     def test_builds_ai_generated_video_product_from_local_wan_engine(self):
         def fake_generate(prompt, output, **kwargs):
             output.write_bytes(bytes.fromhex("000000186674797069736f6d66697874757265"))
@@ -457,7 +480,7 @@ class VideoProductBuilderTests(unittest.TestCase):
 
         def fake_generate(prompt, output_path, **kwargs):
             output_path.write_bytes(bytes.fromhex("000000186674797069736f6d66697874757265"))
-            generated_calls.append((prompt, kwargs["seed"], kwargs["duration_seconds"]))
+            generated_calls.append((prompt, kwargs["seed"], kwargs["duration_seconds"], kwargs["negative_prompt"]))
             return {
                 "status": "completed", "prompt_id": f"wan-{len(generated_calls)}",
                 "model": "Wan 2.1 T2V 1.3B", "seed": kwargs["seed"],
@@ -477,12 +500,17 @@ class VideoProductBuilderTests(unittest.TestCase):
             patch.object(self.builder, "package_generated_clip", return_value={"validated": True}) as package,
         ):
             result = self.builder.build_from_scenes("多镜头测试", [
-                {"prompt": "清晨城市全景", "duration_seconds": 1, "seed": 101},
-                {"prompt": "镜头推进到街道", "duration_seconds": 2, "seed": 202},
-            ])
+                {"prompt": "清晨城市全景", "duration_seconds": 1, "seed": 101,
+                 "negative_prompt": "避免额外人物"},
+                {"prompt": "镜头推进到街道", "duration_seconds": 2, "seed": 202,
+                 "negative_prompt": "避免字幕"},
+            ], negative_prompt="避免画面文字")
 
         self.assertTrue(result["validated"])
-        self.assertEqual(generated_calls, [("清晨城市全景", 101, 1.0), ("镜头推进到街道", 202, 2.0)])
+        self.assertEqual(generated_calls, [
+            ("清晨城市全景", 101, 1.0, "避免画面文字\n避免额外人物"),
+            ("镜头推进到街道", 202, 2.0, "避免画面文字\n避免字幕"),
+        ])
         self.assertEqual(concat.call_count, 1)
         self.assertIn("concat", concat.call_args.args[0])
         self.assertIn(str("-i"), concat.call_args.args[0])
@@ -491,6 +519,21 @@ class VideoProductBuilderTests(unittest.TestCase):
         self.assertEqual(len(package.call_args.kwargs["scene_asset_paths"]), 2)
         self.assertEqual([scene["seed"] for scene in package.call_args.kwargs["scene_records"]], [101, 202])
         self.assertEqual([scene["duration_seconds"] for scene in package.call_args.kwargs["scene_records"]], [1.0, 2.0])
+        self.assertEqual(
+            [scene["negative_prompt"] for scene in package.call_args.kwargs["scene_records"]],
+            ["避免画面文字\n避免额外人物", "避免画面文字\n避免字幕"],
+        )
+
+    def test_build_from_scenes_rejects_combined_negative_prompt_over_limit_before_wan_dispatch(self):
+        with patch("muse.wan_video.generate_wan21_t2v") as generate:
+            with self.assertRaisesRegex(ValueError, "combined negative_prompt exceeds 1000 characters"):
+                self.builder.build_from_scenes(
+                    "过长负面提示词", [
+                        {"prompt": "第一镜", "duration_seconds": 1, "seed": 1, "negative_prompt": "s" * 401},
+                        {"prompt": "第二镜", "duration_seconds": 1, "seed": 2},
+                    ], negative_prompt="g" * 600,
+                )
+        generate.assert_not_called()
 
     def test_build_from_scenes_resumes_verified_shot_and_keeps_attempt_staging(self):
         attempt_id = "a" * 32
@@ -565,7 +608,13 @@ class VideoProductBuilderTests(unittest.TestCase):
         checkpoints = []
         guarded = []
 
+        lease = SimpleNamespace(
+            lease_id="wan-lease-scenes", owner_id="wan-owner-scenes",
+            coordination={"status": "ready"}, assert_valid=lambda: None,
+        )
+
         def fake_generate(prompt, output_path, **kwargs):
+            kwargs["admission_guard"](lease)
             generated.append(prompt)
             output_path.write_bytes(bytes.fromhex("000000186674797069736f6d66697874757265"))
             return {
@@ -573,7 +622,8 @@ class VideoProductBuilderTests(unittest.TestCase):
                 "width": 512, "height": 288, "fps": 12, "frames": 13,
             }
 
-        def guard(step_id):
+        def guard(step_id, scene=None, lease_context=None):
+            self.assertIs(lease_context, lease)
             guarded.append(step_id)
             if step_id == "shot_002":
                 raise PermissionError("Commander approval revoked")

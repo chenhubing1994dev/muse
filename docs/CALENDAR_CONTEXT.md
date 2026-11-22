@@ -69,7 +69,9 @@ CelestialCalendarProvider 是可选依赖适配器，不安装到 Muse 默认 Py
 - tests/test_qimen_provider.py：7/7（含隔离环境真实样例及历法差异拒绝）。
 - tests/test_ziwei_provider.py：6/6（含民用钟与真太阳时隔离环境真实样例）。
 - tests/test_inspiration.py：31/31（含三引擎真实调度 + Yi Jing 的四体系 dossier 端到端校验）。
-- 最近一次完整 Python 3.11 unittest：916/916 通过（71.371 秒，在新增 1 个真太阳时 Ziwei 测试和 2 个 dossier 测试之前）。新增 Ziwei 专项 6/6、Inspiration 专项 31/31、compileall 和三个隔离 venv 的 pip check 均通过；完整 919 项重跑被宿主安全检查拦截，故不宣称 919 项全量验收。
+- 早期历史验证：Python 3.11 unittest 916/916 通过（71.371 秒；当时尚未加入 1 个真太阳时 Ziwei 测试和 2 个 dossier 测试）。新增 Ziwei 专项 6/6、Inspiration 专项 31/31、compileall 和三个隔离 venv 的 pip check 均通过；完整 919 项重跑当时曾被宿主安全检查拦截。
+
+- 2026-11-23 回归更新：`scripts/validate_full_suite.py` 会在测试期间复用现有 `artifacts/ziwei-poc-venv` 隔离环境中的 site-packages（Windows/Linux venv 路径均兼容），不向 Muse 默认 Python 环境安装可选依赖。此前因缺少 `celestial-calendar==0.8.0` 被跳过的真太阳时真实引擎差分测试现已执行并通过；全仓 Python 3.11 回归 **2,390 tests / 0 failures / 0 errors / 0 skipped**（331.349s）。
 
 ## 尚未完成
 

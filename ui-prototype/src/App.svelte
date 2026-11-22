@@ -19,12 +19,15 @@
   import VideoReleaseReview from "./lib/VideoReleaseReview.svelte";
   import VideoVisualReview from "./lib/VideoVisualReview.svelte";
   import MemPalacePanel from "./lib/MemPalacePanel.svelte";
+  import CompanionPanel from "./lib/CompanionPanel.svelte";
+  import MobileCompanionPanel from "./lib/MobileCompanionPanel.svelte";
   import {
     createApiClient,
     resolveDesktopConnection,
     type AgentRecord,
     type AgentOrgChartResponse,
     type ApiClient,
+    type CompanionRemoteClient,
     type CelestialCatalogResponse,
     type FeedbackRecord,
     type GalaxyResponse,
@@ -46,6 +49,8 @@
     type WorkflowRunRecord,
     type SelfImprovementStatus,
     type MemPalaceStatusResponse,
+    type SystemDashboardResponse,
+    type FusionRecord,
     type ContextualInquiryReviewSummary,
     type ContextualInquiryReviewResult,
   } from "./lib/api";
@@ -68,6 +73,9 @@
   let inFlight = false;
   let refreshBusy = false;
   let connected = false;
+  let mobileCompanion = false;
+  let mobileCompanionConnected = false;
+  let mobileCompanionClient: CompanionRemoteClient | null = null;
   let stale = false;
   let message = "";
   let registryConfigured = false;
@@ -84,6 +92,7 @@
   let proposals: ImprovementProposal[] = [];
   let selfImprovementStatus: SelfImprovementStatus | null = null;
   let mempalaceStatus: MemPalaceStatusResponse | null = null;
+  let systemDashboard: SystemDashboardResponse | null = null;
   let contextualReviewTickets: ContextualInquiryReviewSummary[] = [];
   let selectedContextualReviewId: string | null = null;
   let contextualReviewResult: ContextualInquiryReviewResult | null = null;
@@ -198,9 +207,12 @@
   let presetLowerBits = "";
   let reducedFx = false;
 
-  type ViewKey = "overview" | "tasks" | "agents" | "memory" | "knowledge" | "studio" | "evolve" | "runtime" | "reviews";
+  type ViewKey = "overview" | "fusion" | "system" | "companion" | "tasks" | "agents" | "memory" | "knowledge" | "studio" | "evolve" | "runtime" | "reviews";
   const VIEWS: Array<{ key: ViewKey; label: string; icon: string; hint: string }> = [
     { key: "overview", label: "总览", icon: "core", hint: "调度阵、健康度与实时指标" },
+    { key: "fusion", label: "超融合", icon: "knowledge", hint: "一键导入源码，提取能力并连接 Muse 工作流" },
+    { key: "system", label: "万象中枢", icon: "core", hint: "系统文件、工作区、技能与服务连接" },
+    { key: "companion", label: "设备安全", icon: "shield", hint: "Host 配对挑战、设备凭据与安全审计" },
     { key: "tasks", label: "任务中心", icon: "tasks", hint: "队列、Commander 工作流与执行节点" },
     { key: "agents", label: "智能体", icon: "agents", hint: "唯一 Commander、专家角色与实连 Agent" },
     { key: "memory", label: "记忆库", icon: "memory", hint: "双轨记忆、MemPalace 与灵感池" },
@@ -210,7 +222,9 @@
     { key: "runtime", label: "运行时", icon: "flame", hint: "常驻引擎、创作流水线与事件流" },
     { key: "reviews", label: "个案审查", icon: "lock", hint: "加密审查结果、人工复核与独立审批" },
   ];
+  $: visibleViews = mobileCompanion ? VIEWS.filter((item) => item.key === "companion") : VIEWS;
   const ANCHOR_VIEW: Record<string, ViewKey> = {
+
     "#overview": "overview",
     "#celestial-lab": "knowledge",
     "#knowledge-starmap": "knowledge",
@@ -228,6 +242,12 @@
     "#events": "overview",
   };
   let view: ViewKey = "overview";
+  let fusionSourceUrl = "";
+  let fusionFile: File | null = null;
+  let fusionBusy = false;
+  let fusionMessage = "";
+  let fusionResult: FusionRecord | null = null;
+  let fusionJobs: FusionRecord[] = [];
   let selectedRole = "";
   let clockLabel = "";
   let dateLabel = "";
@@ -242,6 +262,92 @@
     if (next !== "reviews") closeContextualInquiryReview();
     view = next;
     document.querySelector(".stage")?.scrollTo({ top: 0, behavior: "smooth" });
+    if (next === "fusion") void loadFusionJobs();
+  }
+
+  async function loadFusionJobs(): Promise<void> {
+    if (!client) return;
+    try { fusionJobs = (await client.fusionJobs(20)).jobs; } catch { /* retain the last local snapshot */ }
+  }
+
+  function selectFusionFile(event: Event): void {
+    const input = event.currentTarget as HTMLInputElement;
+    const selected = input.files?.[0] ?? null;
+    if (selected && (selected.size < 1 || selected.size > 8 * 1024 * 1024 || !selected.name.toLowerCase().endsWith(".zip"))) {
+      fusionFile = null;
+      input.value = "";
+      fusionMessage = "只接受不超过 8 MiB 的 ZIP 源码压缩包。";
+      return;
+    }
+    fusionFile = selected;
+    fusionMessage = selected ? `已选择 ${selected.name} · ${(selected.size / 1024 / 1024).toFixed(2)} MiB` : "";
+  }
+
+  async function submitFusion(): Promise<void> {
+    if (!client || fusionBusy) return;
+    const sourceUrl = fusionSourceUrl.trim();
+    if (Boolean(sourceUrl) === Boolean(fusionFile)) {
+      fusionMessage = "请只提供一个 GitHub/GitLab 地址，或选择一个 ZIP 压缩包。";
+      return;
+    }
+    fusionBusy = true;
+    fusionMessage = "正在安全检查源码并提取可复用能力…";
+    try {
+      let response: { api_version: 1; fusion: FusionRecord };
+      if (fusionFile) {
+        const bytes = new Uint8Array(await fusionFile.arrayBuffer());
+        let binary = "";
+        for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+          binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+        }
+        response = await client.submitFusion({
+          archive_base64: btoa(binary), file_name: fusionFile.name,
+        });
+      } else {
+        response = await client.submitFusion({ source_url: sourceUrl });
+      }
+      fusionResult = response.fusion;
+      fusionMessage = fusionResult.duplicate
+        ? "检测到相同源码，已载入既有融合记录。"
+        : `分析完成并已自动接入候选能力图：检查 ${fusionResult.analysis.file_count} 个文件，识别 ${fusionResult.analysis.capabilities.length} 项候选能力。`;
+      await loadFusionJobs();
+    } catch (error) {
+      fusionMessage = error instanceof Error ? error.message : "融合分析失败，请检查来源后重试。";
+    } finally {
+      fusionBusy = false;
+    }
+  }
+
+  async function approveFusion(): Promise<void> {
+    if (!client || !fusionResult || fusionBusy || fusionResult.status !== "integrated_unverified") return;
+    fusionBusy = true;
+    fusionMessage = "正在将已审阅的能力关系写入 Muse 能力图…";
+    try {
+      const response = await client.approveFusion(fusionResult.fusion_id);
+      fusionResult = response.fusion;
+      fusionMessage = "已记录人工审阅；外部代码仍保持未验证，尚未获准执行。";
+      await loadFusionJobs();
+    } catch (error) {
+      fusionMessage = error instanceof Error ? error.message : "能力入库失败。";
+    } finally {
+      fusionBusy = false;
+    }
+  }
+
+  async function rollbackFusion(): Promise<void> {
+    if (!client || !fusionResult || fusionBusy || !["integrated_unverified", "approved_unverified"].includes(fusionResult.status)) return;
+    fusionBusy = true;
+    fusionMessage = "正在停用这次融合写入的候选能力…";
+    try {
+      const response = await client.rollbackFusion(fusionResult.fusion_id);
+      fusionResult = response.fusion;
+      fusionMessage = "已回滚：相关能力已标记为 disabled，原始压缩包和审计记录保留。";
+      await loadFusionJobs();
+    } catch (error) {
+      fusionMessage = error instanceof Error ? error.message : "融合回滚失败。";
+    } finally {
+      fusionBusy = false;
+    }
   }
 
   function focusAnchor(selector: string): void {
@@ -546,9 +652,9 @@
   $: filteredQueueTasks = filterQueueTasks(queueSnapshot?.active ?? [], queueQuery, queueStatusFilter);
   $: successRate = aggregateRate(agents, "succeeded", "completed");
   $: reviewRate = aggregateRate(agents, "review_approved", "reviewed");
-  $: connectionStatusKey = connected && !stale ? "online" : stale ? "stale" : "offline";
-  $: connectionLabel = connected ? "本地核心 · 在线" : stale ? "连接中断 · 数据已过期" : "本地核心 · 未连接";
-  $: connectionBadge = connected ? "LIVE" : stale ? "STALE" : "OFFLINE";
+  $: connectionStatusKey = (mobileCompanion ? mobileCompanionConnected : connected && !stale) ? "online" : stale ? "stale" : "offline";
+  $: connectionLabel = mobileCompanion ? (mobileCompanionConnected ? "Muse Host · 已连接" : "Muse Companion · 未配对") : connected ? "本地核心 · 在线" : stale ? "连接中断 · 数据已过期" : "本地核心 · 未连接";
+  $: connectionBadge = mobileCompanion ? (mobileCompanionConnected ? "SECURE" : "UNPAIRED") : connected ? "LIVE" : stale ? "STALE" : "OFFLINE";
   $: updatedLabel = updatedAt ? `更新于 ${new Date(updatedAt).toLocaleTimeString()}` : "尚无实时数据";
   $: videoEngineSummary = videoEngineStatus
     ? `FFmpeg ${videoEngineStatus.ffmpeg_available ? "就绪" : "缺失"} · ${videoEngineStatus.hardware_encoders.includes("h264_amf") ? "AMD AMF 可用" : "硬件编码器未检测到"} · ComfyUI ${videoEngineStatus.comfyui.status === "ready" ? "已连接" : "未连接"} · Velorn ${videoEngineStatus.velorn.status === "ready" ? "已连接" : "未连接"}`
@@ -617,6 +723,15 @@
     message = detail;
   }
 
+  function handleMobileClientChange(next: CompanionRemoteClient | null): void {
+    mobileCompanionClient = next;
+  }
+
+  function handleMobileConnectionChange(isConnected: boolean): void {
+    mobileCompanionConnected = isConnected;
+    message = isConnected ? "Muse Companion 已建立安全只读连接。" : "Muse Companion 尚未配对。";
+  }
+
   async function refresh(): Promise<void> {
     if (inFlight) return;
     inFlight = true;
@@ -628,7 +743,7 @@
           if (!client) {
             client = createApiClient(await resolveDesktopConnection());
           }
-          const [health, agentResponse, overview, feedbackResponse, improvementResponse, selfImprovementResponse, inspirationResponse, artifactResponse, productResponse, engineResponse, videoAttemptResponse, gpuResourceResponse, daemonResponse, recipesResponse, jobsResponse, celestialResponse, prometheusResponse, graphResponse, galaxyResponse, mempalaceResponse, contextualReviewResponse] = await Promise.all([
+          const [health, agentResponse, overview, feedbackResponse, improvementResponse, selfImprovementResponse, inspirationResponse, artifactResponse, productResponse, engineResponse, videoAttemptResponse, gpuResourceResponse, daemonResponse, recipesResponse, jobsResponse, celestialResponse, prometheusResponse, graphResponse, galaxyResponse, mempalaceResponse, contextualReviewResponse, systemDashboardResponse] = await Promise.all([
             client.health(),
             client.agents(),
             client.overview(),
@@ -650,6 +765,7 @@
             client.galaxy().catch(() => null),
             client.mempalaceStatus().catch(() => null),
             client.contextualInquiryReviews(100).catch(() => null),
+            client.systemDashboard().catch(() => null),
           ]);
           lastSnapshot = {
             agents: Array.isArray(agentResponse.agents) ? agentResponse.agents : [],
@@ -666,6 +782,7 @@
           proposals = Array.isArray(improvementResponse.proposals) ? improvementResponse.proposals : [];
           selfImprovementStatus = selfImprovementResponse;
           if (mempalaceResponse) mempalaceStatus = mempalaceResponse;
+          if (systemDashboardResponse) systemDashboard = systemDashboardResponse;
           if (contextualReviewResponse) {
             contextualReviewTickets = Array.isArray(contextualReviewResponse.reviews) ? contextualReviewResponse.reviews : [];
             if (selectedContextualReviewId && !contextualReviewTickets.some((item) => item.task_id === selectedContextualReviewId)) {
@@ -1344,17 +1461,34 @@
     }
   }
   onMount(() => {
+    let disposed = false;
     const localConfig = (window as Window & { __MUSE_LOCAL_CONNECTION__?: { pairingCode?: string | null; lanUrls?: string[] } }).__MUSE_LOCAL_CONNECTION__;
     pairingCode = localConfig?.pairingCode ?? "";
     lanUrls = Array.isArray(localConfig?.lanUrls) ? localConfig.lanUrls : [];
 
-    eventStreamController = new AbortController();    window.addEventListener("keydown", handleGlobalKeydown);
+    eventStreamController = new AbortController();
+    window.addEventListener("keydown", handleGlobalKeydown);
     tickClock();
     const clockHandle = window.setInterval(tickClock, 1000);
-    void refresh();
-    void runEventStream(eventStreamController.signal);
-    pollHandle = window.setInterval(() => void refresh(), POLL_INTERVAL_MS);
+    void (async () => {
+      const invokeMobile = (window as Window & {
+        __TAURI__?: { core?: { invoke?: (command: string) => Promise<unknown> } };
+      }).__TAURI__?.core?.invoke;
+      mobileCompanion = invokeMobile
+        ? await invokeMobile("is_mobile_companion").then((value) => value === true).catch(() => false)
+        : false;
+      if (disposed) return;
+      if (mobileCompanion) {
+        setView("companion");
+        setConnection(false, false, "Muse Companion 尚未配对。请使用 HTTPS Host 地址发起设备配对。");
+        return;
+      }
+      void refresh();
+      if (eventStreamController) void runEventStream(eventStreamController.signal);
+      pollHandle = window.setInterval(() => void refresh(), POLL_INTERVAL_MS);
+    })();
     return () => {
+      disposed = true;
       window.removeEventListener("keydown", handleGlobalKeydown);
       window.clearInterval(clockHandle);
       stopPolling();
@@ -1387,7 +1521,7 @@
   <div class="tb-mid">
     <span class={`chip ${connected && !stale ? "is-live" : stale ? "is-stale" : "is-down"}`}>
       <i class="dot" aria-hidden="true"></i>
-      {connected && !stale ? "本地核心在线" : stale ? "数据已过期" : "本地核心未连接"}
+      {mobileCompanion ? (connected ? "Muse Host 已连接" : "Companion 未配对") : connected && !stale ? "本地核心在线" : stale ? "数据已过期" : "本地核心未连接"}
     </span>
     <span class="chip is-quiet">{updatedLabel}</span>
     {#if gpuResourceStatus?.status === "reserved"}
@@ -1484,7 +1618,7 @@
 
 <div class="body">
 <nav class="rail" aria-label="主导航">
-  {#each VIEWS as item (item.key)}
+  {#each visibleViews as item (item.key)}
     <button
       class="rail-item"
       type="button"
@@ -1793,6 +1927,291 @@
         </div>
       </div>
     </section>
+    {/if}
+
+    {#if view === "fusion"}
+      <header class="view-head">
+        <div>
+          <h1>万象<em>超融合</em></h1>
+          <p>提交一个源码地址或 ZIP。Muse 会拆解项目、识别能力，并寻找与现有技能和工作流的连接点。</p>
+        </div>
+        <div class="view-head-meta"><span class="chip is-live">本地分析 · 不执行外部代码</span></div>
+      </header>
+
+      <div class="fusion-grid">
+        <section class="card fusion-source-card">
+          <div class="card-h">
+            <div><h2>一键<em>接入源代码</em></h2><p>支持 GitHub 仓库地址、GitHub/GitLab ZIP 和本地 ZIP。</p></div>
+            <span class="chip is-quiet">单次提交</span>
+          </div>
+          <label class="fusion-field">
+            <span>源码网址</span>
+            <input class="fusion-input" type="url" bind:value={fusionSourceUrl} placeholder="https://github.com/owner/repository" disabled={fusionBusy || !!fusionFile} />
+          </label>
+          <div class="fusion-orbit"><span></span>或</div>
+          <label class="fusion-field">
+            <span>上传源码压缩包</span>
+            <input class="fusion-input fusion-file" type="file" accept=".zip,application/zip,application/x-zip-compressed" onchange={selectFusionFile} disabled={fusionBusy || !!fusionSourceUrl.trim()} />
+            <small>ZIP · 最大 8 MiB；压缩展开后最多 32 MiB、300 个文件</small>
+          </label>
+          {#if fusionFile}
+            <div class="fusion-selected"><b>{fusionFile.name}</b><span>{(fusionFile.size / 1024 / 1024).toFixed(2)} MiB</span><button type="button" class="fusion-clear" onclick={() => { fusionFile = null; fusionMessage = ""; }}>移除</button></div>
+          {/if}
+          <button type="button" class="feedback-submit fusion-submit" onclick={submitFusion} disabled={!connected || fusionBusy || (!fusionSourceUrl.trim() && !fusionFile)}>
+            {fusionBusy ? "正在融合分析…" : "启动一键超融合"}
+          </button>
+          {#if fusionMessage}<p class="fusion-message" role="status">{fusionMessage}</p>{/if}
+          <p class="fusion-note">安全边界：只做静态读取，不安装依赖、不运行脚本、不启动未知服务。来源许可证及信任状态未确认前，不会激活外部代码。</p>
+        </section>
+
+        <section class="card fusion-result-card">
+          <div class="card-h"><div><h2>能力<em>融合图谱</em></h2><p>显示新项目能为 Muse 带来什么，以及可以连接哪些现有能力。</p></div></div>
+          {#if fusionResult}
+            <div class="fusion-result-head">
+              <span class="chip {fusionResult.status === "approved_unverified" ? "is-stale" : fusionResult.status === "rolled_back" ? "is-quiet" : "is-live"}">{fusionResult.status === "integrated_unverified" ? "已自动接入候选图" : fusionResult.status === "approved_unverified" ? "已审阅 · 未激活" : fusionResult.status === "rolled_back" ? "已回滚" : "无候选能力"}</span>
+              <b>{fusionResult.source.label}</b>
+              <small>SHA-256 · {fusionResult.source.sha256.slice(0, 20)}…</small>
+            </div>
+            <div class="fusion-metrics">
+              <div><b>{fusionResult.analysis.file_count}</b><small>检查文件</small></div>
+              <div><b>{fusionResult.analysis.capabilities.length}</b><small>候选能力</small></div>
+              <div><b>{fusionResult.analysis.integration_edges.length}</b><small>连接建议</small></div>
+            </div>
+            <div class="fusion-capabilities">
+              {#each fusionResult.analysis.capabilities as capability (capability.id)}
+                <article class="fusion-capability">
+                  <div><b>{capability.name}</b><span>{capability.domain}</span></div>
+                  <p>{capability.description}</p>
+                  <small>匹配信号：{capability.signals.join(" · ")}</small>
+                </article>
+              {:else}
+                <div class="empty"><b>未识别到明确能力</b><span>项目已安全读取，但当前规则没有足够信号形成能力候选。</span></div>
+              {/each}
+            </div>
+            {#if fusionResult.analysis.integration_edges.length}
+              <div class="worker-heading"><b>跨技能连接建议</b><span>{fusionResult.analysis.integration_edges.length} 条</span></div>
+              <div class="feedback-list">
+                {#each fusionResult.analysis.integration_edges as edge, index (index)}
+                  <div class="artifact-row"><span><b>{edge.from.replace("external:", "新能力 · ")}</b><small>连接到 {edge.to.replace("muse:", "Muse · ")}</small></span><span class="chip is-quiet">{edge.relationship === "overlap" ? "能力重叠" : "领域关联"}</span></div>
+                {/each}
+              </div>
+            {:else}
+              <p class="side-copy">暂未找到足够强的现有能力匹配；候选仍可进入人工审阅。</p>
+            {/if}
+            <div class="fusion-safety">
+              <b>安全与验证状态</b>
+              <span>源码已检查 · 未执行代码 · 未安装依赖 · 许可证：{fusionResult.analysis.license_status}</span>
+            </div>
+            {#if fusionResult.status === "integrated_unverified"}
+              <p class="fusion-note">候选能力及跨技能关系已自动写入 Muse 能力图；仍为 unverified，不能被 Commander 调度或执行。</p>
+              <button type="button" class="vs-btn" onclick={approveFusion} disabled={fusionBusy}>标记为已审阅</button>
+              <button type="button" class="vs-btn" onclick={rollbackFusion} disabled={fusionBusy}>回滚本次融合</button>
+            {:else if fusionResult.status === "approved_unverified"}
+              <p class="fusion-note">已记录人工审阅，但代码和依赖仍未执行；通过独立测试及信任审查前，不能进入可调度状态。</p>
+              <button type="button" class="vs-btn" onclick={rollbackFusion} disabled={fusionBusy}>回滚本次融合</button>
+            {:else if fusionResult.status === "rolled_back"}
+              <p class="fusion-note">本次融合已回滚；相关候选能力均已停用，原始源码压缩包和审计记录仍保留。</p>
+            {:else}
+              <p class="fusion-note">没有识别到可安全注册的候选能力；源码和分析报告仍保留供复核。</p>
+            {/if}
+          {:else}
+            <div class="empty fusion-empty"><b>等待第一个融合项目</b><span>提交一个源码仓库或 ZIP，Muse 会生成能力清单和跨技能连接建议。</span></div>
+          {/if}
+        </section>
+      </div>
+
+      <section class="card fusion-history">
+        <div class="card-h"><div><h2>融合<em>记录</em></h2><p>已分析的来源及其入库状态。</p></div><button type="button" class="vs-btn" onclick={loadFusionJobs}>刷新</button></div>
+        {#if fusionJobs.length}
+          <div class="feedback-list">
+            {#each fusionJobs as job (job.fusion_id)}
+              <button type="button" class="fusion-history-row" onclick={() => { fusionResult = job; fusionMessage = ""; }}>
+                <span><b>{job.source.label}</b><small>{job.analysis.file_count} 个文件 · {job.analysis.capabilities.length} 项能力 · {job.fusion_id.slice(0, 8)}</small></span>
+                <span class="chip is-quiet">{job.status === "integrated_unverified" ? "已自动入图" : job.status === "approved_unverified" ? "已审阅" : job.status === "rolled_back" ? "已回滚" : job.status === "analyzed_no_capabilities" ? "无候选" : "候选记录"}</span>
+              </button>
+            {/each}
+          </div>
+        {:else}
+          <p class="side-copy">尚无融合记录。</p>
+        {/if}
+      </section>
+    {/if}
+
+    {#if view === "system"}
+      <header class="view-head">
+        <div>
+          <h1>万象<em>中枢</em></h1>
+          <p>把 Muse 本机运行状态、能力注册表、文件资产与外部 Runner 观察汇总到一个只读控制台。每项都标明数据来源和新鲜度。</p>
+        </div>
+        <div class="view-head-meta">
+          <span class={"chip " + (systemDashboard?.runner.status === "fresh" ? "is-live" : systemDashboard?.runner.status === "stale" ? "is-stale" : "is-quiet")}>
+            <i class="dot" aria-hidden="true"></i>
+            {systemDashboard?.runner.status === "fresh" ? "Runner 快照新鲜" : systemDashboard?.runner.status === "stale" ? "Runner 快照过期" : "Runner 未同步"}
+          </span>
+          <span class="chip is-quiet">只读 · 本地状态 5 秒刷新</span>
+        </div>
+      </header>
+
+      <section class="stats" aria-label="系统总览">
+        <div class="stat"><small>已登记项目</small><b>{systemDashboard?.runner.project_count ?? "—"}</b><em>WebCodex 外部快照</em></div>
+        <div class="stat"><small>Runner 活跃任务</small><b>{systemDashboard?.runner.active_job_count ?? "—"}</b><em>运行 {systemDashboard?.runner.running_job_count ?? "—"} · 排队 {systemDashboard?.runner.queued_job_count ?? "—"}</em></div>
+        <div class="stat"><small>Runner Skills</small><b>{systemDashboard?.runner.skill_count ?? "—"}</b><em>{systemDashboard?.runner.invalid_skill_count ?? "—"} 项定义异常</em></div>
+        <div class="stat"><small>本地 Agent</small><b>{agents.length}</b><em>Agent Registry</em></div>
+        <div class="stat"><small>执行中任务</small><b class="is-jade">{queueSnapshot?.counts.running ?? "—"}</b><em>本地 Commander 队列</em></div>
+        <div class="stat"><small>本地能力</small><b>{systemDashboard?.local_capabilities.count ?? "—"}</b><em>Muse Capability Registry</em></div>
+        <div class="stat"><small>工作区文件</small><b>{systemDashboard?.files.count ?? "—"}</b><em>安全白名单目录</em></div>
+      </section>
+
+      <div class="cols-2">
+        <section class="card">
+          <div class="card-h">
+            <div><h2>本地<em>文件清单</em></h2><p>只显示文档、脚本、源码与前端文件名和元数据，不读取文件内容。</p></div>
+            <span class="chip is-quiet">{systemDashboard?.files.count ?? 0} 项</span>
+          </div>
+          {#if systemDashboard?.files.items.length}
+            <div class="system-file-list">
+              {#each systemDashboard.files.items.slice(0, 160) as file (file.path)}
+                <div class="artifact-row">
+                  <span><b>{file.path}</b><small>{(file.size_bytes / 1024).toFixed(1)} KB · {relativeTime(file.modified_at)}</small></span>
+                </div>
+              {/each}
+            </div>
+            {#if systemDashboard.files.truncated}<p class="side-copy">清单已按安全规则截断，完整计数 {systemDashboard.files.count} 项。</p>{/if}
+          {:else}
+            <div class="empty"><b>文件清单暂不可用</b><span>本地 API 尚未返回工作区文件信息。</span></div>
+          {/if}
+        </section>
+
+        <section class="card">
+          <div class="card-h"><div><h2>本机<em>运行态势</em></h2><p>来自 Muse 本地状态 API，不把已安装误判为正在运行。</p></div></div>
+          <div class="kv">
+            <div class="kv-row"><span>MemPalace</span><b>{mempalaceStatus?.enabled ? "已启用" : mempalaceStatus?.connection_state === "disabled" ? "已关闭" : mempalaceStatus?.connection_state ?? "未读取"}</b></div>
+            <div class="kv-row"><span>记忆存储</span><b>{mempalaceStatus?.memory_store_state === "ready" ? "可用" : mempalaceStatus?.memory_store_state ?? "未读取"}</b></div>
+            <div class="kv-row"><span>向量索引</span><b>{mempalaceStatus ? (mempalaceStatus.vector_index_present ? "已建立" : "未建立") : "未读取"}</b></div>
+            <div class="kv-row"><span>记忆投影队列</span><b>{mempalaceStatus?.projection_outbox.status === "not_initialized" ? "未初始化" : mempalaceStatus?.projection_outbox.status ?? "未读取"} · 待处理 {mempalaceStatus?.projection_outbox.pending ?? "—"}</b></div>
+            <div class="kv-row"><span>Agent / Worker</span><b>{agents.length} / {workers.length}</b></div>
+            <div class="kv-row"><span>任务队列</span><b>排队 {queueSnapshot?.counts.queued ?? "—"} · 执行 {queueSnapshot?.counts.running ?? "—"}</b></div>
+            <div class="kv-row"><span>自主运行时</span><b class={daemonStatus?.running ? "is-live" : "is-dim"}>{daemonStatus?.running ? "运行中" : daemonStatus?.state ?? "未读取"}</b></div>
+            <div class="kv-row"><span>GPU 资源</span><b>{gpuResourceStatus?.status ?? "未读取"}</b></div>
+            <div class="kv-row"><span>自我进化</span><b>{selfImprovementStatus?.status ?? "未读取"}</b></div>
+          </div>
+          <div class="worker-heading"><b>Windows 计划任务</b><span>{systemDashboard?.scheduled_tasks.status ?? "未读取"}</span></div>
+          {#if systemDashboard?.scheduled_tasks.items.length}
+            <div class="feedback-list">
+              {#each systemDashboard.scheduled_tasks.items as task (task.name)}
+                <div class="artifact-row">
+                  <span><b>{task.name}</b><small>{task.state === "running" ? "正在运行" : task.state === "ready" ? "已注册 · 当前空闲" : task.state === "disabled" ? "已禁用" : task.state === "not_registered" ? "未注册" : "状态未知"}</small></span>
+                  <span class="chip is-quiet">{task.state === "running" ? "运行中" : task.state === "ready" ? "就绪" : task.state === "disabled" ? "已禁用" : task.state === "not_registered" ? "未注册" : "未知"}</span>
+                </div>
+              {/each}
+            </div>
+          {:else}
+            <p class="side-copy">{systemDashboard?.scheduled_tasks.note ?? "尚未读取计划任务状态。"}</p>
+          {/if}
+        </section>
+      </div>
+
+      <div class="cols-2">
+        <section class="card">
+          <div class="card-h"><div><h2>Runner <em>项目空间</em></h2><p>外部 WebCodex 控制面只读快照，不等同于 Muse 本地 Space。</p></div><span class="chip is-quiet">{systemDashboard?.runner.status === "fresh" ? "快照新鲜" : systemDashboard?.runner.status === "stale" ? "快照过期" : "未同步"}</span></div>
+          {#if systemDashboard?.runner.projects.length}
+            <div class="feedback-list">
+              {#each systemDashboard.runner.projects as project (project.name)}
+                <div class="artifact-row">
+                  <span><b>{project.name}</b><small>{project.connected ? "Runner 已连接" : "Runner 未连接"}</small></span>
+                  <span class={project.connected ? "is-live" : "is-dim"}>{project.connected ? "在线" : "离线"}</span>
+                </div>
+              {/each}
+            </div>
+            <p class="side-copy">快照时间：{systemDashboard.runner.captured_at ? relativeTime(systemDashboard.runner.captured_at) : "未知"}。超过 15 分钟会标记为过期。</p>
+            <div class="worker-heading"><b>Runner 运行队列</b><span class={systemDashboard.runner.connected ? "is-live" : "is-dim"}>{systemDashboard.runner.connected ? "在线" : "未知"}</span></div>
+            <div class="kv">
+              <div class="kv-row"><span>并发上限</span><b>{systemDashboard.runner.concurrency_limit ?? "—"}</b></div>
+              <div class="kv-row"><span>运行中 / 排队</span><b>{systemDashboard.runner.running_job_count ?? "—"} / {systemDashboard.runner.queued_job_count ?? "—"}</b></div>
+            </div>
+            {#if systemDashboard.runner.active_jobs.length}
+              <div class="feedback-list">
+                {#each systemDashboard.runner.active_jobs as job, index (`${job.kind}-${index}`)}
+                  <div class="artifact-row"><span><b>{job.kind}</b><small>{job.project || "Runner"} · {job.elapsed_secs === null ? "运行时长未知" : `快照时已运行 ${Math.floor(job.elapsed_secs / 60)} 分 ${job.elapsed_secs % 60} 秒`}</small></span><span class="is-live">{job.status}</span></div>
+                {/each}
+              </div>
+            {/if}
+          {:else}
+            <div class="empty"><b>尚无 Runner 快照</b><span>外部项目清单尚未同步到本地仪表盘。</span></div>
+          {/if}
+          <div class="worker-heading"><b>Muse Space</b><span>{systemDashboard?.spaces.status ?? "未读取"}</span></div>
+          <p class="side-copy">{systemDashboard?.spaces.note ?? "Space 注册表状态未知。"}</p>
+        </section>
+
+        <section class="card">
+          <div class="card-h"><div><h2>Runner <em>技能目录</em></h2><p>只展示技能名称，不在仪表盘执行技能内容。</p></div><span class="chip is-quiet">{systemDashboard?.runner.skill_count ?? "—"} 项</span></div>
+          {#if systemDashboard?.runner.skills.length}
+            <div class="system-skill-list">
+              {#each systemDashboard.runner.skills as skill (skill.name)}
+                <span class="chip is-quiet">{skill.name}</span>
+              {/each}
+            </div>
+            {#if systemDashboard.runner.skill_sources.length}
+              <div class="kv">
+                {#each systemDashboard.runner.skill_sources as source (source.name)}
+                  <div class="kv-row"><span>{source.name === "project" ? "Muse 项目内" : source.name === "configured_runner_roots" ? "Runner 配置目录" : source.name === "managed_runner_store" ? "Runner 托管库" : source.name}</span><b>{source.count} 项 · 异常 {source.invalid_count}</b></div>
+                {/each}
+              </div>
+            {/if}
+            {#if (systemDashboard.runner.invalid_skill_count ?? 0) > 0}
+              <p class="side-copy is-warn">{systemDashboard.runner.invalid_skill_count} 项技能定义存在异常；当前目录摘要没有提供异常项名称，故不猜测是哪几项。</p>
+            {/if}
+          {:else}
+            <div class="empty"><b>技能目录未同步</b><span>Runner 技能不在 Muse 本地 API 的直接读取范围内。</span></div>
+          {/if}
+        </section>
+      </div>
+
+      <div class="cols-2">
+        <section class="card">
+          <div class="card-h"><div><h2>Muse <em>本地能力注册表</em></h2><p>这是本机能力元数据，与 Runner Skills 分开统计。</p></div><span class="chip is-quiet">{systemDashboard?.local_capabilities.count ?? 0} 项</span></div>
+          {#if systemDashboard?.local_capabilities.items.length}
+            <div class="feedback-list">
+              {#each systemDashboard.local_capabilities.items.slice(0, 24) as capability (capability.capability_id)}
+                <div class="artifact-row">
+                  <span><b>{capability.name ?? capability.capability_id}</b><small>{capability.domain ?? "能力"} · {capability.capability_id}</small></span>
+                  <span class="chip is-quiet">{capability.status ?? "未知"}</span>
+                </div>
+              {/each}
+            </div>
+          {:else}
+            <div class="empty"><b>能力注册表未配置或为空</b><span>不会用 Skill 数量替代本地能力数量。</span></div>
+          {/if}
+        </section>
+
+        <section class="card">
+          <div class="card-h"><div><h2>外部<em>服务连接</em></h2><p>连接状态来自外部快照或本地连接检测。</p></div></div>
+          <div class="feedback-list">
+            {#each systemDashboard?.integrations ?? [] as integration (integration.id)}
+              <div class="artifact-row">
+                <span><b>{integration.label}</b><small>{integration.detail}</small></span>
+                <span class={integration.status === "available" ? "is-live" : integration.status === "not_connected" ? "is-dim" : "is-warn"}>{integration.status === "snapshot_only" ? "快照同步" : integration.status === "available" ? "已连接" : integration.status === "empty" ? "暂无登记" : integration.status === "not_connected" ? "未连接" : "未桥接"}</span>
+              </div>
+            {/each}
+          </div>
+          <p class="side-copy">MCP、插件与邮件没有接入时会明确显示未连接；不会把功能代码或配置示例算作在线服务。</p>
+        </section>
+      </div>
+    {/if}
+
+    {#if view === "companion"}
+      <header class="view-head">
+        <div>
+          <h1>跨端<em>设备安全</em></h1>
+          <p>Host 本机设备信任中心。配对审批与凭据撤销留在 Muse Host；移动端不会获得桌面 Bearer，也不会绕过唯一 Commander。</p>
+        </div>
+        <div class="view-head-meta"><span class="chip is-quiet">{mobileCompanion ? "HTTPS · DEVICE HMAC · READ-ONLY" : "LOOPBACK · BEARER · READ-ONLY DEVICE SCOPE"}</span></div>
+      </header>
+      {#if mobileCompanion}
+        <section class="card"><MobileCompanionPanel client={mobileCompanionClient} onClientChange={handleMobileClientChange} onConnectionChange={handleMobileConnectionChange} /></section>
+      {:else}
+        <section class="card"><CompanionPanel {client} connected={connected && !stale} /></section>
+      {/if}
     {/if}
 
     {#if view === "runtime"}
@@ -2734,7 +3153,7 @@
     <div class="kv">
       <div class="kv-row"><span>核心</span><b class={connected && !stale ? "is-live" : "is-warn"}>{connectionBadge}</b></div>
       <div class="kv-row"><span>更新时间</span><b class="is-dim">{updatedLabel}</b></div>
-      <div class="kv-row"><span>网关</span><b class="is-dim">127.0.0.1 · Bearer</b></div>
+      <div class="kv-row"><span>网关</span><b class="is-dim">{mobileCompanion ? "等待安全配对" : "127.0.0.1 · Bearer"}</b></div>
     </div>
   </div>
 
@@ -3152,5 +3571,329 @@
       grid-template-columns: minmax(0, 1fr);
     }
   }
+  .system-file-list {
+    max-height: 430px;
+    overflow: auto;
+    padding-right: 4px;
+  }
+
+  .system-skill-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    max-height: 260px;
+    overflow: auto;
+    padding: 4px 0;
+  }
+
+  .system-file-list .artifact-row b {
+    overflow-wrap: anywhere;
+    font-family: var(--font-data);
+    font-size: 10px;
+  }
+
+  .system-file-list .artifact-row small {
+    font-size: 9px;
+  }
+
+  .fusion-grid {
+    display: grid;
+    grid-template-columns: minmax(260px, .82fr) minmax(0, 1.18fr);
+    gap: 14px;
+    align-items: start;
+  }
+
+  .fusion-source-card,
+  .fusion-result-card,
+  .fusion-history {
+    min-width: 0;
+  }
+
+  .fusion-field {
+    display: grid;
+    gap: 7px;
+    margin: 16px 0;
+    color: var(--ivory-2);
+    font-size: 12px;
+  }
+
+  .fusion-field > span {
+    color: var(--gold-hi);
+    font-weight: 650;
+  }
+
+  .fusion-input {
+    width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
+    border: 1px solid var(--hair);
+    border-radius: var(--r-sm);
+    background: var(--ink-2);
+    color: var(--ivory);
+    padding: 11px 12px;
+    font: 12px var(--font-ui);
+  }
+
+  .fusion-input:focus-visible,
+  .fusion-clear:focus-visible,
+  .fusion-history-row:focus-visible {
+    outline: 2px solid var(--cyan);
+    outline-offset: 2px;
+  }
+
+  .fusion-file {
+    padding: 10px;
+  }
+
+  .fusion-field small,
+  .fusion-note,
+  .fusion-result-head small,
+  .fusion-capability small {
+    color: var(--muted);
+    font-size: 10px;
+    line-height: 1.6;
+  }
+
+  .fusion-orbit {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: var(--muted);
+    font-size: 10px;
+  }
+
+  .fusion-orbit::before,
+  .fusion-orbit::after {
+    content: "";
+    height: 1px;
+    flex: 1;
+    background: var(--hair);
+  }
+
+  .fusion-orbit span {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--jade);
+    box-shadow: 0 0 12px var(--jade);
+  }
+
+  .fusion-selected,
+  .fusion-result-head,
+  .fusion-safety {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 9px;
+    padding: 10px;
+    margin: 12px 0;
+    border: 1px solid var(--hair);
+    border-radius: var(--r-sm);
+    background: var(--ink-2);
+  }
+
+  .fusion-selected b,
+  .fusion-result-head b {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    color: var(--ivory);
+    font-size: 11px;
+  }
+
+  .fusion-selected span {
+    color: var(--muted);
+    font: 10px var(--font-data);
+  }
+
+  .fusion-clear {
+    margin-left: auto;
+    border: 0;
+    background: transparent;
+    color: var(--cyan);
+    cursor: pointer;
+    font-size: 11px;
+  }
+
+  .fusion-submit {
+    width: 100%;
+    margin-top: 12px;
+    min-height: 42px;
+  }
+
+  .fusion-submit:disabled {
+    opacity: .45;
+    cursor: not-allowed;
+  }
+
+  .fusion-message {
+    color: var(--jade);
+    font-size: 11px;
+    line-height: 1.6;
+    overflow-wrap: anywhere;
+  }
+
+  .fusion-note {
+    display: block;
+    margin: 12px 0 0;
+  }
+
+  .fusion-result-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .fusion-result-head small {
+    font-family: var(--font-data);
+    overflow-wrap: anywhere;
+  }
+
+  .fusion-metrics {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+    margin: 14px 0;
+  }
+
+  .fusion-metrics > div {
+    padding: 12px;
+    border: 1px solid var(--hair);
+    border-radius: var(--r-sm);
+    background: var(--ink-2);
+  }
+
+  .fusion-metrics b,
+  .fusion-metrics small {
+    display: block;
+  }
+
+  .fusion-metrics b {
+    color: var(--gold-hi);
+    font: 600 22px var(--font-data);
+  }
+
+  .fusion-metrics small {
+    margin-top: 4px;
+    color: var(--muted);
+    font-size: 10px;
+  }
+
+  .fusion-capabilities {
+    display: grid;
+    gap: 8px;
+    max-height: 300px;
+    overflow: auto;
+  }
+
+  .fusion-capability {
+    padding: 12px;
+    border: 1px solid var(--hair);
+    border-left: 2px solid var(--jade);
+    border-radius: var(--r-sm);
+    background: var(--panel-2);
+  }
+
+  .fusion-capability > div {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .fusion-capability b {
+    color: var(--ivory);
+    font-size: 12px;
+  }
+
+  .fusion-capability > div span {
+    color: var(--cyan);
+    font: 10px var(--font-data);
+  }
+
+  .fusion-capability p {
+    margin: 6px 0;
+    color: var(--ivory-2);
+    font-size: 11px;
+    line-height: 1.55;
+  }
+
+  .fusion-capability small {
+    display: block;
+    overflow-wrap: anywhere;
+  }
+
+  .fusion-safety {
+    align-items: flex-start;
+    flex-direction: column;
+    border-color: var(--gold-dim);
+  }
+
+  .fusion-safety b {
+    color: var(--gold-hi);
+    font-size: 11px;
+  }
+
+  .fusion-safety span {
+    color: var(--ivory-2);
+    font-size: 10px;
+    line-height: 1.6;
+  }
+
+  .fusion-empty {
+    min-height: 220px;
+  }
+
+  .fusion-history {
+    margin-top: 14px;
+  }
+
+  .fusion-history-row {
+    display: flex;
+    width: 100%;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 12px 4px;
+    border: 0;
+    border-bottom: 1px solid var(--hair-soft);
+    background: transparent;
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .fusion-history-row > span:first-child {
+    display: grid;
+    min-width: 0;
+    gap: 4px;
+  }
+
+  .fusion-history-row b {
+    color: var(--ivory);
+    font-size: 11px;
+    overflow-wrap: anywhere;
+  }
+
+  .fusion-history-row small {
+    color: var(--muted);
+    font-size: 10px;
+  }
+
+  @media (max-width: 900px) {
+    .fusion-grid {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+
+  @media (max-width: 520px) {
+    .fusion-metrics b {
+      font-size: 18px;
+    }
+
+    .fusion-history-row {
+      align-items: flex-start;
+      flex-direction: column;
+    }
+  }
+
 </style>
 

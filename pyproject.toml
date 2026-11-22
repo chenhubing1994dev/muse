@@ -53,6 +53,9 @@ muse-autonomous = "muse.autonomous_runtime:main"
 muse-reminders = "muse.reminders:main"
 muse-intake = "muse.intake_runtime:main"
 muse-status-api = "muse.status_api:main"
+muse-companion-host = "muse.companion_transport:main"
+muse-plugins = "muse.plugin_platform:main"
+muse-web-portal = "muse.web_portal:main"
 muse-agents = "muse.agent_discovery:main"
 muse-agent-status = "muse.herdr_adapter:main"
 muse-herdr-core-smoke = "muse.herdr_core_smoke:main"
@@ -72,6 +75,9 @@ muse-business = "muse.business_opportunities:main"
 muse-value = "muse.value_forge:main"
 
 [project.optional-dependencies]
+plugin-security = [
+    "cryptography>=42.0",
+]
 web-scraping = [
     "scrapling>=0.5.1,<0.6",
 ]

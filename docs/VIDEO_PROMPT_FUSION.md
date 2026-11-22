@@ -31,6 +31,7 @@
 - 提示词相关专项：Composer、VideoPromptStudio、VideoWorkflow、PromptEngine **44/44 passed**，Python 3.11；修改源码/测试文件 compileall 通过。psmux Job `603fcb4373dc4a13b7a3c52e8d7b060c` exit 0。
 - 单镜头 Worker handoff 后的历史全仓回归：2,270 tests / 0 failures / 0 errors / 1 skipped（B337）。随后 B339 BPM/节拍 handoff guard 最新共享快照再次全仓复验：Python 3.11 compileall 扫描 `src/muse`、`tests`、`scripts` 全部通过；**2,271 tests / 0 failures / 0 errors / 1 skipped**，206.402 秒；内层 psmux Job `a7cd4be771284a23b1ac41bf50bd1a63` `result.txt=0`，外层 WebCodex Job `wc_job_PH_H1o0RVbSOKTta` exit 0；最终 `muse-dev inspect` 为 `active_job_id=null`。
 - Composer → Worker → narration/TTS/Builder/CheckpointAdapter/VideoStudio/visual-evidence 跨模块专项：**155/155 passed，0 failures/errors/skips**，Python 3.11，同一快照 compileall + unittest；内层 psmux Job `9becc6a0c55748d2a6d58f967690d367`、外层 WebCodex Job `wc_job_KUpd7ElKK8rqR9ZY` 均 exit 0。该组覆盖接口与模拟/单元流程，不代表真实 Wan/GPU 渲染。
+- 2026-11-22 修复 TTS/Worker/Builder/旁白证据链后，全仓 Python 3.11：**2,276 tests / 0 failures / 0 errors / 1 skipped**，206.617 秒；同一 Job 后置 `compileall src/muse tests scripts` 输出 `MUSE_PYTHON_COMPILEALL_OK`；内层 psmux Job `b7839613278a4c6e9598366673d95efb` `command_succeeded=true` / exit 0，外层 `wc_job_zDlV5HNDd_0WBR7W` exit 0。TTS + ProsodyBridge + Worker + Builder 五模块专项 **116/116 passed**；新增 Worker 旁白计划/分段顺序/unsupported-control 断言后，Worker 专项 **28/28 passed**。这些均为本地测试与模拟链路，不代表真实 Wan/GPU 成片。
 
 
 ## Composer → VideoStudio → Worker handoff
@@ -44,10 +45,9 @@
 ## 仍需打通的接口
 
 1. 多镜头 Composer 输出的逐镜头 `negative_prompt` 当前未完整穿过 Worker → Builder → CheckpointAdapter → Wan。必须将其传到 Wan 的负向 conditioning，并纳入每镜头 checkpoint input digest，防止负向约束变化后复用旧镜头。
-2. VideoPromptStudio 当前仍是 preview-only；不能将 Commander DAG 预览误称为真实提交或可执行。InitiativeStore owner 已接手 Attempt admission grant 原子 bind / one-shot consume / revoke 契约；等待精确 API、实现与回归证据后，由主 Worker Session 接入消费端及 capability/role authorization。
-3. 结构化旁白段落仍被 Worker flatten 成纯文本；当前 TTS runtime public API 只接受 text 并重新按标点切段，底层仅能插入 trailing PCM pause。主 Worker Session 已邀请 M5-TTS Session 接管新增 structured-segment runtime API；在契约与实现通过前，情绪/语速/音高/呼吸仍标记 unsupported，不得在 Manifest 中标记为已应用。
+2. VideoPromptStudio 当前仍是 preview-only。最新共享源码仍未出现 InitiativeStore admission grant 的 create/bind、one-shot consume、revoke API；Store owner 尚未交付可调用契约。不能将 Commander DAG 预览误称为真实提交或可执行。交付后由主 Worker Session 接入最新 TaskQueue human.decision 复核、lease/epoch 绑定与逐镜头 guard。
+3. 结构化粤语旁白已接通本地接口链：NarrationGenerator segments → ProsodyPlan → Builder 校验文本/段落对应 → `synthesize_cantonese_segment_payload_with_runtime` → WAV/逐段 metadata/SHA-256 → 产品 manifest。当前真实支持只有 `pause_after` PCM 静音；emotion、rate、pitch、breath 等仍明确 unsupported，必须保留人工听审要求。专项 116/116 passed；不代表声学情绪效果已经实现。
 4. 长片分镜需要按具体视频模型的实际限制拆分/适配；不能仅因 Composer 接受 20 秒镜头，就假设本地 Wan 1.3B 的 1–5 秒单镜头生成器可直接执行。
-
 ## 验收原则
 
 - 只把上游方法抽象为自己的结构化字段、校验规则和模板，不保存未获授权的完整创作者提示词。

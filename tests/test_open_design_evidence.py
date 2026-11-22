@@ -8,6 +8,7 @@ from pathlib import Path
 from muse.initiative_engine import InitiativeStore
 from muse.open_design import OpenDesignTaskHandler
 from muse.open_design_evidence import persist_open_design_artifact_evidence
+from muse.open_design_recovery import persist_completed_open_design_run_evidence
 from muse.research_knowledge import ResearchKnowledgeStore
 
 
@@ -143,6 +144,103 @@ class OpenDesignEvidencePersistenceTests(unittest.TestCase):
                 result = handler.execute_task({}, task_id=task_id)
         self.assertEqual(result["artifact_evidence_persistence"]["status"], "incomplete")
         self.assertEqual(result["artifact_evidence_persistence"]["error_type"], "IncompleteArtifactEvidence")
+
+    def _completed_result_for_recovery(self, task_id: str, *, evidence=None, project_id="project-42"):
+        return {
+            "task_id": task_id,
+            "status": "completed",
+            "run_id": "run-42",
+            "project_id": project_id,
+            "artifact_evidence": dict(evidence or self.evidence),
+        }
+
+    def test_persistence_only_recovery_reuses_completed_run_without_starting_another(self):
+        task_id = "e" * 32
+        payload = {
+            "kind": "open_design_run",
+            "project_id": "project-42",
+            "initiative_id": self.initiative_id,
+        }
+        completed = self._completed_result_for_recovery(task_id)
+        with patch(
+            "muse.open_design.OpenDesignAdapter.from_installed",
+            side_effect=AssertionError("persistence-only recovery must not create an adapter or start a run"),
+        ):
+            result = persist_completed_open_design_run_evidence(
+                knowledge_database=self.knowledge_db,
+                initiative_database=self.initiative_db,
+                payload=payload,
+                task_id=task_id,
+                completed_result=completed,
+                completion_event_id="task-event-42",
+            )
+        self.assertEqual(result["status"], "persisted")
+        self.assertEqual(result["recovery_mode"], "persistence_only")
+        self.assertEqual(result["recovered_from_event_id"], "task-event-42")
+        self.assertFalse(result["new_open_design_run_started"])
+        with ResearchKnowledgeStore(self.knowledge_db) as knowledge:
+            self.assertEqual(len(knowledge.list_nodes(node_type="source", limit=10)), 3)
+
+    def test_persistence_only_recovery_is_idempotent(self):
+        task_id = "f" * 32
+        payload = {"kind": "open_design_run", "project_id": "project-42"}
+        completed = self._completed_result_for_recovery(task_id)
+        kwargs = {
+            "knowledge_database": self.knowledge_db,
+            "initiative_database": self.initiative_db,
+            "payload": payload,
+            "task_id": task_id,
+            "completed_result": completed,
+            "completion_event_id": "task-event-43",
+        }
+        first = persist_completed_open_design_run_evidence(**kwargs)
+        second = persist_completed_open_design_run_evidence(**kwargs)
+        self.assertEqual(first["bundle_node_id"], second["bundle_node_id"])
+        self.assertEqual(first["file_node_ids"], second["file_node_ids"])
+        with ResearchKnowledgeStore(self.knowledge_db) as knowledge:
+            self.assertEqual(len(knowledge.list_nodes(node_type="source", limit=10)), 3)
+
+    def test_persistence_only_recovery_rejects_untrusted_or_incomplete_results(self):
+        task_id = "a" * 32
+        payload = {"kind": "open_design_run", "project_id": "project-42"}
+        base = self._completed_result_for_recovery(task_id)
+        with self.assertRaisesRegex(ValueError, "completed Open Design run"):
+            persist_completed_open_design_run_evidence(
+                knowledge_database=self.knowledge_db,
+                initiative_database=self.initiative_db,
+                payload=payload, task_id=task_id,
+                completed_result={**base, "status": "running"},
+                completion_event_id="task-event-44",
+            )
+        with self.assertRaisesRegex(ValueError, "project does not match"):
+            persist_completed_open_design_run_evidence(
+                knowledge_database=self.knowledge_db,
+                initiative_database=self.initiative_db,
+                payload=payload, task_id=task_id,
+                completed_result={**base, "project_id": "different-project"},
+                completion_event_id="task-event-44",
+            )
+        partial = dict(self.evidence)
+        partial["complete"] = False
+        partial["truncated"] = True
+        with self.assertRaisesRegex(ValueError, "complete artifact evidence"):
+            persist_completed_open_design_run_evidence(
+                knowledge_database=self.knowledge_db,
+                initiative_database=self.initiative_db,
+                payload=payload, task_id=task_id,
+                completed_result=self._completed_result_for_recovery(task_id, evidence=partial),
+                completion_event_id="task-event-44",
+            )
+        with self.assertRaisesRegex(ValueError, "completion event id"):
+            persist_completed_open_design_run_evidence(
+                knowledge_database=self.knowledge_db,
+                initiative_database=self.initiative_db,
+                payload=payload, task_id=task_id,
+                completed_result=base,
+                completion_event_id="",
+            )
+        with ResearchKnowledgeStore(self.knowledge_db) as knowledge:
+            self.assertEqual(knowledge.list_nodes(node_type="source", limit=10), [])
 
     def test_rejects_inconsistent_complete_flag(self):
         self.evidence["complete"] = False

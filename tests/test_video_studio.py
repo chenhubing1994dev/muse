@@ -8,6 +8,7 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
+from muse.commander_planner import CommanderPlan, PlannedStep
 from muse.video_studio import (
     PIPELINE_PROFILES,
     assess_video_studio_commander_admission,
@@ -159,6 +160,46 @@ class VideoStudioTests(unittest.TestCase):
                 dep for step_id in item.step_ids for dep in original[step_id].depends_on if dep not in batch_ids
             }
             self.assertEqual(set(item.required_completed_steps), expected_external)
+
+    def test_batches_are_role_homogeneous_and_preserve_cross_role_dag_dependencies(self):
+        steps = (
+            PlannedStep("intake", "operator", "intake", (), ("video_intake",)),
+            PlannedStep("research", "researcher", "research", ("intake",), ("video_research",)),
+            PlannedStep("archive_retrieval", "researcher", "archive", ("research",), ("archive_retrieval",)),
+            PlannedStep("source_rights", "reviewer", "rights", ("archive_retrieval",), ("source_rights",)),
+            PlannedStep("preflight", "operator", "preflight", ("source_rights",), ("video_preflight",)),
+            PlannedStep("publish_gate", "operator", "publish", ("preflight",), ("video_publish",)),
+        )
+        plan = CommanderPlan(
+            plan_id="role-homogeneous-plan", goal="role partition regression",
+            steps=steps, source="test:role-homogeneous",
+            parallel_waves=tuple((step.step_id,) for step in steps),
+        )
+        batches = build_video_studio_batches(plan, max_steps=3, input_sha256="a" * 64)
+        repeated = build_video_studio_batches(plan, max_steps=3, input_sha256="a" * 64)
+        self.assertEqual([batch.role for batch in batches], ["operator", "researcher", "reviewer", "operator"])
+        self.assertEqual([len(batch.step_ids) for batch in batches], [1, 2, 1, 2])
+        self.assertEqual([batch.required_completed_steps for batch in batches], [(), ("intake",), ("archive_retrieval",), ("source_rights",)])
+        self.assertEqual([batch.batch_fingerprint for batch in batches], [batch.batch_fingerprint for batch in repeated])
+        original = {step.step_id: set(step.depends_on) for step in steps}
+        completed: set[str] = set()
+        for batch in batches:
+            actual_roles = {step.role for step in batch.plan.steps if step.step_id in batch.step_ids}
+            self.assertEqual(actual_roles, {batch.role})
+            payload = batch.as_dict()
+            self.assertEqual(payload["role"], batch.role)
+            self.assertEqual(payload["required_capabilities"], list(batch.required_capabilities))
+            self.assertIn(batch.batch_fingerprint, batch.checkpoint_key_template)
+            self.assertEqual(len(batch.dag_sha256), 64)
+            self.assertEqual(len(batch.batch_fingerprint), 64)
+            self.assertTrue(set(batch.required_completed_steps) <= completed)
+            batch_ids = set(batch.step_ids)
+            batch_steps = {step.step_id: step for step in batch.plan.steps}
+            for step_id in batch.step_ids:
+                internal = {dep for dep in batch_steps[step_id].depends_on if dep != "__video_batch_entry__"}
+                self.assertEqual(internal, original[step_id] & batch_ids)
+            completed.update(batch.step_ids)
+        self.assertEqual(completed, set(original))
 
     def test_preview_binds_canonical_storyboard_content_to_dag_and_batch_fingerprints(self):
         storyboard = sample_storyboard()

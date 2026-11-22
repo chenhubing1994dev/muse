@@ -387,6 +387,41 @@ class AutonomousRuntimeTests(unittest.TestCase):
             self.assertEqual(result, expected)
             run_once.assert_called_once_with()
 
+    def test_commander_video_worker_passes_injected_admission_context(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            provider = type("Provider", (), {"issue_video_admission_grant": lambda self, store, request: {}})()
+            request_factory = lambda **kwargs: kwargs
+            supervisor = AutonomousSupervisor(
+                task_db=root / "tasks.sqlite3", routine_db=root / "routines.sqlite3",
+                state_db=root / "runtime.sqlite3", improvement_db=root / "improvements.sqlite3",
+                knowledge_db=root / "knowledge.sqlite3", reminder_db=root / "reminders.sqlite3",
+                memory_db=root / "memory.sqlite3", conversation_db=root / "conversations.sqlite3",
+                workspace=root, video_admission_provider=provider,
+                video_admission_request_factory=request_factory,
+            )
+            expected = {"status": "idle", "claimed": False}
+            with patch.dict(os.environ, {"MUSE_ENABLE_VIDEO_WORKER": "1"}):
+                with patch("muse.video_task_worker.VideoTaskWorker") as worker_type:
+                    worker_type.return_value.run_once.return_value = expected
+                    result = supervisor._video_worker({})
+            self.assertEqual(result, expected)
+            worker_type.assert_called_once_with(
+                root.resolve(), worker_id="commander-video-worker", admission_provider=provider,
+                admission_request_factory=request_factory,
+            )
+
+    def test_supervisor_rejects_partial_video_admission_injection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaisesRegex(ValueError, "injected together"):
+                AutonomousSupervisor(task_db=root / "tasks.sqlite3", workspace=root,
+                                     video_admission_provider=object())
+            with self.assertRaisesRegex(ValueError, "injected together"):
+                AutonomousSupervisor(task_db=root / "tasks.sqlite3", workspace=root,
+                                     video_admission_request_factory=lambda **kwargs: kwargs)
+
+
     def test_autonomous_research_receives_improvement_store_for_proposal_generation(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -521,6 +521,13 @@ class AutonomousResearchEngine:
         for candidate in creator_candidates:
             hypothesis = candidate.get("summary", "")[:2000]
             metadata = candidate.get("metadata", {})
+            if not isinstance(metadata, dict):
+                metadata = {}
+            raw_framework_id = metadata.get("symbolic_framework_id")
+            framework_id = raw_framework_id if isinstance(raw_framework_id, str) and raw_framework_id in SYMBOLIC_LENSES else None
+            framework_source_value = raw_framework_id.strip()[:64] if isinstance(raw_framework_id, str) and raw_framework_id.strip() else None
+            framework_attribution = "source_metadata" if framework_id else ("unrecognized_source_metadata" if framework_source_value else "default_lens_only")
+            symbolic_lens = framework_id or "iching"
             is_inbox = metadata.get("origin") == "creator_inspiration_inbox"
             question_match = re.search(
                 r"(?:明确问题|研究问题|research question)\s*[:：]\s*(.+?)(?=(?:可测试假设|验证方法|反证条件|证伪条件|潜在价值|研究领域|分类标签|支持证据搜索方向|反证搜索方向|可执行实验|明确证伪条件|test|falsifier)\s*[:：]|$)",
@@ -598,7 +605,10 @@ class AutonomousResearchEngine:
                 "question": hypothesis or candidate["title"],
                 "support_query": support_query,
                 "counter_query": counter_query,
-                "symbolic_lens": "iching",
+                "symbolic_lens": symbolic_lens,
+                "symbolic_framework_id": framework_id,
+                "symbolic_framework_source_value": framework_source_value,
+                "symbolic_framework_attribution": framework_attribution,
                 "hypothesis": hypothesis,
                 "topic_origin": "creator_inspired_hypothesis_backlog",
                 "is_creator_inbox": is_inbox,
@@ -612,8 +622,14 @@ class AutonomousResearchEngine:
             dynamic_topics.append(entry)
         for candidate in symbolic_candidates:
             metadata = candidate.get("metadata", {})
-            framework_id = metadata.get("symbolic_framework_id", "tarot")
-            lens = SYMBOLIC_LENSES.get(framework_id, SYMBOLIC_LENSES["tarot"])
+            if not isinstance(metadata, dict):
+                metadata = {}
+            raw_framework_id = metadata.get("symbolic_framework_id")
+            framework_id = raw_framework_id if isinstance(raw_framework_id, str) and raw_framework_id in SYMBOLIC_LENSES else None
+            framework_source_value = raw_framework_id.strip()[:64] if isinstance(raw_framework_id, str) and raw_framework_id.strip() else None
+            framework_attribution = "source_metadata" if framework_id else ("unrecognized_source_metadata" if framework_source_value else "default_lens_only")
+            symbolic_lens = framework_id or "tarot"
+            lens = SYMBOLIC_LENSES[symbolic_lens]
             hypothesis = candidate.get("summary", "")[:500]
             question = metadata.get("application_question") or hypothesis
             parent_bookmarks = metadata.get("parent_bookmark_sources")
@@ -628,7 +644,10 @@ class AutonomousResearchEngine:
                 "counter_query": f"counterexamples limitations confirmation bias alternative explanations {query_seed}",
                 "bookmark_sources": parent_bookmarks,
                 "research_bookmarks": parent_bookmarks,
-                "symbolic_lens": framework_id if framework_id in SYMBOLIC_LENSES else "tarot",
+                "symbolic_lens": symbolic_lens,
+                "symbolic_framework_id": framework_id,
+                "symbolic_framework_source_value": framework_source_value,
+                "symbolic_framework_attribution": framework_attribution,
                 "hypothesis": hypothesis,
                 "topic_origin": "symbolic_hypothesis_backlog",
                 "trigger_count": 1,
@@ -2458,6 +2477,9 @@ class AutonomousResearchEngine:
                           "topic_origin": topic["topic_origin"], "trigger_count": topic["trigger_count"],
                           "symbolic_hypothesis": topic["hypothesis"],
                           "symbolic_lens": topic["symbolic_lens"],
+                          "symbolic_framework_id": topic.get("symbolic_framework_id"),
+                          "symbolic_framework_source_value": topic.get("symbolic_framework_source_value"),
+                          "symbolic_framework_attribution": topic.get("symbolic_framework_attribution", "not_specified"),
                           "symbolic_inspiration_pack": symbolic_metadata_pack,
                           "symbolic_cross_system": symbolic_cross_system_metadata,
                           "research_run_experiment_id": (result.get("knowledge_run") or {}).get("experiment_id"),
@@ -2668,6 +2690,9 @@ class AutonomousResearchEngine:
             "feedback_experiment_execution": feedback_experiment_execution,
             "feedback_reviewer_configuration": self.feedback_reviewer_status,
             "symbolic_lens": symbolic["name"], "symbolic_hypothesis": topic["hypothesis"],
+            "symbolic_framework_id": topic.get("symbolic_framework_id"),
+            "symbolic_framework_source_value": topic.get("symbolic_framework_source_value"),
+            "symbolic_framework_attribution": topic.get("symbolic_framework_attribution", "not_specified"),
             "symbolic_hypothesis_node_id": topic.get("symbolic_hypothesis_node_id"),
             "symbolic_inspiration_pack": symbolic_pack,
             "symbolic_cross_system": symbolic_cross_system,
@@ -2857,6 +2882,8 @@ class AutonomousResearchEngine:
         try:            report_path = self._persist_report(topic["key"], report, fetched_at)
         except OSError as exc:
             report["report_persist_error"] = type(exc).__name__
+        if stop_event is not None and stop_event.is_set():
+            return stopped_result()
         if not topic.get("symbolic_hypothesis_node_id") and not topic.get("creator_inspired_hypothesis_node_id") and not topic.get("creator_inspiration_node_id"):
             try:
                 self._persist_creator_inspired_hypotheses(
@@ -2968,11 +2995,17 @@ class AutonomousResearchEngine:
                         source_ref=(report_path or f"research:{topic['key']}:{fetched_at}") + "#symbolic-seed",
                         epistemic_status="symbolic_only",
                         metadata={"symbolic_lens": topic.get("symbolic_lens", "unknown"),
+                                  "symbolic_framework_id": topic.get("symbolic_framework_id"),
+                                  "symbolic_framework_source_value": topic.get("symbolic_framework_source_value"),
+                                  "symbolic_framework_attribution": topic.get("symbolic_framework_attribution", "not_specified"),
                                   "is_evidence": False, "is_prediction": False},
                     )
                     philosophy.distill_principles(inspiration_item["id"])
                 reflection_text = json.dumps({
                     "research_question": topic.get("question", ""),
+                    "symbolic_framework_id": topic.get("symbolic_framework_id"),
+                    "symbolic_framework_source_value": topic.get("symbolic_framework_source_value"),
+                    "symbolic_framework_attribution": topic.get("symbolic_framework_attribution", "not_specified"),
                     "synthesis": report.get("synthesis", {}),
                     "claim_review": report.get("claim_review", {}),
                     "evidence_coverage_score": evidence_coverage_score,
@@ -2984,6 +3017,9 @@ class AutonomousResearchEngine:
                     source_ref=(report_path or f"research:{topic['key']}:{fetched_at}") + "#philosophy-reflection",
                     epistemic_status="experience",
                     metadata={"symbolic_lens": topic.get("symbolic_lens", "unknown"),
+                              "symbolic_framework_id": topic.get("symbolic_framework_id"),
+                              "symbolic_framework_source_value": topic.get("symbolic_framework_source_value"),
+                              "symbolic_framework_attribution": topic.get("symbolic_framework_attribution", "not_specified"),
                               "derived_from_research": True,
                               "evidence_status": report.get("claim_review_status", "unknown"),
                               "bookmark_driven": bool(topic.get("bookmark_sources"))},
@@ -2993,7 +3029,8 @@ class AutonomousResearchEngine:
                 for index, candidate in enumerate((report.get("synthesis") or {}).get("creator_inspired_hypotheses", [])[:3], 1):
                     proposal = philosophy.propose_principle_candidate(
                         reflection_item["id"],
-                        f"研究候选原则：{topic.get('title', '玄学灵感研究')[:48]} #{index}",                        str(candidate)[:2000],
+                        f"研究候选原则：{topic.get('title', '玄学灵感研究')[:48]} #{index}",
+                        str(candidate)[:2000],
                         suggested_practice="暂存为待验证候选；需要跨轮次独立来源、明确基线、反例和回归实验后，才可晋升为正式哲学原则。",
                         source_refs=source_refs[:12],
                     )

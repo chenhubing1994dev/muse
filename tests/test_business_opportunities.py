@@ -5,6 +5,7 @@ from muse.business_opportunities import BusinessOpportunityStore, score_opportun
 from muse.initiative_engine import InitiativeStore
 from muse.task_queue import TaskQueue
 from muse.video_task_worker import VideoTaskWorker
+from test_video_task_worker import FakeAdmissionProvider, fake_admission_request_factory
 
 
 class BusinessOpportunityTests(unittest.TestCase):
@@ -109,7 +110,10 @@ class BusinessOpportunityTests(unittest.TestCase):
         (tts_model/"browser_poc_manifest.json").write_text("{}",encoding="utf-8")
         builder=StubBuilder()
         with patch("muse.cantonese_tts.preflight_cantonese_tts_runtime",return_value={"status":"ready"}):
-            result=VideoTaskWorker(Path(self.tmp.name),builder=builder).run_once()
+            result=VideoTaskWorker(
+                Path(self.tmp.name), builder=builder, admission_provider=FakeAdmissionProvider(),
+                admission_request_factory=fake_admission_request_factory,
+            ).run_once()
         self.assertEqual(result["status"],"succeeded")
         self.assertTrue(result["content_review_required"])
         self.assertFalse(result["auto_publish"])
