@@ -11,7 +11,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from muse.video_engines import ComfyUIClient
 
@@ -195,6 +195,7 @@ def _generate_wan21_t2v_unleased(
     aspect_ratio: str = "16:9", duration_seconds: float = 2.0,
     steps: int = 8, seed: int = 0, timeout_seconds: int = 1800,
     endpoint: str = "http://127.0.0.1:8188",
+    _before_submit: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     """Submit one approved fixed workflow, wait for completion and retrieve MP4."""
     if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int) or not 30 <= timeout_seconds <= 3600:
@@ -206,8 +207,10 @@ def _generate_wan21_t2v_unleased(
         filename_prefix="muse_wan21_" + job_tag,
     )
     client = ComfyUIClient(endpoint, timeout_seconds=10.0)
+    gpu_memory = _require_gpu_headroom(client)
+    if _before_submit is not None:
+        _before_submit()
     try:
-        gpu_memory = _require_gpu_headroom(client)
         submitted = client.submit_workflow(
             workflow, node_allowlist=WAN21_NODE_ALLOWLIST, approved=True,
         )
@@ -316,9 +319,14 @@ def generate_wan21_t2v(
     steps: int = 8, seed: int = 0, timeout_seconds: int = 1800,
     endpoint: str = "http://127.0.0.1:8188",
     resource_db: str | Path | None = None, workspace: str | Path | None = None,
+    admission_guard: Callable[[Any], None] | None = None,
 ) -> dict[str, Any]:
-    """Generate Wan media under a cross-process GPU lease when resource_db is supplied."""
+    """Generate Wan media; an admission guard runs inside a live GPU lease before submission."""
+    if admission_guard is not None and not callable(admission_guard):
+        raise ValueError("admission_guard must be callable")
     if resource_db is None:
+        if admission_guard is not None:
+            raise WanVideoError("Commander admission_guard requires resource_db and a live GPU lease")
         return _generate_wan21_t2v_unleased(
             prompt, output_path, negative_prompt=negative_prompt, aspect_ratio=aspect_ratio,
             duration_seconds=duration_seconds, steps=steps, seed=seed,
@@ -336,10 +344,17 @@ def generate_wan21_t2v(
             model_probe=lambda: probe_configured_model_service(str(workspace_root)),
             wait_timeout_seconds=min(90, max(0, timeout_seconds)),
         ) as lease:
+            before_submit = None
+            if admission_guard is not None:
+                def before_submit() -> None:
+                    lease.assert_valid()
+                    admission_guard(lease)
+                    lease.assert_valid()
             result = _generate_wan21_t2v_unleased(
                 prompt, output_path, negative_prompt=negative_prompt, aspect_ratio=aspect_ratio,
                 duration_seconds=duration_seconds, steps=steps, seed=seed,
                 timeout_seconds=timeout_seconds, endpoint=endpoint,
+                _before_submit=before_submit,
             )
             lease.assert_valid()
             memory_release = _request_comfyui_model_release(endpoint)

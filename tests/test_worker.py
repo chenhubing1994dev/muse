@@ -920,6 +920,47 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(result["payload"]["_result"]["status"], "implemented")
             self.assertEqual(source.read_text(encoding="utf-8"), "VALUE = 2\\n")
 
+    def test_approved_code_change_handler_rejects_timestamp_not_bound_to_decision(self) -> None:
+        import hashlib
+        import json
+        from muse.evolution_executor import ApprovedCodeChangeExecutor, build_approved_code_change_handler
+
+        class Store:
+            def get(self, proposal_id):
+                return {"id": proposal_id, "status": "approved"}
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "src" / "example.py"
+            source.parent.mkdir()
+            source.write_text("VALUE = 1\\n", encoding="utf-8")
+            database = root / "tasks.sqlite3"
+            original_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+            payload = {
+                "kind": "approved_code_change", "proposal_id": "proposal-1",
+                "patches": [{"path": "src/example.py", "expected_sha256": original_hash,
+                             "old_text": "VALUE = 1", "new_text": "VALUE = 2"}],
+            }
+            executor = ApprovedCodeChangeExecutor(
+                root, improvement_store=Store(), experiment_bridge=object(), review_gate=object(),
+                run_tests=lambda **_: self.fail("forged approval timestamp must not execute tests"),
+                implementer_id="builder-1",
+            )
+            handler = build_approved_code_change_handler(executor, database)
+            with TaskQueue(database) as queue:
+                task = queue.enqueue("approved code change", payload, require_approval=True, recovery_policy="manual")
+                queue.approve(task["id"], approved_by="human-owner")
+                approved = queue.get(task["id"])
+                approved["payload"]["_approval"]["approved_at"] = "2000-01-01T00:00:00+00:00"
+                queue._connection.execute(
+                    "UPDATE tasks SET payload_json=? WHERE id=?",
+                    (json.dumps(approved["payload"]), task["id"]),
+                )
+                queue._connection.commit()
+            result = run_once(database, {"approved_code_change": handler})
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(source.read_text(encoding="utf-8"), "VALUE = 1\\n")
+
     def test_approved_code_change_handler_rejects_forged_payload_approval(self) -> None:
         from muse.evolution_executor import ApprovedCodeChangeExecutor, build_approved_code_change_handler
 

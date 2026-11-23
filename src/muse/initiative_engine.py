@@ -142,6 +142,26 @@ class InitiativeStore:
             BEFORE DELETE ON initiative_knowledge_links
             BEGIN SELECT RAISE(ABORT,'initiative knowledge links are append-only'); END;
         """)
+        self.connection.executescript("""
+            CREATE TABLE IF NOT EXISTS initiative_concept_updates(
+                id TEXT PRIMARY KEY,
+                initiative_id TEXT NOT NULL REFERENCES creator_initiatives(id) ON DELETE RESTRICT,
+                previous_sha256 TEXT NOT NULL,
+                new_sha256 TEXT NOT NULL,
+                actor TEXT NOT NULL,
+                source TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(initiative_id,new_sha256)
+            );
+            CREATE INDEX IF NOT EXISTS idx_initiative_concept_updates_timeline
+                ON initiative_concept_updates(initiative_id,created_at,id);
+            CREATE TRIGGER IF NOT EXISTS initiative_concept_updates_no_update
+                BEFORE UPDATE ON initiative_concept_updates
+                BEGIN SELECT RAISE(ABORT,'initiative concept updates are append-only'); END;
+            CREATE TRIGGER IF NOT EXISTS initiative_concept_updates_no_delete
+                BEFORE DELETE ON initiative_concept_updates
+                BEGIN SELECT RAISE(ABORT,'initiative concept updates are append-only'); END;
+        """)
         feedback_columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(initiative_feedback)")}
         if "evolution_cycle_id" not in feedback_columns:
             self.connection.execute("ALTER TABLE initiative_feedback ADD COLUMN evolution_cycle_id TEXT NOT NULL DEFAULT ''")
@@ -444,6 +464,68 @@ class InitiativeStore:
             "SELECT * FROM creator_initiatives WHERE id=?", (item_id,)
         ).fetchone()
         return self._decode(updated)
+
+    def update_concept(
+        self, item_id, concept, *, expected_current_sha256, actor="researcher",
+        source="research_context_refresh",
+    ):
+        """Refresh a proposed initiative's research context with optimistic concurrency and an append-only audit."""
+        if not isinstance(item_id, str) or not item_id.strip() or len(item_id) > 128:
+            raise ValueError("item_id must be a non-empty bounded string")
+        if not isinstance(expected_current_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_current_sha256):
+            raise ValueError("expected_current_sha256 must be a lowercase SHA-256 digest")
+        for value, field in ((actor, "actor"), (source, "source")):
+            if not isinstance(value, str) or not value.strip() or len(value) > 200:
+                raise ValueError(f"{field} must be a non-empty bounded string")
+        if isinstance(concept, dict):
+            concept_value = concept
+        elif isinstance(concept, str):
+            try:
+                concept_value = json.loads(concept)
+            except json.JSONDecodeError as exc:
+                raise ValueError("concept must be valid JSON") from exc
+        else:
+            raise ValueError("concept must be a JSON object or serialized JSON object")
+        if not isinstance(concept_value, dict):
+            raise ValueError("concept must decode to a JSON object")
+        concept_text = json.dumps(concept_value, ensure_ascii=False, sort_keys=True, default=str)
+        if len(concept_text) > 12000:
+            raise ValueError("concept exceeds the 12000-character storage limit")
+        new_sha256 = hashlib.sha256(concept_text.encode("utf-8")).hexdigest()
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            current = self.connection.execute(
+                "SELECT status,concept FROM creator_initiatives WHERE id=?", (item_id,),
+            ).fetchone()
+            if current is None:
+                raise KeyError(item_id)
+            if current["status"] != "proposed":
+                raise ValueError("only proposed initiatives can receive an automatic research-context refresh")
+            previous_sha256 = hashlib.sha256(str(current["concept"] or "").encode("utf-8")).hexdigest()
+            if previous_sha256 != expected_current_sha256:
+                raise ValueError("initiative concept changed since it was read; refusing to overwrite")
+            if new_sha256 == previous_sha256:
+                self.connection.commit()
+                row = self.connection.execute("SELECT * FROM creator_initiatives WHERE id=?", (item_id,)).fetchone()
+                return self._decode(row)
+            now = self._now()
+            cursor = self.connection.execute(
+                "UPDATE creator_initiatives SET concept=?,updated_at=? WHERE id=? AND status='proposed'",
+                (concept_text, now, item_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("initiative status changed before research-context refresh")
+            self.connection.execute(
+                "INSERT OR IGNORE INTO initiative_concept_updates "
+                "(id,initiative_id,previous_sha256,new_sha256,actor,source,created_at) VALUES(?,?,?,?,?,?,?)",
+                (uuid.uuid4().hex, item_id, previous_sha256, new_sha256, actor.strip(), source.strip(), now),
+            )
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
+        row = self.connection.execute("SELECT * FROM creator_initiatives WHERE id=?", (item_id,)).fetchone()
+        return self._decode(row)
 
     def record_feedback(self, initiative_id, feedback, *, decision, reviewer="creator",
                         source="manual", evolution_cycle_id=None):
@@ -1881,6 +1963,40 @@ class InitiativeStore:
             "SELECT * FROM initiative_video_attempts WHERE attempt_id=?", (attempt_id,)
         ).fetchone()
         return dict(row) if row is not None else None
+
+    def attach_video_attempt_approval(self, attempt_id, approval_task_id):
+        """Bind a queued preview attempt to its Commander approval ticket exactly once."""
+        self._validate_video_attempt_id(attempt_id)
+        if (not isinstance(approval_task_id, str) or not approval_task_id.strip()
+                or len(approval_task_id) > 128 or any(ord(ch) < 32 for ch in approval_task_id)):
+            raise ValueError("approval_task_id must be non-empty bounded text")
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.connection.execute(
+                "SELECT status,approval_task_id,cancel_requested FROM initiative_video_attempts WHERE attempt_id=?",
+                (attempt_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(attempt_id)
+            if row["status"] != "queued" or row["cancel_requested"]:
+                raise ValueError("only active queued video attempts can receive an approval ticket")
+            existing = row["approval_task_id"]
+            if existing not in (None, approval_task_id):
+                raise ValueError("video attempt is already bound to a different approval ticket")
+            if existing is None:
+                cursor = self.connection.execute(
+                    "UPDATE initiative_video_attempts SET approval_task_id=? "
+                    "WHERE attempt_id=? AND status='queued' AND cancel_requested=0 "
+                    "AND approval_task_id IS NULL",
+                    (approval_task_id, attempt_id),
+                )
+                if cursor.rowcount != 1:
+                    raise ValueError("video attempt ownership changed before approval binding")
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
+        return self.get_video_attempt(attempt_id)
 
     def list_queued_approval_video_attempts(self, *, limit=200):
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 200:

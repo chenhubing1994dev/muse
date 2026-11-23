@@ -20,7 +20,7 @@ from cryptography.x509.oid import NameOID
 
 from muse.web_portal import (
     PortalError, PortalSessionStore, UPSTREAM_READ_ROUTES, WebPortalServer,
-    safe_static_file, validate_public_origin,
+    parse_trusted_proxy_cidrs, resolve_client_address, safe_static_file, validate_public_origin,
 )
 from muse.plugin_platform import PluginRegistry
 from muse.capabilities import CapabilityRegistry
@@ -38,6 +38,23 @@ class WebPortalPolicyTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(PortalError):
                 validate_public_origin(value)
 
+    def test_forwarded_client_ip_requires_explicit_trusted_proxy_and_single_ip(self) -> None:
+        trusted = parse_trusted_proxy_cidrs(["10.1.2.0/24"])
+        self.assertEqual(resolve_client_address("10.1.2.3", ["198.51.100.27"], trusted), "198.51.100.27")
+        self.assertEqual(resolve_client_address("203.0.113.4", ["198.51.100.27"], trusted), "203.0.113.4")
+        self.assertEqual(resolve_client_address("10.1.2.3", ["198.51.100.27, 192.0.2.1"], trusted), "10.1.2.3")
+        self.assertEqual(resolve_client_address("10.1.2.3", ["198.51.100.27", "192.0.2.1"], trusted), "10.1.2.3")
+        self.assertEqual(resolve_client_address("10.1.2.3", ["not-an-ip"], trusted), "10.1.2.3")
+        self.assertEqual(resolve_client_address("10.1.2.3", ["198.51.100.27"], ()), "10.1.2.3")
+        with self.assertRaises(PortalError):
+            parse_trusted_proxy_cidrs(["10.0.0.1/8"])
+        with self.assertRaises(PortalError):
+            parse_trusted_proxy_cidrs(["not-a-cidr"])
+        with self.assertRaises(PortalError):
+            parse_trusted_proxy_cidrs(["0.0.0.0/0"])
+        with self.assertRaises(PortalError):
+            parse_trusted_proxy_cidrs(["::/0"])
+
     def test_upstream_routes_are_get_only_allowlisted_data(self) -> None:
         self.assertEqual(set(UPSTREAM_READ_ROUTES), {"overview", "agents", "inspirations", "knowledge", "system"})
         self.assertNotIn("tasks", UPSTREAM_READ_ROUTES)
@@ -50,6 +67,10 @@ class WebPortalPolicyTests(unittest.TestCase):
         self.assertEqual(web_portal.UPSTREAM_WRITE_ROUTES, {
             "inspirations": "/api/v1/inspirations",
             "inspiration-evolve": "/api/v1/inspirations/evolve",
+            "daemon-start": "/api/v1/daemon/start",
+            "daemon-pause": "/api/v1/daemon/pause",
+            "daemon-resume": "/api/v1/daemon/resume",
+            "daemon-stop": "/api/v1/daemon/stop",
         })
         root = Path(__file__).resolve().parents[1]
         html = (root / "web-portal" / "index.html").read_text(encoding="utf-8")
@@ -57,12 +78,24 @@ class WebPortalPolicyTests(unittest.TestCase):
         self.assertIn('id="inspiration-create-form"', html)
         self.assertIn("/api/v1/portal/inspirations", app)
         self.assertIn("/api/v1/portal/inspirations/evolve", app)
+        self.assertIn('data-create-offline-product="true"', app)
+        self.assertIn("create_offline_product: createOfflineProduct", app)
+        self.assertIn("/api/v1/portal/runtime/control", app)
+        self.assertIn('data-runtime-action="start"', html)
+        self.assertIn('data-runtime-action="stop"', html)
         self.assertNotIn("enqueue_video", app)
         self.assertIn('api("/api/v1/portal/tasks").catch', app)
         self.assertIn("任务账本暂不可用", app)
         self.assertIn('<option value="false" selected>', html)
         self.assertIn('<option value="true">允许本条灵感进行外部联网检索</option>', html)
         self.assertIn("易经、紫微、奇门、大六壬只用于生成灵感假设", html)
+
+    def test_plugin_hub_displays_signature_trust_state_without_execution_claims(self) -> None:
+        app = Path(__file__).resolve().parents[1].joinpath("web-portal", "app.js").read_text(encoding="utf-8")
+        self.assertIn("p.signature", app)
+        self.assertIn("签名状态", app)
+        self.assertIn("p.execution_enabled", app)
+        self.assertIn("不会执行第三方代码", app)
 
     def test_portal_data_paths_resolve_real_muse_stores_without_creating_empty_databases(self) -> None:
         from muse.web_portal import resolve_portal_data_paths
@@ -233,6 +266,15 @@ class WebPortalPolicyTests(unittest.TestCase):
             with self.assertRaisesRegex(PortalError, "does not match stored administrator credential"):
                 PortalSessionStore(database, "different-admin-secret-" + "y" * 32)
 
+    def test_initial_admin_password_generator_returns_high_entropy_urlsafe_secret(self) -> None:
+        from muse.web_portal_admin import generate_initial_password
+
+        first = generate_initial_password()
+        second = generate_initial_password()
+        self.assertGreaterEqual(len(first), 64)
+        self.assertTrue(all(character.isascii() and (character.isalnum() or character in "-_") for character in first))
+        self.assertNotEqual(first, second)
+
     def test_admin_password_rotation_cli_prompts_and_updates_persisted_hash(self) -> None:
         from muse.web_portal_admin import rotate_admin_password
 
@@ -365,11 +407,19 @@ class WebPortalHttpsIntegrationTests(unittest.TestCase):
                             "status": "not_researched", "allow_external_research": payload.get("allow_external_research", False),
                         }}
                     elif self.path == "/api/v1/inspirations/evolve":
+                        status = 202
+                        result = {"api_version": 1, "accepted": True, "task_id": "f" * 32,
+                                  "status": "queued", "deduplicated": False,
+                                  "execution": "commander_task_queue"}
+                    elif self.path in {
+                        "/api/v1/daemon/start", "/api/v1/daemon/pause",
+                        "/api/v1/daemon/resume", "/api/v1/daemon/stop",
+                    }:
+                        action = self.path.rsplit("/", 1)[-1]
+                        state = {"start": "running", "pause": "paused", "resume": "running", "stop": "stopped"}[action]
                         status = 200
-                        result = {"api_version": 1, "evolution": {
-                            "status": "completed", "inspiration_id": payload.get("inspiration_id"),
-                            "external_network_called": False, "approval_required": True,
-                            "automatic_code_changes": False, "blueprint_path": "data/prometheus/blueprints/test.json",
+                        result = {"api_version": 1, "result": {
+                            "state": state, "running": state in {"running", "paused"},
                         }}
                     else:
                         status = 404
@@ -387,6 +437,10 @@ class WebPortalHttpsIntegrationTests(unittest.TestCase):
             upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
             upstream_thread.start()
             static_dir = Path(__file__).resolve().parents[1] / "web-portal"
+            with PluginRegistry(root / "plugins.sqlite3"):
+                pass
+            with CapabilityRegistry(root / "capabilities.sqlite3"):
+                pass
             with TaskQueue(root / "tasks.sqlite3") as queue:
                 private_task = queue.enqueue(
                     "Private research task", {"kind": "research", "private_detail": "must-not-leak"},
@@ -400,6 +454,7 @@ class WebPortalHttpsIntegrationTests(unittest.TestCase):
                 upstream_token="internal-status-bearer-token-not-for-browser",
                 plugin_db=root / "plugins.sqlite3", task_db=root / "tasks.sqlite3",
                 capability_db=root / "capabilities.sqlite3", static_dir=static_dir,
+                trusted_proxy_cidrs=("127.0.0.0/24",),
             )
             portal_thread = threading.Thread(target=portal.serve_forever, daemon=True)
             portal_thread.start()
@@ -414,10 +469,17 @@ class WebPortalHttpsIntegrationTests(unittest.TestCase):
                 homepage = response.read()
                 self.assertIn(b"plugin-discover-form", homepage)
                 self.assertIn(b"task-list", homepage)
+                self.assertIn(b"runtime-state", homepage)
+                self.assertIn(b'data-runtime-action="start"', homepage)
+                self.assertIn(b'data-runtime-action="stop"', homepage)
                 connection.request("GET", "/healthz", headers={"Host": "muse.example.com"})
                 response = connection.getresponse()
                 self.assertEqual(response.status, 200)
                 self.assertEqual(json.loads(response.read())["check"], "liveness")
+                connection.request("GET", "/readyz", headers={"Host": "muse.example.com"})
+                response = connection.getresponse()
+                self.assertEqual(response.status, 200)
+                self.assertEqual(json.loads(response.read())["check"], "readiness")
                 connection.putrequest("GET", "/healthz", skip_host=True)
                 connection.putheader("Host", "muse.example.com")
                 connection.putheader("Host", "attacker.example.com")
@@ -433,6 +495,14 @@ class WebPortalHttpsIntegrationTests(unittest.TestCase):
                 response = connection.getresponse()
                 self.assertEqual(response.status, 400)
                 response.read()
+                connection.putrequest("GET", "/healthz", skip_host=True)
+                connection.putheader("Host", "attacker.example.com")
+                connection.putheader("X-Forwarded-Host", "muse.example.com")
+                connection.putheader("X-Forwarded-Proto", "https")
+                connection.endheaders()
+                response = connection.getresponse()
+                self.assertEqual(response.status, 400)
+                response.read()
                 connection.request("GET", "/api/v1/portal/tasks", headers=headers)
                 response = connection.getresponse()
                 self.assertEqual(response.status, 401)
@@ -442,7 +512,7 @@ class WebPortalHttpsIntegrationTests(unittest.TestCase):
                 self.assertEqual(response.status, 401)
                 response.read()
 
-                login_headers = {**headers, "Content-Type": "application/json"}
+                login_headers = {**headers, "Content-Type": "application/json", "X-Forwarded-For": "198.51.100.27"}
                 connection.request("POST", "/api/v1/portal/login", body=json.dumps({
                     "password": "i" * 32,
                 }), headers=login_headers)
@@ -453,11 +523,42 @@ class WebPortalHttpsIntegrationTests(unittest.TestCase):
                 self.assertIn("HttpOnly", response.getheader("Set-Cookie"))
                 self.assertIn("SameSite=Strict", response.getheader("Set-Cookie"))
                 self.assertNotIn("internal-status-bearer-token", json.dumps(login))
+                with portal.sessions._lock:
+                    login_event = portal.sessions.connection.execute(
+                        "SELECT client_address FROM web_login_events WHERE outcome='login_success' ORDER BY id DESC LIMIT 1"
+                    ).fetchone()
+                self.assertEqual(login_event["client_address"], "198.51.100.27")
 
                 connection.request("GET", "/api/v1/portal/session", headers={**headers, "Cookie": cookie})
                 response = connection.getresponse()
                 self.assertEqual(response.status, 200)
                 csrf = json.loads(response.read())["csrf_token"]
+
+                runtime_control_path = "/api/v1/portal/runtime/control"
+                connection.request("POST", runtime_control_path, body=json.dumps({"action": "start"}), headers={
+                    **login_headers, "Cookie": cookie,
+                })
+                response = connection.getresponse()
+                self.assertEqual(response.status, 403)
+                response.read()
+                before_invalid_runtime = len(upstream_state["paths"])
+                connection.request("POST", runtime_control_path, body=json.dumps({"action": "restart"}), headers={
+                    **login_headers, "Cookie": cookie, "X-Muse-CSRF": csrf,
+                })
+                response = connection.getresponse()
+                self.assertEqual(response.status, 400)
+                response.read()
+                self.assertEqual(len(upstream_state["paths"]), before_invalid_runtime)
+                for action, expected_state in (("start", "running"), ("pause", "paused"), ("resume", "running"), ("stop", "stopped")):
+                    connection.request("POST", runtime_control_path, body=json.dumps({"action": action}), headers={
+                        **login_headers, "Cookie": cookie, "X-Muse-CSRF": csrf,
+                    })
+                    response = connection.getresponse()
+                    self.assertEqual(response.status, 200)
+                    control = json.loads(response.read())
+                    self.assertEqual(control["result"]["state"], expected_state)
+                    self.assertEqual(upstream_state["paths"][-1], f"/api/v1/daemon/{action}")
+                    self.assertEqual(upstream_state["post_payloads"][-1], {})
 
                 connection.request("GET", "/api/v1/portal/overview", headers={**headers, "Cookie": cookie})
                 response = connection.getresponse()
@@ -518,20 +619,40 @@ class WebPortalHttpsIntegrationTests(unittest.TestCase):
                 response = connection.getresponse()
                 self.assertEqual(response.status, 400)
                 response.read()
-                self.assertEqual(upstream_state["paths"][-1], "/api/v1/inspirations")
-
-                connection.request("POST", evolve_path, body=json.dumps({"inspiration_id": inspiration_id}), headers={
-                    **login_headers, "Cookie": cookie, "X-Muse-CSRF": csrf,
-                })
+                request_id = "e" * 32
+                connection.request("POST", evolve_path, body=json.dumps({
+                    "inspiration_id": inspiration_id, "request_id": request_id,
+                }), headers={**login_headers, "Cookie": cookie, "X-Muse-CSRF": csrf})
                 response = connection.getresponse()
-                self.assertEqual(response.status, 200)
-                evolution = json.loads(response.read())["evolution"]
-                self.assertEqual(evolution["status"], "completed")
-                self.assertFalse(evolution["external_network_called"])
-                self.assertTrue(evolution["approval_required"])
-                self.assertFalse(evolution["automatic_code_changes"])
+                self.assertEqual(response.status, 202)
+                queued_evolution = json.loads(response.read())
+                self.assertEqual(queued_evolution["task_id"], "f" * 32)
+                self.assertEqual(queued_evolution["status"], "queued")
+                self.assertEqual(upstream_state["post_payloads"][-1], {
+                    "inspiration_id": inspiration_id, "request_id": request_id,
+                    "create_offline_product": False,
+                })
                 self.assertEqual(upstream_state["paths"][-1], "/api/v1/inspirations/evolve")
-                self.assertEqual(upstream_state["post_payloads"][-1], {"inspiration_id": inspiration_id})
+                product_request_id = "a" * 32
+                connection.request("POST", evolve_path, body=json.dumps({
+                    "inspiration_id": inspiration_id, "request_id": product_request_id,
+                    "create_offline_product": True,
+                }), headers={**login_headers, "Cookie": cookie, "X-Muse-CSRF": csrf})
+                response = connection.getresponse()
+                self.assertEqual(response.status, 202)
+                self.assertEqual(upstream_state["post_payloads"][-1], {
+                    "inspiration_id": inspiration_id, "request_id": product_request_id,
+                    "create_offline_product": True,
+                })
+                for invalid_value in ("true", 1, None):
+                    connection.request("POST", evolve_path, body=json.dumps({
+                        "inspiration_id": inspiration_id, "request_id": "b" * 32,
+                        "create_offline_product": invalid_value,
+                    }), headers={**login_headers, "Cookie": cookie, "X-Muse-CSRF": csrf})
+                    response = connection.getresponse()
+                    self.assertEqual(response.status, 400)
+                    response.read()
+
 
 
                 manifest = {
@@ -622,23 +743,10 @@ class WebPortalHttpsIntegrationTests(unittest.TestCase):
                     **login_headers, "Cookie": cookie, "X-Muse-CSRF": csrf,
                 })
                 response = connection.getresponse()
-                self.assertEqual(response.status, 202)
-                queued = json.loads(response.read())
-                self.assertEqual(queued["status"], "queued_for_commander_approval")
+                self.assertEqual(response.status, 409)
+                rejected = json.loads(response.read())
+                self.assertIn("verified publisher signature", rejected["error"])
 
-                connection.request("POST", request_path, body=json.dumps({"payload": []}), headers={
-                    **login_headers, "Cookie": cookie, "X-Muse-CSRF": csrf,
-                })
-                response = connection.getresponse()
-                self.assertEqual(response.status, 400)
-                response.read()
-
-                task_id = queued["commander_result"]["task_id"]
-                with TaskQueue(root / "tasks.sqlite3") as queue:
-                    task = queue.get(task_id)
-                self.assertEqual(task["status"], "waiting_approval")
-                self.assertFalse(task["payload"]["execution_enabled"])
-                self.assertTrue(task["payload"]["execution_adapter_required"])
 
                 connection.request("POST", "/api/v1/portal/plugins/research.cross-check/enable",
                     body=json.dumps({"confirmation": "ENABLE-PLUGIN"}), headers={
@@ -691,6 +799,12 @@ class WebPortalHttpsIntegrationTests(unittest.TestCase):
                 response = connection.getresponse()
                 self.assertEqual(response.status, 401)
                 response.read()
+
+                (root / "capabilities.sqlite3").unlink()
+                connection.request("GET", "/readyz", headers={"Host": "muse.example.com"})
+                response = connection.getresponse()
+                self.assertEqual(response.status, 503)
+                self.assertEqual(json.loads(response.read())["status"], "not_ready")
             finally:
                 connection.close()
                 portal.shutdown()

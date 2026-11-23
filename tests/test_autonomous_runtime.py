@@ -380,6 +380,13 @@ class AutonomousRuntimeTests(unittest.TestCase):
     def test_commander_video_worker_dispatches_one_task_when_opted_in(self):
         with tempfile.TemporaryDirectory() as directory:
             supervisor = self.make_supervisor(Path(directory))
+            provider = type("Provider", (), {
+                "issue_video_admission_grant": lambda self, store, request: {},
+                "readiness": lambda self: {"status": "ready"},
+            })()
+            request_factory = lambda **kwargs: kwargs
+            supervisor.video_admission_provider = provider
+            supervisor.video_admission_request_factory = request_factory
             expected = {"status": "idle", "claimed": False}
             with patch.dict(os.environ, {"MUSE_ENABLE_VIDEO_WORKER": "1"}):
                 with patch("muse.video_task_worker.VideoTaskWorker.run_once", return_value=expected) as run_once:

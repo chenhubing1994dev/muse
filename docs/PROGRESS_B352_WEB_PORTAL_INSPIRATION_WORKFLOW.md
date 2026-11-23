@@ -45,14 +45,14 @@
 - 响应字段仅包含 task id、标题、状态、时间、优先级、尝试次数与 workload class；不返回 payload、内部 lease、worker 身份或执行参数。
 - 网页新增任务账本面板；异常相似路径不会命中该接口，任务队列仍由唯一 Commander 管理。账本接口故障时仅该面板局部降级，不阻断其他仪表板数据。
 ## 本轮验证
-- Python 全仓：**2,385 tests / 0 failures / 0 errors / 1 skipped**。
-- Web Portal + Plugin 专项：**25/25 passed**，包括 TLS 登录、Cookie/CSRF、任务账本脱敏、插件 Manifest、Commander 入队、灵感捕获与演化代理、服务器数据路径解析。
+- Python 全仓最新复测：**2,404 tests / 0 failures / 0 errors / 0 skipped**（`scripts/validate_full_suite.py`，Job `wc_job_jYcIORrUNPTKV8qR` exit 0）。此前 1 项 skipped 的真太阳时上游比对测试，确认隔离环境中 `celestial-calendar==0.8.0` 可正常导入，单测 1/1 PASS；不需安装到 Muse 主环境。
+- Web Portal + Plugin + Portal DB maintenance 专项：**40/40 passed**（76.309 秒）；另对曾发生导入错误的 8 个测试模块执行针对性复测：**74/74 passed**。
 - 前端 Node：**66/66 passed**（`node --test`，ui-prototype）；`web-portal/app.js` 与 `sw.js` Node syntax check 通过。
 - `node --check web-portal/app.js`：通过。
 - `node --check web-portal/sw.js`：通过。
 - `compileall src/muse tests`：通过。
 - `muse.web_portal --help`：通过。
-- 最新全仓回归 `scripts/validate_full_suite.py`：**2,385 tests / 0 failures / 0 errors / 1 skipped**（325.874 秒）；早前 2,384 项记录已由此结果取代。另一次 360 秒 Runner shell 尝试超时，不计入测试结果。
+- 全仓回归脚本现明确将项目根目录加入 `sys.path`，修复了 `scripts`、`tools`、`tests` 命名空间包在部分 Runner 启动方式下不可导入的问题；此前一次复测出现 8 个导入错误（Runner 包装器错误地报告 exit 0），修复后 8 个受影响模块 74/74 PASS，最终全仓 2,404/0/0/0。
 
 ## 仍未完成，不能宣称已完成
 
@@ -79,12 +79,18 @@
 
 - Portal session SQLite 新增 `web_login_events` 审计表及索引；只记录来源地址、事件类型与时间，不记录密码、Session Token 或 Bearer。
 - 登录失败限速从进程内存迁移到 SQLite：同一来源地址 15 分钟内连续 5 次失败后返回 429；成功登录会重置该地址的失败计数。事件保留 7 天并限制最多 10,000 条，Portal 重启后限速状态仍然有效。
-- 新增精确 `GET /healthz` HTTPS liveness endpoint，只返回版本与 liveness 状态，不暴露数据库、队列或身份信息；它不冒充上游依赖 readiness。
+- 新增精确 `GET /healthz` HTTPS liveness 与 `GET /readyz` readiness endpoint。Readiness 只读检查 Session/Plugin/Task/Capability SQLite 表结构可访问性及本机 Status API overview；缺失/不可用时返回 503，响应不暴露数据库路径或内部错误。
 - GET 与 POST 均拒绝重复 Host / Origin 标头；Host 必须恰好一个且与配置主机完全相符，POST 必须恰好一个 Origin，避免代理与应用层对重复权威标头产生不同解读。
 - 管理員密碼門檻嚴格檢查 32–1024 個有效 UTF-8 字節（不是字符數）；拒絕無效 Unicode。首次啟動將獨立隨機鹽與 scrypt 摘要持久化至 Session SQLite，不保存明文；後續啟動要求 `MUSE_WEB_PASSWORD` 與持久化憑證匹配，否則拒絕啟動。新增 `py -3.11 -m muse.web_portal_admin --session-db <session-db>` 無回顯密碼輪換工具，輪換需先停 Portal，成功後撤銷所有瀏覽器 Session。
 - 部署指南補充高熵隨機管理員密碼注入建議，以及 WAL 數據庫應使用 SQLite Online Backup API / `Connection.backup()` 或停機一致性備份的說明。
-- Web Portal + Plugin Platform 定向回歸：**35/35 passed**（70.038 秒，exit 0），覆蓋 UTF-8/持久化管理員憑證、密碼輪換、持久登錄限速/審計、重複 Host/Origin 拒絕、TLS liveness、Ed25519 信任根/簽名包/撤銷與 Commander 門禁。
-- 最新全倉 Python 回歸：**2,398 tests / 0 failures / 0 errors / 0 skipped**（336.476 秒，`scripts/validate_full_suite.py`，Job `wc_job_R5C9gPKXTb0KGhmn` exit 0）。本轮未更改共享 Supervisor、Status API、TaskQueue、Rust/Tauri 或 Companion 文件；Portal 仍未纳入 Supervisor，也未部署公网。
+- 历史 Web Portal + Plugin Platform 定向回归：**36/36 passed**（70.122 秒）；现已由后续 40/40 Portal + Plugin + DB maintenance 回归取代。
+- 历史全仓 Python 回归 2,399 项已由最新 **2,404 tests / 0 failures / 0 errors / 0 skipped**（339.125 秒）取代。全仓导入路径修复与真太阳时可选依赖补齐均已复测通过；Portal 仍未纳入 Supervisor，也未部署公网。
+
+## 2026-11-23 follow-up — SQLite Portal backup / restore
+
+- 新增 `muse-portal-db backup`：使用 SQLite Online Backup API 获取 WAL 一致快照，执行 `PRAGMA quick_check`，为每个数据库生成 SHA-256 与 manifest；支持最多 16 个来源数据库。
+- 新增 `muse-portal-db restore`：要求调用方提供 manifest 中的 SHA-256，先做常量时间摘要比对，再恢复到新路径、拒绝覆盖已有文件，并再次执行完整性检查。
+- 新增 CLI / WAL snapshot / tampered digest / restore no-overwrite 测试；Portal + Plugin + maintenance 专项 40/40 PASS。备份目录须位于静态网页目录外并按主机权限保护；恢复时先写入新路径验证，不自动替换生产数据库。
 
 ## Linux systemd deployment template
 
@@ -93,3 +99,30 @@
 - `docs/WEB_PORTAL_SERVER_DEPLOYMENT_V1.md` 新增 Linux 部署步骤、密钥文件权限、真实数据路径和公网监听防火墙注意事项。
 - 新增 Linux systemd 部署静态契约测试：**3/3 passed**。这只验证模板的安全配置与路径约束；当前 Runner 是 Windows，尚未执行 `systemd-analyze verify` 或 Linux 实机启动。
 - 最新全仓回归已包含上述 3 项部署模板测试；这不等于在 Linux 主机完成 systemd 验收。
+
+## 2026-11-23 follow-up — Inspiration / Harness test integrity
+
+- 全仓 AST 审计发现两个测试类存在同名 `test_*` 方法定义，Python 后定义覆盖前定义，导致重复代码/空壳测试不可见；已删除被覆盖的重复片段，保留实际断言版本。
+- 定向灵感演化 + Harness Evolution 回归：**27/27 passed**（7.486 秒）。
+- 再次扫描 `tests/` 全部 `test_*.py` 的类级测试方法名：**0 个重复定义**。
+- 最新全仓 Python 回归：**2,406 tests / 0 failures / 0 errors / 0 skipped**（365.160 秒），Job `wc_job_0kuK9CqmQVlQdY9F` exit 0。
+- 本次仅清理测试代码；未改变插件执行边界、Commander 调度权或生产运行时行为。
+
+## 2026-11-23 follow-up — Inspiration to Creator Initiative
+
+- `evolve_inspiration_closed_loop` 新增严格布尔 opt-in `create_business_initiative`，默认关闭；仅当调用方提供完整商业简报/评分/数据库并显式开启时，才把研究候选提升为现有 Creator Initiative 的 `proposed` / `draft` 草案。
+- 立项复用 `BusinessOpportunityStore.promote_to_initiative`，在草案中保留业务候选 ID、证据引用、客户验证步骤和创作 brief；Research Wiki 节点同步记录 initiative ID 与草案状态。
+- 增加 initiative DB 固定路径、符号链接和数据库路径碰撞防护。失败时返回部分成功状态，不谎报已完成立项。
+- 该衔接不创建 Commander 派工，不启动 GPU、不发布内容；视频执行仍须走既有 Commander 审批票据。
+- 灵感演化 + Business Opportunity + Research Business Bridge 专项：**33/33 passed**（9.999 秒）；全仓重复测试方法扫描仍为 **0**。
+- 本轮全仓 Python 回归：**2,408 tests / 0 failures / 0 errors / 0 skipped**（349.598 秒），Job `wc_job_xSlQtF4z7tGP7gux` exit 0。
+- 全仓完成后补强 Wiki→Initiative 元数据关联断言；最终灵感演化模块复测 **13/13 passed**（10.929 秒），两个改动文件 `py_compile` 通过，测试类重复方法 AST 扫描仍为 **0**。
+
+## 2026-11-23 follow-up — Inspiration to Commander video approval
+
+- `evolve_inspiration_closed_loop` 新增严格布尔 opt-in `request_business_video_approval`；必须同时显式开启 `create_business_initiative=True`，否则拒绝，避免绕过产品立项。
+- 开启后复用 `BusinessOpportunityStore.request_video_approval`，在唯一 Commander TaskQueue 创建 `business_opportunity_video_approval` 审批票据；票据 ID / 状态回写 Research Wiki idea metadata。
+- 该路径只创建 `waiting_approval` 票据；视频 attempt、GPU 执行、发布均未启动。后续执行仍须验证同一票据持久化的人工 `human.decision=approved` 事件。
+- 新增集成测试覆盖严格 opt-in、Commander 票据、Wiki 关联、draft autonomy 与不派工断言；灵感演化模块 **15/15 passed**（11.053 秒），两个改动文件 `py_compile` 通过。
+- 初次全量测试发现新增模块的导入语法错误；已修复并重新执行专项 **15/15 passed**（9.244 秒）。随后全量 `unittest discover`：**2,415 tests / 0 failures / 0 errors / 1 skipped**（341.146 秒），Job `wc_job_l0Na2SNhJChJX9Pl` exit 0。此项是完整 unittest 发现回归，不代表 Linux systemd 实机或公网部署验收。
+- 对 `tests/test_*.py` 重新执行 AST 类级测试方法唯一性扫描：**0 个重复 test_* 定义**。

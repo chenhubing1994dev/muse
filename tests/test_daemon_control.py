@@ -10,6 +10,7 @@ from unittest import mock
 from pathlib import Path
 
 from muse.daemon_control import DaemonError, MuseDaemonController
+from muse.autonomous_runtime import RuntimeStateStore
 
 
 class DaemonControlTests(unittest.TestCase):
@@ -39,6 +40,34 @@ class DaemonControlTests(unittest.TestCase):
         log = self.controller.control_log.read_text(encoding="utf-8").splitlines()
         actions = [json.loads(line)["action"] for line in log]
         self.assertEqual(actions, ["pause", "resume", "stop"])
+
+    def test_start_failure_rolls_back_prepared_runtime_state(self) -> None:
+        self.controller.pause()
+        with mock.patch("muse.daemon_control.subprocess.Popen", side_effect=OSError("spawn denied")):
+            with self.assertRaises(DaemonError):
+                self.controller.start()
+        status = self.controller.status()
+        self.assertEqual(status["state"], "stopped")
+        self.assertFalse(status["running"])
+        self.assertIsNone(status["managed_pid"])
+
+    def test_start_rollback_does_not_stop_a_concurrently_acquired_owner(self) -> None:
+        with RuntimeStateStore(self.controller.state_db) as state:
+            state.acquire("active-owner")
+        self.controller._rollback_unowned_start()
+        status = self.controller.status()
+        self.assertEqual(status["state"], "running")
+        self.assertTrue(status["running"])
+        self.assertEqual(status["owner_id"], "active-owner")
+
+    def test_start_log_open_failure_rolls_back_prepared_runtime_state(self) -> None:
+        self.controller.pause()
+        with mock.patch("builtins.open", side_effect=OSError("disk full")):
+            with self.assertRaises(DaemonError):
+                self.controller.start()
+        status = self.controller.status()
+        self.assertEqual(status["state"], "stopped")
+        self.assertFalse(status["running"])
 
     def test_stop_waits_for_graceful_owner_exit_without_force_signal(self) -> None:
         self.controller._write_lease({"pid": 1234})

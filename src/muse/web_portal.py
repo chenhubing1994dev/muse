@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import hmac
+import ipaddress
 import json
 import mimetypes
 import os
@@ -52,6 +53,10 @@ UPSTREAM_READ_ROUTES = {
 UPSTREAM_WRITE_ROUTES = {
     "inspirations": "/api/v1/inspirations",
     "inspiration-evolve": "/api/v1/inspirations/evolve",
+    "daemon-start": "/api/v1/daemon/start",
+    "daemon-pause": "/api/v1/daemon/pause",
+    "daemon-resume": "/api/v1/daemon/resume",
+    "daemon-stop": "/api/v1/daemon/stop",
 }
 
 
@@ -101,6 +106,56 @@ def validate_public_origin(value: str) -> str:
     if port is not None and port != 443:
         host_part += f":{port}"
     return f"https://{host_part}"
+
+
+def parse_trusted_proxy_cidrs(values: Any) -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:
+    """Parse an explicit, bounded allowlist of proxy peer networks."""
+    if not isinstance(values, (list, tuple)) or len(values) > 16:
+        raise PortalError("trusted proxy CIDRs must be a list of at most 16 networks")
+    networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+    for value in values:
+        if not isinstance(value, str) or not value.strip() or len(value) > 64:
+            raise PortalError("each trusted proxy CIDR must be non-empty text of at most 64 characters")
+        try:
+            network = ipaddress.ip_network(value.strip(), strict=True)
+        except ValueError as exc:
+            raise PortalError("trusted proxy CIDR is invalid or has host bits set") from exc
+        minimum_prefix = 16 if network.version == 4 else 48
+        if network.prefixlen < minimum_prefix:
+            raise PortalError("trusted proxy CIDR is too broad; use a /16-or-narrower IPv4 or /48-or-narrower IPv6 network")
+        if network not in networks:
+            networks.append(network)
+    return tuple(networks)
+
+
+def resolve_client_address(
+    remote_address: str, forwarded_for_values: list[str],
+    trusted_proxy_networks: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...],
+) -> str:
+    """Use one X-Forwarded-For IP only when the direct peer is an allowlisted proxy.
+
+    The proxy must overwrite X-Forwarded-For with its observed client address.
+    Duplicate headers, comma-separated chains, malformed IPs and untrusted peers
+    fall back to the direct TCP peer, preserving a safe shared rate-limit bucket.
+    """
+    try:
+        remote = ipaddress.ip_address(remote_address)
+    except (TypeError, ValueError):
+        return "unknown"
+    if not any(remote in network for network in trusted_proxy_networks):
+        return remote.compressed
+    if not isinstance(forwarded_for_values, list) or len(forwarded_for_values) != 1:
+        return remote.compressed
+    raw_candidate = forwarded_for_values[0]
+    if not isinstance(raw_candidate, str):
+        return remote.compressed
+    candidate = raw_candidate.strip()
+    if not candidate or "," in candidate or "%" in candidate:
+        return remote.compressed
+    try:
+        return ipaddress.ip_address(candidate).compressed
+    except ValueError:
+        return remote.compressed
 
 
 def build_portal_tls_context(certfile: str | Path, keyfile: str | Path) -> ssl.SSLContext:
@@ -404,10 +459,12 @@ class WebPortalServer(ThreadingHTTPServer):
         keyfile: str | Path, session_db: str | Path, password: str,
         upstream_url: str, upstream_token: str, plugin_db: str | Path,
         task_db: str | Path, capability_db: str | Path, static_dir: str | Path,
+        trusted_proxy_cidrs: tuple[str, ...] = (),
     ) -> None:
         self.public_origin = validate_public_origin(public_origin)
         parsed = urlsplit(self.public_origin)
         self.expected_host = parsed.netloc.lower()
+        self.trusted_proxy_networks = parse_trusted_proxy_cidrs(trusted_proxy_cidrs)
         self.tls_context = build_portal_tls_context(certfile, keyfile)
         self.sessions = PortalSessionStore(session_db, password)
         upstream = urlsplit(upstream_url)
@@ -432,7 +489,6 @@ class WebPortalServer(ThreadingHTTPServer):
             raise PortalError("web portal static directory must be a regular non-symlink directory")
         self.static_dir = static_root.resolve()
         self._request_slots = threading.BoundedSemaphore(8)
-        self._inspiration_evolution_slots = threading.BoundedSemaphore(1)
         super().__init__(address, PortalRequestHandler)
 
     def process_request(self, request: Any, client_address: Any) -> None:
@@ -476,6 +532,34 @@ class WebPortalServer(ThreadingHTTPServer):
     def record_login_rate_limited(self, address: str) -> None:
         self.sessions.record_login_event(address, "login_rate_limited")
 
+    def local_readiness(self) -> bool:
+        """Check local Portal stores without creating or mutating databases."""
+        try:
+            if not self.static_dir.is_dir() or not self.upstream_token:
+                return False
+            with self.sessions._lock:
+                credential = self.sessions.connection.execute(
+                    "SELECT 1 FROM web_admin_credentials WHERE credential_id=1"
+                ).fetchone()
+            if credential is None:
+                return False
+            for path in (self.plugin_db, self.task_db, self.capability_db):
+                if path.is_symlink() or not path.is_file():
+                    return False
+                uri = path.resolve().as_uri() + "?mode=ro"
+                connection = sqlite3.connect(uri, uri=True, timeout=1.0)
+                try:
+                    table = connection.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1"
+                    ).fetchone()
+                    if table is None:
+                        return False
+                finally:
+                    connection.close()
+            return True
+        except (OSError, sqlite3.Error):
+            return False
+
     def close_portal(self) -> None:
         self.sessions.close()
 
@@ -503,6 +587,11 @@ class PortalRequestHandler(BaseHTTPRequestHandler):
 
     def _origin_ok(self) -> bool:
         return self._authority_ok(require_origin=True)
+
+    def _client_address(self) -> str:
+        remote = self.client_address[0] if self.client_address else "unknown"
+        forwarded = self.headers.get_all("X-Forwarded-For") or []
+        return resolve_client_address(remote, forwarded, self.server.trusted_proxy_networks)
 
     def _cookie_token(self) -> str:
         cookie = SimpleCookie()
@@ -673,6 +762,18 @@ class PortalRequestHandler(BaseHTTPRequestHandler):
         if parsed.query or parsed.fragment:
             self._json(400, {"error": "query strings are not accepted"})
             return
+        if parsed.path == "/readyz":
+            try:
+                ready = self.server.local_readiness()
+                if ready:
+                    self._upstream("overview")
+                else:
+                    raise PortalError("local readiness checks failed")
+            except Exception:
+                self._json(503, {"api_version": 1, "status": "not_ready", "check": "readiness"})
+            else:
+                self._json(200, {"api_version": 1, "status": "ready", "check": "readiness"})
+            return
         if parsed.path == "/healthz":
             self._json(200, {"api_version": 1, "status": "ok", "check": "liveness"})
             return
@@ -764,7 +865,7 @@ class PortalRequestHandler(BaseHTTPRequestHandler):
             self._json(400, {"error": "query strings are not accepted"})
             return
         if parsed.path == "/api/v1/portal/login":
-            address = self.client_address[0] if self.client_address else "unknown"
+            address = self._client_address()
             if not self.server.login_allowed(address):
                 self.server.record_login_rate_limited(address)
                 self._json(429, {"error": "too many login attempts; retry later"})
@@ -791,7 +892,7 @@ class PortalRequestHandler(BaseHTTPRequestHandler):
             self._json(403, {"error": "session or CSRF validation failed"})
             return
         if parsed.path == "/api/v1/portal/logout":
-            address = self.client_address[0] if self.client_address else "unknown"
+            address = self._client_address()
             self.server.sessions.record_login_event(address, "logout")
             self.server.sessions.revoke(session)
             self._json_with_headers(200, {"api_version": 1, "authenticated": False}, {
@@ -825,20 +926,38 @@ class PortalRequestHandler(BaseHTTPRequestHandler):
                 self._json(503, {"error": "inspiration submission is unavailable"})
             return
 
+        if parsed.path == "/api/v1/portal/runtime/control":
+            try:
+                payload = self._read_json(maximum=1024)
+                action = payload.get("action") if isinstance(payload, dict) else None
+                if not isinstance(payload, dict) or set(payload) != {"action"} or not isinstance(action, str) or action not in {"start", "pause", "resume", "stop"}:
+                    raise PortalError("runtime action must be start, pause, resume, or stop")
+                status, result = self._upstream_post("daemon-" + action, {})
+                self._json(status, result)
+            except PortalUpstreamError:
+                self._json(503, {"error": "Muse autonomous runtime control is unavailable"})
+            except (PortalError, UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError) as exc:
+                self._json(400, {"error": str(exc)[:300]})
+            except Exception:
+                self._json(503, {"error": "runtime control is unavailable"})
+            return
+
         if parsed.path == "/api/v1/portal/inspirations/evolve":
-            acquired = False
             try:
                 payload = self._read_json(maximum=4096)
+                required_fields = {"inspiration_id", "request_id"}
+                allowed_fields = required_fields | {"create_offline_product"}
+                create_offline_product = payload.get("create_offline_product", False)
                 if (
-                    set(payload) != {"inspiration_id"}
-                    or not isinstance(payload["inspiration_id"], str)
+                    set(payload) not in {frozenset(required_fields), frozenset(allowed_fields)}
+                    or not isinstance(payload.get("inspiration_id"), str)
                     or not re.fullmatch(r"[0-9a-f]{32}", payload["inspiration_id"])
+                    or not isinstance(payload.get("request_id"), str)
+                    or not re.fullmatch(r"[0-9a-f]{32}", payload["request_id"])
+                    or not isinstance(create_offline_product, bool)
                 ):
-                    raise PortalError("evolution requires exactly one valid inspiration_id")
-                acquired = self.server._inspiration_evolution_slots.acquire(blocking=False)
-                if not acquired:
-                    self._json(409, {"error": "an inspiration evolution is already running"})
-                    return
+                    raise PortalError("evolution requires valid inspiration_id, request_id and optional boolean create_offline_product")
+                payload["create_offline_product"] = create_offline_product
                 status, result = self._upstream_post("inspiration-evolve", payload)
                 self._json(status, result)
             except PortalUpstreamError:
@@ -849,11 +968,7 @@ class PortalRequestHandler(BaseHTTPRequestHandler):
                 self._json(400, {"error": "evolution payload nesting exceeds the request limit"})
             except Exception:
                 self._json(503, {"error": "inspiration evolution is unavailable"})
-            finally:
-                if acquired:
-                    self.server._inspiration_evolution_slots.release()
             return
-
         if parsed.path == "/api/v1/portal/plugins/discover":
             try:
                 payload = self._read_json(maximum=MAX_PLUGIN_DISCOVERY_BODY)
@@ -996,6 +1111,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cert", required=True)
     parser.add_argument("--key", required=True)
     parser.add_argument("--origin", required=True, help="Exact public HTTPS origin, e.g. https://muse.example.com")
+    parser.add_argument("--trusted-proxy-cidr", action="append", default=[], help="Optional trusted proxy peer network; only one X-Forwarded-For IP is used for login rate limiting")
     parser.add_argument("--static-dir", default="web-portal")
     parser.add_argument("--bind", default="127.0.0.1", help="Defaults to loopback; public binding must be explicit")
     parser.add_argument("--port", type=int, default=8443)
@@ -1009,6 +1125,10 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("set MUSE_WEB_PASSWORD to a secret containing 32-1024 UTF-8 bytes")
     if not 1 <= args.port <= 65535:
         parser.error("--port must be between 1 and 65535")
+    try:
+        parse_trusted_proxy_cidrs(args.trusted_proxy_cidr)
+    except PortalError as exc:
+        parser.error(str(exc))
     try:
         data_paths = resolve_portal_data_paths(
             args.task_db, agent_db=args.agent_db, improvement_db=args.improvement_db,
@@ -1035,6 +1155,7 @@ def main(argv: list[str] | None = None) -> int:
             upstream_url=f"http://127.0.0.1:{upstream.server_address[1]}", upstream_token=token,
             plugin_db=plugin_db, task_db=args.task_db, capability_db=args.capability_db,
             static_dir=args.static_dir,
+            trusted_proxy_cidrs=tuple(args.trusted_proxy_cidr),
         )
     except (OSError, PortalError) as exc:
         upstream.shutdown()
@@ -1042,6 +1163,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(str(exc))
     print(json.dumps({
         "service": "muse-web-portal", "origin": validate_public_origin(args.origin),
+        "configured_public_url": validate_public_origin(args.origin),
+        "trusted_proxy_cidrs": args.trusted_proxy_cidr,
         "address": args.bind, "port": args.port, "tls": "1.2-1.3",
         "browser_api": "authenticated-read+inspiration-capture/evolution+plugin-manifest-discovery+commander-approval-submit",
         "browser_plugin_approval_exposed": False,

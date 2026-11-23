@@ -15,11 +15,11 @@
 
 ## 仍未闭环
 
-- `AutonomousRuntime` 已接受成对的 `video_admission_provider` + `video_admission_request_factory` 并透传给 Worker；未注入时仍 fail-closed。生产 CLI `main()` 与 `DaemonControl.run_once()` 仍未构造/透传真实 Provider/factory，因此默认启动仍不具备 GPU execution eligibility。
-- 已新增 `build_video_admission_request()` 纯工厂，供 Commander runtime 注入；它使用 Worker 提供的原始 CommanderPlan、官方 batch 对象及真实 Attempt/approval/input，不自造 DAG/digest、不批准资源/成本/人工审批。
-- `RuntimeVideoAdmissionProvider` 仍必须由 Commander 注入真实 CapabilityRegistry、scoped AgentRoleRegistry、可信 handler registry，以及可审计的 resource/cost/human gates。GPU resource gate 需查真实 VRAM 与 `GpuResourceCoordinator` lease/supervisor 状态；Worker/Builder 还未在 Wan dispatch 生命周期持有 `GpuLeaseSession`，故当前仍不能宣称消除了资源竞态。
+- B347 已在生产 CLI `main()` 与 `DaemonControl.run_once()` 构造并注入 `VideoAdmissionRuntime` + request factory；仅在 `MUSE_ENABLE_VIDEO_WORKER=1` 时启用。Registry DB 缺失或 readiness 未通过时，Worker 在领取任务前返回 blocked/no-claim；这不代表 GPU 已获准。
+- `build_video_admission_request()` 纯工厂，供 Commander runtime 注入；它绑定 Worker 传入的 plan/batch 与真实 Attempt/approval/input。B347 另加 DAG 来源闸门：只接受 CommanderPlanner 的 `model`/`safe_fallback` source，拒绝已知 Worker/Checkpoint/VideoStudio 本地 plan source；queued video approval 必须带 `commander_plan_id`/`commander_plan_source`，并与 grant request.plan 匹配。已知本地 fallback 不能再取得 Grant；但 Worker 仍需从 Commander 持久化记录恢复 plan，不能自行伪造同名 source，原始 DAG 持久化证明仍未闭环。
+- B347 composition root 只打开现有 CapabilityRegistry/AgentRoleRegistry，并将真实 `generate_wan21_t2v` callable 绑定到 `comfyui_generation`；不会自动注册 capability 或 role。Readiness 要求 ready video capability、非 unverified/metadata-only trust、已知 license、restricted 的 `video_studio/developer` 精确单能力授权及完整成本配置。Grant 时还会复核最新人工批准、真实 GPU lease/supervisor coordination、ComfyUI health/空闲队列与 Wan VRAM headroom。
 - `build_video_studio_batches` 已按拓扑顺序切分 role-homogeneous chunks，同时遵守容量上限、保留跨批 DAG 前置依赖；role 进入 batch fingerprint，`VideoStudioBatch` 暴露 `role` / `required_capabilities`，checkpoint key 绑定完整 DAG + batch SHA-256。`tests/test_video_studio.py` 当前 **25/25 PASS**；该文件由独立 VideoStudio owner 复核接管。
-- 剩余生产闭环：runtime/CLI owner 构造真实 registry + trusted handler + resource/cost/human gates 并注入 Provider/factory；为 Worker/Builder 持有 GPU lease；明确本地 GPU 成本预算/估算策略。缺少 VRAM、GPU lease 或成本证据时必须 fail-closed。
+- 剩余生产闭环：Worker/Checkpoint adapter 必须要求 Commander 签发并持久化的原始 DAG provenance；由授权流程显式登记真实 `comfyui_generation` capability 与 restricted scoped role；配置本地整机功耗、电价、单次预算及最大运行时间；随后才可进行真实 ComfyUI/Wan GPU smoke test。
 ## 本轮 Worker 修复与复验（2026-11-22）
 - 修复 `video_task_worker.py` 中 Grant 消费方法对 `TaskQueue` 的作用域导入错误；将正式导入提升到模块作用域，避免多镜头/授权撤销/Checkpoint 恢复路径出现 `NameError`。
 - 统一租约丢失且无法释放旧 Attempt 时的结果字段，明确返回 `failure_recorded=false`，不把已被新 Epoch 接管的 Attempt 标记为失败。
@@ -29,4 +29,11 @@
 - 修复多镜头旁白分支的 DAG 缺失：即使启用 Cantonese narration（因此 checkpoint 暂不启用），也会先建立完整多镜头 Commander DAG，再为每个镜头派生官方 singleton batch；新增端到端 Worker 回归，确保两个镜头使用同一 DAG hash、各自独立 batch fingerprint 与一次性 Grant。
 - 视频跨链专项 **141 tests / 0 failures / 0 errors**：Worker 35、Builder 63、Checkpoint adapter 10、Admission provider/factory 6、VideoStudio 25、Worker reverification 2；官方 psmux 外层 Job `wc_job_MXZLlFt1DTtNwsTr`、内层 Job `3207ad49d1f24d5882e6c35332740936` 均 exit 0，15.441 秒。FFmpeg `moov atom not found` 来自损坏 MP4 负向夹具，测试通过。
 - 全仓 Python 3.11 `compileall -q src/muse tests scripts` PASS。最新官方 `scripts/muse_dev.py → psmux` 全量 `unittest discover`：**2,322 tests / 0 failures / 0 errors / 1 skipped**，217.952 秒；外层 Job `wc_job_d1zFqRI7IdEAXB0S`、内层 psmux Job `d197fba246d84d69b68402254ceecc94` 均 exit 0。日志中的 FFmpeg、缺失图片、mock provider 与 CLI 参数错误均为既有负向测试的预期输出，不构成失败。
-- 生产端仍未闭环：`AutonomousRuntime` 的 provider/factory 成对注入 seam 已存在，但 CLI `main()` 与 `DaemonControl.run_once()` 尚未注入真实 Provider/factory；生产 resource gate 必须使用真实 GPU VRAM、独占 lease/supervisor 状态，且 Worker/Builder 还未在 Wan dispatch 生命周期持有 `GpuLeaseSession`。全仓没有可信 GPU 电耗/电价估算；不能把本地 GPU 当作零成本，cost gate 缺少明确预算证据时必须拒绝。未执行 GPU 渲染、未自动发布。
+
+## 2026-11-23｜B358 Wan dispatch admission callback 接通
+
+- 代码审查发现真实断链：`VideoProductBuilder` 已传入 `admission_guard`，但 `generate_wan21_t2v()` 原签名不接收该参数，真实 Wan dispatch 会在提交前因 unexpected keyword argument 中断。新增专项测试覆盖真实 lease 回调顺序、拒绝路径及无 lease fail-closed。
+- 修复 `src/muse/wan_video.py`：公开函数接收可选 `admission_guard`；提供 guard 时必须提供 `resource_db`，并且只在 `GpuLeaseSession` 已进入后执行；先通过真实 VRAM headroom 检查，再将同一个 live lease 对象传给 guard，guard 返回后再次验证 lease，最后才允许 `submit_workflow`。拒绝异常原样传播，确保 Worker 的 `VideoAdmissionBlocked` 仍可被识别；没有 lease 或 guard 拒绝时不会提交 ComfyUI workflow。
+- 定向验证：`tests/test_wan_video.py` **18/18 PASS**；全部 `test_video*.py` **359/359 PASS**，包含 VideoProductBuilder、VideoTaskWorker、VideoStudio、Checkpoint、QA 与发布包测试；`compileall -q src/muse` exit 0。全仓全量回归在新增第 18 项单测前为 **2,452 tests / 0 failures / 0 errors / OK**；新增单测随后由 Wan 专项 18/18 覆盖。全程没有启动 ComfyUI、Wan 或真实 GPU 渲染。
+- B347 的生产 Provider/factory 接线已完成并通过定向验证；剩余 blocker 是真实 capability/role/cost 配置、Commander DAG provenance 与真实 GPU 验收。中间一次视频专项快照因并行 Session 短暂写入 `autonomous_research.py` 时出现 IndentationError，owner 恢复后稳定重跑已通过。未执行真实视频生成或自动发布。
+

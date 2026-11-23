@@ -41,6 +41,14 @@
         <div><p class="eyebrow">THE LIVING COMMANDER</p><h1>奇经八脉 · 统一中枢</h1><p class="muted">研究、学习、灵感、知识与进化，在同一条指挥链中汇流。</p></div>
         <button id="refresh" class="quiet" type="button">↻ 刷新</button>
       </div>
+      <p id="runtime-state" class="pill" role="status" aria-live="polite">AUTONOMOUS RUNTIME · CHECKING</p>
+      <div class="runtime-controls">
+        <button class="quiet" type="button" data-runtime-action="start">启动后台运行</button>
+        <button class="quiet" type="button" data-runtime-action="pause" disabled>暂停</button>
+        <button class="quiet" type="button" data-runtime-action="resume" disabled>恢复</button>
+        <button class="quiet" type="button" data-runtime-action="stop" disabled>停止</button>
+        <p id="runtime-control-result" class="form-result" role="status" aria-live="polite">启动后会运行已启用的本地维护与研究例程；代码修改、插件执行和视频生成仍保留各自审批门槛。</p>
+      </div>
       <div class="metrics" id="metrics">
         <article class="metric"><small>排队任务</small><strong id="queued">—</strong><span>QUEUED</span></article>
         <article class="metric"><small>运行任务</small><strong id="running">—</strong><span>RUNNING</span></article>

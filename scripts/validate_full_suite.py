@@ -9,6 +9,7 @@ TEST_ROOT = PROJECT_ROOT / "tests"
 
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 sys.path.insert(0, str(TEST_ROOT))
+sys.path.insert(0, str(PROJECT_ROOT))
 
 # Reuse the reviewed, isolated astronomy runtime for integration tests only.
 # Muse's default Python environment remains free of optional engine dependencies.

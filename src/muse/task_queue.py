@@ -125,6 +125,34 @@ class TaskQueue:
     def _now() -> str:
         return datetime.now(timezone.utc).isoformat()
 
+
+    @staticmethod
+    def approval_timestamp_matches_event(approved_at: Any, event_created_at: Any) -> bool:
+        """Bind approval metadata to the persisted human-decision event timestamp."""
+        if isinstance(approved_at, str):
+            try:
+                approval_time = datetime.fromisoformat(approved_at.replace("Z", "+00:00"))
+            except ValueError:
+                return False
+        elif isinstance(approved_at, (int, float)) and not isinstance(approved_at, bool):
+            try:
+                approval_time = datetime.fromtimestamp(float(approved_at), tz=timezone.utc)
+            except (OverflowError, OSError, TypeError, ValueError):
+                return False
+        else:
+            return False
+        if approval_time.tzinfo is None or approval_time.utcoffset() is None:
+            return False
+        if not isinstance(event_created_at, str):
+            return False
+        try:
+            event_time = datetime.fromisoformat(event_created_at.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        if event_time.tzinfo is None or event_time.utcoffset() is None:
+            return False
+        return abs((event_time - approval_time).total_seconds()) <= 1.0
+
     @staticmethod
     def _decode(row: sqlite3.Row | None) -> dict[str, Any] | None:
         if row is None:
@@ -132,7 +160,8 @@ class TaskQueue:
         return {
             "id": row["id"],
             "idempotency_key": row["idempotency_key"],
-            "title": row["title"],            "payload": json.loads(row["payload_json"]),
+            "title": row["title"],
+            "payload": json.loads(row["payload_json"]),
             "status": row["status"],
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
@@ -225,7 +254,9 @@ class TaskQueue:
         assert task is not None
         return task
 
-    def _record_event(self, task_id: str, event_type: str, actor: str, payload: Any = None) -> None:
+    def _record_event(
+        self, task_id: str, event_type: str, actor: str, payload: Any = None, *, created_at: str | None = None,
+    ) -> None:
         """Append a bounded lifecycle event inside the caller's transaction."""
         if not isinstance(event_type, str) or not event_type.strip() or len(event_type) > 80:
             raise ValueError("event_type must be non-empty text of at most 80 characters")
@@ -236,7 +267,7 @@ class TaskQueue:
             raise ValueError("task event payload exceeds 16 KiB")
         self._connection.execute(
             "INSERT INTO task_events VALUES (?, ?, ?, ?, ?, ?)",
-            (uuid.uuid4().hex, task_id, event_type.strip(), actor.strip(), encoded, self._now()),
+            (uuid.uuid4().hex, task_id, event_type.strip(), actor.strip(), encoded, created_at or self._now()),
         )
 
     def record_event(self, task_id: str, event_type: str, *, actor: str, payload: Any = None) -> dict[str, Any]:
@@ -1222,7 +1253,17 @@ class TaskQueue:
                 "WHERE id = ? AND status = 'queued'",
                 (timestamp, worker_id, expires, timestamp, task_id),
             )
-            self._record_event(task_id, "assignment.claimed", worker_id, {"attempt": int(self._connection.execute("SELECT attempts FROM tasks WHERE id=?", (task_id,)).fetchone()[0])})
+            attempts = int(self._connection.execute(
+                "SELECT attempts FROM tasks WHERE id=?", (task_id,)
+            ).fetchone()[0])
+            lease_id = f"{task_id}:{attempts}"
+            self._record_event(task_id, "assignment.claimed", worker_id, {
+                "attempt": attempts,
+                "lease_epoch": attempts,
+                "lease_id": lease_id,
+                "heartbeat_at": timestamp,
+                "lease_expires_at": expires,
+            })
             self._connection.commit()
             return self.get(task_id)
         except Exception:
@@ -1232,18 +1273,46 @@ class TaskQueue:
     def heartbeat(
         self, task_id: str, *, worker_id: str, lease_seconds: int = 60
     ) -> dict[str, Any] | None:
-        if lease_seconds <= 0:
-            raise ValueError("lease_seconds must be greater than zero")
-        now = datetime.now(timezone.utc)
-        timestamp = now.isoformat()
-        expires = (now + timedelta(seconds=lease_seconds)).isoformat()
-        cursor = self._connection.execute(
-            "UPDATE tasks SET heartbeat_at = ?, lease_expires_at = ?, updated_at = ? "
-            "WHERE id = ? AND status = 'running' AND lease_owner = ?",
-            (timestamp, expires, timestamp, task_id, worker_id),
-        )
-        self._connection.commit()
-        return self.get(task_id) if cursor.rowcount == 1 else None
+        if isinstance(lease_seconds, bool) or not isinstance(lease_seconds, int) or lease_seconds <= 0:
+            raise ValueError("lease_seconds must be a positive integer")
+        if not isinstance(worker_id, str) or not worker_id.strip() or len(worker_id) > 120:
+            raise ValueError("worker_id must be non-empty text of at most 120 characters")
+        self._connection.execute("SAVEPOINT task_queue_heartbeat")
+        try:
+            # Acquire SQLite's writer lock before sampling the lease clock. A
+            # busy_timeout wait must not let a stale pre-lock timestamp renew
+            # a lease that expired while this heartbeat was waiting.
+            self._connection.execute(
+                "UPDATE tasks SET updated_at = updated_at WHERE id = ?",
+                (task_id,),
+            )
+            now = datetime.now(timezone.utc)
+            timestamp = now.isoformat()
+            expires = (now + timedelta(seconds=lease_seconds)).isoformat()
+            cursor = self._connection.execute(
+                "UPDATE tasks SET heartbeat_at = ?, lease_expires_at = ?, updated_at = ? "
+                "WHERE id = ? AND status = 'running' AND lease_owner = ? "
+                "AND lease_expires_at IS NOT NULL AND lease_expires_at > ?",
+                (timestamp, expires, timestamp, task_id, worker_id.strip(), timestamp),
+            )
+            if cursor.rowcount != 1:
+                self._connection.execute("RELEASE SAVEPOINT task_queue_heartbeat")
+                return None
+            attempts = int(self._connection.execute("SELECT attempts FROM tasks WHERE id = ?", (task_id,)).fetchone()[0])
+            lease_id = f"{task_id}:{attempts}"
+            self._record_event(task_id, "assignment.lease_heartbeat", worker_id.strip(), {
+                "attempt": attempts,
+                "lease_epoch": attempts,
+                "lease_id": lease_id,
+                "heartbeat_at": timestamp,
+                "lease_expires_at": expires,
+            })
+            self._connection.execute("RELEASE SAVEPOINT task_queue_heartbeat")
+            return self.get(task_id)
+        except Exception:
+            self._connection.execute("ROLLBACK TO SAVEPOINT task_queue_heartbeat")
+            self._connection.execute("RELEASE SAVEPOINT task_queue_heartbeat")
+            raise
 
     def finish(
         self, task_id: str, *, status: str, result: Any = None,
@@ -1399,16 +1468,20 @@ class TaskQueue:
                     raise PermissionError(
                         "contextual inquiry review requires a valid trusted case-context attachment audit record"
                     )
+            approved_at = self._now()
             payload["_approved"] = True
-            payload["_approval"] = {"approved_by": approved_by.strip(), "approved_at": self._now()}
+            payload["_approval"] = {"approved_by": approved_by.strip(), "approved_at": approved_at}
             cursor = self._connection.execute(
                 "UPDATE tasks SET payload_json = ?, status = 'queued', updated_at = ? "
                 "WHERE id = ? AND status = 'waiting_approval'",
-                (json.dumps(payload, ensure_ascii=False), self._now(), task_id),
+                (json.dumps(payload, ensure_ascii=False), approved_at, task_id),
             )
             if cursor.rowcount != 1:
                 raise ValueError("task is not waiting for approval")
-            self._record_event(task_id, "human.decision", approved_by.strip(), {"decision": "approved"})
+            self._record_event(
+                task_id, "human.decision", approved_by.strip(), {"decision": "approved"},
+                created_at=approved_at,
+            )
             self._connection.commit()
         except Exception:
             self._connection.rollback()

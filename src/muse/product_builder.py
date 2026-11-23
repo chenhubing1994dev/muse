@@ -63,7 +63,9 @@ APP_SCRIPT = r"""
     hypotheses: seed.hypotheses.map((text, index) => ({
       title: "研究假设 " + (index + 1), statement: text, test: "", falsifier: ""
     })),
-    experiments: []
+    experiments: (seed.experiments || []).map((item, index) => typeof item === "string"
+      ? {title: "实验 " + (index + 1), method: item, expected: "", result: ""}
+      : {title: item.title || ("实验 " + (index + 1)), method: item.method || "", expected: item.expected || "", result: item.result || ""})
   });
   let state = defaults();
   const $ = id => document.getElementById(id);
@@ -162,6 +164,13 @@ APP_SCRIPT = r"""
     renderRows("experiments",state.experiments,"experiment");
     renderSeedList("uncertainties",seed.uncertainties);
     renderSeedList("inspiration-refs",seed.inspiration_refs);
+    renderSeedList("research-domains",seed.research_domains);
+    renderSeedList("sources",seed.sources);
+    renderSeedList("counter-evidence",seed.counter_evidence);
+    renderSeedList("tags",seed.tags);
+    $("hypothesis-brief").textContent = seed.hypothesis_brief || "尚未记录";
+    $("epistemic-status").textContent = "认识状态：" + (seed.epistemic_status || "not_recorded")
+      + " · 证据复核：" + (seed.evidence_review_state || "not_recorded") + " · 未经复核，不构成结论。";
   };
   $("add-hypothesis").addEventListener("click", () => {
     state.hypotheses.push({title:"新假设",statement:"",test:"",falsifier:""});
@@ -273,7 +282,7 @@ class _ProductHTMLValidator(HTMLParser):
 class LocalProductBuilder:
     """Build versioned, offline, interactive HTML products from initiative records."""
 
-    BUILDER_VERSION = 2
+    BUILDER_VERSION = 3
     MAX_SEED_ITEMS = 40
 
     def __init__(self, workspace: str | Path) -> None:
@@ -348,20 +357,56 @@ class LocalProductBuilder:
         uncertainties = discoveries.get("uncertainties")
         if not isinstance(uncertainties, list):
             uncertainties = []
+
+        def clean_strings(value: Any, *, limit: int = cls.MAX_SEED_ITEMS, width: int = 2000) -> list[str]:
+            if not isinstance(value, list):
+                return []
+            return [
+                str(item)[:width] for item in value[:limit]
+                if isinstance(item, (str, int, float)) and str(item).strip()
+            ]
+
+        sources = discoveries.get("sources")
+        clean_sources = []
+        if isinstance(sources, list):
+            for item in sources[:cls.MAX_SEED_ITEMS]:
+                if isinstance(item, dict):
+                    parts = [
+                        f"[{str(item.get('direction') or 'source_candidate')[:60]}]",
+                        str(item.get("title") or "Untitled source")[:180],
+                        str(item.get("url") or "")[:300],
+                        f"review={str(item.get('review_state') or 'unreviewed')[:60]}",
+                        f"quality={str(item.get('quality') or 'unassessed')[:60]}",
+                        f"independence={str(item.get('independence') or 'unassessed')[:60]}",
+                    ]
+                    clean_sources.append(" · ".join(part for part in parts if part)[:2000])
+                elif isinstance(item, (str, int, float)) and str(item).strip():
+                    clean_sources.append(str(item)[:2000])
+
+        counter_items = discoveries.get("counter_evidence")
+        clean_counter_evidence = clean_strings(counter_items)
+        clean_experiments = clean_strings(discoveries.get("testable_experiments"), width=3000)
+        clean_domains = clean_strings(discoveries.get("research_domains"), width=300)
+        clean_tags = clean_strings(discoveries.get("tags"), width=200)
         return {
             "id": initiative["id"],
             "title": str(initiative.get("title") or "Muse 灵感实验台")[:300],
             "creator_value": str(initiative.get("creator_value") or "")[:2000],
             "objective": str(concept.get("research_question") or initiative.get("concept") or "")[:4000],
+            "hypothesis_brief": str(concept.get("creator_hypothesis_summary") or "")[:4000],
+            "epistemic_status": str(discoveries.get("epistemic_status") or "not_recorded")[:120],
+            "evidence_review_state": str(discoveries.get("evidence_review_state") or "not_recorded")[:120],
             "hypotheses": clean_hypotheses,
-            "uncertainties": [
-                str(item)[:2000] for item in uncertainties[:cls.MAX_SEED_ITEMS]
-                if isinstance(item, (str, int, float)) and str(item).strip()
-            ],
-            "inspiration_refs": [
-                str(item)[:2000] for item in (initiative.get("inspiration_refs") or [])[:cls.MAX_SEED_ITEMS]
-                if isinstance(item, str) and item.strip()
-            ],
+            "uncertainties": clean_strings(uncertainties),
+            "sources": clean_sources,
+            "counter_evidence": clean_counter_evidence,
+            "experiments": clean_experiments,
+            "research_domains": clean_domains,
+            "tags": clean_tags,
+            "inspiration_refs": clean_strings(
+                concept.get("inspiration_refs") if isinstance(concept.get("inspiration_refs"), list)
+                else initiative.get("inspiration_refs") or []
+            ),
         }
 
     @classmethod
@@ -411,6 +456,12 @@ class LocalProductBuilder:
 <section class="panel">
 <h2>研究边界与来源</h2>
 <p class="small">以下内容来自本次研究提案，仅作背景与待核查线索。</p>
+<p class="small" id="epistemic-status">本产品记录待验证假设；来源候选未经复核，不构成结论。</p>
+<h3>原始假设简报</h3><p id="hypothesis-brief" class="small"></p>
+<h3>研究领域</h3><ul id="research-domains"></ul>
+<h3>来源候选（未复核）</h3><ul id="sources"></ul>
+<h3>反证检索候选（未复核）</h3><ul id="counter-evidence"></ul>
+<h3>分类标签</h3><ul id="tags"></ul>
 <h3>仍未确定</h3><ul id="uncertainties"></ul>
 <h3>灵感来源引用</h3><ul id="inspiration-refs"></ul>
 </section>
@@ -432,7 +483,7 @@ class LocalProductBuilder:
 </main>
 <footer>
 <p>本产品为单文件离线应用。数据只保存在当前浏览器的本地存储；导出 JSON 可备份或迁移。没有服务器、网络请求、外部脚本或第三方依赖。</p>
-<p>产品版本 1 · 由 Muse Initiative 自动生成 · 尚处于测试阶段，正式发布前仍需人工验收。</p>
+<p>产品版本 3 · 由 Muse Initiative 自动生成 · 研究来源保持候选状态，尚处于测试阶段，正式发布前仍需人工验收。</p>
 </footer>
 <script type="application/json" id="seed">{seed_text}</script>
 <script>{APP_SCRIPT}</script>
@@ -446,7 +497,11 @@ class LocalProductBuilder:
             "# Muse 灵感实验台\n\n"
             f"- Initiative ID: {seed['id']}\n"
             f"- Input SHA-256: {input_hash}\n"
-            "- Product version: 2\n\n"
+            "- Product version: 3\n"
+            f"- Epistemic status: {seed['epistemic_status']}\n"
+            f"- Evidence review state: {seed['evidence_review_state']}\n"
+            f"- Source candidates: {len(seed['sources'])}; counter candidates: {len(seed['counter_evidence'])}\n\n"
+            "All source entries are unreviewed candidates, not factual conclusions. Independent review is required before claim promotion.\n\n"
             "## 使用方法\n\n"
             "1. 解压 product.zip，或直接打开产品目录中的 index.html。\n"
             "2. 使用 Chrome、Edge 或其他现代浏览器双击打开 index.html。\n"
@@ -552,7 +607,7 @@ class LocalProductBuilder:
     def _get_initiative(store: InitiativeStore, initiative_id: str) -> dict[str, Any]:
         if not isinstance(initiative_id, str) or not re.fullmatch(r"[0-9a-f]{32}", initiative_id):
             raise ValueError("initiative_id must be a 32-character lowercase UUID hex string")
-        initiative = next((item for item in store.list(limit=200) if item["id"] == initiative_id), None)
+        initiative = store.get_by_id(initiative_id)
         if initiative is None:
             raise KeyError(initiative_id)
         if initiative.get("status") in {"parked", "rejected", "shipped"}:
@@ -604,6 +659,12 @@ class LocalProductBuilder:
                     "product_name": "Muse 灵感实验台",
                     "status": "testing",
                     "input_sha256": input_hash,
+                    "epistemic_status": seed["epistemic_status"],
+                    "evidence_review_state": seed["evidence_review_state"],
+                    "source_candidate_count": len(seed["sources"]),
+                    "counter_evidence_candidate_count": len(seed["counter_evidence"]),
+                    "auto_publish": False,
+                    "conclusion_promotion_requires_independent_review": True,
                     "generated_at": datetime.now(timezone.utc).isoformat(),
                     "files": {
                         "index.html": self._sha256(html_bytes),

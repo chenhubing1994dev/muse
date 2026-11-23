@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import json
 import hashlib
+import io
+from contextlib import redirect_stderr
 import tempfile
 import unittest
+from unittest.mock import patch
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from pathlib import Path
 
 from muse.plugin_platform import (
     PluginError, PluginRegistry, commander_task_queue_adapter, main as plugin_main,
-    plugin_signature_payload, sync_plugin_capabilities, validate_manifest,
+    plugin_signature_payload, sync_plugin_capabilities, validate_approved_plugin_ticket, validate_manifest,
 )
 from muse.task_queue import TaskQueue
 from muse.capabilities import CapabilityRegistry
@@ -68,6 +71,16 @@ class PluginManifestTests(unittest.TestCase):
         with self.assertRaises(PluginError):
             validate_manifest(manifest(dependencies={"research.cross-check": "1.0.0"}))
 
+    def test_risk_class_is_a_permission_ceiling(self) -> None:
+        value = manifest()
+        value["capabilities"][0]["risk"] = "read_only"
+        value["capabilities"][0]["permissions"] = ["research.read", "network.public_research", "commander.enqueue"]
+        with self.assertRaisesRegex(PluginError, "exceed the declared risk class"):
+            validate_manifest(value)
+        value["capabilities"][0]["risk"] = "research"
+        value["capabilities"][0]["permissions"] = ["research.read", "gpu.request", "commander.enqueue"]
+        with self.assertRaisesRegex(PluginError, "exceed the declared risk class"):
+            validate_manifest(value)
 
 class PluginTrustTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -93,13 +106,18 @@ class PluginTrustTests(unittest.TestCase):
         artifact = Path(self.temp.name) / "research-plugin.whl"
         artifact.write_bytes(b"signed plugin artifact bytes")
         artifact_digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
-        signature = private_key.sign(plugin_signature_payload(manifest(), artifact_digest))
+        payload = plugin_signature_payload(manifest(), artifact_digest)
+        self.assertTrue(payload.startswith(b"MUSE-PLUGIN-BUNDLE-SIGNATURE-V1\x00"))
+        self.assertIn(b"\x00artifact-sha256=", payload)
+        signature = private_key.sign(payload)
         result = self.registry.discover_signed(
             manifest(), artifact, key_id="muse-release-2026", signature=signature,
         )
         self.assertEqual(result["status"], "discovered")
         self.assertEqual(result["signature"]["status"], "verified")
         self.assertEqual(result["signature"]["artifact_sha256"], artifact_digest)
+        self.assertEqual(self.registry.get("research.cross-check").get("signature", {}).get("status"), "verified")
+        self.assertEqual(self.registry.list_plugins()[0].get("signature", {}).get("status"), "verified")
         self.assertFalse(result["execution_enabled"])
 
     def test_signed_bundle_rejects_tampering_unknown_key_and_publisher_mismatch(self) -> None:
@@ -143,6 +161,50 @@ class PluginTrustTests(unittest.TestCase):
         self.registry.discover_signed(manifest(), artifact, key_id="muse-release", signature=signature)
         self.registry.revoke_publisher_key("muse-release", revoked_by="owner")
         self.assertEqual(self.registry.get_signature("research.cross-check")["status"], "revoked")
+        self.assertEqual(self.registry.get("research.cross-check").get("signature", {}).get("status"), "revoked")
+
+    def test_revoking_publisher_key_disables_all_plugins_signed_by_that_key(self) -> None:
+        private_key = Ed25519PrivateKey.generate()
+        public_key = private_key.public_key().public_bytes(
+            serialization.Encoding.Raw, serialization.PublicFormat.Raw,
+        )
+        self.registry.trust_publisher_key("muse-release", "Muse", public_key, trusted_by="owner")
+        artifact = Path(self.temp.name) / "enabled-plugin.whl"
+        artifact.write_bytes(b"signed artifact")
+        digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+        signature = private_key.sign(plugin_signature_payload(manifest(), digest))
+        self.registry.discover_signed(manifest(), artifact, key_id="muse-release", signature=signature)
+        self.registry.approve("research.cross-check", approved_by="owner")
+        self.registry.enable("research.cross-check", enabled_by="owner")
+
+        self.registry.revoke_publisher_key("muse-release", revoked_by="owner")
+
+        self.assertEqual(self.registry.get("research.cross-check")["status"], "disabled")
+        self.assertEqual(self.registry.get_signature("research.cross-check")["status"], "revoked")
+
+    def test_revoked_publisher_cannot_submit_new_commander_capability_requests(self) -> None:
+        private_key = Ed25519PrivateKey.generate()
+        public_key = private_key.public_key().public_bytes(
+            serialization.Encoding.Raw, serialization.PublicFormat.Raw,
+        )
+        self.registry.trust_publisher_key("muse-release", "Muse", public_key, trusted_by="owner")
+        artifact = Path(self.temp.name) / "revoked-plugin.whl"
+        artifact.write_bytes(b"signed artifact")
+        digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+        signature = private_key.sign(plugin_signature_payload(manifest(), digest))
+        self.registry.discover_signed(manifest(), artifact, key_id="muse-release", signature=signature)
+        self.registry.approve("research.cross-check", approved_by="owner")
+        self.registry.enable("research.cross-check", enabled_by="owner")
+        self.registry.revoke_publisher_key("muse-release", revoked_by="owner")
+
+        enqueued = []
+        with self.assertRaisesRegex(PluginError, "publisher signing key has been revoked"):
+            self.registry.commander_request(
+                "research.cross-check", "research", {"topic": "must-not-queue"},
+                enqueue=lambda request, idempotency_key: enqueued.append((request, idempotency_key)),
+                requested_by="owner",
+            )
+        self.assertEqual(enqueued, [])
 
     def test_trusted_key_id_is_immutable_and_same_version_artifact_cannot_be_replaced(self) -> None:
         private_key = Ed25519PrivateKey.generate()
@@ -175,6 +237,7 @@ class PluginTrustTests(unittest.TestCase):
             serialization.Encoding.Raw, serialization.PublicFormat.Raw,
         )
         database = Path(self.temp.name) / "cli-plugins.sqlite3"
+        capability_database = Path(self.temp.name) / "cli-capabilities.sqlite3"
         public_key_file = Path(self.temp.name) / "publisher.pub"
         public_key_file.write_bytes(public_key)
         manifest_file = Path(self.temp.name) / "manifest.json"
@@ -200,11 +263,123 @@ class PluginTrustTests(unittest.TestCase):
             "discover-signed", str(manifest_file), str(artifact), "--key-id", "muse-cli-release",
             "--signature-file", str(signature_file), "--database", str(database),
         ]), 0)
+        with PluginRegistry(database) as registry, CapabilityRegistry(capability_database) as catalog:
+            sync_plugin_capabilities(registry, catalog)
+
         self.assertEqual(invoke([
-            "revoke-key", "muse-cli-release", "--database", str(database), "--revoked-by", "owner",
+            "revoke-key", "muse-cli-release", "--database", str(database),
+            "--capability-db", str(capability_database), "--revoked-by", "owner",
         ]), 0)
         with PluginRegistry(database) as registry:
             self.assertEqual(registry.get_signature("research.cross-check")["status"], "revoked")
+        with CapabilityRegistry(capability_database) as catalog:
+            self.assertEqual(catalog.get("plugin.research.cross-check.research")["status"], "disabled")
+
+    def test_cli_revoke_key_synchronizes_shared_capability_catalog(self) -> None:
+        private_key = Ed25519PrivateKey.generate()
+        public_key = private_key.public_key().public_bytes(
+            serialization.Encoding.Raw, serialization.PublicFormat.Raw,
+        )
+        self.registry.trust_publisher_key("muse-release-sync", "Muse", public_key, trusted_by="owner")
+        artifact = Path(self.temp.name) / "sync-plugin.whl"
+        artifact.write_bytes(b"signed sync artifact")
+        digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+        signature = private_key.sign(plugin_signature_payload(manifest(), digest))
+        self.registry.discover_signed(manifest(), artifact, key_id="muse-release-sync", signature=signature)
+        self.registry.approve("research.cross-check", approved_by="owner")
+        self.registry.enable("research.cross-check", enabled_by="owner")
+
+        capability_database = Path(self.temp.name) / "capabilities.sqlite3"
+        with CapabilityRegistry(capability_database) as catalog:
+            sync_plugin_capabilities(self.registry, catalog)
+            self.assertEqual(catalog.get("plugin.research.cross-check.research")["status"], "needs_approval")
+
+        result = plugin_main([
+            "revoke-key", "muse-release-sync", "--database", str(Path(self.temp.name) / "plugins.sqlite3"),
+            "--capability-db", str(capability_database), "--revoked-by", "owner",
+        ])
+        self.assertEqual(result, 0)
+        with CapabilityRegistry(capability_database) as catalog:
+            item = catalog.get("plugin.research.cross-check.research")
+            self.assertEqual(item["status"], "disabled")
+            self.assertEqual(item["metadata"]["plugin_status"], "disabled")
+            self.assertFalse(item["metadata"]["execution_enabled"])
+            self.assertIsNone(item["executable"])
+
+    def test_cli_sync_capabilities_repairs_catalog_after_separate_revocation(self) -> None:
+        private_key = Ed25519PrivateKey.generate()
+        public_key = private_key.public_key().public_bytes(
+            serialization.Encoding.Raw, serialization.PublicFormat.Raw,
+        )
+        self.registry.trust_publisher_key("muse-release-repair", "Muse", public_key, trusted_by="owner")
+        artifact = Path(self.temp.name) / "repair-plugin.whl"
+        artifact.write_bytes(b"signed repair artifact")
+        digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+        signature = private_key.sign(plugin_signature_payload(manifest(), digest))
+        self.registry.discover_signed(manifest(), artifact, key_id="muse-release-repair", signature=signature)
+        self.registry.approve("research.cross-check", approved_by="owner")
+        self.registry.enable("research.cross-check", enabled_by="owner")
+
+        capability_database = Path(self.temp.name) / "repair-capabilities.sqlite3"
+        with CapabilityRegistry(capability_database) as catalog:
+            sync_plugin_capabilities(self.registry, catalog)
+        self.registry.revoke_publisher_key("muse-release-repair", revoked_by="owner")
+        with CapabilityRegistry(capability_database) as catalog:
+            self.assertEqual(catalog.get("plugin.research.cross-check.research")["status"], "needs_approval")
+
+        result = plugin_main([
+            "sync-capabilities", "--database", str(Path(self.temp.name) / "plugins.sqlite3"),
+            "--capability-db", str(capability_database),
+        ])
+        self.assertEqual(result, 0)
+        with CapabilityRegistry(capability_database) as catalog:
+            item = catalog.get("plugin.research.cross-check.research")
+            self.assertEqual(item["status"], "disabled")
+            self.assertEqual(item["metadata"]["plugin_status"], "disabled")
+
+
+    def test_cli_reports_committed_revocation_when_catalog_sync_fails_and_recovers(self) -> None:
+        private_key = Ed25519PrivateKey.generate()
+        public_key = private_key.public_key().public_bytes(
+            serialization.Encoding.Raw, serialization.PublicFormat.Raw,
+        )
+        self.registry.trust_publisher_key("muse-release-failure", "Muse", public_key, trusted_by="owner")
+        artifact = Path(self.temp.name) / "failure-plugin.whl"
+        artifact.write_bytes(b"signed failure artifact")
+        digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+        signature = private_key.sign(plugin_signature_payload(manifest(), digest))
+        self.registry.discover_signed(manifest(), artifact, key_id="muse-release-failure", signature=signature)
+        self.registry.approve("research.cross-check", approved_by="owner")
+        self.registry.enable("research.cross-check", enabled_by="owner")
+
+        capability_database = Path(self.temp.name) / "failure-capabilities.sqlite3"
+        with CapabilityRegistry(capability_database) as catalog:
+            sync_plugin_capabilities(self.registry, catalog)
+
+        arguments = [
+            "revoke-key", "muse-release-failure", "--database", str(Path(self.temp.name) / "plugins.sqlite3"),
+            "--capability-db", str(capability_database), "--revoked-by", "owner",
+        ]
+        error_output = io.StringIO()
+        with patch("muse.plugin_platform.sync_plugin_capabilities", side_effect=RuntimeError("simulated sync failure")):
+            with redirect_stderr(error_output):
+                with self.assertRaises(SystemExit) as raised:
+                    plugin_main(arguments)
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("publisher key is revoked", error_output.getvalue())
+        self.assertEqual(self.registry.get_signature("research.cross-check")["status"], "revoked")
+        with CapabilityRegistry(capability_database) as catalog:
+            self.assertEqual(catalog.get("plugin.research.cross-check.research")["status"], "needs_approval")
+
+        self.assertEqual(plugin_main([
+            "sync-capabilities", "--database", str(Path(self.temp.name) / "plugins.sqlite3"),
+            "--capability-db", str(capability_database),
+        ]), 0)
+        with CapabilityRegistry(capability_database) as catalog:
+            item = catalog.get("plugin.research.cross-check.research")
+            self.assertEqual(item["status"], "disabled")
+            self.assertFalse(item["metadata"]["execution_enabled"])
+
 
 class PluginRegistryTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -220,9 +395,26 @@ class PluginRegistryTests(unittest.TestCase):
         self.registry.approve(value["id"], approved_by="owner")
         self.registry.enable(value["id"], enabled_by="owner")
 
+    def approve_enable_signed(self, value: dict, *, enable: bool = True) -> None:
+        private_key = Ed25519PrivateKey.generate()
+        public_key = private_key.public_key().public_bytes(
+            serialization.Encoding.Raw, serialization.PublicFormat.Raw,
+        )
+        key_id = f"test-{value['id']}"
+        self.registry.trust_publisher_key(key_id, value["publisher"], public_key, trusted_by="owner")
+        artifact = Path(self.temp.name) / f"{value['id'].replace('.', '-')}.bundle"
+        artifact.write_bytes(b"test plugin bundle bytes")
+        artifact_digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+        signature = private_key.sign(plugin_signature_payload(value, artifact_digest))
+        self.registry.discover_signed(value, artifact, key_id=key_id, signature=signature)
+        self.registry.approve(value["id"], approved_by="owner")
+        if enable:
+            self.registry.enable(value["id"], enabled_by="owner")
+
     def test_discovery_requires_approval_and_manifest_change_resets_approval(self) -> None:
         record = self.registry.discover(manifest())
         self.assertEqual(record["status"], "discovered")
+        self.assertEqual(record.get("signature", {}).get("status"), "unsigned")
         with self.assertRaises(PluginError):
             self.registry.enable("research.cross-check", enabled_by="owner")
         self.registry.approve("research.cross-check", approved_by="owner")
@@ -248,7 +440,7 @@ class PluginRegistryTests(unittest.TestCase):
         self.registry.enable("research.pipeline", enabled_by="owner")
 
     def test_capability_is_queued_to_commander_and_never_executed_locally(self) -> None:
-        self.approve_enable(manifest())
+        self.approve_enable_signed(manifest())
         calls = []
         result = self.registry.commander_request(
             "research.cross-check", "research", {"topic": "test"},
@@ -260,10 +452,18 @@ class PluginRegistryTests(unittest.TestCase):
         request = calls[0][0]
         self.assertTrue(request["approval_required"])
         self.assertEqual(request["action_class"], "research")
+        self.assertEqual(request["publisher_signature"]["status"], "verified")
+        self.assertEqual(len(request["publisher_signature"]["artifact_sha256"]), 64)
+        self.assertEqual(len(request["publisher_signature"]["signature_sha256"]), 64)
         self.assertEqual(request["payload"], {"topic": "test"})
+        budget = request["proposed_resource_budget"]
+        self.assertFalse(budget["runtime_enforced"])
+        self.assertEqual(budget["limits"]["max_network_requests"], 16)
+        self.assertFalse(budget["limits"]["gpu_allowed"])
+        self.assertFalse(request["execution_enabled"])
 
     def test_trusted_adapter_creates_commander_approval_ticket_idempotently(self) -> None:
-        self.approve_enable(manifest())
+        self.approve_enable_signed(manifest())
         task_db = Path(self.temp.name) / "commander.sqlite3"
         enqueue = commander_task_queue_adapter(task_db)
         first = self.registry.commander_request(
@@ -288,10 +488,166 @@ class PluginRegistryTests(unittest.TestCase):
         self.assertEqual(task["payload"]["kind"], "plugin_capability_request")
         self.assertFalse(task["payload"]["execution_enabled"])
         self.assertTrue(task["payload"]["execution_adapter_required"])
+        signed_request = task["payload"]["plugin_capability_request"]
+        self.assertEqual(signed_request["publisher_signature"]["artifact_sha256"], first["request"]["publisher_signature"]["artifact_sha256"])
+
+    def test_approved_ticket_is_revalidated_against_human_event_and_current_plugin_state(self) -> None:
+        self.approve_enable_signed(manifest())
+        task_db = Path(self.temp.name) / "commander.sqlite3"
+        enqueue = commander_task_queue_adapter(task_db)
+        request = self.registry.commander_request(
+            "research.cross-check", "research", {"topic": "approval gate"},
+            enqueue=enqueue, requested_by="owner",
+        )
+        task_id = request["commander_result"]["task_id"]
+        with self.assertRaisesRegex(PluginError, "not been explicitly approved"):
+            validate_approved_plugin_ticket(self.registry.database, task_db, task_id)
+
+        with TaskQueue(task_db) as queue:
+            queue.approve(task_id, approved_by="reviewer")
+        validated = validate_approved_plugin_ticket(self.registry.database, task_db, task_id)
+        self.assertEqual(validated["status"], "approved_for_worker_review")
+        self.assertEqual(validated["approval"]["approved_by"], "reviewer")
+        self.assertFalse(validated["execution_enabled"])
+        self.assertFalse(validated["runtime_adapter_registered"])
+
+        self.registry.disable("research.cross-check", disabled_by="owner")
+        with self.assertRaisesRegex(PluginError, "no longer enabled"):
+            validate_approved_plugin_ticket(self.registry.database, task_db, task_id)
+
+    def test_running_plugin_ticket_requires_matching_live_worker_lease_and_claim_audit(self) -> None:
+        self.approve_enable_signed(manifest())
+        task_db = Path(self.temp.name) / "commander.sqlite3"
+        request = self.registry.commander_request(
+            "research.cross-check", "research", {"topic": "worker lease binding"},
+            enqueue=commander_task_queue_adapter(task_db), requested_by="owner",
+        )
+        task_id = request["commander_result"]["task_id"]
+        with TaskQueue(task_db) as queue:
+            queue.approve(task_id, approved_by="reviewer")
+            claimed = queue.claim_next(worker_id="plugin-worker", lease_seconds=300, task_id=task_id)
+            self.assertEqual(claimed["status"], "running")
+        with self.assertRaisesRegex(PluginError, "current Worker lease owner"):
+            validate_approved_plugin_ticket(self.registry.database, task_db, task_id)
+        with self.assertRaisesRegex(PluginError, "current Worker lease owner"):
+            validate_approved_plugin_ticket(self.registry.database, task_db, task_id, worker_id="other-worker")
+        validated = validate_approved_plugin_ticket(
+            self.registry.database, task_db, task_id, worker_id="plugin-worker",
+        )
+        self.assertEqual(validated["status"], "approved_for_worker_review")
+        self.assertFalse(validated["execution_enabled"])
+
+        with TaskQueue(task_db) as queue:
+            queue._connection.execute(
+                "DELETE FROM task_events WHERE task_id = ? AND event_type = ?",
+                (task_id, "assignment.claimed"),
+            )
+            queue._connection.commit()
+        with self.assertRaisesRegex(PluginError, "matching Worker claim audit event"):
+            validate_approved_plugin_ticket(
+                self.registry.database, task_db, task_id, worker_id="plugin-worker",
+            )
+
+    def test_running_plugin_ticket_rejects_lease_extension_without_matching_heartbeat_audit(self) -> None:
+        self.approve_enable_signed(manifest())
+        task_db = Path(self.temp.name) / "commander.sqlite3"
+        request = self.registry.commander_request(
+            "research.cross-check", "research", {"topic": "lease audit binding"},
+            enqueue=commander_task_queue_adapter(task_db), requested_by="owner",
+        )
+        task_id = request["commander_result"]["task_id"]
+        with TaskQueue(task_db) as queue:
+            queue.approve(task_id, approved_by="reviewer")
+            queue.claim_next(worker_id="plugin-worker", lease_seconds=300, task_id=task_id)
+            renewed = queue.heartbeat(task_id, worker_id="plugin-worker", lease_seconds=600)
+            self.assertIsNotNone(renewed)
+        validated = validate_approved_plugin_ticket(
+            self.registry.database, task_db, task_id, worker_id="plugin-worker",
+        )
+        self.assertFalse(validated["execution_enabled"])
+
+        with TaskQueue(task_db) as queue:
+            queue._connection.execute(
+                "UPDATE tasks SET lease_expires_at = ? WHERE id = ?",
+                ("2999-01-01T00:00:00+00:00", task_id),
+            )
+            queue._connection.commit()
+        with self.assertRaisesRegex(PluginError, "lease expiry does not match the latest lease audit"):
+            validate_approved_plugin_ticket(
+                self.registry.database, task_db, task_id, worker_id="plugin-worker",
+            )
+
+    def test_running_plugin_ticket_rejects_expired_worker_lease(self) -> None:
+        self.approve_enable_signed(manifest())
+        task_db = Path(self.temp.name) / "commander.sqlite3"
+        request = self.registry.commander_request(
+            "research.cross-check", "research", {"topic": "expired worker lease"},
+            enqueue=commander_task_queue_adapter(task_db), requested_by="owner",
+        )
+        task_id = request["commander_result"]["task_id"]
+        with TaskQueue(task_db) as queue:
+            queue.approve(task_id, approved_by="reviewer")
+            queue.claim_next(worker_id="plugin-worker", lease_seconds=300, task_id=task_id)
+            queue._connection.execute(
+                "UPDATE tasks SET lease_expires_at = ? WHERE id = ?",
+                ("2000-01-01T00:00:00+00:00", task_id),
+            )
+            queue._connection.commit()
+        with self.assertRaisesRegex(PluginError, "lease has expired"):
+            validate_approved_plugin_ticket(
+                self.registry.database, task_db, task_id, worker_id="plugin-worker",
+            )
+
+    def test_approved_ticket_rejects_unbounded_integer_timestamp_as_plugin_error(self) -> None:
+        self.approve_enable_signed(manifest())
+        task_db = Path(self.temp.name) / "commander.sqlite3"
+        request = self.registry.commander_request(
+            "research.cross-check", "research", {"topic": "timestamp bounds"},
+            enqueue=commander_task_queue_adapter(task_db), requested_by="owner",
+        )
+        task_id = request["commander_result"]["task_id"]
+        with TaskQueue(task_db) as queue:
+            queue.approve(task_id, approved_by="reviewer")
+            task = queue.get(task_id)
+            task["payload"]["_approval"]["approved_at"] = 10 ** 400
+            queue._connection.execute(
+                "UPDATE tasks SET payload_json = ? WHERE id = ?",
+                (json.dumps(task["payload"]), task_id),
+            )
+            queue._connection.commit()
+        with self.assertRaisesRegex(PluginError, "approval timestamp does not match its audit event"):
+            validate_approved_plugin_ticket(self.registry.database, task_db, task_id)
+
+    def test_approved_ticket_rejects_timestamp_not_bound_to_audit_event(self) -> None:
+        self.approve_enable_signed(manifest())
+        task_db = Path(self.temp.name) / "commander.sqlite3"
+        request = self.registry.commander_request(
+            "research.cross-check", "research", {"topic": "approval timestamp binding"},
+            enqueue=commander_task_queue_adapter(task_db), requested_by="owner",
+        )
+        task_id = request["commander_result"]["task_id"]
+        with TaskQueue(task_db) as queue:
+            queue.approve(task_id, approved_by="reviewer")
+            task = queue.get(task_id)
+            task["payload"]["_approval"]["approved_at"] = "2000-01-01T00:00:00+00:00"
+            queue._connection.execute(
+                "UPDATE tasks SET payload_json = ? WHERE id = ?",
+                (json.dumps(task["payload"]), task_id),
+            )
+            queue._connection.commit()
+        with self.assertRaisesRegex(PluginError, "approval timestamp does not match its audit event"):
+            validate_approved_plugin_ticket(self.registry.database, task_db, task_id)
+
+    def test_unsigned_enabled_plugin_cannot_request_commander_approval(self) -> None:
+        self.approve_enable(manifest())
+        with self.assertRaisesRegex(PluginError, "verified publisher signature"):
+            self.registry.commander_request(
+                "research.cross-check", "research", {"topic": "unsigned"},
+                enqueue=lambda *_args, **_kw: {}, requested_by="owner",
+            )
 
     def test_unlisted_capability_disabled_plugin_and_oversized_payload_are_rejected(self) -> None:
-        self.registry.discover(manifest())
-        self.registry.approve("research.cross-check", approved_by="owner")
+        self.approve_enable_signed(manifest(), enable=False)
         with self.assertRaises(PluginError):
             self.registry.commander_request("research.cross-check", "research", {}, enqueue=lambda *_args, **_kw: {}, requested_by="owner")
         self.registry.enable("research.cross-check", enabled_by="owner")
@@ -299,7 +655,6 @@ class PluginRegistryTests(unittest.TestCase):
             self.registry.commander_request("research.cross-check", "arbitrary", {}, enqueue=lambda *_args, **_kw: {}, requested_by="owner")
         with self.assertRaises(PluginError):
             self.registry.commander_request("research.cross-check", "research", {"blob": "x" * 70000}, enqueue=lambda *_args, **_kw: {}, requested_by="owner")
-
     def test_enabled_dependents_block_dependency_disable(self) -> None:
         self.approve_enable(manifest("research.core", version="1.2.0"))
         self.approve_enable(manifest("research.pipeline", dependencies={"research.core": "1.2.0"}))

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from muse.initiative_engine import InitiativeStore
@@ -35,6 +36,17 @@ class PrototypeBuilderTests(unittest.TestCase):
             priority=90,
         )
         return store, initiative
+
+    def test_build_resolves_exact_initiative_id_without_bounded_list_scan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            store,initiative=self.make_store(root)
+            try:
+                with patch.object(InitiativeStore,"list",return_value=[]):
+                    result=StaticPrototypeBuilder(root).build(store,initiative["id"])
+                self.assertTrue(result["validated"])
+            finally:
+                store.close()
 
     def test_builds_escaped_static_prototype_and_moves_only_to_testing(self):
         with tempfile.TemporaryDirectory() as directory:

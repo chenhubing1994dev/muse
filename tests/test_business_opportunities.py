@@ -76,6 +76,20 @@ class BusinessOpportunityTests(unittest.TestCase):
         count=self.store.connection.execute("SELECT COUNT(*) FROM business_opportunity_events WHERE event_type='initiative_linked'").fetchone()[0]
         self.assertEqual(count,1)
 
+    def test_video_approval_resolves_initiative_by_durable_link_not_recent_list_window(self):
+        opportunity=self.store.create(**self.args)
+        initiative_db=Path(self.tmp.name)/"initiatives.sqlite3"
+        task_db=Path(self.tmp.name)/"tasks.sqlite3"
+        promoted=self.store.promote_to_initiative(opportunity["id"],initiative_database=initiative_db)
+        with patch.object(InitiativeStore,"list",return_value=[]):
+            requested=self.store.request_video_approval(opportunity["id"],initiative_database=initiative_db,task_database=task_db)
+        self.assertEqual(requested["initiative_id"],promoted["initiative"]["id"])
+        with TaskQueue(task_db) as queue:
+            queue.approve(requested["ticket"]["id"],approved_by="test-operator")
+        with patch.object(InitiativeStore,"list",return_value=[]):
+            queued=self.store.queue_video_after_approval(opportunity["id"],requested["ticket"]["id"],initiative_database=initiative_db,task_database=task_db)
+        self.assertEqual(queued["attempt"]["initiative_id"],promoted["initiative"]["id"])
+
     def test_commander_approval_gates_video_attempt(self):
         opportunity=self.store.create(**self.args)
         initiative_db=Path(self.tmp.name)/"data"/"initiatives"/"muse.sqlite3"
@@ -88,8 +102,27 @@ class BusinessOpportunityTests(unittest.TestCase):
             self.assertIsNone(initiatives.get_video_attempt(ticket["payload"]["attempt_id"]))
         with self.assertRaises(PermissionError):
             self.store.queue_video_after_approval(opportunity["id"],ticket["id"],initiative_database=initiative_db,task_database=task_db)
+        import json
         with TaskQueue(task_db) as queue:
             queue.approve(ticket["id"],approved_by="test-operator")
+            approved = queue.get(ticket["id"])
+            approved_at = approved["payload"]["_approval"]["approved_at"]
+            approved["payload"]["_approval"]["approved_at"] = "2000-01-01T00:00:00+00:00"
+            queue._connection.execute(
+                "UPDATE tasks SET payload_json=? WHERE id=?",
+                (json.dumps(approved["payload"]), ticket["id"]),
+            )
+            queue._connection.commit()
+        with self.assertRaises(PermissionError):
+            self.store.queue_video_after_approval(opportunity["id"],ticket["id"],initiative_database=initiative_db,task_database=task_db)
+        with TaskQueue(task_db) as queue:
+            approved = queue.get(ticket["id"])
+            approved["payload"]["_approval"]["approved_at"] = approved_at
+            queue._connection.execute(
+                "UPDATE tasks SET payload_json=? WHERE id=?",
+                (json.dumps(approved["payload"]), ticket["id"]),
+            )
+            queue._connection.commit()
         queued=self.store.queue_video_after_approval(opportunity["id"],ticket["id"],initiative_database=initiative_db,task_database=task_db)
         replay=self.store.queue_video_after_approval(opportunity["id"],ticket["id"],initiative_database=initiative_db,task_database=task_db)
         self.assertTrue(queued["created"])

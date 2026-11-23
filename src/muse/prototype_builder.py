@@ -290,7 +290,7 @@ __CONCEPT_BLOCK__
     def build(self, store: InitiativeStore, initiative_id: str) -> dict[str, Any]:
         if not isinstance(initiative_id, str) or not re.fullmatch(r"[0-9a-f]{32}", initiative_id):
             raise ValueError("initiative_id must be a 32-character lowercase UUID hex string")
-        initiative = next((item for item in store.list(limit=200) if item["id"] == initiative_id), None)
+        initiative = store.get_by_id(initiative_id)
         if initiative is None:
             raise KeyError(initiative_id)
         if initiative.get("status") in {"parked", "rejected", "shipped"}:

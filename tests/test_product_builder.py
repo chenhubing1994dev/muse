@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 import zipfile
 from pathlib import Path
 
@@ -36,6 +37,17 @@ class LocalProductBuilderTests(unittest.TestCase):
             priority=90,
         )
         return store, initiative
+
+    def test_build_resolves_exact_initiative_id_without_bounded_list_scan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            store,initiative=self.make_store(root)
+            try:
+                with patch.object(InitiativeStore,"list",return_value=[]):
+                    result=LocalProductBuilder(root).build(store,initiative["id"])
+                self.assertTrue(result["validated"])
+            finally:
+                store.close()
 
     def test_builds_interactive_offline_product_and_downloadable_package(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -73,7 +85,7 @@ class LocalProductBuilderTests(unittest.TestCase):
                 self.assertIn("双击打开", readme)
                 self.assertEqual(manifest["validation"]["offline_product"], "passed")
                 self.assertEqual(manifest["title"], initiative["title"])
-                self.assertEqual(manifest["builder_version"], 2)
+                self.assertEqual(manifest["builder_version"], 3)
                 self.assertFalse(manifest["execution"]["network_access"])
                 self.assertFalse(manifest["execution"]["arbitrary_code_executed"])
                 self.assertTrue(manifest["execution"]["browser_local_storage_only"])
@@ -82,6 +94,61 @@ class LocalProductBuilderTests(unittest.TestCase):
                     self.assertEqual(archive.testzip(), None)
                 self.assertEqual(store.list(status="testing")[0]["id"], initiative["id"])
                 self.assertEqual(store.list(status="shipped"), [])
+            finally:
+                store.close()
+
+    def test_product_seeds_unreviewed_sources_counter_candidates_and_experiment_plan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = InitiativeStore(root / "data" / "initiatives.sqlite3")
+            try:
+                initiative = store.propose(
+                    "粤语证据语气校准实验台", kind="tool",
+                    creator_value="用可证伪实验校准粤语旁白中的证据语气",
+                    concept=json.dumps({
+                        "research_question": "限定语后的停顿能否提升延迟回忆？",
+                        "creator_hypothesis_summary": "假设：250–450ms pause_after 可提升限定语延迟回忆；回忆提升不足10个百分点即证伪。",
+                        "key_discoveries": {
+                            "creator_inspired_hypotheses": ["250–450ms clause-boundary pause improves delayed recall."],
+                            "uncertainties": ["All retrieved sources remain unreviewed candidates."],
+                            "sources": [
+                                {"title": "Support candidate", "url": "https://example.test/support", "direction": "support_search_candidate", "review_state": "unreviewed", "quality": "unassessed", "independence": "unassessed"},
+                                {"title": "Counter candidate", "url": "https://example.test/counter", "direction": "counter_search_candidate", "review_state": "unreviewed", "quality": "unassessed", "independence": "unassessed"},
+                            ],
+                            "counter_evidence": ["Counter candidate: pause duration may reduce perceived naturalness."],
+                            "testable_experiments": ["Compare default pauses, 250–450ms, and 600ms after the same clause boundary."],
+                            "research_domains": ["粤语语音学与韵律", "停顿与话语分段"],
+                            "tags": ["粤语旁白", "证据语气校准"],
+                            "epistemic_status": "creator_inspired_hypothesis_only",
+                            "evidence_review_state": "unreviewed",
+                        },
+                    }, ensure_ascii=False),
+                    first_step="执行随机对照旁白实验",
+                    expected_output="包含支持与反证候选的离线实验台",
+                    priority=80,
+                )
+                result = LocalProductBuilder(root).build(store, initiative["id"])
+                output = root / result["relative_path"]
+                html = (output / "index.html").read_text(encoding="utf-8")
+                readme = (output / "README.md").read_text(encoding="utf-8")
+                manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+                for value in (
+                    "Support candidate", "Counter candidate", "https://example.test/support",
+                    "counter_search_candidate", "粤语语音学与韵律", "粤语旁白",
+                    "Compare default pauses, 250–450ms, and 600ms", "creator_inspired_hypothesis_only",
+                    "未经复核，不构成结论",
+                ):
+                    self.assertIn(value, html)
+                self.assertNotIn('href="https://', html)
+                self.assertNotIn('src="https://', html)
+                self.assertIn("All source entries are unreviewed candidates", readme)
+                self.assertEqual(manifest["source_candidate_count"], 2)
+                self.assertEqual(manifest["counter_evidence_candidate_count"], 1)
+                self.assertEqual(manifest["epistemic_status"], "creator_inspired_hypothesis_only")
+                self.assertEqual(manifest["evidence_review_state"], "unreviewed")
+                self.assertFalse(manifest["auto_publish"])
+                self.assertTrue(manifest["conclusion_promotion_requires_independent_review"])
+                self.assertEqual(manifest["status"], "testing")
             finally:
                 store.close()
 

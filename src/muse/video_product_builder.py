@@ -5,6 +5,7 @@ installs models or calls cloud video APIs.
 """
 
 import argparse
+import errno
 import hashlib
 import json
 import re
@@ -2120,19 +2121,23 @@ class VideoProductBuilder:
         initiative_database = self.workspace / "data" / "initiatives" / "muse.sqlite3"
         creator_matches: list[tuple[str, str | None]] = []
         with InitiativeStore(initiative_database) as store:
-            for candidate in store.list(limit=200):
-                for event in store.list_events(initiative_id=candidate["id"], limit=200):
-                    details = event.get("details", {})
-                    artifact = details.get("artifact_metadata", {}) if isinstance(details, dict) else {}
-                    if (event.get("event_type") == "product_built"
-                            and details.get("relative_path") == verified["relative_path"].replace("\\", "/")
-                            and artifact.get("product_id") == initiative_id
-                            and artifact.get("version_id") == version):
-                        creator_matches.append((candidate["id"], artifact.get("evolution_cycle_id")))
+            for row in store.connection.execute(
+                "SELECT initiative_id,details_json FROM initiative_events WHERE event_type='product_built' ORDER BY sequence DESC"
+            ):
+                details = json.loads(row["details_json"])
+                if not isinstance(details, dict):
+                    continue
+                artifact = details.get("artifact_metadata", {})
+                if not isinstance(artifact, dict):
+                    continue
+                if (details.get("relative_path") == verified["relative_path"].replace("\\", "/")
+                        and artifact.get("product_id") == initiative_id
+                        and artifact.get("version_id") == version):
+                    creator_matches.append((row["initiative_id"], artifact.get("evolution_cycle_id")))
             if len(creator_matches) != 1:
                 raise VideoProductError("could not resolve one exact Creator Initiative for this product version")
             creator_initiative_id, evolution_cycle_id = creator_matches[0]
-            creator = next((item for item in store.list(limit=200) if item["id"] == creator_initiative_id), None)
+            creator = store.get_by_id(creator_initiative_id)
             if creator is None or creator.get("status") in {"parked", "rejected", "shipped"}:
                 raise VideoProductError("Creator Initiative does not permit a subtitle revision")
 
@@ -2351,8 +2356,11 @@ class VideoProductBuilder:
         target = Path(products_root) / identity / version
         try:
             staging.rename(target)
-        except FileExistsError:
-            if not target.exists():
+        except OSError as exc:
+            # Linux reports ENOTEMPTY when a directory rename races with an
+            # already-published non-empty version; Windows commonly reports
+            # FileExistsError/EEXIST for the same condition.
+            if exc.errno not in {errno.EEXIST, errno.ENOTEMPTY} or not target.is_dir():
                 raise
         result = self.verify_path(products_root, identity, version)
         return self._record_creator_artifact(
@@ -2384,7 +2392,7 @@ class VideoProductBuilder:
                     autonomy_level="prototype",
                 )
             else:
-                item = next((entry for entry in store.list(limit=200) if entry["id"] == creator_initiative_id), None)
+                item = store.get_by_id(creator_initiative_id)
                 if item is None:
                     raise KeyError(creator_initiative_id)
             if item.get("status") in {"parked", "rejected", "shipped"}:

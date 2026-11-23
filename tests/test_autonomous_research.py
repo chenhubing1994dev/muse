@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 
 from muse.autonomous_research import (
     AutonomousResearchEngine, RESEARCH_TOPICS, _build_research_reminder_message,
+    _creator_initiative_title, _creator_video_attempt_id, _queue_creator_video_approval,
 )
 from muse.reminders import ReminderStore
 from muse.research_knowledge import ResearchKnowledgeStore
@@ -365,6 +366,7 @@ class AutonomousResearchTests(unittest.TestCase):
                 evidence_db=root / "e.sqlite3", knowledge_db=root / "k.sqlite3",
                 progress_db=root / "p.sqlite3", reminder_db=root / "r.sqlite3",
                 search=FakeSearch(), reader=FakeReader(), resource_aware=False,
+                workspace=root,
                 synthesizer=lambda topic, sources: synthesis,
             )
             topic = engine._next_topic()
@@ -677,6 +679,7 @@ class AutonomousResearchTests(unittest.TestCase):
                 evidence_db=root / "evidence.sqlite3", knowledge_db=root / "knowledge.sqlite3",
                 progress_db=root / "tasks.sqlite3", reminder_db=root / "reminders.sqlite3",
                 search=FakeSearch(), reader=FakeReader(), resource_aware=False,
+                workspace=root,
                 claim_reviewer=lambda topic, claim, sources: review,
             )
             result = engine.run_once()
@@ -764,6 +767,7 @@ class AutonomousResearchTests(unittest.TestCase):
                 evidence_db=root / "evidence.sqlite3", knowledge_db=root / "knowledge.sqlite3",
                 progress_db=root / "tasks.sqlite3", reminder_db=root / "reminders.sqlite3",
                 search=FakeSearch(), reader=FakeReader(), resource_aware=False,
+                workspace=root,
                 synthesizer=lambda topic, sources: synthesis,
             )
             result = engine.run_once()
@@ -989,6 +993,7 @@ class AutonomousResearchTests(unittest.TestCase):
                 evidence_db=root / "e.sqlite3", knowledge_db=root / "k.sqlite3",
                 progress_db=root / "p.sqlite3", reminder_db=root / "r.sqlite3",
                 search=FakeSearch(), reader=FakeReader(), resource_aware=False,
+                workspace=root,
                 synthesizer=lambda topic, sources: "invalid model output",
                 claim_reviewer=lambda topic, claim, sources: valid_review,
             )
@@ -1014,6 +1019,7 @@ class AutonomousResearchTests(unittest.TestCase):
                 evidence_db=root / "evidence.sqlite3", knowledge_db=root / "knowledge.sqlite3",
                 progress_db=root / "tasks.sqlite3", reminder_db=root / "reminders.sqlite3",
                 search=FakeSearch(shared_domain=True), reader=FakeReader(), resource_aware=False,
+                workspace=root,
             )
             result = engine.run_once()
             self.assertEqual(result["status"], "completed")
@@ -1051,6 +1057,7 @@ class AutonomousResearchTests(unittest.TestCase):
                 progress_db=root / "tasks.sqlite3", reminder_db=root / "reminders.sqlite3",
                 search=ParallelSearch(), reader=FakeReader(), max_sources=4,
                 max_workers=2, resource_aware=False,
+                workspace=root,
             )
             result = engine.run_once()
             self.assertEqual(result["status"], "completed")
@@ -1229,6 +1236,147 @@ class AutonomousResearchTests(unittest.TestCase):
             with ResearchKnowledgeStore(root / "knowledge.sqlite3") as knowledge:
                 self.assertEqual(knowledge.get_node(claim["id"])["status"], "proposed")
 
+    def test_creator_inbox_counter_gap_retains_domain_specific_research_context(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            domains = [
+                "粤语语音学与韵律", "停顿与话语分段", "证据不确定性传播",
+                "听觉记忆与多媒体理解", "文本转语音声学控制", "人机信任校准",
+            ]
+            tags = ["粤语旁白", "停顿控制", "证据语气校准"]
+            with ResearchKnowledgeStore(root / "knowledge.sqlite3") as knowledge:
+                claim = knowledge.upsert_node(
+                    "claim", "证据语气校准", summary="A creator hypothesis awaiting counter-evidence.",
+                    external_ref="creator-inbox:counter-gap-domain-context", status="proposed",
+                    metadata={
+                        "origin": "creator_inspiration_inbox",
+                        "epistemic_status": "creator_inspired_hypothesis_only",
+                        "review_state": "researched_needs_independent_review",
+                        "allow_external_research": True,
+                        "research_domains": domains,
+                        "tags": tags,
+                    },
+                )
+                source = knowledge.upsert_node(
+                    "source", "Support source", external_ref="https://example.org/cantonese-support",
+                )
+                knowledge.record_claim_evidence(
+                    claim["id"], source["id"], direction="support_search_candidate",
+                    evidence_type="research_article", search_query="support only",
+                )
+            engine = AutonomousResearchEngine(
+                evidence_db=root / "evidence.sqlite3", knowledge_db=root / "knowledge.sqlite3",
+                progress_db=root / "tasks.sqlite3", reminder_db=root / "reminders.sqlite3",
+                search=FakeSearch(), reader=FakeReader(), resource_aware=False,
+            )
+            topic = engine._next_topic(
+                preferred_key="research-gap:missing-counter-evidence:" + claim["id"],
+            )
+            self.assertEqual(topic["creator_inspiration_node_id"], claim["id"])
+            self.assertEqual(topic["creator_tags"], tags)
+            self.assertEqual(topic["creator_research_domains"], domains)
+            self.assertEqual(topic["creator_hypothesis_summary"], "A creator hypothesis awaiting counter-evidence.")
+            self.assertEqual(topic["creator_epistemic_status"], "creator_inspired_hypothesis_only")
+            self.assertEqual(topic["creator_review_state"], "researched_needs_independent_review")
+
+            self.assertEqual(
+                topic["support_query"],
+                "Cantonese prosody pause duration epistemic qualifiers speech perception delayed recall TTS",
+            )
+            self.assertEqual(
+                topic["counter_query"],
+                "speech pause duration disfluency fluency naturalness cognitive load listener comprehension counterexamples null effects",
+            )
+
+    def test_creator_initiative_and_video_approval_are_idempotent_across_cycles(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            topic = {
+                "key": "creator-hypothesis-review:" + "a" * 32,
+                "title": "粤语证据语气校准",
+                "creator_inspiration_node_id": "a" * 32,
+            }
+            title = _creator_initiative_title(topic)
+            self.assertEqual(title, _creator_initiative_title({**topic, "cycle_id": "cycle_" + "d" * 32}))
+            video_brief = {
+                "title": "粤语证据语气校准预览", "prompt": "A source-grounded Cantonese narration explainer.",
+                "negative_prompt": "fabricated facts", "aspect_ratio": "9:16", "duration_seconds": 2,
+            }
+            recipe_sha256 = "b" * 64
+            with InitiativeStore(root / "initiatives.sqlite3") as initiatives:
+                args = dict(
+                    kind="tool", creator_value="value", concept=json.dumps({"creator_brief": {"video": video_brief}}),
+                    first_step="step", expected_output="output",
+                )
+                first_initiative = initiatives.propose(title, **args)
+                second_initiative = initiatives.propose(_creator_initiative_title(topic), **args)
+                self.assertEqual(first_initiative["id"], second_initiative["id"])
+                first = _queue_creator_video_approval(
+                    initiatives, root / "tasks.sqlite3", initiative=first_initiative, topic=topic,
+                    video_brief=video_brief, recipe_sha256=recipe_sha256,
+                    evolution_cycle_id="cycle_" + "c" * 32,
+                )
+                second = _queue_creator_video_approval(
+                    initiatives, root / "tasks.sqlite3", initiative=second_initiative, topic=topic,
+                    video_brief=video_brief, recipe_sha256=recipe_sha256,
+                    evolution_cycle_id="cycle_" + "d" * 32,
+                )
+                self.assertEqual(first["attempt_id"], second["attempt_id"])
+                self.assertEqual(first["ticket"]["id"], second["ticket"]["id"])
+                self.assertEqual(first["ticket"]["status"], "waiting_approval")
+                self.assertEqual(first["attempt"]["approval_task_id"], first["ticket"]["id"])
+                self.assertEqual(second["attempt"]["approval_task_id"], first["ticket"]["id"])
+                self.assertEqual(second["attempt"]["status"], "queued")
+                self.assertIsNot(second["ticket"]["payload"].get("_approved"), True)
+                self.assertEqual(len(initiatives.list_video_attempts(limit=20)), 1)
+            self.assertEqual(
+                _creator_video_attempt_id(topic["key"], first_initiative["id"], recipe_sha256, "c" * 64),
+                _creator_video_attempt_id(topic["key"], first_initiative["id"], recipe_sha256, "c" * 64),
+            )
+            self.assertNotEqual(
+                _creator_video_attempt_id(topic["key"], first_initiative["id"], recipe_sha256, "c" * 64),
+                _creator_video_attempt_id(topic["key"], first_initiative["id"], recipe_sha256, "d" * 64),
+            )
+
+    def test_creator_inbox_no_evidence_gap_requests_both_search_directions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            domains = ["粤语语音学与韵律", "停顿与话语分段", "证据不确定性传播"]
+            tags = ["粤语旁白", "证据语气校准"]
+            with ResearchKnowledgeStore(root / "knowledge.sqlite3") as knowledge:
+                claim = knowledge.upsert_node(
+                    "claim", "证据语气校准：无来源重试", summary="A creator hypothesis with no retrieved sources.",
+                    external_ref="creator-inbox:no-evidence-retry-fixture", status="proposed",
+                    metadata={
+                        "origin": "creator_inspiration_inbox",
+                        "epistemic_status": "creator_inspired_hypothesis_only",
+                        "review_state": "researched_needs_independent_review",
+                        "allow_external_research": True,
+                        "research_domains": domains,
+                        "tags": tags,
+                    },
+                )
+            engine = AutonomousResearchEngine(
+                evidence_db=root / "evidence.sqlite3", knowledge_db=root / "knowledge.sqlite3",
+                progress_db=root / "tasks.sqlite3", reminder_db=root / "reminders.sqlite3",
+                search=FakeSearch(), reader=FakeReader(), resource_aware=False,
+            )
+            topic = engine._next_topic(
+                preferred_key="research-gap:missing-support-and-counter-evidence:" + claim["id"],
+            )
+            self.assertEqual(topic["key"], "research-gap:missing-support-and-counter-evidence:" + claim["id"])
+            self.assertEqual(topic["evidence_gap_kind"], "missing-support-and-counter-evidence")
+            self.assertEqual(topic["creator_inspiration_node_id"], claim["id"])
+            self.assertEqual(topic["creator_tags"], tags)
+            self.assertEqual(topic["creator_research_domains"], domains)
+            self.assertEqual(topic["creator_hypothesis_summary"], "A creator hypothesis with no retrieved sources.")
+
+            self.assertEqual(
+                topic["support_query"],
+                "Cantonese prosody pause duration epistemic qualifiers speech perception delayed recall TTS",
+            )
+            self.assertIn("counterexamples", topic["counter_query"])
+
     def test_next_topic_prefers_a_new_support_counter_query_pair(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1378,6 +1526,8 @@ class AutonomousResearchTests(unittest.TestCase):
             topic = engine._next_topic(preferred_key="creator-hypothesis-review:" + candidate["id"])
             self.assertEqual(topic["creator_inspiration_node_id"], candidate["id"])
             self.assertEqual(topic["hypothesis"], summary)
+            self.assertEqual(topic["creator_hypothesis_summary"], summary[:3000])
+
             self.assertEqual(topic["creator_tags"], tags)
             self.assertEqual(topic["creator_research_domains"], domains)
             self.assertIn("YouTube title A/B testing", topic["support_query"])
@@ -1385,6 +1535,113 @@ class AutonomousResearchTests(unittest.TestCase):
             self.assertIn("digital content experimentation", topic["support_query"])
             self.assertIn("counterevidence", topic["counter_query"])
             self.assertIn("statistical power", topic["counter_query"])
+
+    def test_creator_inbox_cantonese_prosody_domains_build_targeted_queries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            summary = (
+                "明确问题：限定语后的停顿能否提升粤语听众对证据不确定性的延迟回忆？"
+                "可测试假设：在限定分句后加入 250–450ms pause_after，可提高限定语延迟回忆。"
+                "潜在价值：让旁白确信程度不越过证据。"
+                "研究领域：粤语语音学与韵律、停顿与话语分段、证据不确定性传播、听觉记忆与多媒体理解、文本转语音声学控制、人机信任校准。"
+                "分类标签：粤语旁白、停顿控制、证据语气校准。"
+                "支持证据搜索方向：粤语韵律、停顿时长、限定语注意和延迟回忆。"
+                "反证搜索方向：停顿导致不流利、认知负荷或没有显著增益。"
+                "可执行实验：相同文案下比较默认停顿与 250–450ms pause_after。"
+                "明确证伪条件：回忆提升不足 10 个百分点或自然度下降超过 0.3 SD。"
+            )
+            domains = [
+                "粤语语音学与韵律", "停顿与话语分段", "证据不确定性传播",
+                "听觉记忆与多媒体理解", "文本转语音声学控制", "人机信任校准",
+            ]
+            tags = ["粤语旁白", "停顿控制", "证据语气校准"]
+            with ResearchKnowledgeStore(root / "knowledge.sqlite3") as knowledge:
+                candidate = knowledge.upsert_node(
+                    "claim", "证据语气校准", summary=summary,
+                    external_ref="creator-inbox-cantonese-prosody-query-fixture",
+                    metadata={
+                        "origin": "creator_inspiration_inbox",
+                        "epistemic_status": "creator_inspired_hypothesis_only",
+                        "review_state": "not_researched",
+                        "allow_external_research": True,
+                        "research_domains": domains,
+                        "tags": tags,
+                    },
+                    status="proposed",
+                )
+            engine = AutonomousResearchEngine(
+                evidence_db=root / "evidence.sqlite3",
+                knowledge_db=root / "knowledge.sqlite3",
+                progress_db=root / "progress.sqlite3",
+                reminder_db=root / "reminders.sqlite3",
+                search=FakeSearch(), reader=FakeReader(), resource_aware=False,
+            )
+            topic = engine._next_topic(preferred_key="creator-hypothesis-review:" + candidate["id"])
+            self.assertEqual(topic["creator_inspiration_node_id"], candidate["id"])
+            self.assertEqual(topic["creator_tags"], tags)
+            self.assertEqual(topic["creator_research_domains"], domains)
+            self.assertEqual(topic["creator_hypothesis_summary"], summary[:3000])
+
+            self.assertEqual(
+                topic["support_query"],
+                "Cantonese prosody pause duration epistemic qualifiers speech perception delayed recall TTS",
+            )
+            self.assertEqual(
+                topic["counter_query"],
+                "speech pause duration disfluency fluency naturalness cognitive load listener comprehension counterexamples null effects",
+            )
+
+    def test_creator_research_cycle_links_directional_sources_to_original_claim(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            summary = (
+                "明确问题：限定语后的停顿能否提升粤语听众对证据不确定性的延迟回忆？"
+                "可测试假设：在限定分句后加入 250–450ms pause_after，可提高限定语延迟回忆。"
+                "潜在价值：让旁白确信程度不越过证据。"
+                "研究领域：粤语语音学与韵律、停顿与话语分段、证据不确定性传播。"
+                "分类标签：粤语旁白、停顿控制、证据语气校准。"
+                "支持证据搜索方向：粤语韵律与停顿位置。"
+                "反证搜索方向：停顿对流利度、自然度和认知负荷的负面影响。"
+                "可执行实验：相同文案下比较默认停顿与 250–450ms pause_after。"
+                "明确证伪条件：回忆提升不足 10 个百分点或自然度下降超过 0.3 SD。"
+            )
+            domains = ["粤语语音学与韵律", "停顿与话语分段", "证据不确定性传播"]
+            tags = ["粤语旁白", "停顿控制", "证据语气校准"]
+            with ResearchKnowledgeStore(root / "knowledge.sqlite3") as knowledge:
+                candidate = knowledge.upsert_node(
+                    "claim", "证据语气校准", summary=summary,
+                    external_ref="creator-inbox:directional-evidence-link-fixture",
+                    metadata={
+                        "origin": "creator_inspiration_inbox",
+                        "epistemic_status": "creator_inspired_hypothesis_only",
+                        "review_state": "not_researched",
+                        "allow_external_research": True,
+                        "research_domains": domains,
+                        "tags": tags,
+                    },
+                    status="proposed",
+                )
+            engine = AutonomousResearchEngine(
+                evidence_db=root / "evidence.sqlite3",
+                knowledge_db=root / "knowledge.sqlite3",
+                progress_db=root / "progress.sqlite3",
+                reminder_db=root / "reminders.sqlite3",
+                search=FakeSearch(), reader=FakeReader(), resource_aware=False,
+                workspace=root,
+            )
+            result = engine.run_once(
+                preferred_topic_key="creator-hypothesis-review:" + candidate["id"],
+            )
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(result["topic_key"], "creator-hypothesis-review:" + candidate["id"])
+            with ResearchKnowledgeStore(root / "knowledge.sqlite3") as knowledge:
+                persisted = knowledge.get_node(candidate["id"])
+                coverage = knowledge.claim_evidence_coverage(candidate["id"])
+            self.assertEqual(persisted["status"], "proposed")
+            self.assertEqual(persisted["metadata"]["review_state"], "researched_needs_independent_review")
+            self.assertEqual(coverage["direction_counts"]["support_search_candidate"], 1)
+            self.assertEqual(coverage["direction_counts"]["counter_search_candidate"], 1)
+            self.assertTrue(coverage["both_support_and_counter_present"])
 
     def test_symbolic_candidate_is_researched_individually_and_kept_unpromoted(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1406,6 +1663,7 @@ class AutonomousResearchTests(unittest.TestCase):
                 evidence_db=root / "evidence.sqlite3", knowledge_db=root / "knowledge.sqlite3",
                 progress_db=root / "tasks.sqlite3", reminder_db=root / "reminders.sqlite3",
                 search=FakeSearch(), reader=FakeReader(), resource_aware=False,
+                workspace=root,
             )
             result = engine.run_once()
             self.assertEqual(result["topic_key"], "symbolic-hypothesis-review:" + candidate["id"])
@@ -1617,6 +1875,7 @@ class AutonomousResearchTests(unittest.TestCase):
                 evidence_db=root / "evidence.sqlite3", knowledge_db=root / "knowledge.sqlite3",
                 progress_db=root / "tasks.sqlite3", reminder_db=root / "reminders.sqlite3",
                 search=FakeSearch(), reader=FakeReader(), resource_aware=False,
+                workspace=root,
                 synthesizer=lambda _topic, _sources: synthesis,
             )
             result = engine.run_once()
@@ -1671,6 +1930,7 @@ class AutonomousResearchTests(unittest.TestCase):
                 evidence_db=root / "evidence.sqlite3", knowledge_db=root / "knowledge.sqlite3",
                 progress_db=root / "tasks.sqlite3", reminder_db=root / "reminders.sqlite3",
                 search=FakeSearch(), reader=FakeReader(), resource_aware=False,
+                workspace=root,
                 synthesizer=lambda *_args: synthesis_calls.append(True),
                 claim_reviewer=lambda *_args: review_calls.append(True),
             )

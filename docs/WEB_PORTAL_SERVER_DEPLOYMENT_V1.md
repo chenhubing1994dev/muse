@@ -7,10 +7,10 @@
 - Portal 进程本身提供 HTTPS（TLS 1.2–1.3），不提供 HTTP 降级。
 - 默认只绑定 `127.0.0.1`。只有明确配置 `--bind` 才会监听其他接口。
 - `--origin` 必须是精确的公网 HTTPS Origin，例如 `https://muse.example.com`；不接受 localhost、LAN 地址或本地域名。
-- `GET /healthz` 提供不含敏感信息的 HTTPS liveness 检查；它只证明 Portal 进程可响应，不代表上游 Status API、TaskQueue 或知识库均健康。部署监控应另行验证业务依赖。
+- `GET /healthz` 提供不含敏感信息的 HTTPS liveness 检查；`GET /readyz` 额外以只读方式检查 Session、Plugin、Task、Capability SQLite 可访问性，并通过受保护的本机 Status API `/api/v1/overview` 做 readiness 探测。依赖缺失/不可用时 `/readyz` 返回 503，响应不泄露具体数据库路径或内部错误。
 - Portal 在服务器内部启动既有 Status API，使用 loopback 随机 Bearer。该 Token 只在服务器进程间使用，不得复制到浏览器、PWA 或手机。
 - 不要把 SQLite 数据库、私钥或环境变量放入 `web-portal/` 静态目录。
-- 当前仍是单一管理员访问密码，不是多用户服务；首次启动由部署者通过 `MUSE_WEB_PASSWORD` 从服务器环境安全注入，建议使用密码管理器生成的高熵随机口令，至少 32 个 UTF-8 字节。Portal 会在 Session SQLite 中持久化独立随机盐与 scrypt 摘要（不保存明文），后续启动时必须提供匹配的 `MUSE_WEB_PASSWORD`；不匹配会拒绝启动。旧版 Session DB 首次升级时会以当前环境密码建立该凭证记录。
+- 当前仍是单一管理员访问密码，不是多用户服务；首次启动由部署者通过 `MUSE_WEB_PASSWORD` 从服务器环境安全注入。可在受信任的本机交互式终端运行 `PYTHONPATH=src py -3.11 -m muse.web_portal_admin --generate-initial-password`（Windows PowerShell 先设置 `$env:PYTHONPATH = 'src'`，再运行 `py -3.11 -m muse.web_portal_admin --generate-initial-password`），生成 48 字节 CSPRNG / 384-bit URL-safe 随机口令。该命令会将口令打印到当前终端，**不要通过 psmux、CI、日志捕获或命令重定向运行**；请立即存入密码管理器，再通过服务管理器/受保护 EnvironmentFile 注入。Portal 会在 Session SQLite 中持久化独立随机盐与 scrypt 摘要（不保存明文），后续启动时必须提供匹配的 `MUSE_WEB_PASSWORD`；不匹配会拒绝启动。旧版 Session DB 首次升级时会以当前环境密码建立该凭证记录。
 - 修改密码前先停止 Portal 服务，再运行 `PYTHONPATH=src py -3.11 -m muse.web_portal_admin --session-db data/web-portal/sessions.sqlite3`（Windows PowerShell 可先设置 `$env:PYTHONPATH = 'src'`，再运行 `py -3.11 -m muse.web_portal_admin --session-db data/web-portal/sessions.sqlite3`）。工具会无回显地提示输入当前密码、新密码及确认；成功后必须同步更新服务环境中的 `MUSE_WEB_PASSWORD` 再启动。密码轮换会撤销全部旧浏览器 Session。不要把口令写入脚本、命令历史或版本库。
 
 ## 2. 服务器准备
@@ -83,11 +83,20 @@ py -3.11 -m muse.web_portal `
 - 本轮只完成自动化资源与 Service Worker 测试；真实 Android、iOS、Windows/macOS 浏览器安装与网络切换仍需验收。
 - 离线只保留静态应用壳；API、登录状态与知识数据不缓存，离线时不能继续研究或提交任务。
 
+## 6.1 反向代理与可信边界
+
+- Portal 自身只接受 HTTPS；若使用 Nginx/Caddy 等反向代理，应采用到 Portal 的 HTTPS 上游再加密并验证上游证书，不能把明文 HTTP 转发到 Portal TLS 监听端口。
+- 启动时必须提供真实公网 `--origin https://your-domain.example`；Host 与 POST Origin 必须精确匹配该 origin。Portal 启动 JSON 会回报已验证的 `configured_public_url`；未配置真实域名/证书前，不应声称公网部署完成。
+- 默认不信任任何转发来源标头。只有显式配置 `--trusted-proxy-cidr 127.0.0.1/32`（可重复，最多 16 个；IPv4 最宽 `/16`、IPv6 最宽 `/48`）后，且 TCP 直接对端确实属于该网络，Portal 才会接受恰好一个 `X-Forwarded-For` 标头中的单一 IP，仅用于登录限速与审计来源。优先使用代理单 IP `/32` 或 `/128`，不要信任宽泛网段。
+- 受信代理必须覆盖写入 `X-Forwarded-For` 为其实际观察到的客户端地址；重复标头、逗号分隔链、非法 IP 均退回代理 TCP 地址。Nginx 应使用 `proxy_set_header X-Forwarded-For $remote_addr;`，不要使用 `$proxy_add_x_forwarded_for`。`Forwarded`、`X-Real-IP`、`X-Forwarded-Proto`、`X-Forwarded-Host` 永远不会被用来证明 HTTPS 或覆盖 Host/Origin。
+- 代理必须原样保留浏览器 Host/Origin，并以 HTTPS 连接 Portal 上游、验证上游证书；不得采用公网 HTTPS → 内网明文 HTTP → Portal。Portal 本身始终执行 TLS 握手与 Host/Origin 校验。
+- 防火墙应阻止公网直接访问 Portal 上游监听端口，只允许受控反向代理主机连接；不要把 loopback 上游 Status API 或 Bearer Token 暴露给代理外部。
+- `/healthz` 只表示进程存活；部署监控应使用 `/readyz` 判断依赖可用性。两者都不得配置为绕过 TLS 或身份边界的公网管理入口。
 ## 7. 维护与安全
 
 - 定期备份 TaskQueue、Progress、Capability、Plugin registry、Knowledge 数据库及 Portal session 数据；备份文件放在静态目录之外。
 - 不要把密码、Token、私钥写进命令历史、日志或网页源码。
 - Portal 重启会使旧浏览器 Session 失效，需要重新登录。登录失败次数与登录审计事件保存在 Portal session SQLite 中：同一来源地址 15 分钟内连续 5 次失败会被限速；成功登录会重置该地址的失败计数。审计只记录来源地址、事件类型和时间，不记录密码或 Token；事件最多保留 7 天且上限 10,000 条。
-- SQLite 数据库处于 WAL 模式时，不要只复制主 `.sqlite3` 文件作为备份。应使用 SQLite Online Backup API / `Connection.backup()` 或先停止服务后连同 WAL 状态一致备份；恢复前先停止 Portal 与相关写入服务，并在副本上验证数据库完整性。
+- SQLite 数据库处于 WAL 模式时，不要只复制主 `.sqlite3` 文件作为备份。新增 `muse-portal-db backup --source-db <db1> --source-db <db2> --backup-dir <outside-static-dir>`：通过 SQLite Online Backup API 获取一致快照、执行 `PRAGMA quick_check` 并生成含 SHA-256 的 manifest。恢复命令 `muse-portal-db restore --backup-file <backup.sqlite3> --destination <new-path.sqlite3> --expected-sha256 <manifest-sha256>` 会先校验哈希，再写入新路径、拒绝覆盖既有文件并再次执行完整性检查。恢复前停止 Portal 与相关写入服务；先恢复到新路径验证，再由管理员切换正式数据库。备份目录必须放在静态网页目录之外，并按服务器操作系统权限保护。
 - 目前没有多用户隔离、MFA、SSO 或设备级原生密钥库；不要把它当作多人 SaaS 部署。
 - 目前没有 Supervisor 生命周期管理、证书自动续期、原生推送或后台同步。

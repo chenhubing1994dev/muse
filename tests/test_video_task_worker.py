@@ -192,6 +192,61 @@ class VideoTaskWorkerTests(unittest.TestCase):
         )
 
 
+    def test_worker_accepts_creator_initiative_ticket_only_after_matching_human_approval(self):
+        task_database = self.root / "data" / "tasks" / "muse.sqlite3"
+        with InitiativeStore(self.database) as store:
+            initiative = store.get_by_id(self.initiative_id)
+            video_brief = json.loads(initiative["concept"])["creator_brief"]["video"]
+            topic_key = "creator-hypothesis-review:" + "f" * 32
+            source_claim_id = "f" * 32
+            recipe_sha256 = "e" * 64
+            brief_sha256 = hashlib.sha256(
+                json.dumps(video_brief, sort_keys=True, ensure_ascii=False).encode("utf-8")
+            ).hexdigest()
+            attempt_id = "research-" + hashlib.sha256(
+                f"{topic_key}:{self.initiative_id}:{recipe_sha256}:{brief_sha256}".encode("utf-8")
+            ).hexdigest()[:32]
+            store.start_video_attempt(
+                attempt_id, mode="prompt_to_video", initiative_id=self.initiative_id,
+                recipe_sha256=recipe_sha256,
+            )
+        payload = {
+            "kind": "creator_initiative_video_approval",
+            "initiative_id": self.initiative_id,
+            "attempt_id": attempt_id,
+            "topic_key": topic_key,
+            "source_claim_id": source_claim_id,
+            "video_brief_sha256": brief_sha256,
+            "video_brief": video_brief,
+            "approval_scope": "one_video_attempt_only",
+            "requires_human_approval": True,
+            "auto_publish": False,
+        }
+        with TaskQueue(task_database) as queue:
+            ticket = queue.enqueue(
+                "Approve creator initiative preview", payload, require_approval=True,
+                idempotency_key=f"creator-video-approval:{attempt_id}", workload_class="media",
+            )
+            with InitiativeStore(self.database) as store:
+                attempt = store.attach_video_attempt_approval(attempt_id, ticket["id"])
+                self.assertIsNone(VideoTaskWorker._commander_approval_evidence(store, queue, attempt))
+            queue.approve(ticket["id"], approved_by="test-operator")
+            with InitiativeStore(self.database) as store:
+                attempt = store.get_video_attempt(attempt_id)
+                evidence = VideoTaskWorker._commander_approval_evidence(store, queue, attempt)
+                self.assertEqual(evidence["approval_task_id"], ticket["id"])
+                self.assertEqual(evidence["approved_by"], "test-operator")
+
+            wrong_payload = dict(payload, topic_key="creator-hypothesis-review:" + "0" * 32)
+            wrong_ticket = queue.enqueue(
+                "Approve mismatched creator preview", wrong_payload, require_approval=True,
+                idempotency_key=f"creator-video-approval:wrong:{attempt_id}", workload_class="media",
+            )
+            queue.approve(wrong_ticket["id"], approved_by="test-operator")
+            mismatched_attempt = dict(attempt, approval_task_id=wrong_ticket["id"])
+            with InitiativeStore(self.database) as store:
+                self.assertIsNone(VideoTaskWorker._commander_approval_evidence(store, queue, mismatched_attempt))
+
     def test_worker_fails_closed_before_claim_when_commander_grant_provider_is_missing(self):
         builder = FakeVideoBuilder()
         result = VideoTaskWorker(self.root, builder=builder, worker_id="missing-admission").run_once()
@@ -607,6 +662,18 @@ class VideoTaskWorkerTests(unittest.TestCase):
             self.assertEqual(evidence["approved_by"], "test-operator")
             self.assertEqual(len(evidence["video_brief_sha256"]), 64)
             self.assertTrue(VideoTaskWorker._commander_approval_is_valid(store, queue, attempt))
+
+    def test_commander_approval_rejects_timestamp_not_bound_to_audit_event(self):
+        with InitiativeStore(self.database) as store, TaskQueue(self.root / "data" / "tasks" / "muse.sqlite3") as queue:
+            attempt = store.get_video_attempt("worker-test")
+            task = queue.get(self.approval_task_id)
+            task["payload"]["_approval"]["approved_at"] = "2000-01-01T00:00:00+00:00"
+            queue._connection.execute(
+                "UPDATE tasks SET payload_json=? WHERE id=?",
+                (json.dumps(task["payload"]), self.approval_task_id),
+            )
+            queue._connection.commit()
+            self.assertFalse(VideoTaskWorker._commander_approval_is_valid(store, queue, attempt))
 
     def test_commander_approval_revocation_overrides_an_earlier_approval(self):
         with InitiativeStore(self.database) as store, TaskQueue(self.root / "data" / "tasks" / "muse.sqlite3") as queue:

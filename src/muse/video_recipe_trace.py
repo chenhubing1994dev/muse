@@ -57,10 +57,13 @@ def _approval_trace(
             "SELECT event_type,actor,payload_json,created_at FROM task_events WHERE task_id=? ORDER BY created_at,rowid LIMIT 500",
             (task_id,),
         ).fetchall()
+        from muse.task_queue import TaskQueue
+
         decision_verified = any(
             event["event_type"] == "human.decision"
             and event["actor"] == approval.get("approved_by")
             and _safe_json(event["payload_json"]).get("decision") == "approved"
+            and TaskQueue.approval_timestamp_matches_event(approval.get("approved_at"), event["created_at"])
             for event in events
         )
         brief_payload = _safe_json(payload.get("video_brief"))

@@ -103,8 +103,8 @@ echo "[8/9] Checking Rust crate"
 (cd "$TAURI" && cargo check --offline)
 
 if [[ "${1:-}" == "--release" ]]; then
-  echo "[9/9] Building Linux release executable"
-  (cd "$TAURI" && cargo build --release --offline --features custom-protocol)
+  echo "[9/9] Building Linux Debian installer"
+  (cd "$TAURI" && cargo tauri build --bundles deb --ci --no-sign -- --offline)
 elif [[ $# -eq 0 ]]; then
   echo "[9/9] Building Linux debug executable"
   (cd "$TAURI" && cargo build --offline)

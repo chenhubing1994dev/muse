@@ -1266,11 +1266,12 @@ class VideoProductBuilderTests(unittest.TestCase):
         target_parent = products_root / first["initiative_id"]
         staging = target_parent / ".race-loser"
         staging.mkdir()
-        recovered = self.builder._publish_staging(
-            staging, products_root, first["initiative_id"], first["version_id"],
-            title="并发发布短片", prompt="晨雾中的纸鹤",
-            creator_initiative_id=first["creator_initiative_id"], evolution_cycle_id=None,
-        )
+        with patch.object(InitiativeStore,"list",return_value=[]):
+            recovered = self.builder._publish_staging(
+                staging, products_root, first["initiative_id"], first["version_id"],
+                title="并发发布短片", prompt="晨雾中的纸鹤",
+                creator_initiative_id=first["creator_initiative_id"], evolution_cycle_id=None,
+            )
         self.assertEqual(recovered["package_sha256"], first["package_sha256"])
         self.assertEqual(recovered["ledger_event_id"], first["ledger_event_id"])
         self.assertTrue(staging.is_dir())
@@ -1571,9 +1572,10 @@ class VideoProductBuilderTests(unittest.TestCase):
             patch("muse.video_product_builder.subprocess.run", side_effect=fake_run) as run_mock,
             patch("muse.video_product_builder._inspect_product_video", side_effect=fake_qa),
         ):
-            revised = self.builder.package_approved_subtitle_revision(
-                original["initiative_id"], original["version_id"], approved,
-            )
+            with patch.object(InitiativeStore,"list",return_value=[]):
+                revised = self.builder.package_approved_subtitle_revision(
+                    original["initiative_id"], original["version_id"], approved,
+                )
 
         self.assertTrue(revised["validated"])
         self.assertNotEqual(revised["version_id"], original["version_id"])

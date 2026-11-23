@@ -1,5 +1,7 @@
 from __future__ import annotations
 import tempfile
+import hashlib
+import json
 import unittest
 from pathlib import Path
 from muse.initiative_engine import InitiativeStore
@@ -23,6 +25,29 @@ class InitiativeStoreTests(unittest.TestCase):
                 self.assertEqual(store.summary()["ready_to_prioritize"], 1)
                 store.update(item["id"], status="building")
                 self.assertEqual(store.summary()["by_status"]["building"], 1)
+
+    def test_attach_video_attempt_approval_is_idempotent_and_rejects_rebinding_or_running(self):
+        with tempfile.TemporaryDirectory() as d:
+            with InitiativeStore(Path(d) / "initiatives.sqlite3") as store:
+                item = store.propose(
+                    "Approval link", kind="tool", creator_value="value", concept="concept",
+                    first_step="step", expected_output="output",
+                )
+                store.start_video_attempt(
+                    "attempt-approval-attach", mode="prompt_to_video", initiative_id=item["id"],
+                )
+                linked = store.attach_video_attempt_approval("attempt-approval-attach", "approval-ticket-1")
+                self.assertEqual(linked["approval_task_id"], "approval-ticket-1")
+                repeated = store.attach_video_attempt_approval("attempt-approval-attach", "approval-ticket-1")
+                self.assertEqual(repeated["approval_task_id"], "approval-ticket-1")
+                with self.assertRaises(ValueError):
+                    store.attach_video_attempt_approval("attempt-approval-attach", "approval-ticket-2")
+                store.start_video_attempt(
+                    "attempt-already-running", mode="prompt_to_video", initiative_id=item["id"],
+                )
+                store.mark_video_attempt_running("attempt-already-running")
+                with self.assertRaises(ValueError):
+                    store.attach_video_attempt_approval("attempt-already-running", "approval-ticket-3")
 
     def test_update_returns_target_even_when_it_is_outside_default_list_window(self):
         with tempfile.TemporaryDirectory() as d:
@@ -371,6 +396,41 @@ class InitiativeStoreTests(unittest.TestCase):
                 self.assertEqual(len(artifacts), 1)
                 self.assertEqual(artifacts[0]["to_status"], "testing")
                 self.assertEqual(store.list(limit=10)[0]["status"], "testing")
+
+    def test_update_concept_uses_optimistic_hash_and_append_only_audit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with InitiativeStore(Path(directory) / "initiatives.sqlite3") as store:
+                item = store.propose(
+                    "Research context refresh", kind="tool", creator_value="value",
+                    concept='{"research_question":"before"}', first_step="step", expected_output="output",
+                )
+                previous_sha256 = hashlib.sha256(item["concept"].encode("utf-8")).hexdigest()
+                updated = store.update_concept(
+                    item["id"],
+                    {"research_question": "after", "key_discoveries": {"sources": ["unreviewed"]}},
+                    expected_current_sha256=previous_sha256, actor="researcher", source="daily_inspiration",
+                )
+                self.assertEqual(updated["status"], "proposed")
+                self.assertEqual(json.loads(updated["concept"])["research_question"], "after")
+                rows = store.connection.execute(
+                    "SELECT previous_sha256,new_sha256,actor,source FROM initiative_concept_updates WHERE initiative_id=?",
+                    (item["id"],),
+                ).fetchall()
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0]["previous_sha256"], previous_sha256)
+                self.assertEqual(rows[0]["new_sha256"], hashlib.sha256(updated["concept"].encode("utf-8")).hexdigest())
+                with self.assertRaises(ValueError):
+                    store.update_concept(
+                        item["id"], {"research_question": "stale overwrite"},
+                        expected_current_sha256=previous_sha256,
+                    )
+                current_sha256 = hashlib.sha256(updated["concept"].encode("utf-8")).hexdigest()
+                store.update(item["id"], status="testing", actor="reviewer")
+                with self.assertRaises(ValueError):
+                    store.update_concept(
+                        item["id"], {"research_question": "must not overwrite testing"},
+                        expected_current_sha256=current_sha256,
+                    )
 
     def test_research_links_are_cycle_scoped_idempotent_and_append_only(self):
         import sqlite3

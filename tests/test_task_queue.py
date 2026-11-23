@@ -347,6 +347,19 @@ class TaskQueueTests(unittest.TestCase):
                 self.assertEqual(claimed["status"], "running")
                 self.assertEqual(queue.get(first["id"])["status"], "running")
 
+    def test_approval_timestamp_matches_only_its_persisted_event(self) -> None:
+        from datetime import datetime, timezone
+
+        now = TaskQueue._now()
+        self.assertTrue(TaskQueue.approval_timestamp_matches_event(now, now))
+        self.assertFalse(TaskQueue.approval_timestamp_matches_event("2000-01-01T00:00:00+00:00", now))
+        self.assertFalse(TaskQueue.approval_timestamp_matches_event("2000-01-01T00:00:00", now))
+        numeric = datetime.now(timezone.utc).timestamp()
+        numeric_event = datetime.fromtimestamp(numeric, timezone.utc).isoformat()
+        self.assertTrue(TaskQueue.approval_timestamp_matches_event(numeric, numeric_event))
+        self.assertFalse(TaskQueue.approval_timestamp_matches_event(10 ** 400, now))
+        self.assertFalse(TaskQueue.approval_timestamp_matches_event(True, now))
+
     def test_approval_requeues_waiting_task_and_records_approval(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             with TaskQueue(Path(directory) / "tasks.sqlite3") as queue:
@@ -409,6 +422,85 @@ class TaskQueueTests(unittest.TestCase):
                 self.assertIsNone(queue.heartbeat(task["id"], worker_id="worker-b", lease_seconds=60))
                 updated = queue.heartbeat(task["id"], worker_id="worker-a", lease_seconds=60)
                 self.assertGreater(updated["lease_expires_at"], before)
+
+    def test_heartbeat_audit_is_atomic_and_binds_current_lease_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with TaskQueue(Path(directory) / "tasks.sqlite3") as queue:
+                task = queue.enqueue("heartbeat audit", {})
+                claimed = queue.claim_next(worker_id="worker-a", lease_seconds=30)
+                claim_event = queue.events(task["id"])[-1]
+                self.assertEqual(claim_event["event_type"], "assignment.claimed")
+                self.assertEqual(claim_event["payload"], {
+                    "attempt": 1,
+                    "lease_epoch": 1,
+                    "lease_id": f"{task['id']}:1",
+                    "heartbeat_at": claimed["heartbeat_at"],
+                    "lease_expires_at": claimed["lease_expires_at"],
+                })
+
+                renewed = queue.heartbeat(task["id"], worker_id="worker-a", lease_seconds=60)
+                heartbeat_event = queue.events(task["id"])[-1]
+                self.assertEqual(heartbeat_event["event_type"], "assignment.lease_heartbeat")
+                self.assertEqual(heartbeat_event["actor"], "worker-a")
+                self.assertEqual(heartbeat_event["payload"], {
+                    "attempt": renewed["attempts"],
+                    "lease_epoch": renewed["attempts"],
+                    "lease_id": f"{task['id']}:{renewed['attempts']}",
+                    "heartbeat_at": renewed["heartbeat_at"],
+                    "lease_expires_at": renewed["lease_expires_at"],
+                })
+
+    def test_expired_worker_cannot_revive_lease_with_heartbeat(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with TaskQueue(Path(directory) / "tasks.sqlite3") as queue:
+                task = queue.enqueue("expired heartbeat", {})
+                queue.claim_next(worker_id="worker-a", lease_seconds=30)
+                queue._connection.execute(
+                    "UPDATE tasks SET lease_expires_at = ? WHERE id = ?",
+                    ("2000-01-01T00:00:00+00:00", task["id"]),
+                )
+                queue._connection.commit()
+                before_events = len(queue.events(task["id"]))
+                self.assertIsNone(queue.heartbeat(task["id"], worker_id="worker-a", lease_seconds=60))
+                self.assertEqual(len(queue.events(task["id"])), before_events)
+
+    def test_heartbeat_uses_savepoint_without_committing_callers_transaction(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with TaskQueue(Path(directory) / "tasks.sqlite3") as queue:
+                task = queue.enqueue("nested heartbeat", {})
+                claimed = queue.claim_next(worker_id="worker-a", lease_seconds=30)
+                queue._connection.execute(
+                    "UPDATE tasks SET created_at = ? WHERE id = ?",
+                    ("2000-01-01T00:00:00+00:00", task["id"]),
+                )
+                self.assertTrue(queue._connection.in_transaction)
+
+                renewed = queue.heartbeat(task["id"], worker_id="worker-a", lease_seconds=60)
+                self.assertIsNotNone(renewed)
+                self.assertTrue(queue._connection.in_transaction)
+                self.assertNotEqual(renewed["lease_expires_at"], claimed["lease_expires_at"])
+                queue._connection.rollback()
+
+                rolled_back = queue.get(task["id"])
+                self.assertEqual(rolled_back["lease_expires_at"], claimed["lease_expires_at"])
+                self.assertEqual(queue.events(task["id"])[-1]["event_type"], "assignment.claimed")
+
+    def test_heartbeat_rolls_back_lease_update_when_audit_write_fails(self) -> None:
+        import sqlite3
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as directory:
+            with TaskQueue(Path(directory) / "tasks.sqlite3") as queue:
+                task = queue.enqueue("heartbeat rollback", {})
+                claimed = queue.claim_next(worker_id="worker-a", lease_seconds=30)
+                before_events = queue.events(task["id"])
+                with patch.object(queue, "_record_event", side_effect=sqlite3.IntegrityError("audit insert failed")):
+                    with self.assertRaisesRegex(sqlite3.IntegrityError, "audit insert failed"):
+                        queue.heartbeat(task["id"], worker_id="worker-a", lease_seconds=60)
+                after = queue.get(task["id"])
+                self.assertEqual(after["heartbeat_at"], claimed["heartbeat_at"])
+                self.assertEqual(after["lease_expires_at"], claimed["lease_expires_at"])
+                self.assertEqual(queue.events(task["id"]), before_events)
 
     def test_expired_running_task_is_requeued_and_can_be_reclaimed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

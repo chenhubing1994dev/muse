@@ -14,6 +14,7 @@ import json
 import re
 import sqlite3
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -30,6 +31,29 @@ MAX_MANIFEST_BYTES = 64 * 1024
 MAX_CAPABILITIES = 64
 MAX_PLUGIN_ARTIFACT_BYTES = 256 * 1024 * 1024
 MAX_DEPENDENCIES = 32
+# Risk labels are ceilings, not descriptive hints: a lower-risk capability may
+# never request permissions reserved for a higher-risk class.
+RISK_PERMISSION_CEILINGS = {
+    "read_only": frozenset({"research.read", "knowledge.read", "commander.enqueue"}),
+    "research": frozenset({"research.read", "knowledge.read", "knowledge.write", "network.public_research", "commander.enqueue"}),
+    "code_change": frozenset({"research.read", "knowledge.read", "knowledge.write", "network.public_research", "filesystem.project_read", "filesystem.project_write", "commander.enqueue"}),
+    "external_action": ALLOWED_PERMISSIONS,
+}
+# These are proposed upper bounds for human review only. No plugin runtime is
+# active, so the values must never be represented as OS-enforced quotas.
+RISK_RESOURCE_BUDGETS = {
+    "read_only": {"cpu_seconds": 5, "wall_time_seconds": 15, "memory_mb": 128, "max_output_bytes": 262144, "max_network_requests": 0, "max_filesystem_write_bytes": 0, "gpu_allowed": False},
+    "research": {"cpu_seconds": 60, "wall_time_seconds": 120, "memory_mb": 512, "max_output_bytes": 2097152, "max_network_requests": 16, "max_filesystem_write_bytes": 0, "gpu_allowed": False},
+    "code_change": {"cpu_seconds": 120, "wall_time_seconds": 300, "memory_mb": 1024, "max_output_bytes": 4194304, "max_network_requests": 16, "max_filesystem_write_bytes": 16777216, "gpu_allowed": False},
+    "external_action": {"cpu_seconds": 180, "wall_time_seconds": 600, "memory_mb": 2048, "max_output_bytes": 8388608, "max_network_requests": 32, "max_filesystem_write_bytes": 67108864, "gpu_allowed": True},
+}
+
+
+def proposed_resource_budget(risk: str) -> dict[str, Any]:
+    """Return review-only resource ceilings; no runtime enforcement is implied."""
+    if not isinstance(risk, str) or risk not in RISK_RESOURCE_BUDGETS:
+        raise PluginError("unsupported plugin risk class")
+    return {"limits": dict(RISK_RESOURCE_BUDGETS[risk]), "runtime_enforced": False}
 
 
 class PluginError(ValueError):
@@ -96,6 +120,9 @@ def validate_manifest(value: Any) -> dict[str, Any]:
             raise PluginError("capability requests an unknown or forbidden permission")
         if len(set(permissions)) != len(permissions):
             raise PluginError("capability permissions must be unique")
+        excessive_permissions = set(permissions) - RISK_PERMISSION_CEILINGS[risk]
+        if excessive_permissions:
+            raise PluginError("capability permissions exceed the declared risk class")
         if "commander.enqueue" not in permissions:
             raise PluginError("every plugin capability must be routed through Commander")
         normalized_capabilities.append({
@@ -124,7 +151,7 @@ def plugin_signature_payload(manifest: Any, artifact_sha256: str) -> bytes:
     encoded = json.dumps(
         normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
     ).encode("utf-8")
-    return b"MUSE-PLUGIN-BUNDLE-SIGNATURE-V1\\0" + encoded + b"\\0artifact-sha256=" + artifact_sha256.encode("ascii")
+    return b"MUSE-PLUGIN-BUNDLE-SIGNATURE-V1\x00" + encoded + b"\x00artifact-sha256=" + artifact_sha256.encode("ascii")
 
 
 class PluginRegistry:
@@ -246,6 +273,21 @@ class PluginRegistry:
             self.connection.execute(
                 "UPDATE plugin_signatures SET status='revoked' WHERE key_id=?", (key_id,),
             )
+            affected_plugins = self.connection.execute(
+                "SELECT DISTINCT plugin_id FROM plugin_signatures WHERE key_id=?", (key_id,),
+            ).fetchall()
+            self.connection.execute(
+                "UPDATE plugins SET status='disabled',updated_at=? WHERE plugin_id IN "
+                "(SELECT DISTINCT plugin_id FROM plugin_signatures WHERE key_id=?) AND status='enabled'",
+                (time.time(), key_id),
+            )
+            for affected in affected_plugins:
+                plugin_row = self.connection.execute(
+                    "SELECT manifest_sha256 FROM plugins WHERE plugin_id=?", (affected["plugin_id"],),
+                ).fetchone()
+                if plugin_row is not None:
+                    self._audit(affected["plugin_id"], "plugin.disabled_publisher_key_revoked", actor,
+                                plugin_row["manifest_sha256"])
             self._audit("*", "publisher_key.revoked", actor, row["fingerprint_sha256"])
             self.connection.commit()
         except Exception:
@@ -517,7 +559,14 @@ class PluginRegistry:
         self.connection.execute("BEGIN IMMEDIATE")
         try:
             row = self.connection.execute("SELECT * FROM plugins WHERE plugin_id=?", (plugin_id,)).fetchone()
-            if row is None or row["status"] != "enabled":
+            if row is None:
+                raise PluginError("plugin must be enabled before requesting a capability")
+            signature = self.get_signature(plugin_id)
+            if signature.get("status") == "revoked":
+                raise PluginError("publisher signing key has been revoked")
+            if signature.get("status") != "verified":
+                raise PluginError("plugin bundle must have a verified publisher signature before requesting Commander approval")
+            if row["status"] != "enabled":
                 raise PluginError("plugin must be enabled before requesting a capability")
             manifest = json.loads(row["manifest_json"])
             capability = next((item for item in manifest["capabilities"] if item["id"] == capability_id), None)
@@ -527,11 +576,20 @@ class PluginRegistry:
                 "plugin_id": plugin_id,
                 "plugin_version": row["version"],
                 "plugin_manifest_sha256": row["manifest_sha256"],
+                "publisher_signature": {
+                    "status": signature["status"],
+                    "key_id": signature["key_id"],
+                    "artifact_sha256": signature["artifact_sha256"],
+                    "signature_sha256": signature["signature_sha256"],
+                    "verified_at": signature["verified_at"],
+                },
                 "capability_id": capability_id,
                 "action_class": capability["risk"],
                 "required_permissions": capability["permissions"],
                 "requested_by": actor,
                 "approval_required": True,
+                "proposed_resource_budget": proposed_resource_budget(capability["risk"]),
+                "execution_enabled": False,
                 "payload": json.loads(encoded_payload),
             }
             request_identity = hashlib.sha256(
@@ -552,13 +610,15 @@ class PluginRegistry:
             self.connection.rollback()
             raise
 
-    @staticmethod
-    def _public(row: sqlite3.Row) -> dict[str, Any]:
+    def _public(self, row: sqlite3.Row) -> dict[str, Any]:
+        plugin_id = row["plugin_id"]
         return {
-            "plugin_id": row["plugin_id"], "version": row["version"],
+            "plugin_id": plugin_id, "version": row["version"],
             "manifest": json.loads(row["manifest_json"]), "manifest_sha256": row["manifest_sha256"],
             "status": row["status"], "approved_by": row["approved_by"],
             "discovered_at": row["discovered_at"], "updated_at": row["updated_at"],
+            "signature": self.get_signature(plugin_id),
+            "execution_enabled": False,
         }
 
 
@@ -588,6 +648,7 @@ def sync_plugin_capabilities(plugin_registry: PluginRegistry, capability_registr
         manifest = plugin["manifest"]
         plugin_id = plugin["plugin_id"]
         plugin_state = plugin["status"]
+        signature_state = plugin.get("signature", {}).get("status")
         for capability in manifest["capabilities"]:
             source_capability_id = capability["id"]
             catalog_id = f"plugin.{plugin_id}.{source_capability_id}"
@@ -602,7 +663,12 @@ def sync_plugin_capabilities(plugin_registry: PluginRegistry, capability_registr
                     raise PluginError(f"plugin capability catalog id collides with an existing capability: {catalog_id}")
             # Enabled only means the manifest passed its management gates. A
             # trusted, reviewed runtime adapter is a separate prerequisite.
-            catalog_status = "disabled" if plugin_state in {"disabled", "quarantined"} else "needs_approval"
+
+            catalog_status = (
+                "disabled"
+                if plugin_state in {"disabled", "quarantined"} or signature_state == "revoked"
+                else "needs_approval"
+            )
             capability_registry.register(
                 capability_id=catalog_id,
                 domain="plugin",
@@ -620,6 +686,7 @@ def sync_plugin_capabilities(plugin_registry: PluginRegistry, capability_registr
                     "plugin_id": plugin_id,
                     "plugin_version": plugin["version"],
                     "plugin_status": plugin_state,
+                    "signature_status": signature_state,
                     "plugin_manifest_sha256": plugin["manifest_sha256"],
                     "source_capability_id": source_capability_id,
                     "risk": capability["risk"],
@@ -654,6 +721,73 @@ def sync_plugin_capabilities(plugin_registry: PluginRegistry, capability_registr
                 disabled += 1
     return {"registered": registered, "updated": updated, "disabled": disabled,
             "total": len(active_ids)}
+
+
+def _plugin_capability_database_paths(
+    plugin_database: str | Path, capability_database: str | Path,
+) -> tuple[Path, Path]:
+    plugin_path = Path(plugin_database).expanduser()
+    capability_path = Path(capability_database).expanduser()
+    for label, path in (("plugin registry", plugin_path), ("capability catalog", capability_path)):
+        if path.is_symlink() or not path.is_file():
+            raise PluginError(f"{label} must be an existing regular non-symlink database file")
+    try:
+        plugin_resolved = plugin_path.resolve(strict=True)
+        capability_resolved = capability_path.resolve(strict=True)
+    except OSError as exc:
+        raise PluginError("plugin registry and capability catalog paths must resolve") from exc
+    if os.path.normcase(str(plugin_resolved)) == os.path.normcase(str(capability_resolved)):
+        raise PluginError("plugin registry and capability catalog must be separate database files")
+    return plugin_resolved, capability_resolved
+
+
+def sync_plugin_capability_databases(
+    plugin_database: str | Path, capability_database: str | Path,
+) -> dict[str, int]:
+    """Reconcile the separate plugin and capability SQLite stores explicitly."""
+    from muse.capabilities import CapabilityRegistry
+
+    plugin_path, capability_path = _plugin_capability_database_paths(plugin_database, capability_database)
+    try:
+        with PluginRegistry(plugin_path) as plugin_registry, CapabilityRegistry(capability_path) as capability_registry:
+            return sync_plugin_capabilities(plugin_registry, capability_registry)
+    except PluginError:
+        raise
+    except (OSError, sqlite3.Error, ValueError, TypeError) as exc:
+        raise PluginError("plugin capability catalog synchronization failed") from exc
+
+
+def revoke_publisher_key_and_sync(
+    plugin_database: str | Path, capability_database: str | Path, key_id: str, *, revoked_by: str,
+) -> dict[str, Any]:
+    """Revoke a publisher, then reconcile the separate capability catalog.
+
+    The two SQLite files cannot share one atomic transaction. If projection fails,
+    the key remains revoked and this error explicitly directs the operator to the
+    idempotent sync-capabilities repair command.
+    """
+    from muse.capabilities import CapabilityRegistry
+
+    plugin_path, capability_path = _plugin_capability_database_paths(plugin_database, capability_database)
+    try:
+        with PluginRegistry(plugin_path) as plugin_registry, CapabilityRegistry(capability_path) as capability_registry:
+            revocation = plugin_registry.revoke_publisher_key(key_id, revoked_by=revoked_by)
+            try:
+                synchronization = sync_plugin_capabilities(plugin_registry, capability_registry)
+            except Exception as exc:
+                raise PluginError(
+                    "publisher key is revoked, but capability catalog synchronization failed; "
+                    "rerun muse-plugins sync-capabilities with both database paths"
+                ) from exc
+    except PluginError:
+        raise
+    except (OSError, sqlite3.Error, ValueError, TypeError) as exc:
+        raise PluginError("publisher revocation or capability catalog synchronization failed") from exc
+    return {
+        "revocation": revocation,
+        "capability_sync": synchronization,
+        "atomic_across_databases": False,
+    }
 
 
 def commander_task_queue_adapter(task_database: str | Path) -> Callable[..., dict[str, Any]]:
@@ -693,6 +827,133 @@ def commander_task_queue_adapter(task_database: str | Path) -> Callable[..., dic
     return enqueue
 
 
+def validate_approved_plugin_ticket(
+    plugin_database: str | Path, task_database: str | Path, task_id: str,
+    *, worker_id: str | None = None,
+) -> dict[str, Any]:
+    """Revalidate a human-approved plugin ticket before a future trusted Worker sees it.
+
+    This is an admission/audit check only. It never executes code and always
+    returns execution_enabled=False because no sandbox runtime is registered.
+    """
+    from muse.task_queue import TaskQueue
+
+    plugin_path = Path(plugin_database).expanduser()
+    task_path = Path(task_database).expanduser()
+    if (plugin_path.is_symlink() or task_path.is_symlink()
+            or not plugin_path.is_file() or not task_path.is_file()):
+        raise PluginError("plugin and Commander databases must be existing regular non-symlink files")
+    try:
+        if os.path.normcase(str(plugin_path.resolve(strict=True))) == os.path.normcase(str(task_path.resolve(strict=True))):
+            raise PluginError("plugin registry and Commander task database must be separate files")
+    except OSError as exc:
+        raise PluginError("plugin and Commander database paths must resolve") from exc
+
+    with PluginRegistry(plugin_path) as registry, TaskQueue(task_path) as queue:
+        task = queue.get(task_id)
+        if task is None:
+            raise PluginError("Commander plugin ticket does not exist")
+        if task.get("status") == "waiting_approval":
+            raise PluginError("plugin ticket has not been explicitly approved")
+        if task.get("status") not in {"queued", "running"}:
+            raise PluginError("Commander plugin ticket is not in an approved dispatch state")
+        if task.get("status") == "running":
+            if (not isinstance(worker_id, str) or not worker_id.strip() or len(worker_id) > 120
+                    or task.get("lease_owner") != worker_id.strip()):
+                raise PluginError("running plugin ticket requires the current Worker lease owner")
+            lease_value = task.get("lease_expires_at")
+            try:
+                lease_expiry = datetime.fromisoformat(lease_value.replace("Z", "+00:00"))
+            except (AttributeError, TypeError, ValueError):
+                raise PluginError("plugin Worker lease expiry is invalid") from None
+            if lease_expiry.tzinfo is None or lease_expiry.utcoffset() is None:
+                raise PluginError("plugin Worker lease expiry is invalid")
+            if lease_expiry.astimezone(timezone.utc) <= datetime.now(timezone.utc):
+                raise PluginError("plugin Worker lease has expired")
+            attempts = task.get("attempts")
+            if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 1:
+                raise PluginError("plugin Worker attempt metadata is invalid")
+            lease_events = [
+                event for event in queue.events(task_id, limit=500)
+                if event.get("event_type") in {"assignment.claimed", "assignment.lease_heartbeat"}
+            ]
+            if not lease_events:
+                raise PluginError("running plugin ticket is missing its matching Worker claim audit event")
+            latest_lease_event = lease_events[-1]
+            expected_lease_payload = {
+                "attempt": attempts,
+                "lease_epoch": attempts,
+                "lease_id": f"{task_id}:{attempts}",
+                "heartbeat_at": task.get("heartbeat_at"),
+                "lease_expires_at": lease_value,
+            }
+            if (
+                latest_lease_event.get("actor") != worker_id.strip()
+                or latest_lease_event.get("payload") != expected_lease_payload
+            ):
+                raise PluginError("plugin Worker lease expiry does not match the latest lease audit")
+        envelope = task.get("payload")
+        if not isinstance(envelope, dict) or envelope.get("kind") != "plugin_capability_request":
+            raise PluginError("Commander ticket is not a plugin capability request")
+        if envelope.get("execution_enabled") is not False or envelope.get("execution_adapter_required") is not True:
+            raise PluginError("plugin ticket execution boundary is invalid")
+        if envelope.get("_approved") is not True:
+            raise PluginError("plugin ticket has not been explicitly approved")
+        approval = envelope.get("_approval")
+        if (not isinstance(approval, dict) or not isinstance(approval.get("approved_by"), str)
+                or not approval["approved_by"].strip()):
+            raise PluginError("plugin ticket approval metadata is invalid")
+        events = queue.events(task_id, limit=500)
+        matching_approval_events = [
+            event for event in events
+            if event.get("event_type") == "human.decision"
+            and event.get("actor") == approval["approved_by"]
+            and event.get("payload") == {"decision": "approved"}
+        ]
+        if not matching_approval_events:
+            raise PluginError("plugin ticket is missing its matching human approval audit event")
+        if not any(
+            TaskQueue.approval_timestamp_matches_event(approval.get("approved_at"), event.get("created_at"))
+            for event in matching_approval_events
+        ):
+            raise PluginError("plugin ticket approval timestamp does not match its audit event")
+
+        request = envelope.get("plugin_capability_request")
+        if not isinstance(request, dict) or request.get("approval_required") is not True:
+            raise PluginError("plugin capability request envelope is invalid")
+        plugin_id = request.get("plugin_id")
+        if not isinstance(plugin_id, str) or not plugin_id:
+            raise PluginError("plugin capability request identity is invalid")
+        current = registry.get(plugin_id)
+        if current.get("status") != "enabled":
+            raise PluginError("plugin is no longer enabled; approved ticket is stale")
+        if (current.get("version") != request.get("plugin_version")
+                or current.get("manifest_sha256") != request.get("plugin_manifest_sha256")):
+            raise PluginError("plugin version or manifest changed after approval; ticket is stale")
+        current_signature = current.get("signature") or {}
+        signed = request.get("publisher_signature")
+        if (not isinstance(signed, dict) or current_signature.get("status") != "verified"
+                or any(current_signature.get(key) != signed.get(key)
+                       for key in ("key_id", "artifact_sha256", "signature_sha256"))):
+            raise PluginError("publisher signature is no longer verified or no longer matches the approved ticket")
+        manifest_capabilities = current["manifest"]["capabilities"]
+        capability = next((item for item in manifest_capabilities if item["id"] == request.get("capability_id")), None)
+        if (capability is None or capability.get("risk") != request.get("action_class")
+                or capability.get("permissions") != request.get("required_permissions")):
+            raise PluginError("plugin capability declaration changed after approval; ticket is stale")
+        return {
+            "status": "approved_for_worker_review",
+            "task_id": task_id,
+            "plugin_id": plugin_id,
+            "plugin_version": current["version"],
+            "capability_id": request["capability_id"],
+            "publisher_signature": dict(signed),
+            "approval": dict(approval),
+            "execution_enabled": False,
+            "runtime_adapter_registered": False,
+        }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Validate and inspect Muse declarative plugin manifests")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -713,7 +974,11 @@ def main(argv: list[str] | None = None) -> int:
     revoke_parser = subparsers.add_parser("revoke-key")
     revoke_parser.add_argument("key_id")
     revoke_parser.add_argument("--database", required=True, type=Path)
+    revoke_parser.add_argument("--capability-db", required=True, type=Path)
     revoke_parser.add_argument("--revoked-by", required=True)
+    sync_parser = subparsers.add_parser("sync-capabilities")
+    sync_parser.add_argument("--database", required=True, type=Path)
+    sync_parser.add_argument("--capability-db", required=True, type=Path)
     signed_parser = subparsers.add_parser("discover-signed")
     signed_parser.add_argument("manifest", type=Path)
     signed_parser.add_argument("artifact", type=Path)
@@ -752,8 +1017,11 @@ def main(argv: list[str] | None = None) -> int:
                     args.key_id, args.publisher, public_key, trusted_by=args.trusted_by,
                 )
         elif args.command == "revoke-key":
-            with PluginRegistry(args.database) as registry:
-                result = registry.revoke_publisher_key(args.key_id, revoked_by=args.revoked_by)
+            result = revoke_publisher_key_and_sync(
+                args.database, args.capability_db, args.key_id, revoked_by=args.revoked_by,
+            )
+        elif args.command == "sync-capabilities":
+            result = {"capability_sync": sync_plugin_capability_databases(args.database, args.capability_db)}
         elif args.command == "discover-signed":
             raw = args.manifest.read_bytes()
             if len(raw) > MAX_MANIFEST_BYTES:

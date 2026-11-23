@@ -79,6 +79,11 @@ class MuseDaemonController:
         }
 
     # -------------------------------------------------------------- lifecycle
+    def _rollback_unowned_start(self) -> None:
+        """Undo the pre-spawn running marker without touching a concurrently acquired owner."""
+        with RuntimeStateStore(self.state_db) as state:
+            state.reset_unowned()
+
     def start(self, *, poll_seconds: int = 5) -> dict[str, Any]:
         if isinstance(poll_seconds, bool) or not isinstance(poll_seconds, int) or not 1 <= poll_seconds <= 60:
             raise DaemonError("poll_seconds must be an integer between 1 and 60")
@@ -98,9 +103,23 @@ class MuseDaemonController:
         env["PYTHONPATH"] = str(self.workspace / "src")
         env["PYTHONUNBUFFERED"] = "1"
         log_dir = self.state_db.parent
-        log_dir.mkdir(parents=True, exist_ok=True)
-        stdout_path = log_dir / "runtime.stdout.log"
-        stderr_path = log_dir / "runtime.stderr.log"
+        stdout = stderr = None
+        try:
+            log_dir.mkdir(parents=True, exist_ok=True)
+            stdout_path = log_dir / "runtime.stdout.log"
+            stderr_path = log_dir / "runtime.stderr.log"
+            stdout = open(stdout_path, "ab", buffering=0)
+            stderr = open(stderr_path, "ab", buffering=0)
+        except OSError as exc:
+            for stream in (stdout, stderr):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except OSError:
+                        pass
+            self._rollback_unowned_start()
+            raise DaemonError(f"cannot open runtime log: {exc}") from exc
+
         args = [
             _python_executable(), "-u", "-m", "muse.autonomous_runtime",
             "--task-db", str(self.task_db),
@@ -112,28 +131,24 @@ class MuseDaemonController:
             "run", "--poll-seconds", str(poll_seconds),
         ]
         try:
-            stdout = open(stdout_path, "ab", buffering=0)
-            stderr = open(stderr_path, "ab", buffering=0)
-        except OSError as exc:
-            raise DaemonError(f"cannot open runtime log: {exc}") from exc
-        try:
             child = subprocess.Popen(
                 args, cwd=self.workspace, env=env,
                 stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         except OSError as exc:
-            stdout.close(); stderr.close()
+            self._rollback_unowned_start()
             raise DaemonError(f"cannot start autonomous runtime: {exc}") from exc
         finally:
-            # Parent-side handles are no longer needed after spawning.
-            try:
-                stdout.close(); stderr.close()
-            except Exception:
-                pass
+            for stream in (stdout, stderr):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except OSError:
+                        pass
 
         self._write_lease({"pid": child.pid, "started_at": _stamp(), "poll_seconds": poll_seconds})
-        self._audit("start", {"pid": child.pid, "poll_seconds": poll_seconds})
+        self._audit("start", {"pid": child.pid})
         return {"changed": True, "action": "start", "pid": child.pid, **self.status()}
 
     def pause(self) -> dict[str, Any]:
@@ -259,15 +274,42 @@ class MuseDaemonController:
         """Run one bounded deterministic tick in-process (no long-lived daemon)."""
         if self.status()["running"]:
             raise DaemonError("stop the runtime before running a one-shot tick")
-        supervisor = AutonomousSupervisor(
-            task_db=self.task_db, routine_db=self.routine_db, state_db=self.state_db,
-            improvement_db=self.improvement_db, knowledge_db=self.knowledge_db,
-            reminder_db=self.reminder_db, workspace=self.workspace,
-        )
-        supervisor.ensure_default_routines()
-        result = supervisor.run_tick()
-        self._audit("run_once", {"task": bool(result.get("task"))})
-        return result
+        video_admission_runtime = None
+        video_admission_setup: dict[str, Any] = {"status": "disabled"}
+        if os.environ.get("MUSE_ENABLE_VIDEO_WORKER", "").strip() == "1":
+            try:
+                from muse.video_admission_runtime import build_video_admission_runtime
+                video_admission_runtime = build_video_admission_runtime(
+                    self.workspace, task_database=self.task_db,
+                )
+                video_admission_setup = video_admission_runtime.readiness()
+            except (OSError, ValueError, RuntimeError) as exc:
+                video_admission_setup = {
+                    "status": "blocked",
+                    "reason": f"{type(exc).__name__}: {exc}"[:300],
+                }
+                video_admission_runtime = None
+        try:
+            supervisor = AutonomousSupervisor(
+                task_db=self.task_db, routine_db=self.routine_db, state_db=self.state_db,
+                improvement_db=self.improvement_db, knowledge_db=self.knowledge_db,
+                reminder_db=self.reminder_db, workspace=self.workspace,
+                video_admission_provider=video_admission_runtime,
+                video_admission_request_factory=(
+                    video_admission_runtime.request_factory if video_admission_runtime is not None else None
+                ),
+            )
+            supervisor.ensure_default_routines()
+            result = supervisor.run_tick()
+            result["video_admission_setup"] = video_admission_setup
+            self._audit("run_once", {
+                "task": bool(result.get("task")),
+                "video_admission_setup": video_admission_setup,
+            })
+            return result
+        finally:
+            if video_admission_runtime is not None:
+                video_admission_runtime.close()
 
     # ------------------------------------------------------------------ audit
     def _lease_path(self) -> Path:

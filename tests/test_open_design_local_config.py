@@ -4,6 +4,7 @@ import json
 import tomllib
 import unittest
 from pathlib import Path
+from pathlib import PureWindowsPath
 from urllib.parse import urlsplit
 
 
@@ -11,7 +12,7 @@ class OpenDesignLocalConfigTests(unittest.TestCase):
     def test_open_design_uses_project_local_loopback_provider_only(self) -> None:
         root = Path(__file__).resolve().parents[1]
         muse_config = tomllib.loads((root / "config" / "muse.toml").read_text(encoding="utf-8"))
-        open_code_path = Path(muse_config["open_design"]["opencode_config_path"])
+        open_code_path = PureWindowsPath(muse_config["open_design"]["opencode_config_path"])
         self.assertEqual(open_code_path.name, "opencode.local.jsonc")
         self.assertEqual(muse_config["open_design"]["allowed_agents"], [])
 

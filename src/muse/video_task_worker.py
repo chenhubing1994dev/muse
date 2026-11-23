@@ -184,8 +184,19 @@ class VideoTaskWorker:
             return None
         approval = payload.get("_approval", {})
         approved_by = approval.get("approved_by") if isinstance(approval, dict) else None
-        if (payload.get("kind") != "business_opportunity_video_approval"
-                or payload.get("initiative_id") != initiative_id
+        approval_kind = payload.get("kind")
+        if approval_kind not in {"business_opportunity_video_approval", "creator_initiative_video_approval"}:
+            return None
+        if approval_kind == "creator_initiative_video_approval":
+            topic_key = payload.get("topic_key")
+            if not isinstance(topic_key, str) or not topic_key.strip():
+                return None
+            expected_attempt_id = "research-" + hashlib.sha256(
+                f"{topic_key}:{initiative_id}:{attempt.get('recipe_sha256') or ''}:{digest}".encode("utf-8")
+            ).hexdigest()[:32]
+            if attempt_id != expected_attempt_id:
+                return None
+        if (payload.get("initiative_id") != initiative_id
                 or payload.get("attempt_id") != attempt_id
                 or payload.get("approval_scope") != "one_video_attempt_only"
                 or payload.get("_approved") is not True
@@ -206,6 +217,7 @@ class VideoTaskWorker:
         if (latest_decision.get("actor") != approved_by
                 or not isinstance(latest_payload, dict)
                 or latest_payload.get("decision") != "approved"
+                or not TaskQueue.approval_timestamp_matches_event(approval.get("approved_at"), latest_decision.get("created_at"))
                 or not isinstance(event_id, str) or not event_id):
             return None
         return {

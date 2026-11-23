@@ -102,32 +102,19 @@ class VideoProductApiTests(unittest.TestCase):
         manifest = json.loads((self.products / job["product"]["initiative_id"] / job["product"]["version_id"] / "manifest.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["video_metadata"]["audio_mode"], "narration")
 
-    def test_ai_prompt_video_job_runs_local_wan_and_publishes_product(self):
-        def fake_generate(prompt, output, **kwargs):
-            output.write_bytes(bytes.fromhex("000000186674797069736f6d66697874757265"))
-            return {"status": "completed", "prompt_id": "wan-prompt-123", "model": "Wan 2.1 T2V 1.3B",                    "seed": kwargs["seed"], "aspect_ratio": kwargs["aspect_ratio"], "fps": 12,
-                    "duration_seconds": 2.0, "frames": 25, "width": 512, "height": 288,
-                    "steps": kwargs["steps"], "bytes": output.stat().st_size, "output": str(output)}
-        with patch("muse.wan_video.generate_wan21_t2v", side_effect=fake_generate):
-            with urlopen(self._request("/api/v1/video-products", method="POST", payload={
-                "mode": "prompt_to_video", "title": "AI 狐狸短片", "prompt": "一只狐狸穿过晨雾竹林",
-                "negative_prompt": "模糊、水印", "duration_seconds": 2, "steps": 8, "seed": 42,
-            })) as response:
-                self.assertEqual(response.status, 202)
-                job_id = json.loads(response.read())["job"]["id"]
-            job = None
-            for _ in range(100):
-                with urlopen(self._request("/api/v1/video-jobs/" + job_id)) as response:
-                    job = json.loads(response.read())["job"]
-                if job["status"] in {"succeeded", "failed"}:
-                    break
-                time.sleep(0.02)
-        self.assertEqual(job["status"], "succeeded", job)
-        product_dir = self.products / job["product"]["initiative_id"] / job["product"]["version_id"]
-        manifest = json.loads((product_dir / "manifest.json").read_text(encoding="utf-8"))
-        storyboard = json.loads((product_dir / "storyboard.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["execution"]["ai_generation"], "completed")
-        self.assertEqual(storyboard["prompt"], "一只狐狸穿过晨雾竹林")
+    def test_ai_prompt_video_api_rejects_direct_generation_without_commander_admission(self):
+        with patch("muse.wan_video.generate_wan21_t2v") as generate:
+            with self.assertRaises(HTTPError) as raised:
+                urlopen(self._request("/api/v1/video-products", method="POST", payload={
+                    "mode": "prompt_to_video", "title": "AI 狐狸短片", "prompt": "一只狐狸穿过晨雾竹林",
+                    "negative_prompt": "模糊、水印", "duration_seconds": 2, "steps": 8, "seed": 42,
+                }))
+        self.assertEqual(raised.exception.code, 409)
+        body = json.loads(raised.exception.read())
+        self.assertEqual(body["code"], "video.commander_admission_required")
+        self.assertTrue(body["approval_required"])
+        generate.assert_not_called()
+        self.assertEqual(list(self.products.iterdir()), [])
 
 
     def test_generic_video_product_contact_sheet_and_visual_review_flow(self):

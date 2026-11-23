@@ -48,6 +48,7 @@ def _store_paths(workspace: Path) -> dict[str, Path]:
         "philosophy_db": data / "philosophy" / "muse.sqlite3",
         "memory_db": data / "memory" / "muse.sqlite3",
         "conversation_db": data / "conversations" / "muse.sqlite3",
+        "initiative_db": data / "initiatives" / "muse.sqlite3",
         "report_dir": data / "research" / "reports",
         "dossiers_dir": data / "improvements" / "dossiers",
         "blueprints_dir": data / "prometheus" / "blueprints",
@@ -176,8 +177,16 @@ def _run_optional_business_bridge(
     business_currency: str,
     estimated_price_minor: int | None,
     estimated_cost_minor: int | None,
+    create_initiative: bool = False,
+    request_video_approval: bool = False,
 ) -> dict[str, Any]:
-    """Create a business pilot candidate only from complete, explicit caller inputs."""
+    """Create a candidate, optional draft initiative, and optional Commander approval ticket."""
+    if not isinstance(create_initiative, bool):
+        raise TypeError("create_business_initiative must be a boolean")
+    if not isinstance(request_video_approval, bool):
+        raise TypeError("request_business_video_approval must be a boolean")
+    if request_video_approval and not create_initiative:
+        raise ValueError("request_business_video_approval requires create_business_initiative=True")
     supplied = {
         "business_brief": business_brief is not None,
         "business_ratings": business_ratings is not None,
@@ -204,8 +213,7 @@ def _run_optional_business_bridge(
         data_root = workspace_root / "data"
         business_root = data_root / "business"
         if data_root.is_symlink() or business_root.is_symlink() or database_path.is_symlink():
-            return {
-                "status": "blocked_symlink_path",
+            return {                "status": "blocked_symlink_path",
                 "candidate_created": False,
                 "error_type": "ValueError",
             }
@@ -225,6 +233,15 @@ def _run_optional_business_bridge(
         if resolved_database in protected_paths:
             return {
                 "status": "blocked_database_collision",
+                "candidate_created": False,
+                "error_type": "ValueError",
+            }
+        initiative_path = paths["initiative_db"]
+        initiative_root = workspace_root / "data" / "initiatives"
+        if (initiative_root.is_symlink() or initiative_path.is_symlink()
+                or not initiative_path.resolve().is_relative_to(initiative_root.resolve())):
+            return {
+                "status": "blocked_initiative_database_path",
                 "candidate_created": False,
                 "error_type": "ValueError",
             }
@@ -313,6 +330,59 @@ def _run_optional_business_bridge(
             "publishing_started": False,
             "gpu_work_started": False,
         }
+    initiative_id = None
+    approval_ticket = None
+    if create_initiative:
+        try:
+            from muse.business_opportunities import BusinessOpportunityStore
+            with BusinessOpportunityStore(database_path) as store:
+                promoted = store.promote_to_initiative(
+                    opportunity_id, initiative_database=paths["initiative_db"],
+                )
+            initiative_id = promoted["initiative"]["id"]
+            if request_video_approval:
+                with BusinessOpportunityStore(database_path) as store:
+                    approval_result = store.request_video_approval(
+                        opportunity_id, initiative_database=paths["initiative_db"],
+                        task_database=paths["progress_db"],
+                    )
+                approval_ticket = approval_result["ticket"]
+            with ResearchKnowledgeStore(paths["knowledge_db"]) as knowledge:
+                linked_idea = knowledge.get_node(wiki_idea_id)
+                linked_metadata = dict(linked_idea.get("metadata") or {})
+                linked_metadata.update({
+                    "initiative_created": True,
+                    "creator_initiative_id": initiative_id,
+                    "creator_initiative_status": "proposed",
+                    "creator_initiative_autonomy_level": "draft",
+                    "commander_approval_ticket_id": approval_ticket.get("id") if approval_ticket else None,
+                    "commander_approval_ticket_status": approval_ticket.get("status") if approval_ticket else None,
+                    "dispatch_started": False,
+                    "publishing_started": False,
+                    "gpu_work_started": False,
+                })
+                knowledge.upsert_node(
+                    "idea", linked_idea["title"], summary=linked_idea["summary"],
+                    external_ref=linked_idea["external_ref"], metadata=linked_metadata,
+                    provenance=tuple(linked_idea.get("provenance") or ()),
+                    status=linked_idea["status"],
+                )
+        except (OSError, sqlite3.Error, TypeError, ValueError, KeyError) as exc:
+            return {
+                "status": "candidate_created_initiative_failed",
+                "candidate_created": True,
+                "opportunity_id": opportunity_id,
+                "research_wiki_idea_id": wiki_idea_id,
+                "error_type": type(exc).__name__,
+                "market_demand_inferred": False,
+                "willingness_to_pay_inferred": False,
+                "customer_validation_required": True,
+                "requires_human_review": True,
+                "initiative_created": False,
+                "dispatch_started": False,
+                "publishing_started": False,
+                "gpu_work_started": False,
+            }
     return {
         "status": bridge_result.get("status", "opportunity_resolved"),
         "candidate_created": True,
@@ -326,12 +396,17 @@ def _run_optional_business_bridge(
         "willingness_to_pay_inferred": False,
         "customer_validation_required": True,
         "requires_human_review": True,
-        "initiative_created": False,
+        "initiative_created": initiative_id is not None,
+        "creator_initiative_id": initiative_id,
+        "creator_initiative_status": "proposed" if initiative_id else None,
+        "creator_initiative_autonomy_level": "draft" if initiative_id else None,
+        "approval_ticket_created": approval_ticket is not None,
+        "approval_ticket_id": approval_ticket.get("id") if approval_ticket else None,
+        "approval_ticket_status": approval_ticket.get("status") if approval_ticket else None,
         "dispatch_started": False,
         "publishing_started": False,
         "gpu_work_started": False,
     }
-
 
 def _short_clean(text: Any, limit: int = 80) -> str:
     cleaned = re.sub(r"\[S\d+\]", "", " ".join(str(text or "").split())).strip()
@@ -872,14 +947,24 @@ def evolve_inspiration_closed_loop(
     business_currency: str = "USD",
     estimated_price_minor: int | None = None,
     estimated_cost_minor: int | None = None,
+    create_business_initiative: bool = False,
+    request_business_video_approval: bool = False,
+    create_offline_product: bool = False,
 ) -> dict[str, Any]:
     """Run closed-loop Inspiration -> Research -> Self-Improvement -> Video Blueprint (+ optional Commander jobs)."""
+    if not isinstance(create_business_initiative, bool):
+        raise TypeError("create_business_initiative must be a boolean")
+    if not isinstance(request_business_video_approval, bool):
+        raise TypeError("request_business_video_approval must be a boolean")
+    if not isinstance(create_offline_product, bool):
+        raise TypeError("create_offline_product must be a boolean")
+    if request_business_video_approval and not create_business_initiative:
+        raise ValueError("request_business_video_approval requires create_business_initiative=True")
     root = Path(workspace).resolve()
     paths = _store_paths(root)
-    for key in ("knowledge_db", "evidence_db", "progress_db", "reminder_db", "improvement_db", "philosophy_db"):
+    for key in ("knowledge_db", "evidence_db", "progress_db", "reminder_db", "improvement_db", "philosophy_db", "initiative_db"):
         paths[key].parent.mkdir(parents=True, exist_ok=True)
     paths["report_dir"].mkdir(parents=True, exist_ok=True)
-
     with ResearchKnowledgeStore(paths["knowledge_db"]) as knowledge:
         target_node: dict[str, Any] | None = None
         if inspiration_id:
@@ -934,6 +1019,8 @@ def evolve_inspiration_closed_loop(
 
     assert target_node is not None
     allow_external = target_node.get("metadata", {}).get("allow_external_research") is True
+    if create_offline_product and allow_external:
+        raise ValueError("offline productization cannot be combined with external research")
     inspiration_context = _build_inspiration_context(
         workspace=root, paths=paths, inspiration=target_node,
         allow_external_research=allow_external,
@@ -1030,14 +1117,48 @@ def evolve_inspiration_closed_loop(
     )
     rel_blueprint = blueprint_path.relative_to(root).as_posix()
 
+    offline_productization: dict[str, Any] | None = None
+    if create_offline_product:
+        if allow_external or report.get("synthesis_status") != "local_offline_only":
+            raise ValueError("offline productization requires a local_offline_only report with external research disabled")
+        symbolic_rows = inspiration_context.get("symbolic_inspiration") or []
+        symbolic_framework_ids = [
+            row["id"] for row in symbolic_rows
+            if isinstance(row, dict) and isinstance(row.get("id"), str)
+        ]
+        symbolic_hypotheses = [
+            "【象数启发／待验证，非证据】" + row["hypothesis_seed"]
+            for row in symbolic_rows
+            if isinstance(row, dict) and isinstance(row.get("hypothesis_seed"), str)
+            and row["hypothesis_seed"].strip()
+        ]
+        from muse.inspiration_productization import build_offline_inspiration_product
+        synthesis = report.get("synthesis") if isinstance(report.get("synthesis"), dict) else {}
+        offline_productization = build_offline_inspiration_product(
+            workspace=root,
+            inspiration_id=target_node["id"],
+            title=target_node["title"],
+            summary=target_node["summary"],
+            blueprint_path=rel_blueprint,
+            report=report,
+            hypotheses=symbolic_hypotheses,
+            uncertainties=synthesis.get("uncertainties", []),
+            counter_evidence=synthesis.get("counter_evidence", []),
+            experiments=synthesis.get("testable_experiments", []),
+            evolution_cycle_id=evolution_cycle_id or None,
+            symbolic_framework_ids=symbolic_framework_ids or None,
+            allow_external_research=False,
+        )
+
     business_bridge = _run_optional_business_bridge(
         workspace=root, paths=paths, report=report, report_path=report_path,
         inspiration_id=target_node["id"], business_brief=business_brief,
         business_ratings=business_ratings, business_database=business_database,
         business_currency=business_currency, estimated_price_minor=estimated_price_minor,
         estimated_cost_minor=estimated_cost_minor,
+        create_initiative=create_business_initiative,
+        request_video_approval=request_business_video_approval,
     )
-
     with ResearchKnowledgeStore(paths["knowledge_db"]) as knowledge:
         latest = knowledge.get_node(target_node["id"]) or target_node
         meta = dict(latest.get("metadata") or {})
@@ -1045,6 +1166,9 @@ def evolve_inspiration_closed_loop(
             "review_state": meta.get("review_state") if allow_external and meta.get("review_state") != "not_researched" else "researched_local_only" if not allow_external else "researched_needs_independent_review",
             "evolution_stage": "blueprint_ready",
             "blueprint_path": rel_blueprint,
+            "offline_product_initiative_id": (
+                offline_productization.get("initiative_id") if offline_productization else None
+            ),
             "improvement_proposal_ids": linked_proposal_ids,
             "inspiration_brief_path": inspiration_context["brief_path"],
             "inspiration_brief_sha256": inspiration_context["brief_sha256"],
@@ -1100,6 +1224,7 @@ def evolve_inspiration_closed_loop(
         "automatic_code_changes": False,
         "blueprint_path": rel_blueprint,
         "blueprint_title": blueprint["title"],
+        "offline_productization": offline_productization,
         "queued_video_jobs": queued_jobs,
         "business_bridge": business_bridge,
     }

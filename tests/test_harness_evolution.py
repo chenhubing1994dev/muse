@@ -69,9 +69,6 @@ class HarnessEvolutionTests(unittest.TestCase):
     def test_probe_composition_adopts_only_comparable_improvement(self):
         baseline, candidate = self._runs()
         decision = compare_probes(baseline, candidate)
-    def test_probe_composition_adopts_only_comparable_improvement(self):
-        baseline, candidate = self._runs()
-        decision = compare_probes(baseline, candidate)
         self.assertEqual(decision.outcome, "helped")
         self.assertTrue(decision.adopted)
         lesson = lesson_from_decision(decision, domain="tests", scope="unit suite")

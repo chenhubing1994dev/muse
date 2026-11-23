@@ -74,6 +74,31 @@ class VideoProductBuilder:
         return getattr(self._implementation(), name)
 
 
+def _validate_json_nesting(raw: bytes, *, max_depth: int = 64) -> None:
+    """Reject deeply nested JSON before schema validation can mask the depth error."""
+    text = raw.decode("utf-8")
+    depth = 0
+    in_string = False
+    escaped = False
+    for char in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char in "[{":
+            depth += 1
+            if depth > max_depth:
+                raise RecursionError("request nesting exceeds the supported limit")
+        elif char in "]}":
+            depth = max(0, depth - 1)
+
+
 def _allowed_origin(origin: str | None) -> bool:
     if origin is None:
         return True
@@ -86,7 +111,6 @@ def _allowed_origin(origin: str | None) -> bool:
         and parsed.username is None
         and parsed.password is None
     )
-
 
 def build_mempalace_status(workspace_root: str | Path, memory_db: str | Path | None = None) -> dict[str, Any]:
     """Read-only, privacy-minimal MemPalace and projection-outbox health snapshot."""
@@ -1442,27 +1466,18 @@ def create_status_server(
             workspace = products_path.parent.parent if products_path is not None else Path.cwd()
             builder = VideoProductBuilder(workspace)
             if payload.get("mode", "local_assets") == "prompt_to_video":
-                result = builder.build_from_prompt(
-                    payload["title"], payload["prompt"],
-                    negative_prompt=payload.get("negative_prompt", ""),
-                    aspect_ratio=payload.get("aspect_ratio", "16:9"),
-                    duration_seconds=payload.get("duration_seconds", 2.0),
-                    steps=payload.get("steps", 8), seed=payload.get("seed"),
-                    timeout_seconds=1800, creator_initiative_id=payload.get("creator_initiative_id"),
-                    evolution_cycle_id=payload.get("evolution_cycle_id"),
-                    motion_profile=payload.get("motion_profile", "none"),
-                    recipe_sha256=payload.get("recipe_sha256"),
+                raise RuntimeError(
+                    "AI video generation must use Commander VideoTaskWorker after persisted approval and admission"
                 )
-            else:
-                result = builder.build_from_source(
-                    payload["source"], payload["title"], audio_name=payload.get("audio"),
-                    audio_mode=payload.get("audio_mode", "music"),
-                    aspect_ratio=payload.get("aspect_ratio", "16:9"), fps=payload.get("fps", 30),
-                    image_seconds=payload.get("image_seconds", 4.0), encoder=payload.get("encoder", "auto"),
-                    creator_initiative_id=payload.get("creator_initiative_id"),
-                    evolution_cycle_id=payload.get("evolution_cycle_id"),
-                    motion_profile=payload.get("motion_profile", "none"),
-                )
+            result = builder.build_from_source(
+                payload["source"], payload["title"], audio_name=payload.get("audio"),
+                audio_mode=payload.get("audio_mode", "music"),
+                aspect_ratio=payload.get("aspect_ratio", "16:9"), fps=payload.get("fps", 30),
+                image_seconds=payload.get("image_seconds", 4.0), encoder=payload.get("encoder", "auto"),
+                creator_initiative_id=payload.get("creator_initiative_id"),
+                evolution_cycle_id=payload.get("evolution_cycle_id"),
+                motion_profile=payload.get("motion_profile", "none"),
+            )
             if result.get("recipe_sha256") != payload.get("recipe_sha256"):
                 raise RuntimeError("video product recipe fingerprint does not match the submitted attempt")
             visual_review_evidence = {"status": "unavailable", "reason": "product_store_not_configured", "can_publish": False}
@@ -1601,7 +1616,15 @@ def create_status_server(
                 elif parsed.path == "/api/v1/gpu-resources":
                     self._send(200, {"api_version": 1, **build_gpu_resource_status(gpu_resource_path)})
                 elif parsed.path == "/api/v1/overview":
-                    self._send(200, {"api_version": 1, **build_overview(task_path, progress_path)})
+                    runtime = daemon.status()
+                    safe_runtime = {
+                        key: runtime.get(key)
+                        for key in ("state", "running", "heartbeat_age_seconds", "stale")
+                    }
+                    self._send(200, {
+                        "api_version": 1, **build_overview(task_path, progress_path),
+                        "autonomous_runtime": safe_runtime,
+                    })
                 elif parsed.path == "/api/v1/contextual-inquiry-reviews":
                     limit = int(parse_qs(parsed.query).get("limit", ["50"])[0])
                     if not 1 <= limit <= 100:
@@ -2540,6 +2563,9 @@ def create_status_server(
                 except ValueError:
                     self._send(400, {"error": "invalid content length"})
                     return
+                if length < 0:
+                    self._send(400, {"error": "invalid content length"})
+                    return
                 if length > 1024:
                     self._send(413, {"error": "runtime control accepts no meaningful body"})
                     return
@@ -2755,6 +2781,12 @@ def create_status_server(
                         ):
                             raise ValueError("creator brief recipe_sha256 must be a lowercase SHA-256 digest")
                         payload["recipe_sha256"] = recipe_sha256
+                        self._send(409, {
+                            "code": "video.commander_admission_required",
+                            "error": "AI video generation must be submitted through Commander approval and Video Admission",
+                            "approval_required": True,
+                        })
+                        return
                     else:
                         allowed = {"mode", "source", "title", "audio", "audio_mode", "aspect_ratio", "fps", "image_seconds", "encoder", "creator_initiative_id", "evolution_cycle_id", "motion_profile"}
                         if set(payload) - allowed or "source" not in payload:
@@ -2861,6 +2893,9 @@ def create_status_server(
                 except ValueError:
                     self._send(400, {"error": "invalid content length"})
                     return
+                if length < 0:
+                    self._send(400, {"error": "invalid content length"})
+                    return
                 if length > 4096:
                     self._send(413, {"error": "request body exceeds 4096 bytes"})
                     return
@@ -2870,40 +2905,68 @@ def create_status_server(
                         raw = self.rfile.read(length)
                         if len(raw) != length:
                             raise ValueError("incomplete request body")
+                        _validate_json_nesting(raw)
                         payload = json.loads(raw.decode("utf-8"))
-                    if not isinstance(payload, dict) or set(payload) - {"inspiration_id", "enqueue_video", "aspect_ratios"}:
-                        raise ValueError("body accepts optional inspiration_id, enqueue_video, aspect_ratios")
+                    allowed_fields = {"inspiration_id", "request_id", "enqueue_video", "aspect_ratios", "create_offline_product"}
+                    if not isinstance(payload, dict) or set(payload) - allowed_fields:
+                        raise ValueError("body accepts request_id and optional inspiration_id, enqueue_video, aspect_ratios, create_offline_product")
+                    request_id = payload.get("request_id")
+                    if not isinstance(request_id, str) or not re.fullmatch(r"[0-9a-f]{32}", request_id):
+                        raise ValueError("request_id must be a 32-char hex string")
                     insp_id = payload.get("inspiration_id")
                     if insp_id is not None and (not isinstance(insp_id, str) or not re.fullmatch(r"[0-9a-f]{32}", insp_id)):
                         raise ValueError("inspiration_id must be a 32-char hex string")
                     enqueue_video = payload.get("enqueue_video", False)
                     if not isinstance(enqueue_video, bool):
                         raise ValueError("enqueue_video must be boolean")
+                    create_offline_product = payload.get("create_offline_product", False)
+                    if not isinstance(create_offline_product, bool):
+                        raise ValueError("create_offline_product must be boolean")
                     ratios = payload.get("aspect_ratios") or ["9:16"]
-                    if not isinstance(ratios, list) or any(r not in {"9:16", "16:9"} for r in ratios):
-                        raise ValueError("aspect_ratios may only contain '9:16' and '16:9'")
-                    recipes: list[str] = []
-                    if enqueue_video:
-                        for r in ratios:
-                            rid = "inspiration_viral_9x16_v1" if r == "9:16" else "inspiration_viral_16x9_v1"
-                            if rid not in recipes:
-                                recipes.append(rid)
-                    from muse.inspiration_evolution import evolve_inspiration_closed_loop
-                    evolved = evolve_inspiration_closed_loop(
-                        workspace_root,
-                        inspiration_id=insp_id,
-                        enqueue_video_recipes=recipes,
-                    )
-                    self._send(200, {"api_version": 1, "evolution": evolved})
+                    if (not isinstance(ratios, list) or not 1 <= len(ratios) <= 2
+                            or any(not isinstance(r, str) or r not in {"9:16", "16:9"} for r in ratios)
+                            or len(set(ratios)) != len(ratios)):
+                        raise ValueError("aspect_ratios must contain one or two unique supported ratios")
+                    task_payload = {
+                        "kind": "inspiration_evolution", "request_id": request_id,
+                        "inspiration_id": insp_id, "enqueue_video": enqueue_video,
+                        "aspect_ratios": ratios,
+                        "create_offline_product": create_offline_product,
+                    }
+                    idempotency_key = "inspiration-evolution:" + request_id
+                    with TaskQueue(task_path) as queue:
+                        existing = queue.get_by_idempotency_key(idempotency_key)
+                        if existing is not None:
+                            existing_payload = existing.get("payload")
+                            existing_request = (
+                                {key: existing_payload.get(key, False) if key == "create_offline_product" else existing_payload.get(key)
+                                 for key in task_payload}
+                                if isinstance(existing_payload, dict) else None
+                            )
+                            if existing_request != task_payload:
+                                raise ValueError("request_id was already used for a different inspiration evolution")
+                        task = queue.enqueue(
+                            "Evolve creator inspiration", task_payload,
+                            priority=65, workload_class="research", recovery_policy="retry",
+                            idempotency_key=idempotency_key,
+                        )
+                    self._send(202, {
+                        "api_version": 1, "accepted": True, "task_id": task["id"],
+                        "status": task["status"], "deduplicated": existing is not None,
+                        "execution": "commander_task_queue",
+                    })
                 except KeyError as exc:
                     self._send(404, {"error": str(exc)})
                 except (UnicodeDecodeError, json.JSONDecodeError, ValueError, PipelineError) as exc:
                     self._send(400, {"error": str(exc)})
+                except RecursionError:
+                    self._send(400, {"error": "request nesting exceeds the supported limit"})
                 except (OSError, sqlite3.Error):
                     self._send(503, {"error": "inspiration evolution store unavailable"})
                 return
             if parsed.path == "/api/v1/inspirations":
                 if knowledge_path is None:
+
                     self._send(503, {"error": "inspiration store is not configured"})
                     return
                 if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json":

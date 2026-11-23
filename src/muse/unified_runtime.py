@@ -417,6 +417,13 @@ class MuseRuntime:
             selected = queue.get(task_id)
             if selected is None or selected["status"] != "queued":
                 raise RuntimeBlocked("the explicitly selected task does not exist or is not queued")
+            selected_payload = selected.get("payload") or {}
+            if (isinstance(selected_payload, dict)
+                    and (selected_payload.get("kind") == "plugin_capability_request"
+                         or selected_payload.get("execution_adapter_required") is True)):
+                raise RuntimeBlocked(
+                    "plugin capability tickets require a registered sandbox Worker; generic dispatch is forbidden"
+                )
             task = queue.claim_next(worker_id=worker_id, lease_seconds=300, task_id=task_id)
             if task is None:
                 return {"status": "idle", "message": "No queued task"}
@@ -478,6 +485,13 @@ class MuseRuntime:
             selected = queue.get(task_id)
             if selected is None or selected["status"] != "queued":
                 raise RuntimeBlocked("the explicitly selected ticket does not exist or is not queued")
+            selected_payload = selected.get("payload") or {}
+            if (isinstance(selected_payload, dict)
+                    and (selected_payload.get("kind") == "plugin_capability_request"
+                         or selected_payload.get("execution_adapter_required") is True)):
+                raise RuntimeBlocked(
+                    "plugin capability tickets require a registered sandbox Worker; generic dispatch is forbidden"
+                )
             task = queue.claim_next(worker_id=worker_id, lease_seconds=600, task_id=task_id)
             if task is None:
                 raise RuntimeBlocked("the selected ticket is blocked by dependencies or is no longer claimable")

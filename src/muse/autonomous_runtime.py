@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
 import threading
@@ -211,6 +212,19 @@ class RuntimeStateStore:
         return self.status()
 
     def release(self, owner_id: str) -> None:
+        return self.status()
+
+    def reset_unowned(self) -> bool:
+        """Reset a pre-spawn state only if no supervisor has acquired the lease."""
+        cursor = self.db.execute(
+            "UPDATE autonomous_runtime SET state='stopped',updated_at=? "
+            "WHERE singleton=1 AND owner_id IS NULL",
+            (_stamp(),),
+        )
+        self.db.commit()
+        return cursor.rowcount == 1
+
+    def release(self, owner_id: str) -> None:
         self.db.execute(
             "UPDATE autonomous_runtime SET state='stopped',owner_id=NULL,pid=NULL,"
             "heartbeat_at=?,updated_at=? WHERE singleton=1 AND owner_id=?",
@@ -351,6 +365,30 @@ class AutonomousSupervisor:
             return {"status": "disabled", "reason": "set MUSE_ENABLE_VIDEO_WORKER=1 to allow queued GPU generation"}
         if self._stop_event is not None and self._stop_event.is_set():
             return {"status": "stopping", "claimed": False}
+        if self.video_admission_provider is None or self.video_admission_request_factory is None:
+            return {
+                "status": "blocked", "claimed": False,
+                "reason": "Commander video admission runtime is not configured; no task was claimed",
+            }
+        readiness = getattr(self.video_admission_provider, "readiness", None)
+        if callable(readiness):
+            try:
+                readiness_result = readiness()
+            except Exception as exc:
+                return {
+                    "status": "blocked", "claimed": False,
+                    "reason": f"Commander video admission readiness failed closed ({type(exc).__name__})",
+                }
+            if not isinstance(readiness_result, dict) or readiness_result.get("status") != "ready":
+                reason = (
+                    readiness_result.get("reason")
+                    if isinstance(readiness_result, dict) else None
+                )
+                return {
+                    "status": "blocked", "claimed": False,
+                    "reason": str(reason or "Commander video admission preflight is not ready")[:300],
+                    "admission_readiness": readiness_result if isinstance(readiness_result, dict) else {},
+                }
         from muse.video_task_worker import VideoTaskWorker
         return VideoTaskWorker(
             self.workspace, worker_id="commander-video-worker",
@@ -532,9 +570,47 @@ class AutonomousSupervisor:
         return {"status": "completed", "execution_mode": "deterministic_local",
                 "model_used": False, "steps": outcomes}
 
+    def inspiration_evolution(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Run one user-submitted inspiration evolution as a Commander-owned task."""
+        legacy_expected = {"kind", "request_id", "inspiration_id", "enqueue_video", "aspect_ratios"}
+        expected = legacy_expected | {"create_offline_product"}
+        if (not isinstance(payload, dict) or frozenset(payload) not in {frozenset(expected), frozenset(legacy_expected)}
+                or payload.get("kind") != "inspiration_evolution"):
+            raise ValueError("inspiration_evolution task payload is invalid")
+        request_id = payload.get("request_id")
+        if not isinstance(request_id, str) or not re.fullmatch(r"[0-9a-f]{32}", request_id):
+            raise ValueError("inspiration evolution request_id must be a 32-char hex string")
+        inspiration_id = payload.get("inspiration_id")
+        if inspiration_id is not None and (
+            not isinstance(inspiration_id, str) or not re.fullmatch(r"[0-9a-f]{32}", inspiration_id)
+        ):
+            raise ValueError("inspiration_id must be a 32-char hex string")
+        enqueue_video = payload.get("enqueue_video")
+        create_offline_product = payload.get("create_offline_product", False)
+        if not isinstance(create_offline_product, bool):
+            raise ValueError("create_offline_product must be boolean")
+        if not isinstance(enqueue_video, bool):
+            raise ValueError("enqueue_video must be boolean")
+        ratios = payload.get("aspect_ratios")
+        if (not isinstance(ratios, list) or not 1 <= len(ratios) <= 2
+                or any(not isinstance(ratio, str) or ratio not in {"9:16", "16:9"} for ratio in ratios)
+                or len(set(ratios)) != len(ratios)):
+            raise ValueError("aspect_ratios must contain one or two unique supported ratios")
+        recipes: list[str] = []
+        if enqueue_video:
+            recipes = [
+                "inspiration_viral_9x16_v1" if ratio == "9:16" else "inspiration_viral_16x9_v1"
+                for ratio in ratios
+            ]
+        from muse.inspiration_evolution import evolve_inspiration_closed_loop
+        return evolve_inspiration_closed_loop(
+            self.workspace, inspiration_id=inspiration_id, enqueue_video_recipes=recipes,
+            create_offline_product=create_offline_product,
+        )
     def handlers(self) -> dict[str, Any]:
         handlers = dict(DEFAULT_HANDLERS)
         handlers["local_workflow"] = self.local_workflow
+        handlers["inspiration_evolution"] = self.inspiration_evolution
         from muse.pipeline_control import PipelineTaskHandler
         handlers["video_pipeline"] = PipelineTaskHandler(self.workspace)
         return handlers
@@ -553,7 +629,9 @@ class AutonomousSupervisor:
         with TaskQueue(self.task_db) as queue:
             for item in queue.queued_work_items():
                 task = queue.get(item["id"])
-                if task and task["payload"].get("kind") in {"local_workflow", "video_pipeline", "review_followup_research"}:
+                if task and task["payload"].get("kind") in {
+                    "local_workflow", "video_pipeline", "review_followup_research", "inspiration_evolution",
+                }:
                     return task["id"]
         return None
 
@@ -837,16 +915,43 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         except (OSError, ValueError, RuntimeError) as exc:
             parser.error(f"cannot enable local contextual review: {exc}")
-    supervisor = AutonomousSupervisor(
-        task_db=args.task_db, routine_db=args.routine_db, state_db=args.state_db,
-        improvement_db=args.improvement_db, knowledge_db=args.knowledge_db,
-        reminder_db=args.reminder_db,
-        memory_db=str(project_root / "data/memory/muse.sqlite3"),
-        conversation_db=str(project_root / "data/conversations/muse.sqlite3"),
-        workspace=project_root,
-        contextual_review_handler=contextual_review_handler,
-    )
+
+    video_admission_runtime = None
+    if args.command in {"once", "run"} and os.environ.get("MUSE_ENABLE_VIDEO_WORKER", "").strip() == "1":
+        try:
+            from muse.video_admission_runtime import build_video_admission_runtime
+            video_admission_runtime = build_video_admission_runtime(
+                project_root, task_database=Path(args.task_db).resolve(),
+            )
+            readiness = video_admission_runtime.readiness()
+            if readiness.get("status") != "ready":
+                print(
+                    "Muse video worker remains fail-closed: "
+                    + str(readiness.get("reason") or "admission preflight is not ready"),
+                    file=sys.stderr,
+                )
+        except (OSError, ValueError, RuntimeError) as exc:
+            print(
+                f"Muse video admission runtime unavailable; no video task will be claimed: "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            video_admission_runtime = None
+
     try:
+        supervisor = AutonomousSupervisor(
+            task_db=args.task_db, routine_db=args.routine_db, state_db=args.state_db,
+            improvement_db=args.improvement_db, knowledge_db=args.knowledge_db,
+            reminder_db=args.reminder_db,
+            memory_db=str(project_root / "data/memory/muse.sqlite3"),
+            conversation_db=str(project_root / "data/conversations/muse.sqlite3"),
+            workspace=project_root,
+            contextual_review_handler=contextual_review_handler,
+            video_admission_provider=video_admission_runtime,
+            video_admission_request_factory=(
+                video_admission_runtime.request_factory if video_admission_runtime is not None else None
+            ),
+        )
         if args.command == "status":
             print(json.dumps(supervisor.status(), ensure_ascii=False, indent=2))
         elif args.command in {"pause", "resume", "stop"}:
@@ -871,6 +976,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
         print(f"Muse autonomous runtime: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
+    finally:
+        if video_admission_runtime is not None:
+            try:
+                video_admission_runtime.close()
+            except Exception as exc:
+                print(
+                    f"Muse video admission registry cleanup warning: {type(exc).__name__}",
+                    file=sys.stderr,
+                )
     return 0
 
 

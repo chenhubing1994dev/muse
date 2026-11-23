@@ -24,6 +24,107 @@ from muse.model_call_context import current_model_call_context, model_call_scope
 _DEFAULT_LM_STUDIO_CLIENT = LMStudioClient
 
 
+def _creator_initiative_title(topic: dict[str, Any]) -> str:
+    """Stable initiative identity for repeated research cycles on the same topic."""
+    topic_key = str(topic.get("key") or topic.get("title") or "creator-inspiration").strip()
+    display_title = str(topic.get("title") or topic_key).strip()[:62]
+    fingerprint = hashlib.sha256(topic_key.encode("utf-8")).hexdigest()[:8]
+    return f"创意机会：{display_title}｜{fingerprint}"
+
+
+def _creator_video_attempt_id(
+    topic_key: str, initiative_id: str, recipe_sha256: str | None, video_brief_sha256: str,
+) -> str:
+    identity = f"{topic_key}:{initiative_id}:{recipe_sha256 or ''}:{video_brief_sha256}"
+    return "research-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
+
+
+def _queue_creator_video_approval(
+    initiative_store: Any, task_database: Path | str, *, initiative: dict[str, Any],
+    topic: dict[str, Any], video_brief: dict[str, Any], recipe_sha256: str | None,
+    evolution_cycle_id: str,
+) -> dict[str, Any]:
+    """Create an idempotent human-approval ticket and bind it to one queued preview."""
+    from muse.task_queue import TaskQueue
+
+    topic_key = str(topic.get("key") or "").strip()
+    if not topic_key:
+        raise ValueError("creator video approval requires a stable research topic key")
+    if not isinstance(video_brief, dict) or not video_brief.get("title") or not video_brief.get("prompt"):
+        raise ValueError("creator video approval requires a valid video brief")
+    video_brief_sha256 = hashlib.sha256(
+        json.dumps(video_brief, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+    attempt_id = _creator_video_attempt_id(
+        topic_key, initiative["id"], recipe_sha256, video_brief_sha256,
+    )
+    source_claim_id = (
+        topic.get("creator_inspiration_node_id")
+        or topic.get("creator_inspired_hypothesis_node_id")
+        or topic.get("source_claim_id")
+        or ""
+    )
+    payload = {
+        "kind": "creator_initiative_video_approval",
+        "initiative_id": initiative["id"],
+        "attempt_id": attempt_id,
+        "topic_key": topic_key,
+        "source_claim_id": source_claim_id,
+        "video_brief_sha256": video_brief_sha256,
+        "video_brief": video_brief,
+        "approval_scope": "one_video_attempt_only",
+        "requires_human_approval": True,
+        "auto_publish": False,
+    }
+    with TaskQueue(task_database) as queue:
+        ticket = queue.enqueue(
+            f"审批创作者视频预览：{str(initiative.get('title') or 'Muse 创作预览')[:100]}",
+            payload,
+            priority=max(0, min(100, int(initiative.get("priority", 70) or 70))),
+            recovery_policy="manual",
+            idempotency_key=f"creator-video-approval:{attempt_id}",
+            require_approval=True,
+            workload_class="media",
+        )
+    stored = ticket.get("payload", {})
+    expected_fields = (
+        "kind", "initiative_id", "attempt_id", "topic_key", "source_claim_id",
+        "video_brief_sha256", "video_brief", "approval_scope",
+    )
+    if any(stored.get(field) != payload[field] for field in expected_fields):
+        raise ValueError("Commander idempotency key is already bound to a different creator video approval")
+
+    attempt = initiative_store.get_video_attempt(attempt_id)
+    if attempt is None:
+        try:
+            attempt = initiative_store.start_video_attempt(
+                attempt_id, mode="prompt_to_video", initiative_id=initiative["id"],
+                evolution_cycle_id=evolution_cycle_id, approval_task_id=ticket["id"],
+                recipe_sha256=recipe_sha256,
+            )
+        except ValueError as exc:
+            # A concurrent cycle may have committed the same deterministic attempt first.
+            attempt = initiative_store.get_video_attempt(attempt_id)
+            if attempt is None:
+                raise
+            if attempt.get("recipe_sha256") != recipe_sha256 or attempt.get("initiative_id") != initiative["id"]:
+                raise ValueError("concurrent creator video attempt has a different identity") from exc
+    if attempt.get("recipe_sha256") != recipe_sha256 or attempt.get("initiative_id") != initiative["id"]:
+        raise ValueError("existing creator video attempt has a different recipe or initiative")
+    linked_approval_id = attempt.get("approval_task_id")
+    if linked_approval_id is None:
+        attempt = initiative_store.attach_video_attempt_approval(attempt_id, ticket["id"])
+    elif linked_approval_id != ticket["id"]:
+        raise ValueError("creator video attempt is already bound to a different approval ticket")
+    return {
+        "attempt": attempt,
+        "ticket": ticket,
+        "attempt_id": attempt_id,
+        "video_brief_sha256": video_brief_sha256,
+    }
+
+
+
 def _probe_loopback_endpoint(base_url: str, timeout: float = 1.5) -> None:
     """Fail fast when a real loopback LLM server is not listening."""
     if LMStudioClient is not _DEFAULT_LM_STUDIO_CLIENT:
@@ -568,6 +669,12 @@ class AutonomousResearchEngine:
                 "在线平台A/B测试": ("online platform A/B testing", "YouTube title experiments"),
                 "创作者分析": ("creator analytics", "audience retention"),
                 "贝叶斯决策与统计功效": ("Bayesian decision theory", "statistical power"),
+                "粤语语音学与韵律": ("Cantonese prosody", "Cantonese phonetics", "lexical tone"),
+                "停顿与话语分段": ("pause duration", "discourse segmentation"),
+                "证据不确定性传播": ("epistemic uncertainty", "uncertainty qualifiers"),
+                "听觉记忆与多媒体理解": ("auditory memory", "multimedia comprehension"),
+                "文本转语音声学控制": ("text-to-speech pause control", "speech synthesis prosody"),
+                "人机信任校准": ("trust calibration", "perceived speaker confidence"),
             }
             domain_terms = []
             if isinstance(raw_domains, list):
@@ -583,7 +690,18 @@ class AutonomousResearchEngine:
             domain_set = {
                 item for item in raw_domains if isinstance(item, str)
             } if isinstance(raw_domains, list) else set()
-            if {"数字内容实验设计", "在线平台A/B测试"}.issubset(domain_set):
+            if {
+                "粤语语音学与韵律", "停顿与话语分段", "证据不确定性传播",
+            }.issubset(domain_set):
+                support_query = (
+                    "Cantonese prosody pause duration epistemic qualifiers "
+                    "speech perception delayed recall TTS"
+                )
+                counter_query = (
+                    "speech pause duration disfluency fluency naturalness "
+                    "cognitive load listener comprehension counterexamples null effects"
+                )
+            elif {"数字内容实验设计", "在线平台A/B测试"}.issubset(domain_set):
                 support_query = (
                     "YouTube title A/B testing watch-time share randomized experiments "
                     "digital content experimentation"
@@ -619,6 +737,12 @@ class AutonomousResearchEngine:
                 entry["creator_inspiration_node_id"] = candidate["id"]
                 entry["creator_tags"] = list(metadata.get("tags", []))[:12]
                 entry["creator_research_domains"] = list(raw_domains)[:12] if isinstance(raw_domains, list) else []
+                entry["creator_hypothesis_summary"] = str(candidate.get("summary") or "")[:3000]
+                entry["creator_epistemic_status"] = metadata.get("epistemic_status") or "creator_inspired_hypothesis_only"
+                entry["creator_review_state"] = metadata.get("review_state") or "not_researched"
+                entry["creator_research_report_path"] = str(metadata.get("research_report_path") or "")[:500]
+
+
             dynamic_topics.append(entry)
         for candidate in symbolic_candidates:
             metadata = candidate.get("metadata", {})
@@ -658,23 +782,51 @@ class AutonomousResearchEngine:
                 coverage = evidence_knowledge.claim_evidence_coverage(claim["id"])
                 gap_state = coverage.get("coverage_state")
                 conflict_state = coverage.get("evidence_conflict_state")
+                claim_metadata = claim.get("metadata", {})
+                if not isinstance(claim_metadata, dict):
+                    claim_metadata = {}
+                raw_claim_domains = claim_metadata.get("research_domains", [])
+                claim_domains = (
+                    [item for item in raw_claim_domains if isinstance(item, str)]
+                    if isinstance(raw_claim_domains, list) else []
+                )
+                claim_domain_set = set(claim_domains)
+                if gap_state == "no_evidence" and claim_metadata.get("origin") != "creator_inspiration_inbox":
+                    continue
                 if conflict_state == "contested":
                     gap_kind = "contested-claim"
                     title = "争议主张的独立证据与分歧根因复核"
                     question = "哪些原始数据、定义差异、样本边界或方法学因素能够解释该主张的支持与反驳证据冲突？"
                     support_query = "independent replication original data methods " + claim["title"][:100]
                     counter_query = "contradictory findings limitations alternative explanations " + claim["title"][:100]
-                elif gap_state in {"counter_search_missing", "both_search_directions_missing"}:
-                    gap_kind = "missing-counter-evidence"
-                    title = "为待验证主张补齐反面证据与替代解释"
-                    question = "针对该待验证主张，哪些反例、失败条件、零结果或替代解释尚未被检索和审查？"
-                    support_query = "independent evidence replication " + claim["title"][:100]
-                    counter_query = "counterexamples null results limitations falsification alternative explanations " + claim["title"][:100]
+                elif gap_state in {"no_evidence", "counter_search_missing", "both_search_directions_missing"}:
+                    if gap_state in {"no_evidence", "both_search_directions_missing"}:
+                        gap_kind = "missing-support-and-counter-evidence"
+                        title = "为待验证主张补齐支持证据、反面证据与替代解释"
+                        question = "当前尚无完整的支持与反面来源覆盖；哪些独立证据、反例、失败条件、零结果或替代解释尚未被检索和审查？"
+                    else:
+                        gap_kind = "missing-counter-evidence"
+                        title = "为待验证主张补齐反面证据与替代解释"
+                        question = "针对该待验证主张，哪些反例、失败条件、零结果或替代解释尚未被检索和审查？"
+                    if {
+                        "粤语语音学与韵律", "停顿与话语分段", "证据不确定性传播",
+                    }.issubset(claim_domain_set):
+                        support_query = (
+                            "Cantonese prosody pause duration epistemic qualifiers "
+                            "speech perception delayed recall TTS"
+                        )
+                        counter_query = (
+                            "speech pause duration disfluency fluency naturalness "
+                            "cognitive load listener comprehension counterexamples null effects"
+                        )
+                    else:
+                        support_query = "independent evidence replication " + claim["title"][:100]
+                        counter_query = "counterexamples null results limitations falsification alternative explanations " + claim["title"][:100]
                 else:
                     continue
                 evidence_rows = evidence_knowledge.list_claim_evidence(claim["id"], limit=32)
                 source_ids = list(dict.fromkeys(item["source_node_id"] for item in evidence_rows))
-                dynamic_topics.append({
+                topic_entry = {
                     "key": "research-gap:" + gap_kind + ":" + claim["id"],
                     "title": title,
                     "question": question,
@@ -694,7 +846,20 @@ class AutonomousResearchEngine:
                     "conflict_requires_human_resolution": bool(coverage.get("conflict_requires_human_resolution")),
                     "candidate_only": True,
                     "claim_status_unchanged": True,
-                })
+                }
+                if claim_metadata.get("origin") == "creator_inspiration_inbox":
+                    topic_entry.update({
+                        "creator_inspiration_node_id": claim["id"],
+                        "creator_tags": [item for item in claim_metadata.get("tags", []) if isinstance(item, str)][:12]
+                        if isinstance(claim_metadata.get("tags", []), list) else [],
+                        "creator_research_domains": claim_domains[:12],
+                        "creator_epistemic_status": claim_metadata.get("epistemic_status") or "creator_inspired_hypothesis_only",
+                        "creator_review_state": claim_metadata.get("review_state") or "researched_needs_independent_review",
+                        "creator_hypothesis_summary": str(claim.get("summary") or "")[:3000],
+                        "creator_research_report_path": str(claim_metadata.get("research_report_path") or "")[:500],
+
+                    })
+                dynamic_topics.append(topic_entry)
         # Failed or partial public-research retrieval runs return to the topic queue.
         # Their query text and failure details stay local; only stable IDs/status are used.
         for experiment in recent_research_runs:
@@ -1453,7 +1618,8 @@ class AutonomousResearchEngine:
         inspiration_brief: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any] | None, str]:
         self._last_synthesis_error = ""
-        if not sources:            return None, "no_sources"
+        if not sources:
+            return None, "no_sources"
         try:
             if self.synthesizer is not None:
                 raw = self.synthesizer(topic, sources)
@@ -1554,7 +1720,8 @@ class AutonomousResearchEngine:
     def _validate_claim_review(raw: Any, source_count: int) -> dict[str, Any]:
         required = {"verdict", "rationale", "source_refs"}
         raw = AutonomousResearchEngine._decode_model_json_object(raw, required, exact_keys=True)
-        if raw["verdict"] not in {"supported", "refuted", "contested", "insufficient"}:            raise ValueError("claim reviewer verdict is invalid")
+        if raw["verdict"] not in {"supported", "refuted", "contested", "insufficient"}:
+            raise ValueError("claim reviewer verdict is invalid")
         rationale, refs = raw["rationale"], raw["source_refs"]
         if not isinstance(rationale, str) or not rationale.strip() or len(rationale) > 1200:
             raise ValueError("claim reviewer rationale is invalid")
@@ -2933,6 +3100,18 @@ class AutonomousResearchEngine:
                                 "content_hash": source.get("sha256"),
                                 "relation_is_not_support_or_refutation": True,
                             })
+                            direction = (
+                                "counter_search_candidate" if source["query"] == topic["counter_query"]
+                                else "support_search_candidate" if source["query"] == topic["support_query"]
+                                else "context_candidate"
+                            )
+                            knowledge.record_claim_evidence(
+                                candidate["id"], source_node["id"], direction=direction,
+                                evidence_type=str(source.get("source_kind", "web_source_unspecified"))[:80],
+                                quality="unassessed", independence="unassessed",
+                                search_query=str(source.get("query", ""))[:500],
+                                notes="检索方向仅表示搜索意图，不代表原文已支持或反驳主张。",
+                            )
                     if symbolic_target_id:
                         report["symbolic_hypothesis_review_state"] = "researched_needs_independent_review"
                     else:
@@ -3099,25 +3278,133 @@ class AutonomousResearchEngine:
                             "symbolic_inspiration_is_evidence": False,
                         },
                     }
-                    initiative_title = f"创意机会：{topic.get('title', topic['key'])[:62]}｜{cycle_id[-8:]}"
+                    hypothesis_brief = str(topic.get("creator_hypothesis_summary") or "")[:3000]
+                    source_candidates = []
+                    for source in (report.get("sources") or [])[:8]:
+                        if not isinstance(source, dict) or not source.get("url"):
+                            continue
+                        query = source.get("query")
+                        direction = (
+                            "counter_search_candidate" if query == topic.get("counter_query")
+                            else "support_search_candidate" if query == topic.get("support_query")
+                            else "context_candidate"
+                        )
+                        source_candidates.append({
+                            "title": str(source.get("title") or "Untitled source")[:140],
+                            "url": str(source.get("url") or "")[:260],
+                            "direction": direction,
+                            "review_state": "unreviewed",
+                            "quality": "unassessed",
+                            "independence": "unassessed",
+                            "sha256": str(source.get("sha256") or "")[:64],
+                        })
+                    def brief_section(label: str, stop_labels: tuple[str, ...] = ()) -> str:
+                        marker = label + "："
+                        start = hypothesis_brief.find(marker)
+                        if start < 0:
+                            return ""
+                        start += len(marker)
+                        end = len(hypothesis_brief)
+                        for stop_label in stop_labels:
+                            position = hypothesis_brief.find(stop_label + "：", start)
+                            if position >= 0:
+                                end = min(end, position)
+                        return " ".join(hypothesis_brief[start:end].split())[:900]
+                    raw_experiments = synthesis.get("testable_experiments")
+                    if not isinstance(raw_experiments, list):
+                        raw_experiments = []
+                    experiment_candidates = [
+                        str(item)[:500] for item in raw_experiments[:3]
+                        if isinstance(item, (str, int, float)) and str(item).strip()
+                    ]
+                    experiment_text = brief_section("可执行实验", ("明确证伪条件",))
+                    falsifier_text = brief_section("明确证伪条件")
+                    if experiment_text:
+                        experiment_candidates.append(
+                            experiment_text + ("；证伪条件：" + falsifier_text if falsifier_text else "")
+                        )
+                    creator_hypotheses = [str(topic.get("hypothesis") or "")[:1000] if topic.get("hypothesis") else ""]
+                    creator_hypotheses = [item for item in creator_hypotheses if item]
+                    raw_uncertainties = synthesis.get("uncertainties")
+                    if not isinstance(raw_uncertainties, list):
+                        raw_uncertainties = []
+                    uncertainties = [
+                        str(item)[:500] for item in raw_uncertainties[:3]
+                        if isinstance(item, (str, int, float)) and str(item).strip()
+                    ]
+                    if not uncertainties:
+                        uncertainties = [
+                            "来源候选尚未人工复核全文；证据质量与来源独立性仍为 unassessed。",
+                            "跨语言、语料与任务的停顿时长结果不能直接外推到粤语。",
+                        ]
+                    research_domains = topic.get("creator_research_domains") or topic.get("research_domains") or []
+                    if not isinstance(research_domains, list):
+                        research_domains = []
+                    tags = topic.get("creator_tags") or topic.get("tags") or []
+                    if not isinstance(tags, list):
+                        tags = []
+                    counter_evidence = [
+                        f"{item['title']} — {item['url']}" for item in source_candidates
+                        if item["direction"] == "counter_search_candidate"
+                    ]
+                    raw_counter_evidence = synthesis.get("counter_evidence")
+                    if isinstance(raw_counter_evidence, list):
+                        counter_evidence.extend(
+                            str(item)[:220] for item in raw_counter_evidence[:3]
+                            if isinstance(item, (str, int, float)) and str(item).strip()
+                        )
+                    epistemic_status = topic.get("creator_epistemic_status") or (
+                        "creator_inspired_hypothesis_only" if topic.get("creator_inspiration_node_id")
+                        else "research_hypothesis_only"
+                    )
+                    evidence_review_state = "unreviewed" if source_candidates else "not_researched"
+                    initiative_title = _creator_initiative_title(topic)
+                    key_discoveries = {
+                        "executive_summary": executive_summary[:500],
+                        "creator_inspired_hypotheses": creator_hypotheses,
+                        "uncertainties": uncertainties,
+                        "sources": source_candidates,
+                        "counter_evidence": counter_evidence[:6],
+                        "testable_experiments": experiment_candidates[:3],
+                        "research_domains": [str(item)[:120] for item in research_domains[:12] if isinstance(item, str)],
+                        "tags": [str(item)[:100] for item in tags[:12] if isinstance(item, str)],
+                        "epistemic_status": epistemic_status,
+                        "evidence_review_state": evidence_review_state,
+                    }
+                    stable_report_path = str(topic.get("creator_research_report_path") or "")[:500]
+                    if stable_report_path and isinstance(creator_brief, dict):
+                        creator_brief["research_report_path"] = stable_report_path
                     concept_data = {
                         "research_question": topic.get("question", ""),
-                        "key_discoveries": {
-                            "executive_summary": executive_summary[:700],
-                            "counter_evidence": [str(item)[:220] for item in synthesis.get("counter_evidence", [])[:3]],
-                            "testable_experiments": [str(item)[:220] for item in synthesis.get("testable_experiments", [])[:3]],
-                        },
+                        "creator_hypothesis_summary": hypothesis_brief,
+                        "key_discoveries": key_discoveries,
                         "bookmark_driven": bool(topic.get("bookmark_sources")),
-                        "report_path": report_path or "",
+                        "report_path": stable_report_path,
+                        "inspiration_refs": [stable_report_path or f"research:{topic['key']}"],
+
                         "creator_brief": creator_brief,
                     }
                     concept_text = json.dumps(concept_data, ensure_ascii=False, default=str)
                     if len(concept_text) > 3900:
                         creator_brief["video"]["prompt"] = creator_brief["video"]["prompt"][:700]
-                        concept_data["key_discoveries"] = {"executive_summary": executive_summary[:400]}
+                        concept_data["creator_hypothesis_summary"] = hypothesis_brief[:1200]
+                        key_discoveries["executive_summary"] = executive_summary[:300]
+                        key_discoveries["sources"] = source_candidates[:4]
+                        key_discoveries["counter_evidence"] = counter_evidence[:3]
+                        key_discoveries["uncertainties"] = uncertainties[:3]
+                        key_discoveries["testable_experiments"] = experiment_candidates[:2]
+                        key_discoveries["creator_inspired_hypotheses"] = creator_hypotheses[:1]
                         concept_text = json.dumps(concept_data, ensure_ascii=False, default=str)
                     if len(concept_text) > 3900:
-                        raise ValueError("creator brief exceeds the initiative concept storage limit")
+                        creator_brief["video"]["prompt"] = creator_brief["video"]["prompt"][:450]
+                        concept_data["creator_hypothesis_summary"] = hypothesis_brief[:700]
+                        key_discoveries["sources"] = source_candidates[:2]
+                        key_discoveries["counter_evidence"] = counter_evidence[:2]
+                        key_discoveries["uncertainties"] = uncertainties[:2]
+                        key_discoveries["testable_experiments"] = experiment_candidates[:1]
+                        concept_text = json.dumps(concept_data, ensure_ascii=False, default=str)
+                    if len(concept_text) > 3900:
+                        raise ValueError("creator brief and evidence context exceed the initiative concept storage limit")
                     initiative = initiatives.propose(
                         initiative_title,
                         kind="tool",
@@ -3126,30 +3413,105 @@ class AutonomousResearchEngine:
                         first_step="先检查创作 Brief 与证据边界；通过资源调度后生成短视频预览，同时构建离线研究产品",
                         expected_output="可验证的离线研究产品，以及排队等待本机 GPU 资源的短视频预览任务",
                         interest_signals=[str(item.get("title", "")) for item in topic.get("bookmark_sources", [])[:12]],
-                        inspiration_refs=[report_path or f"research:{topic['key']}:{fetched_at}"],
+                        inspiration_refs=[stable_report_path or f"research:{topic['key']}"],
                         capability_gap="把研究洞察自动转化为原型、测试和可交付成果",
                         priority=85 if topic.get("bookmark_sources") else 70,
                         autonomy_level="prototype",
                     )
+                    # Merge new evidence into the stable initiative without overwriting its approved or in-progress concept.
+                    try:
+                        persisted_concept = json.loads(initiative.get("concept") or "{}")
+                    except (TypeError, json.JSONDecodeError):
+                        persisted_concept = {}
+                    if not isinstance(persisted_concept, dict):
+                        persisted_concept = {}
+                    persisted_brief = persisted_concept.get("creator_brief")
+                    stable_report_path = str(
+                        topic.get("creator_research_report_path") or persisted_concept.get("report_path") or ""
+                    )[:500]
+                    if initiative.get("status") == "proposed":
+                        new_brief = concept_data.get("creator_brief")
+                        if not isinstance(new_brief, dict):
+                            new_brief = {}
+                        if isinstance(persisted_brief, dict):
+                            stored_video = persisted_brief.get("video")
+                            if isinstance(stored_video, dict):
+                                new_brief["video"] = stored_video
+                            for stable_field in (
+                                "source_evolution_cycle_id", "source_research_topic_key", "research_report_path",
+                            ):
+                                if persisted_brief.get(stable_field):
+                                    new_brief[stable_field] = persisted_brief[stable_field]
+                        if stable_report_path:
+                            new_brief["research_report_path"] = stable_report_path
+                        concept_data["creator_brief"] = new_brief
+                        concept_data["report_path"] = stable_report_path
+                        current_concept_text = str(initiative.get("concept") or "{}")
+                        merged_concept_text = json.dumps(
+                            concept_data, ensure_ascii=False, sort_keys=True, default=str,
+                        )
+                        if merged_concept_text != current_concept_text:
+                            current_concept_sha256 = hashlib.sha256(
+                                current_concept_text.encode("utf-8")
+                            ).hexdigest()
+                            try:
+                                initiative = initiatives.update_concept(
+                                    initiative["id"], concept_data,
+                                    expected_current_sha256=current_concept_sha256,
+                                    actor="researcher", source="autonomous_research",
+                                )
+                            except ValueError:
+                                # Retry once after a concurrent research cycle updates the same stable initiative.
+                                latest = initiatives.get_by_id(initiative["id"])
+                                if latest and latest.get("status") == "proposed":
+                                    latest_text = str(latest.get("concept") or "{}")
+                                    latest_sha256 = hashlib.sha256(latest_text.encode("utf-8")).hexdigest()
+                                    initiative = initiatives.update_concept(
+                                        initiative["id"], concept_data,
+                                        expected_current_sha256=latest_sha256,
+                                        actor="researcher", source="autonomous_research",
+                                    )
+                                else:
+                                    initiative = latest or initiative
+                    try:
+                        persisted_concept = json.loads(initiative.get("concept") or "{}")
+                    except (TypeError, json.JSONDecodeError):
+                        persisted_concept = {}
+                    persisted_brief = persisted_concept.get("creator_brief") if isinstance(persisted_concept, dict) else None
+                    if isinstance(persisted_brief, dict) and isinstance(persisted_brief.get("video"), dict):
+                        creator_brief = persisted_brief
                     video_task = {"status": "not_queued_low_evidence"}
                     if high_value:
-                        attempt_id = "research-" + hashlib.sha256(
-                            f"{cycle_id}:{initiative['id']}".encode("utf-8")
-                        ).hexdigest()[:32]
-                        existing_attempt = initiatives.get_video_attempt(attempt_id)
                         recipe_sha256 = (
                             creator_brief.get("video", {}).get("recipe_sha256")
                             if isinstance(creator_brief, dict) and isinstance(creator_brief.get("video"), dict)
                             else None
                         )
-                        if existing_attempt is not None and existing_attempt.get("recipe_sha256") != recipe_sha256:
-                            raise ValueError("existing autonomous video attempt has a different recipe fingerprint")
-                        video_task = existing_attempt or initiatives.start_video_attempt(
-                            attempt_id, mode="prompt_to_video", initiative_id=initiative["id"],
-                            evolution_cycle_id=cycle_id, recipe_sha256=recipe_sha256,
+                        approval_result = _queue_creator_video_approval(
+                            initiatives, self.progress_db, initiative=initiative, topic=topic,
+                            video_brief=creator_brief["video"], recipe_sha256=recipe_sha256,
+                            evolution_cycle_id=cycle_id,
                         )
-                        video_task = {"attempt_id": video_task["attempt_id"], "status": video_task["status"],
-                                      "mode": video_task["mode"], "gpu_started": video_task["status"] == "running"}
+                        attempt = approval_result["attempt"]
+                        ticket = approval_result["ticket"]
+                        approval_payload = ticket.get("payload", {})
+                        approved = bool(approval_payload.get("_approved") is True and ticket.get("status") == "queued")
+                        video_task = {
+                            "attempt_id": attempt["attempt_id"],
+                            "status": attempt["status"],
+                            "mode": attempt["mode"],
+                            "approval_task_id": ticket["id"],
+                            "approval_status": ticket["status"],
+                            "gpu_started": attempt["status"] == "running",
+                        }
+                        report["creator_video_approval"] = {
+                            "task_id": ticket["id"],
+                            "status": ticket["status"],
+                            "approval_required": True,
+                            "approved": approved,
+                            "auto_approved": False,
+                            "scope": "one_video_attempt_only",
+                        }
                     report["creator_brief"] = creator_brief
                     report["creator_video_task"] = video_task
                     linked_knowledge_nodes = []

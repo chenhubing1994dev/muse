@@ -42,6 +42,28 @@ async function loadDashboard() {
       api("/api/v1/portal/plugins"),
       api("/api/v1/portal/tasks").catch((error) => ({ tasks: [], error: error.message })),
     ]);
+    const runtime = overview.autonomous_runtime || {};
+    const runtimeState = $("runtime-state");
+    if (runtimeState) {
+      runtimeState.textContent = runtime.stale
+        ? "AUTONOMOUS RUNTIME · HEARTBEAT STALE"
+        : runtime.running
+          ? "AUTONOMOUS RUNTIME · ONLINE"
+          : "AUTONOMOUS RUNTIME · STOPPED — Commander tickets wait in queue";
+    }
+    document.querySelectorAll("[data-runtime-action]").forEach((button) => {
+      const action = button.dataset.runtimeAction;
+      const state = runtime.state || "stopped";
+      button.disabled = action === "start"
+        ? runtime.running || state === "paused" || state === "stopping"
+        : action === "pause"
+          ? !runtime.running || state !== "running"
+          : action === "resume"
+            ? state !== "paused"
+            : action === "stop"
+              ? !runtime.running && state !== "paused"
+              : true;
+    });
     const counts = overview.queue?.counts || {};
     $("queued").textContent = number(counts.queued);
     $("running").textContent = number(counts.running);
@@ -65,7 +87,8 @@ async function loadDashboard() {
         <small>${escapeHtml(i.status || i.created_at || "")} · ${external ? "允许外部检索" : "仅本地研究"} · ${escapeHtml(i.evolution_stage || "not_evolved")}</small>
         <div class="inspiration-actions">
           <span class="muted">${escapeHtml(i.epistemic_status || "待验证假设")}</span>
-          <button class="quiet inspiration-evolve" type="button" data-inspiration-id="${escapeHtml(inspirationId)}" ${canEvolve ? "" : "disabled"}>启动演化闭环</button>
+          <button class="quiet inspiration-evolve" type="button" data-inspiration-id="${escapeHtml(inspirationId)}" data-create-offline-product="false" ${canEvolve ? "" : "disabled"}>启动演化闭环</button>
+          ${external ? "" : `<button class="quiet inspiration-evolve" type="button" data-inspiration-id="${escapeHtml(inspirationId)}" data-create-offline-product="true" ${canEvolve ? "" : "disabled"}>演化并创建离线产品原型</button>`}
         </div>
       </article>`;
     }).join("") || '<p class="empty">暂无灵感记录</p>';
@@ -83,6 +106,10 @@ async function loadDashboard() {
     $("knowledge").innerHTML = summary + (nodeCards || '<p class="empty">知识库暂未建立节点</p>');
     $("plugins").innerHTML = (plugins.plugins || []).map((p) => {
       const capabilities = Array.isArray(p.manifest?.capabilities) ? p.manifest.capabilities : [];
+      const signature = p.signature || { status: "unsigned" };
+      const signatureStatus = String(signature.status || "unsigned").toUpperCase();
+      const signatureKey = signature.key_id ? ` · ${escapeHtml(signature.key_id)}` : "";
+      const executionState = p.execution_enabled === true ? "执行适配器仍需独立审核" : "不会执行第三方代码";
       const requestForm = p.status === "enabled" && capabilities.length ?
         `<form class="plugin-request-form" data-plugin-id="${escapeHtml(p.plugin_id)}">
           <label>请求能力</label>
@@ -95,7 +122,9 @@ async function loadDashboard() {
       return `<article class="plugin"><b>${escapeHtml(p.manifest?.name || p.plugin_id)}</b>
         <small>${escapeHtml(p.plugin_id)} · v${escapeHtml(p.version)}</small>
         <p class="muted">${escapeHtml(p.manifest?.description || "")}</p>
-        <span class="status">${escapeHtml(String(p.status || "unknown").toUpperCase())}</span>${requestForm}</article>`;
+        <span class="status">${escapeHtml(String(p.status || "unknown").toUpperCase())}</span>
+        <small class="muted">签名状态：${escapeHtml(signatureStatus)}${signatureKey}</small>
+        <small class="muted">执行边界：${escapeHtml(executionState)}</small>${requestForm}</article>`;
     }).join("") || '<p class="empty">插件注册表已就绪，等待待审核候选</p>';
     $("updated").textContent = "同步时间 " + new Date().toLocaleString();
     $("connection-state").textContent = "SECURE · ONLINE";
@@ -142,15 +171,22 @@ $("inspirations").addEventListener("click", async (event) => {
   if (!button || button.disabled) return;
   const inspirationId = button.dataset.inspirationId;
   const status = $("inspiration-workflow-result");
+  const createOfflineProduct = button.dataset.createOfflineProduct === "true";
   button.disabled = true;
-  status.textContent = "演化中：整理本地上下文、研究证据与反证、生成改进提案和蓝图；不会自动执行代码或启动视频任务…";
+  status.textContent = createOfflineProduct
+    ? "演化并创建离线产品原型：仅接受本地研究报告；原型进入 testing，等待人工验收，不会发布、启动 GPU 或执行生成代码…"
+    : "演化中：整理本地上下文、研究证据与反证、生成改进提案和蓝图；不会自动执行代码或启动视频任务…";
   try {
+    const requestId = button.dataset.requestId || crypto.randomUUID().replace(/-/g, "");
+    button.dataset.requestId = requestId;
     const result = await api("/api/v1/portal/inspirations/evolve", {
-      method: "POST", csrf: true, body: { inspiration_id: inspirationId },
+      method: "POST", csrf: true, body: {
+        inspiration_id: inspirationId, request_id: requestId,
+        create_offline_product: createOfflineProduct,
+      },
     });
-    const evolution = result.evolution || {};
-    const proposalCount = Array.isArray(evolution.improvement_proposal_ids) ? evolution.improvement_proposal_ids.length : 0;
-    status.textContent = `闭环完成：${evolution.external_network_called ? "已按该灵感的授权联网研究" : "仅使用本地研究"}；${proposalCount} 项改进提案；蓝图：${evolution.blueprint_path || "已生成"}。代码修改仍需独立人工审批。`;
+    delete button.dataset.requestId;
+    status.textContent = `已提交至 Muse Commander：${result.task_id}；当前状态：${result.status === "queued" ? "排队中" : result.status}。${createOfflineProduct ? "离线产品原型将进入 testing 并等待人工验收。" : "研究、提案和蓝图将在后台处理。"}代码修改与视频生成仍需各自审批。`;
     await loadDashboard();
   } catch (error) {
     status.textContent = error.message;
@@ -229,6 +265,25 @@ $("plugins").addEventListener("submit", async (event) => {
   } finally {
     button.disabled = false;
   }
+});
+document.querySelectorAll("[data-runtime-action]").forEach((button) => {
+  button.addEventListener("click", async () => {
+    const action = button.dataset.runtimeAction;
+    if (action === "stop" && !window.confirm("确定停止 Muse 后台运行时？当前任务会按现有恢复策略保留。")) return;
+    const status = $("runtime-control-result");
+    button.disabled = true;
+    status.textContent = `正在提交运行时指令：${action}…`;
+    try {
+      const result = await api("/api/v1/portal/runtime/control", {
+        method: "POST", csrf: true, body: { action },
+      });
+      status.textContent = `运行时指令已受理：${result.result?.state || action}。`;
+      await loadDashboard();
+    } catch (error) {
+      status.textContent = error.message;
+      await loadDashboard().catch(() => {});
+    }
+  });
 });
 restoreSession();
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});

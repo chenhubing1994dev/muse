@@ -98,7 +98,14 @@ def run_check(
         events = task_events.get(item["id"], [])
         meaningful = [event for event in events if event["event_type"] in _MEANINGFUL_TASK_EVENTS]
         latest_meaningful = _parse_timestamp(meaningful[-1]["created_at"]) if meaningful else None
-        latest_event = _parse_timestamp(events[-1]["created_at"]) if events else _parse_timestamp(item.get("created_at"))
+        activity_events = [
+            event for event in events
+            if event["event_type"] != "assignment.lease_heartbeat"
+        ]
+        latest_event = (
+            _parse_timestamp(activity_events[-1]["created_at"])
+            if activity_events else _parse_timestamp(item.get("created_at"))
+        )
         if latest_meaningful is not None:
             if last_meaningful_progress_at is None or latest_meaningful > last_meaningful_progress_at:
                 last_meaningful_progress_at = latest_meaningful

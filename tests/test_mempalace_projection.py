@@ -211,7 +211,29 @@ class MemPalaceProjectionOutboxTests(unittest.TestCase):
                             task_database=task_database, approval_task_id=ticket["id"],
                         )
                     self.assertEqual(adapter.calls, [])
+                    import json
                     tasks.approve(ticket["id"], approved_by="human-reviewer")
+                    approved = tasks.get(ticket["id"])
+                    approved_at = approved["payload"]["_approval"]["approved_at"]
+                    approved["payload"]["_approval"]["approved_at"] = "2000-01-01T00:00:00+00:00"
+                    tasks._connection.execute(
+                        "UPDATE tasks SET payload_json=? WHERE id=?",
+                        (json.dumps(approved["payload"]), ticket["id"]),
+                    )
+                    tasks._connection.commit()
+                with self.assertRaises(PermissionError):
+                    outbox.deliver_with_approval_ticket(
+                        queued["outbox_id"], adapter,
+                        task_database=task_database, approval_task_id=ticket["id"],
+                    )
+                with TaskQueue(task_database) as tasks:
+                    approved = tasks.get(ticket["id"])
+                    approved["payload"]["_approval"]["approved_at"] = approved_at
+                    tasks._connection.execute(
+                        "UPDATE tasks SET payload_json=? WHERE id=?",
+                        (json.dumps(approved["payload"]), ticket["id"]),
+                    )
+                    tasks._connection.commit()
 
                 delivered = outbox.deliver_with_approval_ticket(
                     queued["outbox_id"], adapter,

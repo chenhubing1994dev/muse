@@ -91,6 +91,24 @@ class VideoRecipeTraceTests(unittest.TestCase):
             self.assertFalse(trace["approval"]["human_decision_verified"])
             self.assertFalse(trace["chain_consistent"])
 
+    def test_trace_fails_closed_when_approval_timestamp_is_not_bound_to_event(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _, ticket_id, _, _ = self._seed(root)
+            tasks_db = root / "data" / "tasks" / "muse.sqlite3"
+            with closing(sqlite3.connect(tasks_db)) as connection:
+                row = connection.execute("SELECT payload_json FROM tasks WHERE id=?", (ticket_id,)).fetchone()
+                payload = json.loads(row[0])
+                payload["_approval"]["approved_at"] = "2000-01-01T00:00:00+00:00"
+                connection.execute(
+                    "UPDATE tasks SET payload_json=? WHERE id=?",
+                    (json.dumps(payload, ensure_ascii=False), ticket_id),
+                )
+                connection.commit()
+            trace = build_video_recipe_trace(root, "trace-attempt")
+            self.assertFalse(trace["approval"]["human_decision_verified"])
+            self.assertFalse(trace["chain_consistent"])
+
     def test_trace_rejects_approval_ticket_bound_to_a_different_attempt(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -814,6 +814,49 @@ class UnifiedRuntimeTests(unittest.TestCase):
         with TaskQueue(self.db) as queue:
             self.assertEqual(queue.get(task["id"])["status"], "queued")
 
+    def test_plugin_tickets_cannot_enter_generic_dispatchers(self):
+        for dispatcher in (self.runtime.dispatch_once, self.runtime.dispatch_commander_once):
+            task = self.runtime.enqueue(
+                "Plugin request: research.cross-check/research",
+                {
+                    "kind": "plugin_capability_request",
+                    "plugin_capability_request": {"plugin_id": "research.cross-check"},
+                    "execution_adapter_required": True,
+                    "execution_enabled": False,
+                },
+            )
+            with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}, clear=True):
+                with self.assertRaisesRegex(RuntimeBlocked, "plugin capability tickets require a registered sandbox Worker"):
+                    if dispatcher == self.runtime.dispatch_once:
+                        dispatcher(task_id=task["id"], approved=True)
+                    else:
+                        dispatcher(task_id=task["id"], approved=True, planner=CommanderPlanner())
+            with TaskQueue(self.db) as queue:
+                self.assertEqual(queue.get(task["id"])["status"], "queued")
+            self.assertEqual(self.runtime.ruflo.calls, [])
+    def test_video_approval_tickets_cannot_enter_generic_dispatchers(self):
+        for approval_kind in ("creator_initiative_video_approval", "business_opportunity_video_approval"):
+            for dispatcher_name in ("dispatch_once", "dispatch_commander_once"):
+                with TaskQueue(self.db) as queue:
+                    ticket = queue.enqueue(
+                        "Approve a dedicated video preview",
+                        {"kind": approval_kind, "attempt_id": approval_kind, "approval_scope": "one_video_attempt_only"},
+                        require_approval=True, workload_class="media",
+                        idempotency_key=f"video-approval-dispatch:{approval_kind}:{dispatcher_name}",
+                    )
+                    queue.approve(ticket["id"], approved_by="test-operator")
+                with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}, clear=True):
+                    with self.assertRaisesRegex(RuntimeBlocked, "video approval tickets require VideoTaskWorker"):
+                        if dispatcher_name == "dispatch_once":
+                            self.runtime.dispatch_once(task_id=ticket["id"], approved=True)
+                        else:
+                            self.runtime.dispatch_commander_once(
+                                task_id=ticket["id"], approved=True, planner=CommanderPlanner(),
+                            )
+                with TaskQueue(self.db) as queue:
+                    self.assertEqual(queue.get(ticket["id"])["status"], "queued")
+                self.assertEqual(self.runtime.ruflo.calls, [])
+
     def test_task_scoped_desktop_snapshot_records_metadata_without_ui_contents(self):
         task = self.runtime.enqueue("inspect UI", {"goal": "observe"})
         snapshot = self.runtime.desktop_snapshot(app="notepad", task_id=task["id"])

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import hashlib
 import zipfile
+import socket
 import tempfile
 import threading
 import unittest
@@ -222,6 +223,44 @@ class StatusApiTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp.cleanup()
+
+    def test_daemon_control_rejects_negative_content_length_without_dispatch(self) -> None:
+        calls = []
+        daemon_stub = ModuleType("muse.daemon_control")
+        daemon_stub.MuseDaemonController = lambda **kwargs: SimpleNamespace(
+            start=lambda: calls.append("start") or {"status": "started"},
+        )
+        daemon_stub.DaemonError = RuntimeError
+        with patch.dict("sys.modules", {"muse.daemon_control": daemon_stub}):
+            server, token = create_status_server(
+                task_db=self.task_db, progress_db=self.progress_db,
+                capability_db=self.capability_db,
+            )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        client = socket.create_connection(("127.0.0.1", server.server_address[1]), timeout=5)
+        try:
+            client.sendall((
+                "POST /api/v1/daemon/start HTTP/1.1\r\n"
+                "Host: 127.0.0.1\r\n"
+                f"Authorization: Bearer {token}\r\n"
+                "Content-Length: -1\r\n"
+                "\r\n"            ).encode("ascii"))
+            client.shutdown(socket.SHUT_WR)
+            response = b""
+            while True:
+                chunk = client.recv(4096)
+                if not chunk:
+                    break
+                response += chunk
+            self.assertTrue(response.startswith(b"HTTP/1.0 400"), response[:200])
+            self.assertIn(b"invalid content length", response)
+            self.assertEqual(calls, [])
+        finally:
+            client.close()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
 
     def test_contact_sheet_endpoint_serves_only_hash_verified_release_evidence(self) -> None:
         workspace = Path(self.temp.name)
@@ -796,6 +835,11 @@ class StatusApiTests(unittest.TestCase):
                 payload = json.loads(response.read())
             self.assertEqual(payload["api_version"], 1)
             self.assertIn("queue", payload)
+            self.assertIn("autonomous_runtime", payload)
+            self.assertFalse(payload["autonomous_runtime"]["running"])
+            self.assertEqual(payload["autonomous_runtime"]["state"], "stopped")
+            self.assertNotIn("owner_id", payload["autonomous_runtime"])
+            self.assertNotIn("managed_pid", payload["autonomous_runtime"])
             health_request = Request(base + "/api/v1/health", headers={"Authorization": f"Bearer {token}"})
             with urlopen(health_request, timeout=3) as response:
                 health_payload = json.loads(response.read())
@@ -1443,7 +1487,8 @@ class StatusApiTests(unittest.TestCase):
             self.assertEqual(len(product_items), 1)
             self.assertEqual(product_items[0]["initiative_id"], initiative["id"])
             self.assertEqual(product_items[0]["name"], initiative["title"])
-            self.assertEqual(product_items[0]["version"], "v2")
+            self.assertEqual(product_items[0]["version"], "v3")
+            # Keep the API contract aligned with LocalProductBuilder v3.
             self.assertEqual(product_items[0]["status"], "testing")
             timeline_request = Request(
                 base + f"/api/v1/initiatives/{initiative['id']}/timeline?limit=20",
@@ -1671,16 +1716,14 @@ class StatusApiTests(unittest.TestCase):
             server.server_close()
             thread.join(timeout=3)
 
-    def test_failed_video_job_is_saved_as_redacted_initiative_failure(self):
-        import time
-
+    def test_prompt_video_api_requires_commander_admission_before_creating_attempt(self):
         root = Path(self.temp.name)
         initiatives_db = root / "data" / "initiatives" / "muse.sqlite3"
         products_dir = root / "data" / "products"
         products_dir.mkdir(parents=True)
         with InitiativeStore(initiatives_db) as initiatives:
             item = initiatives.propose(
-                "Failed video job target", kind="creative_output", creator_value="value",
+                "Video admission target", kind="creative_output", creator_value="value",
                 concept="concept", first_step="step", expected_output="output",
             )
         server, token = create_status_server(
@@ -1690,18 +1733,17 @@ class StatusApiTests(unittest.TestCase):
         )
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
-        cycle = "cycle_" + "9" * 32
-        recipe_sha256 = "f" * 64
         try:
-            with patch("muse.status_api.VideoProductBuilder.build_from_prompt", side_effect=RuntimeError("private GPU failure detail")) as build_prompt:
+            with patch("muse.status_api.VideoProductBuilder.build_from_prompt") as build_prompt:
                 request = Request(
                     f"http://127.0.0.1:{server.server_address[1]}/api/v1/video-products",
                     data=json.dumps({
-                        "mode": "prompt_to_video", "title": "故障注入视频",
+                        "mode": "prompt_to_video", "title": "待审批视频",
                         "prompt": "A short cinematic test scene",
-                        "creator_initiative_id": item["id"], "evolution_cycle_id": cycle,
+                        "creator_initiative_id": item["id"],
+                        "evolution_cycle_id": "cycle_" + "9" * 32,
                         "motion_profile": "brand_intro_outro",
-                        "recipe_sha256": recipe_sha256,
+                        "recipe_sha256": "f" * 64,
                     }).encode("utf-8"),
                     headers={
                         "Authorization": "Bearer " + token,
@@ -1710,35 +1752,15 @@ class StatusApiTests(unittest.TestCase):
                     },
                     method="POST",
                 )
-                with urlopen(request, timeout=3) as response:
-                    job_id = json.loads(response.read())["job"]["id"]
-                status = None
-                for _ in range(100):
-                    poll = Request(
-                        f"http://127.0.0.1:{server.server_address[1]}/api/v1/video-jobs/{job_id}",
-                        headers={"Authorization": "Bearer " + token},
-                    )
-                    with urlopen(poll, timeout=3) as response:
-                        status = json.loads(response.read())["job"]["status"]
-                    if status == "failed":
-                        break
-                    time.sleep(0.02)
-            build_prompt.assert_called_once()
-            self.assertEqual(build_prompt.call_args.kwargs["motion_profile"], "brand_intro_outro")
-            self.assertEqual(build_prompt.call_args.kwargs["recipe_sha256"], recipe_sha256)
-            self.assertEqual(status, "failed")
+                with self.assertRaises(HTTPError) as raised:
+                    urlopen(request, timeout=3)
+                self.assertEqual(raised.exception.code, 409)
+                body = json.loads(raised.exception.read())
+                self.assertEqual(body["code"], "video.commander_admission_required")
+                self.assertTrue(body["approval_required"])
+                build_prompt.assert_not_called()
             with InitiativeStore(initiatives_db) as initiatives:
-                failures = initiatives.list_failures(initiative_id=item["id"])
-                attempt = initiatives.get_video_attempt(job_id)
-            self.assertEqual(attempt["recipe_sha256"], recipe_sha256)
-            self.assertEqual(len(failures), 1)
-            self.assertEqual(failures[0]["failure_code"], "video.product_job_failed")
-            self.assertEqual(failures[0]["error_type"], "RuntimeError")
-            self.assertEqual(failures[0]["evolution_cycle_id"], cycle)
-            self.assertNotIn("private GPU failure detail", str(failures))
-            timeline = build_initiative_timeline(initiatives_db, item["id"])
-            failed_event = next(event for event in timeline["events"] if event["event_type"] == "product_failed")
-            self.assertEqual(failed_event["details"]["evolution_cycle_id"], cycle)
+                self.assertEqual(initiatives.list_failures(initiative_id=item["id"]), [])
         finally:
             server.shutdown()
             server.server_close()
@@ -2145,19 +2167,13 @@ class PluginPlatformStatusApiTests(unittest.TestCase):
                 }) as response:
                     self.assertEqual(json.loads(response.read())["plugin"]["status"], "enabled")
 
-                with post("/api/v1/plugins/research.cross-check/capabilities/research/request", {
-                    "payload": {"topic": "Muse knowledge graph"},
-                }) as response:
-                    queued = json.loads(response.read())
-                    self.assertEqual(response.status, 202)
-                    self.assertEqual(queued["status"], "queued_for_commander_approval")
-                    task_id = queued["commander_result"]["task_id"]
-
-                with TaskQueue(task_db) as queue:
-                    task = queue.get(task_id)
-                self.assertEqual(task["status"], "waiting_approval")
-                self.assertFalse(task["payload"]["execution_enabled"])
-                self.assertTrue(task["payload"]["execution_adapter_required"])
+                with self.assertRaises(HTTPError) as unsigned_request:
+                    post("/api/v1/plugins/research.cross-check/capabilities/research/request", {
+                        "payload": {"topic": "Muse knowledge graph"},
+                    })
+                self.assertEqual(unsigned_request.exception.code, 409)
+                self.assertIn("verified publisher signature", unsigned_request.exception.read().decode("utf-8"))
+                unsigned_request.exception.close()
 
                 with urlopen(Request(base + "/api/v1/plugins/audit", headers=headers), timeout=3) as response:
                     events = json.loads(response.read())["events"]

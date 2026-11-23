@@ -263,16 +263,35 @@ class BusinessOpportunityStore:
             self.connection.commit()
         return {"opportunity":opportunity,"initiative":initiative,"created_link":not linked}
 
+    def _linked_initiative(self,opportunity_id,*,initiative_database):
+        """Resolve the exact linked initiative by durable event ID, with legacy fallback."""
+        from muse.initiative_engine import InitiativeStore
+        reference=f"business-opportunity:{opportunity_id}"
+        rows=self.connection.execute(
+            "SELECT details_json FROM business_opportunity_events WHERE opportunity_id=? AND event_type='initiative_linked' ORDER BY sequence DESC",
+            (opportunity_id,),
+        ).fetchall()
+        initiative_ids=[]
+        for row in rows:
+            details=json.loads(row["details_json"])
+            initiative_id=details.get("initiative_id") if isinstance(details,dict) else None
+            if isinstance(initiative_id,str) and re.fullmatch(r"[0-9a-f]{32}",initiative_id) and initiative_id not in initiative_ids:
+                initiative_ids.append(initiative_id)
+        with InitiativeStore(initiative_database) as initiatives:
+            for initiative_id in initiative_ids:
+                initiative=initiatives.get_by_id(initiative_id)
+                if initiative is not None and reference in initiative.get("inspiration_refs",[]):
+                    return initiative
+            # Compatibility for records created before initiative_linked stored the ID.
+            return next((item for item in initiatives.list(limit=200) if reference in item["inspiration_refs"]),None)
+
     def request_video_approval(self,opportunity_id,*,initiative_database,task_database):
         """Create a Commander approval ticket; never queue GPU work at this stage."""
-        from muse.initiative_engine import InitiativeStore
         from muse.task_queue import TaskQueue
         opportunity=self.get(opportunity_id)
         if opportunity["status"] in {"rejected","parked"}:
             raise ValueError("rejected or parked opportunities cannot request video approval")
-        reference=f"business-opportunity:{opportunity_id}"
-        with InitiativeStore(initiative_database) as initiatives:
-            initiative=next((x for x in initiatives.list(limit=200) if reference in x["inspiration_refs"]),None)
+        initiative=self._linked_initiative(opportunity_id,initiative_database=initiative_database)
         if initiative is None:
             raise KeyError("promote the opportunity to a Creator Initiative first")
         if initiative["status"] in {"rejected","parked"}:
@@ -321,9 +340,7 @@ class BusinessOpportunityStore:
         opportunity=self.get(opportunity_id)
         if opportunity["status"] in {"rejected","parked"}:
             raise ValueError("rejected or parked opportunities cannot queue video")
-        reference=f"business-opportunity:{opportunity_id}"
-        with InitiativeStore(initiative_database) as initiatives:
-            initiative=next((x for x in initiatives.list(limit=200) if reference in x["inspiration_refs"]),None)
+        initiative=self._linked_initiative(opportunity_id,initiative_database=initiative_database)
         if initiative is None:
             raise KeyError("promote the opportunity to a Creator Initiative first")
         if initiative["status"] in {"rejected","parked"}:
@@ -340,6 +357,7 @@ class BusinessOpportunityStore:
             and event.get("actor")==approval.get("approved_by")
             and isinstance(event.get("payload"),dict)
             and event["payload"].get("decision")=="approved"
+            and TaskQueue.approval_timestamp_matches_event(approval.get("approved_at"), event.get("created_at"))
             for event in events
         )
         if (ticket.get("status")!="queued"

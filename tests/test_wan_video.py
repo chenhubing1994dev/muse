@@ -256,5 +256,150 @@ class WanWorkflowTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             generate_wan21_t2v("A red fox", Path("unused.mp4"), endpoint="http://192.168.1.10:8188")
 
+    def test_generate_calls_admission_guard_with_live_lease_after_vram_preflight_before_submit(self):
+        events = []
+        leases = []
+
+        class FakeLeaseSession:
+            def __init__(self, _coordinator, owner_id, **_kwargs):
+                self.lease_id = "lease-guard-test"
+                self.owner_id = owner_id
+                self.coordination = {"mode": "model_offline_supervisor_not_running"}
+                self.active = False
+
+            def __enter__(self):
+                self.active = True
+                leases.append(self)
+                events.append("lease_enter")
+                return self
+
+            def assert_valid(self):
+                if not self.active:
+                    raise GpuResourceBusy("lease is not active")
+                events.append("lease_assert")
+
+            def __exit__(self, exc_type, exc, traceback):
+                self.active = False
+                events.append("lease_exit")
+                return False
+
+        class FakeClient:
+            def __init__(self, _endpoint, **_kwargs):
+                events.append("client_init")
+
+            def gpu_memory(self):
+                events.append("gpu_memory")
+                return {"vram_total_bytes": 1000, "vram_free_bytes": 900, "vram_free_ratio": 0.9}
+
+            def submit_workflow(self, _workflow, *, node_allowlist, approved):
+                events.append("submit")
+                return {"prompt_id": "guarded-prompt"}
+
+            def history(self, prompt_id):
+                return {prompt_id: {"status": {"status_str": "success"}, "outputs": {
+                    "11": {"gifs": [{"filename": "muse_wan21_guarded.mp4", "subfolder": "", "type": "output"}]}
+                }}}
+
+        def guard(received_lease):
+            events.append("guard")
+            self.assertIs(received_lease, leases[0])
+            self.assertTrue(received_lease.active)
+
+        def fake_download(_client, _metadata, target):
+            target.write_bytes(bytes.fromhex("000000186674797069736f6d66697874757265"))
+            return target.stat().st_size
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            with patch("muse.gpu_resources.GpuLeaseSession", FakeLeaseSession), \
+                 patch("muse.model_service.probe_configured_model_service", return_value={"status": "unavailable"}), \
+                 patch("muse.wan_video.ComfyUIClient", FakeClient), \
+                 patch("muse.wan_video._download_local_output", side_effect=fake_download), \
+                 patch("muse.wan_video._request_comfyui_model_release", return_value={"status": "released", "vram_free_ratio": 0.8}), \
+                 patch("muse.wan_video.time.sleep"):
+                result = generate_wan21_t2v(
+                    "A red fox", root / "video.mp4", timeout_seconds=30,
+                    resource_db=root / "data" / "gpu-resources.sqlite3", workspace=root,
+                    admission_guard=guard,
+                )
+
+        self.assertEqual(result["status"], "completed")
+        self.assertLess(events.index("gpu_memory"), events.index("guard"))
+        self.assertLess(events.index("guard"), events.index("submit"))
+        self.assertIn("lease_exit", events)
+
+    def test_generate_propagates_admission_rejection_without_submitting_workflow(self):
+        events = []
+        denied = PermissionError("Commander admission was revoked")
+
+        class FakeLeaseSession:
+            def __init__(self, _coordinator, owner_id, **_kwargs):
+                self.lease_id = "lease-denied-test"
+                self.owner_id = owner_id
+                self.coordination = {"mode": "model_offline_supervisor_not_running"}
+                self.active = False
+
+            def __enter__(self):
+                self.active = True
+                return self
+
+            def assert_valid(self):
+                if not self.active:
+                    raise GpuResourceBusy("lease is not active")
+
+            def __exit__(self, exc_type, exc, traceback):
+                self.active = False
+                return False
+
+        class FakeClient:
+            def __init__(self, _endpoint, **_kwargs):
+                pass
+
+            def gpu_memory(self):
+                return {"vram_total_bytes": 1000, "vram_free_bytes": 900, "vram_free_ratio": 0.9}
+
+            def submit_workflow(self, *_args, **_kwargs):
+                events.append("submit")
+                raise AssertionError("a rejected admission must not submit a workflow")
+
+        def guard(_lease):
+            events.append("guard")
+            raise denied
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            with patch("muse.gpu_resources.GpuLeaseSession", FakeLeaseSession), \
+                 patch("muse.model_service.probe_configured_model_service", return_value={"status": "unavailable"}), \
+                 patch("muse.wan_video.ComfyUIClient", FakeClient):
+                with self.assertRaises(PermissionError) as caught:
+                    generate_wan21_t2v(
+                        "A red fox", root / "video.mp4", timeout_seconds=30,
+                        resource_db=root / "data" / "gpu-resources.sqlite3", workspace=root,
+                        admission_guard=guard,
+                    )
+
+        self.assertIs(caught.exception, denied)
+        self.assertEqual(events, ["guard"])
+
+    def test_generate_rejects_admission_guard_without_gpu_lease_database(self):
+        with patch("muse.wan_video.ComfyUIClient") as client:
+            with self.assertRaisesRegex(WanVideoError, "resource_db"):
+                generate_wan21_t2v(
+                    "A red fox", Path("unused.mp4"), admission_guard=lambda _lease: None,
+                )
+        client.assert_not_called()
+
+    def test_gpu_memory_transport_error_remains_wan_video_error(self):
+        class BrokenTelemetryClient:
+            def __init__(self, _endpoint, **_kwargs):
+                pass
+
+            def gpu_memory(self):
+                raise OSError("local GPU telemetry unavailable")
+
+        with patch("muse.wan_video.ComfyUIClient", BrokenTelemetryClient):
+            with self.assertRaisesRegex(WanVideoError, "reliable GPU memory telemetry is unavailable"):
+                generate_wan21_t2v("A red fox", Path("unused.mp4"), timeout_seconds=30)
+
 if __name__ == "__main__":
     unittest.main()

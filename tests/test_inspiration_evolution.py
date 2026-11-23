@@ -1,6 +1,7 @@
 """End-to-end tests for Inspiration -> Follow-Up -> Self-Improvement -> Video Blueprint & Multi-Platform Publish."""
 from __future__ import annotations
 
+import http.client
 import hashlib
 import json
 import tempfile
@@ -9,8 +10,8 @@ import unittest
 import zipfile
 from pathlib import Path
 from unittest.mock import patch
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
-
 from muse.improvement import ImprovementStore
 from muse.inspiration_evolution import evolve_inspiration_closed_loop
 from muse.pipeline_control import PipelineController
@@ -114,6 +115,7 @@ class InspirationEvolutionTests(unittest.TestCase):
         self.assertFalse(result["external_network_called"])
         self.assertTrue(result["approval_required"])
         self.assertFalse(result["automatic_code_changes"])
+        self.assertIsNone(result["offline_productization"])
         self.assertEqual(len(result["improvement_proposal_ids"]), 1)
         self.assertEqual(len(result["queued_video_jobs"]), 1)
         self.assertEqual(result["queued_video_jobs"][0]["recipe_id"], "inspiration_viral_9x16_v1")
@@ -129,6 +131,18 @@ class InspirationEvolutionTests(unittest.TestCase):
         self.assertIn("douyin", bp["platform_copy"])
         self.assertIn("wechat_channels", bp["platform_copy"])
         self.assertIn("youtube", bp["platform_copy"])
+
+    def test_offline_productization_opt_in_requires_an_actual_boolean(self) -> None:
+        with self.assertRaisesRegex(TypeError, "create_offline_product must be a boolean"):
+            evolve_inspiration_closed_loop(
+                self.root,
+                create_if_missing={
+                    "title": "Strict productization opt-in",
+                    "content": "A string must not enable prototype creation.",
+                    "allow_external_research": False,
+                },
+                create_offline_product="true",
+            )
 
     def test_external_research_consent_requires_an_actual_boolean(self) -> None:
         with patch("muse.inspiration_evolution.AutonomousResearchEngine") as engine_class:
@@ -214,64 +228,152 @@ class InspirationEvolutionTests(unittest.TestCase):
         base = f"http://127.0.0.1:{server.server_address[1]}"
         headers = {"Authorization": "Bearer " + token, "Content-Type": "application/json"}
         try:
+            request_id = "b" * 32
+            request_payload = {
+                "inspiration_id": node["id"],
+                "request_id": request_id,
+                "enqueue_video": True,
+                "aspect_ratios": ["9:16", "16:9"],
+                "create_offline_product": True,
+            }
             req = Request(
                 base + "/api/v1/inspirations/evolve",
-                data=json.dumps({
-                    "inspiration_id": node["id"],
-                    "enqueue_video": True,
-                    "aspect_ratios": ["9:16", "16:9"],
-                }).encode("utf-8"),
+                data=json.dumps(request_payload).encode("utf-8"),
                 headers=headers,
                 method="POST",
             )
             with urlopen(req, timeout=10) as resp:
-                self.assertEqual(resp.status, 200)
+                self.assertEqual(resp.status, 202)
                 body = json.loads(resp.read())
-            evo = body["evolution"]
-            self.assertEqual(evo["inspiration_id"], node["id"])
-            self.assertEqual(len(evo["queued_video_jobs"]), 2)
-            self.assertEqual(len(evo["improvement_proposal_ids"]), 1)
-            with urlopen(Request(base + "/api/v1/inspirations", headers={"Authorization": "Bearer " + token}), timeout=5) as resp:
-                listed = json.loads(resp.read())["inspirations"]
-            self.assertEqual(listed[0]["evolution_stage"], "blueprint_ready")
+            task_id = body["task_id"]
+            self.assertEqual(body["status"], "queued")
+            with TaskQueue(task_db) as queue:
+                queued = queue.get(task_id)
+                self.assertEqual(queued["status"], "queued")
+                self.assertEqual(queued["payload"]["kind"], "inspiration_evolution")
+                self.assertEqual(queued["payload"]["inspiration_id"], node["id"])
+                self.assertTrue(queued["payload"]["create_offline_product"])
+
+            duplicate = Request(
+                base + "/api/v1/inspirations/evolve",
+                data=json.dumps(request_payload).encode("utf-8"),
+                headers=headers,
+                method="POST",
+            )
+            with urlopen(duplicate, timeout=10) as resp:
+                self.assertEqual(resp.status, 202)
+                duplicate_body = json.loads(resp.read())
+            self.assertEqual(duplicate_body["task_id"], task_id)
+            self.assertTrue(duplicate_body["deduplicated"])
+            with ResearchKnowledgeStore(knowledge_db) as knowledge:
+                queued_node = knowledge.get_node(node["id"])
+            self.assertNotIn("evolution_stage", queued_node["metadata"])
+            conflicting_payload = {**request_payload, "enqueue_video": False}
+            conflicting = Request(
+                base + "/api/v1/inspirations/evolve",
+                data=json.dumps(conflicting_payload).encode("utf-8"),
+                headers=headers,
+                method="POST",
+            )
+            with self.assertRaises(HTTPError) as conflict_error:
+                urlopen(conflicting, timeout=10)
+            self.assertEqual(conflict_error.exception.code, 400)
+            malformed_ratios = Request(
+                base + "/api/v1/inspirations/evolve",
+                data=json.dumps({
+                    "request_id": "c" * 32, "inspiration_id": node["id"],
+                    "enqueue_video": True, "aspect_ratios": [[]],
+                }).encode("utf-8"),
+                headers=headers,
+                method="POST",
+            )
+            with self.assertRaises(HTTPError) as ratios_error:
+                urlopen(malformed_ratios, timeout=10)
+            self.assertEqual(ratios_error.exception.code, 400)
+
+            default_request = Request(
+                base + "/api/v1/inspirations/evolve",
+                data=json.dumps({"request_id": "d" * 32, "inspiration_id": node["id"]}).encode("utf-8"),
+                headers=headers, method="POST",
+            )
+            with urlopen(default_request, timeout=10) as resp:
+                self.assertEqual(resp.status, 202)
+                default_body = json.loads(resp.read())
+            with TaskQueue(task_db) as queue:
+                default_task = queue.get(default_body["task_id"])
+            self.assertFalse(default_task["payload"]["create_offline_product"])
+            malformed_product_opt_in = Request(
+                base + "/api/v1/inspirations/evolve",
+                data=json.dumps({"request_id": "e" * 32, "inspiration_id": node["id"],
+                                 "create_offline_product": "true"}).encode("utf-8"),
+                headers=headers, method="POST",
+            )
+            with self.assertRaises(HTTPError) as product_opt_in_error:
+                urlopen(malformed_product_opt_in, timeout=10)
+            self.assertEqual(product_opt_in_error.exception.code, 400)
+            from muse.autonomous_runtime import AutonomousSupervisor
+            supervisor = AutonomousSupervisor(
+                task_db=task_db,
+                routine_db=self.root / "data" / "routines" / "muse.sqlite3",
+                state_db=self.root / "data" / "autonomy" / "runtime.sqlite3",
+                improvement_db=improvement_db,
+                knowledge_db=knowledge_db,
+                reminder_db=self.root / "data" / "reminders" / "muse.sqlite3",
+                memory_db=self.root / "data" / "memory" / "muse.sqlite3",
+                conversation_db=self.root / "data" / "conversations" / "muse.sqlite3",
+                workspace=self.root,
+            )
+            tick = supervisor.run_tick()
+            self.assertEqual(tick["task"]["id"], task_id)
+            self.assertEqual(tick["task"]["status"], "succeeded")
+            with TaskQueue(task_db) as queue:
+                completed_task = queue.get(task_id)
+            product_result = completed_task["payload"]["_result"]["offline_productization"]
+            self.assertEqual(product_result["initiative_status"], "testing")
+            self.assertTrue(product_result["verified"])
+            self.assertFalse(product_result["published"])
+            self.assertFalse(product_result["dispatch_started"])
+            self.assertFalse(product_result["gpu_work_started"])
+            completed_duplicate = Request(
+                base + "/api/v1/inspirations/evolve",
+                data=json.dumps(request_payload).encode("utf-8"),
+                headers=headers,
+                method="POST",
+            )
+            with urlopen(completed_duplicate, timeout=10) as resp:
+                self.assertEqual(resp.status, 202)
+                completed_duplicate_body = json.loads(resp.read())
+            self.assertEqual(completed_duplicate_body["task_id"], task_id)
+            self.assertEqual(completed_duplicate_body["status"], "succeeded")
+            self.assertTrue(completed_duplicate_body["deduplicated"])
+            with ResearchKnowledgeStore(knowledge_db) as knowledge:
+                completed_node = knowledge.get_node(node["id"])
+            self.assertEqual(completed_node["metadata"]["evolution_stage"], "blueprint_ready")
+            deeply_nested = "[" * 1100 + "0" + "]" * 1100
+            malformed_depth = Request(
+                base + "/api/v1/inspirations/evolve",
+                data=deeply_nested.encode("ascii"), headers=headers, method="POST",
+            )
+            with self.assertRaises(HTTPError) as error:
+                urlopen(malformed_depth, timeout=5)
+            self.assertEqual(error.exception.code, 400)
+            self.assertEqual(json.loads(error.exception.read())["error"], "request nesting exceeds the supported limit")
+            negative_length = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
+            try:
+                negative_length.request(
+                    "POST", "/api/v1/inspirations/evolve", body=b"",
+                    headers={"Authorization": "Bearer " + token, "Content-Type": "application/json", "Content-Length": "-1"},
+                )
+                negative_response = negative_length.getresponse()
+                self.assertEqual(negative_response.status, 400)
+                self.assertEqual(json.loads(negative_response.read())["error"], "invalid content length")
+            finally:
+                negative_length.close()
         finally:
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)
 
-    @staticmethod
-    def _business_bridge_inputs() -> tuple[dict[str, str], dict[str, int]]:
-        brief = {
-            "title": "Muse 本地短视频工作流试点",
-            "customer_segment": "愿意参与试点的本地小型商户",
-            "customer_problem": "商户缺少稳定制作高质量短视频的时间。",
-            "proposed_offer": "先交付一条人工复核的粤语短片样片。",
-            "validation_test": "向三家自愿参与的商户展示样片并记录实际反馈。",
-            "success_signal": "至少一位商户明确提出下一步试点需求。",
-        }
-        ratings = {
-            "demand_signal": 1,
-            "willingness_to_pay": 1,
-            "delivery_fit": 3,
-            "competition_gap": 2,
-            "repeatability": 2,
-            "risk": 4,
-        }
-        return brief, ratings
-
-    def test_business_bridge_is_noop_without_explicit_opt_in(self) -> None:
-        business_db = self.root / "data" / "business" / "opportunities.sqlite3"
-        result = evolve_inspiration_closed_loop(
-            self.root,
-            create_if_missing={
-                "title": "不自动推断商业价值",
-                "content": "研究一个本地创作流程的技术可行性。",
-                "allow_external_research": False,
-            },
-        )
-        self.assertEqual(result["business_bridge"]["status"], "not_requested")
-        self.assertFalse(result["business_bridge"]["candidate_created"])
-        self.assertFalse(business_db.exists())
 
     @staticmethod
     def _business_bridge_inputs() -> tuple[dict[str, str], dict[str, int]]:
@@ -374,6 +476,104 @@ class InspirationEvolutionTests(unittest.TestCase):
         blueprint_text = json.dumps(blueprint, ensure_ascii=False)
         self.assertNotIn(brief["customer_problem"], blueprint_text)
         self.assertFalse((self.root / "data" / "tasks" / "muse.sqlite3").exists())
+
+    def test_business_bridge_explicitly_creates_only_a_draft_initiative(self) -> None:
+        from muse.business_opportunities import BusinessOpportunityStore
+        from muse.initiative_engine import InitiativeStore
+
+        business_db = self.root / "data" / "business" / "opportunities.sqlite3"
+        brief, ratings = self._business_bridge_inputs()
+        result = evolve_inspiration_closed_loop(
+            self.root,
+            create_if_missing={
+                "title": "灵感转产品立项闭环",
+                "content": "把研究后的创作流程转化为可审核的产品原型立项。",
+                "allow_external_research": False,
+            },
+            business_brief=brief,
+            business_ratings=ratings,
+            business_database=business_db,
+            create_business_initiative=True,
+        )
+        bridge = result["business_bridge"]
+        self.assertTrue(bridge["initiative_created"])
+        self.assertEqual(bridge["creator_initiative_status"], "proposed")
+        self.assertEqual(bridge["creator_initiative_autonomy_level"], "draft")
+        self.assertFalse(bridge["dispatch_started"])
+        self.assertFalse(bridge["publishing_started"])
+        self.assertFalse(bridge["gpu_work_started"])
+        initiative_db = self.root / "data" / "initiatives" / "muse.sqlite3"
+        with InitiativeStore(initiative_db) as initiatives:
+            initiative = next(
+                item for item in initiatives.list(limit=200)
+                if item["id"] == bridge["creator_initiative_id"]
+            )
+        self.assertEqual(initiative["status"], "proposed")
+        self.assertEqual(initiative["autonomy_level"], "draft")
+        self.assertIn(f"business-opportunity:{bridge['opportunity_id']}", initiative["inspiration_refs"])
+        with ResearchKnowledgeStore(self.root / "data" / "research" / "knowledge.sqlite3") as knowledge:
+            wiki_idea = knowledge.get_node(bridge["research_wiki_idea_id"])
+        self.assertTrue(wiki_idea["metadata"]["initiative_created"])
+        self.assertEqual(wiki_idea["metadata"]["creator_initiative_id"], initiative["id"])
+
+        with BusinessOpportunityStore(business_db) as store:
+            opportunity = store.get(bridge["opportunity_id"])
+        self.assertEqual(opportunity["status"], "candidate")
+
+    def test_business_initiative_can_create_commander_waiting_approval_ticket_without_gpu_dispatch(self) -> None:
+        from muse.initiative_engine import InitiativeStore
+        from muse.task_queue import TaskQueue
+
+        business_db = self.root / "data" / "business" / "opportunities.sqlite3"
+        brief, ratings = self._business_bridge_inputs()
+        result = evolve_inspiration_closed_loop(
+            self.root,
+            create_if_missing={"title": "产品样片先审批再生产", "content": "将研究灵感转为视频产品草案，并先进入人工审批。", "allow_external_research": False},
+            business_brief=brief, business_ratings=ratings, business_database=business_db,
+            create_business_initiative=True, request_business_video_approval=True,
+        )
+        bridge = result["business_bridge"]
+        self.assertTrue(bridge["initiative_created"])
+        self.assertTrue(bridge["approval_ticket_created"])
+        self.assertIsInstance(bridge["approval_ticket_id"], str)
+        self.assertEqual(bridge["approval_ticket_status"], "waiting_approval")
+        self.assertFalse(bridge["dispatch_started"])
+        self.assertFalse(bridge["publishing_started"])
+        self.assertFalse(bridge["gpu_work_started"])
+
+        task_db = self.root / "data" / "tasks" / "muse.sqlite3"
+        with TaskQueue(task_db) as queue:
+            ticket = queue.get(bridge["approval_ticket_id"])
+        self.assertEqual(ticket["status"], "waiting_approval")
+        self.assertEqual(ticket["payload"]["kind"], "business_opportunity_video_approval")
+        self.assertFalse(ticket["payload"].get("_approved", False))
+        with InitiativeStore(self.root / "data" / "initiatives" / "muse.sqlite3") as initiatives:
+            initiative = next(x for x in initiatives.list(limit=200) if x["id"] == bridge["creator_initiative_id"])
+        self.assertEqual(initiative["autonomy_level"], "draft")
+        with ResearchKnowledgeStore(self.root / "data" / "research" / "knowledge.sqlite3") as knowledge:
+            idea = knowledge.get_node(bridge["research_wiki_idea_id"])
+        self.assertEqual(idea["metadata"]["commander_approval_ticket_id"], bridge["approval_ticket_id"])
+        self.assertEqual(idea["metadata"]["commander_approval_ticket_status"], "waiting_approval")
+
+    def test_video_approval_opt_in_requires_draft_initiative_opt_in(self) -> None:
+        with self.assertRaisesRegex(ValueError, "requires create_business_initiative=True"):
+            evolve_inspiration_closed_loop(
+                self.root,
+                create_if_missing={"title": "依赖关系", "content": "审批请求不能绕过产品立项", "allow_external_research": False},
+                request_business_video_approval=True,
+            )
+
+    def test_business_initiative_opt_in_requires_an_actual_boolean(self) -> None:
+        with self.assertRaisesRegex(TypeError, "create_business_initiative must be a boolean"):
+            evolve_inspiration_closed_loop(
+                self.root,
+                create_if_missing={
+                    "title": "严格布尔输入",
+                    "content": "字符串 false 不能触发立项。",
+                    "allow_external_research": False,
+                },
+                create_business_initiative="false",
+            )
 
     def test_business_bridge_rejects_database_path_outside_workspace_business_dir(self) -> None:
         brief, ratings = self._business_bridge_inputs()

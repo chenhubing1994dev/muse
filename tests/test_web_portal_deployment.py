@@ -31,6 +31,15 @@ class LinuxSystemdDeploymentArtifactTests(unittest.TestCase):
                 self.assertIn(path, unit)
                 self.assertIn(f"ExecStartPre=/usr/bin/test -r {path}", unit)
 
+    def test_reverse_proxy_documentation_requires_explicit_trust_and_https(self) -> None:
+        guide = (ROOT / "docs" / "WEB_PORTAL_SERVER_DEPLOYMENT_V1.md").read_text(encoding="utf-8")
+        self.assertIn("--trusted-proxy-cidr", guide)
+        self.assertIn("configured_public_url", guide)
+        self.assertIn("proxy_set_header X-Forwarded-For $remote_addr", guide)
+        self.assertIn("$proxy_add_x_forwarded_for", guide)
+        self.assertIn("X-Forwarded-Proto", guide)
+        self.assertIn("HTTPS", guide)
+
     def test_secret_example_contains_only_a_placeholder(self) -> None:
         example = (ROOT / "deploy" / "systemd" / "muse-web-portal.env.example").read_text(encoding="utf-8")
         self.assertIn("MUSE_WEB_PASSWORD=REPLACE_WITH_A_RANDOM_64_CHARACTER_ALPHANUMERIC_SECRET", example)

@@ -570,6 +570,7 @@ class ApprovedCodeChangeTicketHandler:
             and event.get("actor") == approver
             and isinstance(event.get("payload"), dict)
             and event["payload"].get("decision") == "approved"
+            and TaskQueue.approval_timestamp_matches_event(approved_at, event.get("created_at"))
             for event in events
         )
         if not decision_exists:
