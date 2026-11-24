@@ -1,4 +1,4 @@
-const CACHE = "muse-portal-shell-v5";
+const CACHE = "muse-portal-shell-v6";
 const SHELL = [
   "/", "/styles.css", "/app.js", "/manifest.webmanifest", "/icon.svg",
   "/apple-touch-icon.png", "/icon-192.png", "/icon-512.png",

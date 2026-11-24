@@ -125,6 +125,11 @@ class TaskQueue:
     def _now() -> str:
         return datetime.now(timezone.utc).isoformat()
 
+    @staticmethod
+    def _now_datetime() -> datetime:
+        return datetime.now(timezone.utc)
+
+
 
     @staticmethod
     def approval_timestamp_matches_event(approved_at: Any, event_created_at: Any) -> bool:
@@ -1175,9 +1180,9 @@ class TaskQueue:
         """Recover expired leases; non-idempotent work is paused for human review."""
         if max_attempts < 1:
             raise ValueError("max_attempts must be at least one")
-        timestamp = now or self._now()
         self._connection.execute("BEGIN IMMEDIATE")
         try:
+            timestamp = now or self._now_datetime().isoformat()
             recovered = self._recover_expired_locked(timestamp, max_attempts)
             self._connection.commit()
             return recovered
@@ -1196,11 +1201,11 @@ class TaskQueue:
             raise ValueError("lease_seconds must be greater than zero")
         if max_attempts < 1:
             raise ValueError("max_attempts must be at least one")
-        now = datetime.now(timezone.utc)
-        timestamp = now.isoformat()
-        expires = (now + timedelta(seconds=lease_seconds)).isoformat()
         self._connection.execute("BEGIN IMMEDIATE")
         try:
+            now = self._now_datetime()
+            timestamp = now.isoformat()
+            expires = (now + timedelta(seconds=lease_seconds)).isoformat()
             self._recover_expired_locked(timestamp, max_attempts)
             query = "SELECT id, payload_json, depends_on_json FROM tasks WHERE status = 'queued'"
             parameters: tuple[Any, ...] = ()
@@ -1286,7 +1291,7 @@ class TaskQueue:
                 "UPDATE tasks SET updated_at = updated_at WHERE id = ?",
                 (task_id,),
             )
-            now = datetime.now(timezone.utc)
+            now = self._now_datetime()
             timestamp = now.isoformat()
             expires = (now + timedelta(seconds=lease_seconds)).isoformat()
             cursor = self._connection.execute(
@@ -1340,6 +1345,7 @@ class TaskQueue:
             failure_category = result.get("failure_category")
             retryable = result.get("retryable")
             recovery_guidance = result.get("recovery_guidance")
+            exception_type = result.get("exception_type")
             allowed_categories = {
                 "authorization", "configuration", "dependency", "execution", "input",
                 "provider", "review", "storage", "system", "handler", "worker",
@@ -1352,10 +1358,18 @@ class TaskQueue:
                 and isinstance(recovery_guidance, str) and recovery_guidance.strip()
                 and len(recovery_guidance) <= 240
             ):
-                self._record_event(task_id, "failure.classified", worker_id or "worker", {
+                failure_payload = {
                     "error_code": error_code, "failure_category": failure_category,
                     "retryable": retryable, "recovery_guidance": recovery_guidance.strip(),
-                })
+                }
+                if (
+                    isinstance(exception_type, str) and len(exception_type) <= 80
+                    and re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", exception_type)
+                ):
+                    failure_payload["exception_type"] = exception_type
+                self._record_event(
+                    task_id, "failure.classified", worker_id or "worker", failure_payload,
+                )
         if result is not None:
             self._record_event(task_id, "report.submitted", worker_id or "worker", {"has_result": True})
             row = self._connection.execute(

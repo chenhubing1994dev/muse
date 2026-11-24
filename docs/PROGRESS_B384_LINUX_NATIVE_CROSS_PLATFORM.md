@@ -1,5 +1,10 @@
 # B384/B385 — Linux 原生构建、跨平台回归与视频审批安全闭环
 
+最新 Worker 失败诊断：`docs/PROGRESS_B390_FAILURE_DIAGNOSTICS.md`（安全记录异常类型，不持久化异常消息）。
+自主运行状态修复：`docs/PROGRESS_B389_AUTONOMY_STATUS_RECOVERY.md`（停止状态不再误报 stale、运行记录审计与安全恢复说明）。
+TaskQueue 租约时钟修复：`docs/PROGRESS_B388_TASK_QUEUE_LEASE_CLOCK.md`（writer-lock 时间采样、heartbeat fencing 与并发回归）。
+Web Portal 产品化补充：`docs/PROGRESS_B387_PORTAL_PRODUCT_VAULT.md`（产品库、受控预览/下载与任务完成后自动刷新）。
+
 日期：2026-11-24
 
 ## 本轮目标
@@ -68,6 +73,11 @@
 - B383/B385 已封堵 `POST /api/v1/video-products` 的 `prompt_to_video` 直通 Wan 生成路径：请求现在 fail closed，返回 HTTP 409 `video.commander_admission_required`；旧线程执行器内部也拒绝 AI 视频直通调用。AI 视频必须经持久化 Commander 审批与 Video Admission 后由 `VideoTaskWorker` 执行；纯本地 `local_assets` + FFmpeg 路径保留。负责人报告视频/Admission 相关专项 105/105 PASS。
 - B381/B385 负责人另行完成 TaskQueue heartbeat 原子审计与租约竞态修复；`test_task_queue.py` 51/51、`test_plugin_platform.py` 33/33、`test_watchdog.py` 18/18（合计 102/102）专项通过。本会话未修改 `task_queue.py` 或 `plugin_platform.py`。
 
+## Android build preflight (B386)
+
+- 新增 `scripts/muse-android-preflight.sh`：只读检查 Linux 原生工作副本中的 JDK 17+、Android SDK/SDK Manager、platform-tools/ADB、Android platform/build-tools、NDK、四个常见 Android Rust target 与 Tauri CLI。
+- 脚本拒绝在 WSL 的 `/mnt/<drive>` 正式项目目录运行；缺项时只报告缺失项并退出，不自动下载 SDK、不初始化 Android 工程、不生成签名密钥，也不触碰正式 `data/`。
+- 在隔离 Linux 副本执行脚本：Bash 语法检查通过；preflight 正常 fail-closed，报告 JDK（java/javac）、SDK root 与四个 Android Rust target 共 7 项缺失，Rust/Cargo 与 Tauri CLI 2.10.0 可用。由于 SDK root 未配置，SDK Manager、ADB、platform/build-tools、NDK 子项尚不能继续核验；APK/AAB 未构建。
 ## 下一轮优先级
 
 1. 为 Linux 构建建立固定版本 CI 与依赖缓存，并在 CI 中保留全量/专项回归与 Debian 包 smoke test。

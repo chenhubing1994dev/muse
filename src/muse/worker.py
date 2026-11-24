@@ -536,6 +536,11 @@ def run_once(
         except Exception as exc:
             failure = classify_failure(exc)
             result = failure.as_result()
+            exception_type = type(exc).__name__
+            result["exception_type"] = (
+                exception_type if exception_type.isidentifier() and len(exception_type) <= 80
+                else "Exception"
+            )
             failure_code = failure.code
             status = "failed"
         finally:

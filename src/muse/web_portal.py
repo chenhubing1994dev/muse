@@ -22,6 +22,8 @@ import ssl
 import threading
 import time
 from http.cookies import SimpleCookie
+from html import unescape
+
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -43,11 +45,15 @@ MAX_LOGIN_BODY = 4096
 MAX_PLUGIN_DISCOVERY_BODY = 70 * 1024
 MAX_INSPIRATION_BODY = 8192
 MAX_API_RESPONSE = 1024 * 1024
+MAX_PRODUCT_RESPONSE = 20 * 1024 * 1024
+
 UPSTREAM_READ_ROUTES = {
     "overview": "/api/v1/overview",
     "agents": "/api/v1/agents?limit=200",
     "inspirations": "/api/v1/inspirations?limit=20",
     "knowledge": "/api/v1/knowledge/graph?limit=80",
+    "products": "/api/v1/products?limit=50",
+
     "system": "/api/v1/system-dashboard",
 }
 UPSTREAM_WRITE_ROUTES = {
@@ -311,6 +317,61 @@ class PortalSessionStore:
                 "(SELECT id FROM web_login_events ORDER BY attempted_at DESC,id DESC LIMIT 10000)"
             )
             self.connection.commit()
+
+    def authenticate(self, address: str, supplied: Any, *, now: float | None = None) -> str:
+        """Atomically rate-limit, verify credentials, and persist the login outcome.
+
+        The lock spans the failure-count read, password verification, and audit write so
+        concurrent request threads cannot all pass the same pre-check.
+        """
+        if not isinstance(address, str) or not address or len(address) > 128:
+            address = "unknown"
+        current = time.time() if now is None else float(now)
+        window_start = current - 900
+        with self._lock:
+            row = self.connection.execute(
+                "SELECT COUNT(*) AS failures FROM web_login_events "
+                "WHERE client_address=? AND outcome='login_failure' AND attempted_at>? "
+                "AND attempted_at>COALESCE((SELECT MAX(attempted_at) FROM web_login_events "
+                "WHERE client_address=? AND outcome='login_success'), ?)",
+                (address, window_start, address, window_start),
+            ).fetchone()
+            if not row or int(row["failures"]) >= 5:
+                outcome, result = "login_rate_limited", "rate_limited"
+            else:
+                matched = False
+                if isinstance(supplied, str):
+                    try:
+                        encoded = supplied.encode("utf-8")
+                    except UnicodeEncodeError:
+                        encoded = b""
+                    if len(encoded) <= 1024:
+                        credential = self.connection.execute(
+                            "SELECT algorithm,salt,password_hash FROM web_admin_credentials WHERE credential_id=1"
+                        ).fetchone()
+                        if credential and credential["algorithm"] == "scrypt":
+                            salt = bytes(credential["salt"])
+                            expected = bytes(credential["password_hash"])
+                            if len(salt) == 16 and len(expected) == 32:
+                                candidate = hashlib.scrypt(encoded, salt=salt, n=2**14, r=8, p=1, dklen=32)
+                                matched = hmac.compare_digest(candidate, expected)
+                                if matched:
+                                    self._salt, self._password_digest = salt, expected
+                outcome = "login_success" if matched else "login_failure"
+                result = "authenticated" if matched else "invalid"
+            self.connection.execute(
+                "DELETE FROM web_login_events WHERE attempted_at<?", (current - 7 * 86400,)
+            )
+            self.connection.execute(
+                "INSERT INTO web_login_events(client_address,outcome,attempted_at) VALUES(?,?,?)",
+                (address, outcome, current),
+            )
+            self.connection.execute(
+                "DELETE FROM web_login_events WHERE id NOT IN "
+                "(SELECT id FROM web_login_events ORDER BY attempted_at DESC,id DESC LIMIT 10000)"
+            )
+            self.connection.commit()
+            return result
 
     def verify_password(self, supplied: str) -> bool:
         if not isinstance(supplied, str):
@@ -624,6 +685,42 @@ class PortalRequestHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
         self.close_connection = True
 
+    def _send_product_file(
+        self, body: bytes, *, action: str, initiative_id: str, preview_policy: str | None = None,
+    ) -> None:
+        is_preview = action == "preview"
+        if is_preview and not preview_policy:
+            raise PortalError("verified preview policy is required")
+        content_type = "text/html; charset=utf-8" if is_preview else "application/zip"
+        extension = "html" if is_preview else "zip"
+        disposition = "inline" if is_preview else "attachment"
+        csp = (
+            "sandbox allow-scripts allow-same-origin allow-downloads allow-modals; " + preview_policy
+            if is_preview else "default-src 'none'; sandbox"
+        )
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header(
+            "Content-Disposition",
+            f'{disposition}; filename="muse-product-{initiative_id[:8]}.{extension}"',
+        )
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+        self.send_header("Content-Security-Policy", csp)
+        self.send_header("Cross-Origin-Opener-Policy", "same-origin")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Strict-Transport-Security", "max-age=31536000")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        if body:
+            self.wfile.write(body)
+        self.close_connection = True
+
+
+
     def _json(self, status: int, payload: dict[str, Any], extra_headers: dict[str, str] | None = None) -> None:
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
         if len(body) > MAX_API_RESPONSE:
@@ -701,6 +798,85 @@ class PortalRequestHandler(BaseHTTPRequestHandler):
         if not isinstance(value, dict) or value.get("api_version") != 1:
             raise PortalError("Muse local API returned an incompatible response")
         return value
+
+    def _upstream_product_file(
+        self, initiative_id: str, version_id: str, action: str,
+    ) -> tuple[int, bytes, str | None]:
+        if (not re.fullmatch(r"[0-9a-f]{32}", initiative_id)
+                or not re.fullmatch(r"[0-9a-f]{20}", version_id)
+                or action not in {"preview", "download"}):
+            raise PortalError("product file route is not allowlisted")
+        path = f"/api/v1/products/{initiative_id}/{version_id}/{action}"
+        expected_type = "text/html" if action == "preview" else "application/zip"
+        request = Request(
+            self.server.upstream_url + path,
+            headers={
+                "Authorization": "Bearer " + self.server.upstream_token,
+                "Accept": expected_type,
+            },
+            method="GET",
+        )
+
+        class NoRedirect(HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, new_url):
+                return None
+
+        try:
+            opener = build_opener(ProxyHandler({}), NoRedirect())
+            with opener.open(request, timeout=15.0) as response:
+                status = int(response.status)
+                content_type = response.headers.get_content_type()
+                raw = response.read(MAX_PRODUCT_RESPONSE + 1)
+        except HTTPError as exc:
+            if exc.code in {404, 409, 413}:
+                return int(exc.code), b"", None
+            raise PortalUpstreamError("Muse local product service is unavailable") from exc
+        except (URLError, TimeoutError, OSError) as exc:
+            raise PortalUpstreamError("Muse local product service is unavailable") from exc
+        if len(raw) > MAX_PRODUCT_RESPONSE:
+            return 413, b"", None
+        if status != 200 or content_type != expected_type or not raw:
+            raise PortalUpstreamError("Muse local product service returned an incompatible file")
+
+        preview_policy = None
+        if action == "preview":
+            try:
+                html_text = raw.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise PortalUpstreamError("Muse product preview is not valid UTF-8") from exc
+            match = re.search(
+                r'<meta\s+http-equiv="Content-Security-Policy"\s+content="([^"]+)"\s*/?>',
+                html_text,
+                flags=re.IGNORECASE,
+            )
+            if not match:
+                raise PortalUpstreamError("Muse product preview is missing its integrity CSP")
+            preview_policy = unescape(match.group(1))
+            required_directives = (
+                "default-src 'none'",
+                "connect-src 'none'",
+                "img-src 'none'",
+                "font-src 'none'",
+                "media-src 'none'",
+                "object-src 'none'",
+                "frame-src 'none'",
+                "base-uri 'none'",
+                "form-action 'none'",
+            )
+            has_script_hash = re.search(
+                r"(?:^|;\s*)script-src 'sha256-[A-Za-z0-9+/]{43}='(?:;|$)",
+                preview_policy,
+            )
+            has_style_hash = re.search(
+                r"(?:^|;\s*)style-src 'sha256-[A-Za-z0-9+/]{43}='(?:;|$)",
+                preview_policy,
+            )
+            if (not all(item in preview_policy for item in required_directives)
+                    or not has_script_hash or not has_style_hash
+                    or any(item in preview_policy.casefold() for item in ("unsafe-inline", "unsafe-eval", "http:", "https:", "data:", "blob:"))):
+                raise PortalUpstreamError("Muse product preview CSP is too permissive or incomplete")
+        return status, raw, preview_policy
+
 
     def _upstream_post(self, route: str, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         path = UPSTREAM_WRITE_ROUTES.get(route)
@@ -826,6 +1002,26 @@ class PortalRequestHandler(BaseHTTPRequestHandler):
                 except Exception:
                     self._json(503, {"error": "Commander task ledger is unavailable"})
                 return
+
+            product_match = re.fullmatch(
+                r"/api/v1/portal/products/([0-9a-f]{32})/([0-9a-f]{20})/(preview|download)",
+                parsed.path,
+            )
+            if product_match:
+                initiative_id, version_id, action = product_match.groups()
+                try:
+                    status, body, preview_policy = self._upstream_product_file(initiative_id, version_id, action)
+                except PortalUpstreamError:
+                    self._json(503, {"error": "product file is unavailable"})
+                    return
+                if status != 200:
+                    self._json(status, {"error": "product file is unavailable"})
+                else:
+                    self._send_product_file(
+                        body, action=action, initiative_id=initiative_id, preview_policy=preview_policy,
+                    )
+                return
+                return
             route = parsed.path.rsplit("/", 1)[-1]
             if route in UPSTREAM_READ_ROUTES and parsed.path == f"/api/v1/portal/{route}":
                 try:
@@ -866,17 +1062,18 @@ class PortalRequestHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/v1/portal/login":
             address = self._client_address()
-            if not self.server.login_allowed(address):
-                self.server.record_login_rate_limited(address)
-                self._json(429, {"error": "too many login attempts; retry later"})
-                return
             try:
                 payload = self._read_json()
-                if set(payload) != {"password"} or not self.server.sessions.verify_password(payload["password"]):
-                    self.server.record_login_failure(address)
+                if set(payload) != {"password"}:
+                    self._json(400, {"error": "invalid login request"})
+                    return
+                authentication = self.server.sessions.authenticate(address, payload["password"])
+                if authentication == "rate_limited":
+                    self._json(429, {"error": "too many login attempts; retry later"})
+                    return
+                if authentication != "authenticated":
                     self._json(401, {"error": "invalid credentials"})
                     return
-                self.server.record_login_success(address)
                 token, expiry = self.server.sessions.create()
                 csrf = self.server.sessions.rotate_csrf(token)
                 self._json_with_headers(200, {"api_version": 1, "authenticated": True,

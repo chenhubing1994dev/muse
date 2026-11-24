@@ -5,3 +5,13 @@
 .inspiration-actions{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-top:10px}
 .inspiration-evolve:disabled{opacity:.55;cursor:wait}
 
+.product-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px}
+.product{min-width:0;padding:14px;border:1px solid #819ac533;border-radius:12px;background:linear-gradient(145deg,#111d35dd,#0a1327dd)}
+.product-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}
+.product-heading b{font-size:13px;overflow-wrap:anywhere}
+.product small{display:block;margin-top:7px;color:var(--muted);font-size:10px;overflow-wrap:anywhere}
+.product p{font-size:11px;margin:12px 0 0}
+.product-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+.product-actions a{font-size:11px;text-decoration:none}
+
+

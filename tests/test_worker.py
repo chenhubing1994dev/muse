@@ -650,8 +650,13 @@ class WorkerTests(unittest.TestCase):
             failure = result["payload"]["_result"]
             self.assertEqual(failure["error_code"], "handler.unexpected")
             self.assertFalse(failure["retryable"])
+            self.assertEqual(failure["exception_type"], "RuntimeError")
             self.assertNotIn("private exception", str(failure))
             self.assertNotIn("private payload", str(failure))
+            with TaskQueue(database) as queue:
+                classified = [event for event in queue.events(task["id"]) if event["event_type"] == "failure.classified"]
+            self.assertEqual(classified[0]["payload"]["exception_type"], "RuntimeError")
+            self.assertNotIn("private exception", str(classified))
             with ProgressEventStore(database) as progress:
                 events = progress.list_events(category="task", subject_id=task["id"])
                 codes = progress.aggregate_failure_codes(

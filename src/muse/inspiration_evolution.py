@@ -951,7 +951,7 @@ def evolve_inspiration_closed_loop(
     request_business_video_approval: bool = False,
     create_offline_product: bool = False,
 ) -> dict[str, Any]:
-    """Run closed-loop Inspiration -> Research -> Self-Improvement -> Video Blueprint (+ optional Commander jobs)."""
+    """Run the inspiration loop; explicit offline productization keeps future research permission intact."""
     if not isinstance(create_business_initiative, bool):
         raise TypeError("create_business_initiative must be a boolean")
     if not isinstance(request_business_video_approval, bool):
@@ -1018,12 +1018,13 @@ def evolve_inspiration_closed_loop(
             )
 
     assert target_node is not None
-    allow_external = target_node.get("metadata", {}).get("allow_external_research") is True
-    if create_offline_product and allow_external:
-        raise ValueError("offline productization cannot be combined with external research")
+    allow_external_permission = target_node.get("metadata", {}).get("allow_external_research") is True
+    # An explicit offline productization request controls this run only; it does not
+    # revoke the inspiration's permission to receive external research in a later run.
+    run_external_research = allow_external_permission and not create_offline_product
     inspiration_context = _build_inspiration_context(
         workspace=root, paths=paths, inspiration=target_node,
-        allow_external_research=allow_external,
+        allow_external_research=allow_external_permission,
     )
     preferred_key = f"creator-hypothesis-review:{target_node['id']}"
     report: dict[str, Any] = {}
@@ -1031,7 +1032,7 @@ def evolve_inspiration_closed_loop(
     evolution_cycle_id = ""
     external_network_called = False
 
-    if allow_external:
+    if run_external_research:
         external_network_called = True
         engine = AutonomousResearchEngine(
             evidence_db=paths["evidence_db"],
@@ -1083,16 +1084,68 @@ def evolve_inspiration_closed_loop(
             inspiration=target_node,
             local_context_count=len(local_hits),
         )
+        creator_metadata = target_node.get("metadata") if isinstance(target_node.get("metadata"), dict) else {}
+        creator_brief = creator_metadata.get("creator_brief")
+        if not isinstance(creator_brief, dict):
+            creator_brief = {}
+
+        def brief_rows(key: str, fallback: Any = None) -> list[str]:
+            values = creator_brief.get(key)
+            rows = (
+                [value.strip()[:2000] for value in values if isinstance(value, str) and value.strip()]
+                if isinstance(values, list)
+                else []
+            )
+            if not rows and isinstance(fallback, list):
+                rows = [
+                    value.strip()[:2000]
+                    for value in fallback
+                    if isinstance(value, str) and value.strip()
+                ]
+            return rows[:40]
+
+        executive_summary = creator_brief.get("executive_summary")
+        if not isinstance(executive_summary, str) or not executive_summary.strip():
+            executive_summary = "未开启外部联网检索，仅依据本地知识节点与哲学经验梳理创作与进化方案。"
         report = {
             "topic_key": preferred_key,
             "evidence_coverage_score": 0,
             "domain_count": 0,
             "sources": [],
             "synthesis_status": "local_offline_only",
+            "external_network_called": False,
+            "allow_external_research": False,
             "synthesis": {
-                "executive_summary": "未开启外部联网检索，仅依据本地知识节点与哲学经验梳理创作与进化方案。",
-                "design_implications_for_muse": ["保持隐私隔离边界，先把灵感转化为双画幅可控原型与待审核提案。"],
-                "counter_evidence": ["未进行公网独立检索，禁止把本地灵感假设当成外部事实依据。"],
+                "executive_summary": executive_summary[:1200],
+                "creator_hypotheses": brief_rows(
+                    "hypotheses",
+                    [
+                        (
+                            f"产品可用性假设（待验证，非领域证据）：在完全离线且不执行生成代码的条件下，"
+                            f"围绕「{target_node['title']}」的原型可让5名独立评审者中至少4名在3分钟内找到研究问题、假设、反证、实验和不确定项，并提交验收决定；"
+                            "若不足4名完成，或任何人将未验证内容误判为事实，则否定当前原型设计。"
+                        )
+                    ] if create_offline_product else None,
+                ),
+                "design_implications_for_muse": brief_rows(
+                    "design_implications_for_muse",
+                    ["保持隐私隔离边界，将灵感转化为可测试、待人工验收的本地原型。"],
+                ),
+                "uncertainties": brief_rows("uncertainties"),
+                "counter_evidence": brief_rows(
+                    "counter_evidence",
+                    ["未进行公网独立检索，禁止把本地灵感假设当成外部事实依据。"],
+                ),
+                "testable_experiments": brief_rows(
+                    "testable_experiments",
+                    [
+                        "在无外网、无GPU、无代码执行条件下，让5名未参与设计的评审者独立使用本地原型；记录3分钟内完成率、耗时及是否把未验证假设误判为事实。至少4/5完成且误判次数为0才支持该原型可用性假设，否则证伪。"
+                    ] if create_offline_product else [
+                        "在本地选取3—5个代表性任务，比较现有流程与原型流程的耗时、完成率和失败案例；此试运行仅是待执行实验，不构成外部证据。"
+                    ],
+                ),
+                "tags": brief_rows("tags", creator_metadata.get("tags")),
+                "research_domains": brief_rows("research_domains", creator_metadata.get("research_domains")),
             },
         }
 
@@ -1119,8 +1172,13 @@ def evolve_inspiration_closed_loop(
 
     offline_productization: dict[str, Any] | None = None
     if create_offline_product:
-        if allow_external or report.get("synthesis_status") != "local_offline_only":
-            raise ValueError("offline productization requires a local_offline_only report with external research disabled")
+        if (
+            run_external_research
+            or report.get("synthesis_status") != "local_offline_only"
+            or report.get("external_network_called") is not False
+            or report.get("allow_external_research") is not False
+        ):
+            raise ValueError("offline productization requires an explicitly local-only run with no external network activity")
         symbolic_rows = inspiration_context.get("symbolic_inspiration") or []
         symbolic_framework_ids = [
             row["id"] for row in symbolic_rows
@@ -1150,6 +1208,25 @@ def evolve_inspiration_closed_loop(
             allow_external_research=False,
         )
 
+    offline_product_artifact: dict[str, Any] | None = None
+    if offline_productization is not None:
+        product_record = offline_productization.get("product")
+        if not isinstance(product_record, dict):
+            raise RuntimeError("offline productization returned no verified artifact record")
+        offline_product_artifact = {
+            "initiative_id": offline_productization.get("initiative_id"),
+            "initiative_status": offline_productization.get("initiative_status"),
+            "relative_path": product_record.get("relative_path"),
+            "html_path": product_record.get("html_path"),
+            "package_path": product_record.get("package_path"),
+            "input_sha256": product_record.get("input_sha256"),
+            "package_sha256": product_record.get("package_sha256"),
+            "artifact_status": product_record.get("status"),
+            "verified": offline_productization.get("verified") is True,
+            "human_review_required": offline_productization.get("human_review_required") is True,
+            "published": offline_productization.get("published") is True,
+        }
+
     business_bridge = _run_optional_business_bridge(
         workspace=root, paths=paths, report=report, report_path=report_path,
         inspiration_id=target_node["id"], business_brief=business_brief,
@@ -1162,13 +1239,17 @@ def evolve_inspiration_closed_loop(
     with ResearchKnowledgeStore(paths["knowledge_db"]) as knowledge:
         latest = knowledge.get_node(target_node["id"]) or target_node
         meta = dict(latest.get("metadata") or {})
+        if run_external_research and meta.get("review_state") == "not_researched":
+            meta["review_state"] = "researched_needs_independent_review"
+        elif not run_external_research and not allow_external_permission:
+            meta["review_state"] = "researched_local_only"
         meta.update({
-            "review_state": meta.get("review_state") if allow_external and meta.get("review_state") != "not_researched" else "researched_local_only" if not allow_external else "researched_needs_independent_review",
             "evolution_stage": "blueprint_ready",
             "blueprint_path": rel_blueprint,
             "offline_product_initiative_id": (
                 offline_productization.get("initiative_id") if offline_productization else None
             ),
+            "offline_product_artifact": offline_product_artifact,
             "improvement_proposal_ids": linked_proposal_ids,
             "inspiration_brief_path": inspiration_context["brief_path"],
             "inspiration_brief_sha256": inspiration_context["brief_sha256"],
@@ -1205,7 +1286,8 @@ def evolve_inspiration_closed_loop(
         "status": "completed",
         "inspiration_id": target_node["id"],
         "inspiration_title": target_node["title"],
-        "allow_external_research": allow_external,
+        "allow_external_research": allow_external_permission,
+        "research_mode": "external" if run_external_research else "offline",
         "external_network_called": external_network_called,
         "evolution_cycle_id": evolution_cycle_id,
         "research_report_path": report_path,

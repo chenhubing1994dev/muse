@@ -1387,12 +1387,25 @@ class StatusApiTests(unittest.TestCase):
         products_dir = workspace / "data" / "products"
         report_dir.mkdir()
         report_name = "autonomous-research-example-20261110.md"
+        from muse.research_knowledge import ResearchKnowledgeStore
+        with ResearchKnowledgeStore(knowledge_db) as knowledge:
+            source_claim = knowledge.upsert_node(
+                "claim", "状态变化实验工具灵感", "分层状态有助于复盘，仍需独立证据与反证。",
+                external_ref="test:creator-product-feedback-source",
+                metadata={
+                    "epistemic_status": "creator_inspired_hypothesis_only",
+                    "creator_context_is_evidence": False,
+                    "requires_support_and_counter_evidence": True,
+                },
+                status="proposed",
+            )
         with InitiativeStore(workspace / "data" / "initiatives" / "muse.sqlite3") as initiatives:
             initiative = initiatives.propose(
                 "状态变化实验工具", kind="tool", creator_value="把灵感变成实验",
                 concept=json.dumps({"research_question": "如何识别变化？",
                                     "key_discoveries": {"creator_inspired_hypotheses": ["分层状态有助于复盘。"]}}, ensure_ascii=False),
                 first_step="记录状态", expected_output="离线实验工具",
+                inspiration_refs=[f"inspiration:{source_claim['id']}"],
             )
             product = LocalProductBuilder(workspace).build(initiatives, initiative["id"])
         (report_dir / report_name).write_text("# Muse report\\n\\nFinished report body", encoding="utf-8")
@@ -1517,6 +1530,69 @@ class StatusApiTests(unittest.TestCase):
                 self.assertEqual(response.status, 200)
                 self.assertIn("text/html", response.headers["Content-Type"])
                 self.assertIn("灵感实验台".encode("utf-8"), response.read())
+
+            feedback_text = "评审者无法在3分钟内找到反证入口；这只是待核验的创作者观察。"
+            feedback_payload = {
+                "feedback": feedback_text,
+                "decision": "revise",
+                "reviewer": "portal_creator",
+                "source": f"web_portal_product_feedback:{product_items[0]['version_id']}:counter_evidence",
+                "idempotency_key": "f" * 32,
+                "product_version": product_items[0]["version_id"],
+                "feedback_kind": "counter_evidence",
+            }
+            feedback_url = base + f"/api/v1/initiatives/{initiative['id']}/feedback"
+            feedback_request = Request(
+                feedback_url, data=json.dumps(feedback_payload, ensure_ascii=False).encode("utf-8"),
+                headers=headers, method="POST",
+            )
+            with urlopen(feedback_request, timeout=3) as response:
+                self.assertEqual(response.status, 201)
+                feedback_result = json.loads(response.read())["feedback"]
+            self.assertTrue(feedback_result["research_wiki_linked"])
+            self.assertTrue(feedback_result["source_claim_linked"])
+            self.assertFalse(feedback_result["status_changed"])
+            self.assertFalse(feedback_result["allow_external_research"])
+            self.assertEqual(feedback_result["initiative_status"], "testing")
+
+            duplicate_feedback = Request(
+                feedback_url, data=json.dumps(feedback_payload, ensure_ascii=False).encode("utf-8"),
+                headers=headers, method="POST",
+            )
+            with urlopen(duplicate_feedback, timeout=3) as response:
+                self.assertEqual(response.status, 200)
+                duplicate_result = json.loads(response.read())["feedback"]
+            self.assertTrue(duplicate_result["deduplicated"])
+            self.assertEqual(duplicate_result["id"], feedback_result["id"])
+
+            conflicting_feedback_payload = dict(feedback_payload, feedback="不同内容复用同一个请求 ID。")
+            conflicting_feedback = Request(
+                feedback_url, data=json.dumps(conflicting_feedback_payload, ensure_ascii=False).encode("utf-8"),
+                headers=headers, method="POST",
+            )
+            with self.assertRaises(HTTPError) as conflict:
+                urlopen(conflicting_feedback, timeout=3)
+            self.assertEqual(conflict.exception.code, 409)
+            conflict.exception.close()
+
+            with InitiativeStore(workspace / "data" / "initiatives" / "muse.sqlite3") as initiatives:
+                self.assertEqual(len(initiatives.list_feedback(initiative_id=initiative["id"])), 1)
+                self.assertEqual(initiatives.get_by_id(initiative["id"])["status"], "testing")
+            with ResearchKnowledgeStore(knowledge_db) as knowledge:
+                feedback_node = knowledge.get_node(feedback_result["knowledge_node_id"])
+                self.assertEqual(feedback_node["node_type"], "decision")
+                self.assertEqual(feedback_node["metadata"]["feedback_kind"], "counter_evidence")
+                self.assertFalse(feedback_node["metadata"]["creator_context_is_evidence"])
+                self.assertTrue(feedback_node["metadata"]["requires_support_and_counter_evidence"])
+                self.assertEqual(feedback_node["metadata"]["review_state"], "not_researched")
+                self.assertFalse(feedback_node["metadata"]["allow_external_research"])
+                source_edges = knowledge.list_edges(node_id=source_claim["id"], limit=50)
+                self.assertTrue(any(
+                    edge["target_id"] == feedback_node["id"] and edge["edge_type"] == "relates"
+                    for edge in source_edges
+                ))
+                self.assertEqual(knowledge.get_node(source_claim["id"])["status"], "proposed")
+
             traversal_product = Request(base + "/api/v1/products/%2e%2e%2fsecret/0123456789abcdef0123/download", headers={"Authorization": f"Bearer {token}"})
             with self.assertRaises(HTTPError) as rejected_product:
                 urlopen(traversal_product, timeout=3)

@@ -419,6 +419,13 @@ class MuseRuntime:
                 raise RuntimeBlocked("the explicitly selected task does not exist or is not queued")
             selected_payload = selected.get("payload") or {}
             if (isinstance(selected_payload, dict)
+                    and selected_payload.get("kind") in {
+                        "creator_initiative_video_approval", "business_opportunity_video_approval",
+                    }):
+                raise RuntimeBlocked(
+                    "video approval tickets require VideoTaskWorker; generic dispatch is forbidden"
+                )
+            if (isinstance(selected_payload, dict)
                     and (selected_payload.get("kind") == "plugin_capability_request"
                          or selected_payload.get("execution_adapter_required") is True)):
                 raise RuntimeBlocked(
@@ -486,6 +493,13 @@ class MuseRuntime:
             if selected is None or selected["status"] != "queued":
                 raise RuntimeBlocked("the explicitly selected ticket does not exist or is not queued")
             selected_payload = selected.get("payload") or {}
+            if (isinstance(selected_payload, dict)
+                    and selected_payload.get("kind") in {
+                        "creator_initiative_video_approval", "business_opportunity_video_approval",
+                    }):
+                raise RuntimeBlocked(
+                    "video approval tickets require VideoTaskWorker; generic dispatch is forbidden"
+                )
             if (isinstance(selected_payload, dict)
                     and (selected_payload.get("kind") == "plugin_capability_request"
                          or selected_payload.get("execution_adapter_required") is True)):

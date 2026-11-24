@@ -100,6 +100,34 @@ class InitiativeStoreTests(unittest.TestCase):
                 self.assertEqual(reopened.list_feedback()[0]["initiative_id"], item["id"])
                 self.assertEqual(reopened.list(limit=10)[0]["status"], "proposed")
 
+    def test_feedback_idempotency_replays_identical_content_and_rejects_conflicts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with InitiativeStore(Path(directory) / "initiatives.sqlite3") as store:
+                item = store.propose(
+                    "Idempotent feedback target", kind="feature", creator_value="value",
+                    concept="concept", first_step="step", expected_output="output",
+                )
+                request_id = "a" * 32
+                first = store.record_feedback(
+                    item["id"], "原型反馈内容", decision="revise", reviewer="portal_creator",
+                    source="web_portal_product_feedback", idempotency_key=request_id,
+                )
+                replay = store.record_feedback(
+                    item["id"], "原型反馈内容", decision="revise", reviewer="portal_creator",
+                    source="web_portal_product_feedback", idempotency_key=request_id,
+                )
+                self.assertFalse(first["deduplicated"])
+                self.assertTrue(replay["deduplicated"])
+                self.assertEqual(first["id"], replay["id"])
+                with self.assertRaises(ValueError):
+                    store.record_feedback(
+                        item["id"], "不同的反馈内容", decision="revise", reviewer="portal_creator",
+                        source="web_portal_product_feedback", idempotency_key=request_id,
+                    )
+                self.assertEqual(len(store.list_feedback(initiative_id=item["id"])), 1)
+                self.assertEqual(store.list(limit=10)[0]["status"], "proposed")
+
+
     def test_feedback_rejects_invalid_data_and_unknown_initiatives(self):
         with tempfile.TemporaryDirectory() as d:
             with InitiativeStore(Path(d) / "initiatives.sqlite3") as store:

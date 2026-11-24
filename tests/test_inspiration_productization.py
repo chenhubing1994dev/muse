@@ -78,6 +78,20 @@ class OfflineInspirationProductizationTests(unittest.TestCase):
         with InitiativeStore(self.root / "data" / "initiatives" / "muse.sqlite3") as store:
             self.assertEqual(len(store.list(limit=20)), 1)
 
+    def test_bounded_rows_stops_consuming_an_unbounded_generator(self):
+        consumed = []
+
+        def endless_rows():
+            index = 0
+            while True:
+                consumed.append(index)
+                yield f"hypothesis-{index}"
+                index += 1
+
+        with self.assertRaisesRegex(InspirationProductizationError, "exceeds 40 items"):
+            build_offline_inspiration_product(**{**self.kwargs, "hypotheses": endless_rows()})
+        self.assertEqual(len(consumed), 41)
+
     def test_rejects_external_research_or_non_offline_report(self):
         with self.assertRaises(InspirationProductizationError):
             build_offline_inspiration_product(**{**self.kwargs, "allow_external_research": True})
@@ -149,6 +163,18 @@ class OfflineInspirationProductizationTests(unittest.TestCase):
             build_offline_inspiration_product(**invalid)
         invalid = {**self.kwargs, "hypotheses": "not-a-list"}
         with self.assertRaises(InspirationProductizationError):
+            build_offline_inspiration_product(**invalid)
+
+
+    def test_rejects_product_without_a_testable_hypothesis(self):
+        invalid = {**self.kwargs, "hypotheses": []}
+        with self.assertRaisesRegex(InspirationProductizationError, "at least one testable hypothesis"):
+            build_offline_inspiration_product(**invalid)
+
+    def test_rejects_product_without_a_testable_experiment(self):
+        report = {**self.report, "synthesis": {**self.report["synthesis"], "testable_experiments": []}}
+        invalid = {**self.kwargs, "report": report, "experiments": None}
+        with self.assertRaisesRegex(InspirationProductizationError, "at least one experiment"):
             build_offline_inspiration_product(**invalid)
 
 

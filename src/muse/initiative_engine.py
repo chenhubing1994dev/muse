@@ -21,6 +21,10 @@ STATUSES = {"proposed", "prioritized", "building", "testing", "shipped", "parked
 KINDS = {"feature", "tool", "product", "research", "workflow", "creative_output"}
 CONTENT_PROFILE_FIELDS = frozenset({"topic", "hook_style", "narrative_structure", "editing_pace", "visual_style", "voice_language", "cta_style", "format"})
 
+class FeedbackIdempotencyConflict(ValueError):
+    """A feedback request ID was reused with different review content."""
+
+
 _VIDEO_ATTEMPT_LEASE_CONTEXT: ContextVar[tuple[str, str, int] | None] = ContextVar(
     "muse_video_attempt_lease", default=None,
 )
@@ -528,8 +532,12 @@ class InitiativeStore:
         return self._decode(row)
 
     def record_feedback(self, initiative_id, feedback, *, decision, reviewer="creator",
-                        source="manual", evolution_cycle_id=None):
-        """Persist an auditable review event without changing initiative status."""
+                        source="manual", evolution_cycle_id=None, idempotency_key=None):
+        """Persist an auditable review event without changing initiative status.
+
+        A supplied 32-hex request ID is scoped to this initiative. Identical
+        retries return the original record; conflicting reuse is rejected.
+        """
         if not isinstance(initiative_id, str) or not initiative_id.strip() or len(initiative_id) > 128:
             raise ValueError("initiative_id must be a non-empty bounded string")
         if not isinstance(feedback, str) or not feedback.strip() or len(feedback) > 8000:
@@ -544,35 +552,75 @@ class InitiativeStore:
             or not re.fullmatch(r"cycle_[0-9a-f]{32}", evolution_cycle_id)
         ):
             raise ValueError("evolution_cycle_id must be a valid Muse Evolution Cycle ID")
+        if idempotency_key is not None and (
+            not isinstance(idempotency_key, str)
+            or not re.fullmatch(r"[0-9a-f]{32}", idempotency_key)
+        ):
+            raise ValueError("idempotency_key must be a 32-character lowercase hexadecimal request ID")
         exists = self.connection.execute(
             "SELECT 1 FROM creator_initiatives WHERE id=?", (initiative_id,)
         ).fetchone()
         if exists is None:
             raise KeyError(initiative_id)
-        feedback_id = uuid.uuid4().hex
+        normalized_feedback = feedback.strip()
+        normalized_reviewer = reviewer.strip()
+        normalized_source = source.strip()
+        normalized_cycle_id = evolution_cycle_id or ""
+        feedback_id = (
+            uuid.uuid5(uuid.NAMESPACE_URL, f"muse:initiative-feedback:{initiative_id}:{idempotency_key}").hex
+            if idempotency_key is not None else uuid.uuid4().hex
+        )
         created_at = self._now()
-        self.connection.execute(
-            """INSERT INTO initiative_feedback
+        cursor = self.connection.execute(
+            """INSERT OR IGNORE INTO initiative_feedback
             (id,initiative_id,feedback,decision,reviewer,source,created_at,evolution_cycle_id)
             VALUES(?,?,?,?,?,?,?,?)""",
-            (feedback_id, initiative_id, feedback.strip(), decision,
-             reviewer.strip(), source.strip(), created_at, evolution_cycle_id or ""),
+            (feedback_id, initiative_id, normalized_feedback, decision,
+             normalized_reviewer, normalized_source, created_at, normalized_cycle_id),
         )
-        current = self.connection.execute(
-            "SELECT status FROM creator_initiatives WHERE id=?", (initiative_id,)
-        ).fetchone()
-        self._append_event(
-            initiative_id, "feedback_recorded",
-            from_status=current["status"], to_status=current["status"],
-            actor=reviewer.strip(), source=source.strip(),
-            details={"feedback_id": feedback_id, "decision": decision,
-                     "evolution_cycle_id": evolution_cycle_id},
-            event_key=f"feedback:{feedback_id}",
-        )
-        self.connection.commit()
-        return self._decode_feedback(self.connection.execute(
+        if cursor.rowcount == 0:
+            existing = self.connection.execute(
+                "SELECT * FROM initiative_feedback WHERE id=?", (feedback_id,)
+            ).fetchone()
+            if existing is None:
+                self.connection.rollback()
+                raise FeedbackIdempotencyConflict("feedback request ID collided with an unavailable record")
+            existing_values = (
+                existing["initiative_id"], existing["feedback"], existing["decision"],
+                existing["reviewer"], existing["source"], existing["evolution_cycle_id"],
+            )
+            expected_values = (
+                initiative_id, normalized_feedback, decision, normalized_reviewer,
+                normalized_source, normalized_cycle_id,
+            )
+            if existing_values != expected_values:
+                self.connection.rollback()
+                raise FeedbackIdempotencyConflict("feedback idempotency key was already used with different content")
+            self.connection.commit()
+            item = self._decode_feedback(existing)
+            item["deduplicated"] = True
+            return item
+        try:
+            current = self.connection.execute(
+                "SELECT status FROM creator_initiatives WHERE id=?", (initiative_id,)
+            ).fetchone()
+            self._append_event(
+                initiative_id, "feedback_recorded",
+                from_status=current["status"], to_status=current["status"],
+                actor=normalized_reviewer, source=normalized_source,
+                details={"feedback_id": feedback_id, "decision": decision,
+                         "evolution_cycle_id": evolution_cycle_id},
+                event_key=f"feedback:{feedback_id}",
+            )
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
+        item = self._decode_feedback(self.connection.execute(
             "SELECT * FROM initiative_feedback WHERE id=?", (feedback_id,)
         ).fetchone())
+        item["deduplicated"] = False
+        return item
 
     @staticmethod
     def _decode_feedback(row):

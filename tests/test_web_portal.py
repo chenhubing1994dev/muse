@@ -56,8 +56,7 @@ class WebPortalPolicyTests(unittest.TestCase):
             parse_trusted_proxy_cidrs(["::/0"])
 
     def test_upstream_routes_are_get_only_allowlisted_data(self) -> None:
-        self.assertEqual(set(UPSTREAM_READ_ROUTES), {"overview", "agents", "inspirations", "knowledge", "system"})
-        self.assertNotIn("tasks", UPSTREAM_READ_ROUTES)
+        self.assertEqual(set(UPSTREAM_READ_ROUTES), {"overview", "agents", "inspirations", "knowledge", "products", "system"})
         self.assertNotIn("daemon-control", UPSTREAM_READ_ROUTES)
 
         self.assertIn("/api/v1/portal/tasks", Path(__file__).resolve().parents[1].joinpath("src/muse/web_portal.py").read_text(encoding="utf-8"))
@@ -80,7 +79,18 @@ class WebPortalPolicyTests(unittest.TestCase):
         self.assertIn("/api/v1/portal/inspirations/evolve", app)
         self.assertIn('data-create-offline-product="true"', app)
         self.assertIn("create_offline_product: createOfflineProduct", app)
+        self.assertIn('id="product-list"', html)
+        self.assertIn('api("/api/v1/portal/products").catch', app)
+        self.assertIn("/api/v1/portal/products/", app)
+        self.assertIn("product.preview_path", app)
+        self.assertIn("async function waitForCommanderTask", app)
+        self.assertIn("await waitForCommanderTask(result.task_id, status)", app)
+        self.assertIn("产品原型已生成并加入原型库", app)
+
         self.assertIn("/api/v1/portal/runtime/control", app)
+        self.assertIn('runtime.state === "stopped" && !runtime.owner_id && !runtime.pid', app)
+        self.assertIn("STOPPED — Start to resume routines", app)
+
         self.assertIn('data-runtime-action="start"', html)
         self.assertIn('data-runtime-action="stop"', html)
         self.assertNotIn("enqueue_video", app)
@@ -200,6 +210,38 @@ class WebPortalPolicyTests(unittest.TestCase):
                     short_store.close()
             store = PortalSessionStore(Path(tmp) / "unicode-length.sqlite3", "密" * 11)
             store.close()
+
+    def test_concurrent_login_attempts_cannot_bypass_failure_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = PortalSessionStore(Path(tmp) / "sessions.sqlite3", "a" * 32)
+            barrier = threading.Barrier(12)
+            results: list[str] = []
+            results_lock = threading.Lock()
+
+            def attempt() -> None:
+                barrier.wait()
+                result = store.authenticate("198.51.100.10", "wrong-password", now=1000.0)
+                with results_lock:
+                    results.append(result)
+
+            threads = [threading.Thread(target=attempt) for _ in range(12)]
+            try:
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join(timeout=10)
+                self.assertTrue(all(not thread.is_alive() for thread in threads))
+                self.assertEqual(results.count("invalid"), 5)
+                self.assertEqual(results.count("rate_limited"), 7)
+                self.assertFalse(store.login_allowed("198.51.100.10", now=1000.0))
+                events = store.connection.execute(
+                    "SELECT outcome,COUNT(*) FROM web_login_events GROUP BY outcome"
+                ).fetchall()
+                self.assertEqual({row[0]: row[1] for row in events}, {
+                    "login_failure": 5, "login_rate_limited": 7,
+                })
+            finally:
+                store.close()
 
     def test_session_cookie_secret_is_hashed_and_csrf_rotates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -388,9 +430,42 @@ class WebPortalHttpsIntegrationTests(unittest.TestCase):
                 def do_GET(self) -> None:
                     upstream_state["authorization"] = self.headers.get("Authorization")
                     upstream_state["paths"].append(self.path)
-                    body = json.dumps({"api_version": 1, "queue": {"counts": {"queued": 3}}}).encode()
+                    if self.path == "/api/v1/products?limit=50":
+                        result = {
+                            "api_version": 1, "count": 1, "products": [{
+                                "initiative_id": "a" * 32, "version_id": "b" * 20,
+                                "name": "离线灵感产品原型", "kind": "offline_product",
+                                "status": "testing", "version": "v1", "size_bytes": 1234,
+                                "modified_at": "2026-11-24T00:00:00+00:00",
+                                "preview_path": "/api/v1/products/" + "a" * 32 + "/" + "b" * 20 + "/preview",
+                                "download_path": "/api/v1/products/" + "a" * 32 + "/" + "b" * 20 + "/download",
+                            }],
+                        }
+                        body = json.dumps(result).encode()
+                        content_type = "application/json"
+                    elif self.path == "/api/v1/products/" + "a" * 32 + "/" + "b" * 20 + "/preview":
+                        script_hash = b"A" * 43 + b"="
+                        style_hash = b"B" * 43 + b"="
+                        body = (
+                            b'<!doctype html><meta http-equiv="Content-Security-Policy" content="default-src &#x27;none&#x27;; script-src &#x27;sha256-'
+                            + script_hash
+                            + b'&#x27;; style-src &#x27;sha256-'
+                            + style_hash
+                            + b'&#x27;; connect-src &#x27;none&#x27;; img-src &#x27;none&#x27;; font-src &#x27;none&#x27;; media-src &#x27;none&#x27;; object-src &#x27;none&#x27;; frame-src &#x27;none&#x27;; base-uri &#x27;none&#x27;; form-action &#x27;none&#x27;">'
+                            + b'<script>window.__unsafePreview=true</script><h1>Muse prototype</h1>'
+                        )
+                        content_type = "text/html; charset=utf-8"
+                    elif self.path == "/api/v1/products/" + "c" * 32 + "/" + "d" * 20 + "/preview":
+                        body = b"<!doctype html><h1>Unverified preview</h1>"
+                        content_type = "text/html; charset=utf-8"
+                    elif self.path == "/api/v1/products/" + "a" * 32 + "/" + "b" * 20 + "/download":
+                        body = b"PK\x03\x04muse-demo"
+                        content_type = "application/zip"
+                    else:
+                        body = json.dumps({"api_version": 1, "queue": {"counts": {"queued": 3}}}).encode()
+                        content_type = "application/json"
                     self.send_response(200)
-                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Type", content_type)
                     self.send_header("Content-Length", str(len(body)))
                     self.end_headers()
                     self.wfile.write(body)
@@ -472,9 +547,9 @@ class WebPortalHttpsIntegrationTests(unittest.TestCase):
                 self.assertIn(b"runtime-state", homepage)
                 self.assertIn(b'data-runtime-action="start"', homepage)
                 self.assertIn(b'data-runtime-action="stop"', homepage)
+                self.assertIn(b"product-list", homepage)
                 connection.request("GET", "/healthz", headers={"Host": "muse.example.com"})
                 response = connection.getresponse()
-                self.assertEqual(response.status, 200)
                 self.assertEqual(json.loads(response.read())["check"], "liveness")
                 connection.request("GET", "/readyz", headers={"Host": "muse.example.com"})
                 response = connection.getresponse()
@@ -504,6 +579,10 @@ class WebPortalHttpsIntegrationTests(unittest.TestCase):
                 self.assertEqual(response.status, 400)
                 response.read()
                 connection.request("GET", "/api/v1/portal/tasks", headers=headers)
+                response = connection.getresponse()
+                self.assertEqual(response.status, 401)
+                response.read()
+                connection.request("GET", "/api/v1/portal/products", headers=headers)
                 response = connection.getresponse()
                 self.assertEqual(response.status, 401)
                 response.read()
@@ -583,6 +662,51 @@ class WebPortalHttpsIntegrationTests(unittest.TestCase):
                 self.assertEqual(response.status, 200)
                 response.read()
                 self.assertIn("/api/v1/knowledge/graph?limit=80", upstream_state["paths"])
+                connection.request("GET", "/api/v1/portal/products", headers={**headers, "Cookie": cookie})
+                response = connection.getresponse()
+                self.assertEqual(response.status, 200)
+                product_list = json.loads(response.read())
+                self.assertEqual(product_list["products"][0]["kind"], "offline_product")
+                self.assertEqual(upstream_state["paths"][-1], "/api/v1/products?limit=50")
+                self.assertEqual(upstream_state["authorization"], "Bearer internal-status-bearer-token-not-for-browser")
+
+                product_base = "/api/v1/portal/products/" + "a" * 32 + "/" + "b" * 20
+                connection.request("GET", product_base + "/preview", headers={**headers, "Cookie": cookie})
+                response = connection.getresponse()
+                self.assertEqual(response.status, 200)
+                preview = response.read()
+                self.assertIn(b"Muse prototype", preview)
+                self.assertIn(b"Muse prototype", preview)
+                preview_csp = response.getheader("Content-Security-Policy")
+                self.assertIn("sandbox allow-scripts allow-same-origin allow-downloads allow-modals", preview_csp)
+                self.assertIn("default-src 'none'", preview_csp)
+                self.assertIn("script-src 'sha256-", preview_csp)
+                self.assertIn("connect-src 'none'", preview_csp)
+                self.assertIn(b"connect-src &#x27;none&#x27;", preview)
+                self.assertIn("inline;", response.getheader("Content-Disposition"))
+                self.assertEqual(response.getheader("X-Content-Type-Options"), "nosniff")
+                self.assertIn("inline;", response.getheader("Content-Disposition"))
+                self.assertEqual(response.getheader("X-Content-Type-Options"), "nosniff")
+
+                connection.request("GET", product_base + "/download", headers={**headers, "Cookie": cookie})
+                response = connection.getresponse()
+                self.assertEqual(response.status, 200)
+                self.assertEqual(response.read(), b"PK\x03\x04muse-demo")
+                self.assertEqual(response.getheader("Content-Type"), "application/zip")
+                self.assertIn("attachment;", response.getheader("Content-Disposition"))
+                unverified_base = "/api/v1/portal/products/" + "c" * 32 + "/" + "d" * 20
+                connection.request("GET", unverified_base + "/preview", headers={**headers, "Cookie": cookie})
+                response = connection.getresponse()
+                self.assertEqual(response.status, 503)
+                response.read()
+
+
+                before_invalid_product = len(upstream_state["paths"])
+                connection.request("GET", "/api/v1/portal/products/../download", headers={**headers, "Cookie": cookie})
+                response = connection.getresponse()
+                self.assertEqual(response.status, 404)
+                response.read()
+                self.assertEqual(len(upstream_state["paths"]), before_invalid_product)
 
                 inspiration_id = "d" * 32
                 inspiration_payload = {

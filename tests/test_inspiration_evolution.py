@@ -132,6 +132,89 @@ class InspirationEvolutionTests(unittest.TestCase):
         self.assertIn("wechat_channels", bp["platform_copy"])
         self.assertIn("youtube", bp["platform_copy"])
 
+    def test_research_enabled_inspiration_can_be_productized_offline_without_revoking_consent(self) -> None:
+        from muse.initiative_engine import InitiativeStore
+
+        class ExplodingSearch:
+            def search(self, *_args, **_kwargs):
+                raise AssertionError("explicit offline productization must not call external search")
+
+        content = "验证带上下文与时效的失败记忆，能否减少重复检索而不损害独立来源覆盖和反证召回。"
+        title = "失败路径记忆差异化路由实验台"
+        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        creator_brief = {
+            "executive_summary": "验证上下文键控的失败记忆能否减少重复检索，同时保持独立来源覆盖和反证召回。",
+            "hypotheses": [
+                "在至少60个重复研究任务中，按失败类型、来源族和时间窗建立失败记忆并设置7天TTL，可减少重复或近重复检索调用至少20%，每条可用来源耗时降低至少10%，且来源族覆盖与反证召回下降均不超过5个百分点。证伪条件：任一指标未达门槛，或错误抑制率超过5%。"
+            ],
+            "uncertainties": [
+                "1、3、7天TTL在不同检索引擎、语言地区和主题变化频率下的泛化能力仍未知。"
+            ],
+            "counter_evidence": [
+                "搜索索引更新会使旧零结果失效；负缓存可能抑制后来出现的新证据。",
+                "网络故障、访问受限、限流和解析失败不能解释为不存在证据。"
+            ],
+            "testable_experiments": [
+                "抽取至少60个重复研究任务，随机分配基线组与上下文失败记忆组，并比较1、3、7天TTL。",
+                "测量重复检索调用、每条可用来源耗时、独立来源族覆盖率、反证召回率和错误抑制率。",
+                "每次复用旧失败记录前重新验证种子来源，并至少尝试一个不同来源族或检索角度。"
+            ],
+        }
+        metadata = {
+            "origin": "creator_inspiration_inbox",
+            "epistemic_status": "creator_inspired_hypothesis_only",
+            "creator_context_is_evidence": False,
+            "requires_support_and_counter_evidence": True,
+            "review_state": "not_researched",
+            "allow_external_research": True,
+            "source_kind": "chatgpt_daily_inspiration",
+            "content_sha256": digest,
+            "tags": ["失败路径记忆", "差异化检索", "研究去重", "反证覆盖"],
+            "research_domains": ["自主研究", "信息检索", "实验设计", "研究知识图谱"],
+            "creator_brief": creator_brief,
+        }
+        with ResearchKnowledgeStore(self.root / "data" / "research" / "knowledge.sqlite3") as knowledge:
+            node = knowledge.upsert_node(
+                "claim", title, summary=content,
+                external_ref="creator-inspiration:sha256:" + digest,
+                metadata=metadata, provenance=("chatgpt_daily_inspiration",), status="proposed",
+            )
+        result = evolve_inspiration_closed_loop(
+            self.root, inspiration_id=node["id"],
+            search=ExplodingSearch(), create_offline_product=True,
+        )
+        self.assertEqual(result["status"], "completed")
+        self.assertTrue(result["allow_external_research"])
+        self.assertEqual(result["research_mode"], "offline")
+        self.assertFalse(result["external_network_called"])
+        self.assertEqual(result["synthesis_status"], "local_offline_only")
+        product = result["offline_productization"]
+        self.assertEqual(product["status"], "completed")
+        self.assertTrue(product["verified"])
+        self.assertEqual(product["initiative_status"], "testing")
+        self.assertTrue(product["approval_required"])
+        self.assertTrue(product["human_review_required"])
+        self.assertFalse(product["published"])
+        self.assertFalse(product["dispatch_started"])
+        self.assertFalse(product["gpu_work_started"])
+        self.assertFalse(product["automatic_code_changes"])
+        with ResearchKnowledgeStore(self.root / "data" / "research" / "knowledge.sqlite3") as knowledge:
+            node = knowledge.get_node(result["inspiration_id"])
+        self.assertTrue(node["metadata"]["allow_external_research"])
+        self.assertEqual(node["metadata"]["review_state"], "not_researched")
+        self.assertEqual(node["metadata"]["offline_product_initiative_id"], product["initiative_id"])
+        with InitiativeStore(self.root / "data" / "initiatives" / "muse.sqlite3") as initiatives:
+            initiative = initiatives.get_by_id(product["initiative_id"])
+        self.assertEqual(initiative["status"], "testing")
+        self.assertEqual(initiative["autonomy_level"], "draft")
+        discoveries = json.loads(initiative["concept"])["key_discoveries"]
+        self.assertEqual(discoveries["epistemic_status"], "creator_inspired_hypothesis_only")
+        self.assertEqual(discoveries["evidence_review_state"], "not_researched")
+        self.assertIn("失败路径记忆", discoveries["tags"])
+        self.assertIn("自主研究", discoveries["research_domains"])
+        self.assertIn("至少60个重复研究任务", discoveries["creator_inspired_hypotheses"][0])
+        self.assertGreaterEqual(len(discoveries["testable_experiments"]), 3)
+
     def test_offline_productization_opt_in_requires_an_actual_boolean(self) -> None:
         with self.assertRaisesRegex(TypeError, "create_offline_product must be a boolean"):
             evolve_inspiration_closed_loop(
@@ -330,6 +413,13 @@ class InspirationEvolutionTests(unittest.TestCase):
                 completed_task = queue.get(task_id)
             product_result = completed_task["payload"]["_result"]["offline_productization"]
             self.assertEqual(product_result["initiative_status"], "testing")
+            from muse.initiative_engine import InitiativeStore
+            with InitiativeStore(self.root / "data" / "initiatives" / "muse.sqlite3") as initiatives:
+                initiative = initiatives.get_by_id(product_result["initiative_id"])
+            discoveries = json.loads(initiative["concept"])["key_discoveries"]
+            self.assertIn("5名独立评审者", discoveries["creator_inspired_hypotheses"][0])
+            self.assertIn("3分钟内完成率", discoveries["testable_experiments"][0])
+
             self.assertTrue(product_result["verified"])
             self.assertFalse(product_result["published"])
             self.assertFalse(product_result["dispatch_started"])
@@ -349,6 +439,15 @@ class InspirationEvolutionTests(unittest.TestCase):
             with ResearchKnowledgeStore(knowledge_db) as knowledge:
                 completed_node = knowledge.get_node(node["id"])
             self.assertEqual(completed_node["metadata"]["evolution_stage"], "blueprint_ready")
+            artifact_link = completed_node["metadata"]["offline_product_artifact"]
+            self.assertEqual(artifact_link["initiative_id"], product_result["initiative_id"])
+            self.assertEqual(artifact_link["initiative_status"], "testing")
+            self.assertEqual(artifact_link["relative_path"], product_result["product"]["relative_path"])
+            self.assertEqual(artifact_link["package_path"], product_result["product"]["package_path"])
+            self.assertEqual(artifact_link["package_sha256"], product_result["product"]["package_sha256"])
+            self.assertTrue(artifact_link["verified"])
+            self.assertTrue(artifact_link["human_review_required"])
+            self.assertFalse(artifact_link["published"])
             deeply_nested = "[" * 1100 + "0" + "]" * 1100
             malformed_depth = Request(
                 base + "/api/v1/inspirations/evolve",

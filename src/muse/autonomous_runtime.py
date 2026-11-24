@@ -113,7 +113,11 @@ class RuntimeStateStore:
     def status(self, *, stale_after_seconds: int = 30) -> dict[str, Any]:
         row = self.db.execute("SELECT * FROM autonomous_runtime WHERE singleton=1").fetchone()
         if row is None:
-            return {"state": "stopped", "running": False, "heartbeat_age_seconds": None}
+            return {
+                "state": "stopped", "running": False, "pid": None, "owner_id": None,
+                "heartbeat_age_seconds": None, "stale": False,
+                "heartbeat_status": "inactive",
+            }
         value = dict(row)
         heartbeat = None
         if value["heartbeat_at"]:
@@ -126,11 +130,18 @@ class RuntimeStateStore:
                 heartbeat = None
         age = max(0, int((_now() - heartbeat).total_seconds())) if heartbeat else None
         alive = _pid_alive(value["pid"])
-        stale = age is None or age > stale_after_seconds or not alive
+        active = value["state"] in self.ACTIVE_STATES
+        has_owner = bool(value.get("owner_id")) or value.get("pid") is not None
+        stale = (
+            (active and (age is None or age > stale_after_seconds or not alive))
+            or (not active and has_owner)
+        )
+        heartbeat_status = "stale" if stale else "fresh" if active else "inactive"
         value.update({
-            "running": value["state"] in self.ACTIVE_STATES and not stale,
+            "running": active and not stale,
             "heartbeat_age_seconds": age,
             "stale": stale,
+            "heartbeat_status": heartbeat_status,
         })
         return value
 

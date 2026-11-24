@@ -1,6 +1,10 @@
 from pathlib import Path
 import tempfile
 import sqlite3
+import threading
+from datetime import datetime, timezone
+
+import time
 import unittest
 
 from muse.task_queue import TaskQueue
@@ -450,6 +454,45 @@ class TaskQueueTests(unittest.TestCase):
                     "lease_expires_at": renewed["lease_expires_at"],
                 })
 
+    def test_heartbeat_waiting_on_writer_lock_cannot_renew_lease_after_expiry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "tasks.sqlite3"
+            with TaskQueue(database) as queue:
+                task = queue.enqueue("lock-delayed heartbeat", {})
+                claimed = queue.claim_next(worker_id="worker-a", lease_seconds=1)
+                before_events = queue.events(task["id"])
+                lock_acquired = threading.Event()
+                result_ready = threading.Event()
+                result: dict[str, object] = {}
+
+                with TaskQueue(database) as lock_holder:
+                    lock_holder._connection.execute("BEGIN IMMEDIATE")
+
+                    def delayed_heartbeat() -> None:
+                        lock_acquired.set()
+                        with TaskQueue(database) as worker_queue:
+                            result["heartbeat"] = worker_queue.heartbeat(
+                                task["id"], worker_id="worker-a", lease_seconds=60,
+                            )
+                        result_ready.set()
+
+                    worker = threading.Thread(target=delayed_heartbeat, daemon=True)
+                    worker.start()
+                    self.assertTrue(lock_acquired.wait(timeout=2))
+                    # The worker is blocked behind the writer lock. Let the
+                    # one-second lease expire before releasing that lock.
+                    time.sleep(1.2)
+                    lock_holder._connection.commit()
+                    self.assertTrue(result_ready.wait(timeout=5))
+                    worker.join(timeout=1)
+
+                self.assertFalse(worker.is_alive())
+                self.assertIsNone(result.get("heartbeat"))
+                current = queue.get(task["id"])
+                self.assertEqual(current["heartbeat_at"], claimed["heartbeat_at"])
+                self.assertEqual(current["lease_expires_at"], claimed["lease_expires_at"])
+                self.assertEqual(queue.events(task["id"]), before_events)
+
     def test_expired_worker_cannot_revive_lease_with_heartbeat(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             with TaskQueue(Path(directory) / "tasks.sqlite3") as queue:
@@ -670,6 +713,251 @@ class TaskQueueTests(unittest.TestCase):
                 reclaimed = queue.claim_next(worker_id="worker-b")
                 self.assertIsNone(reclaimed)
                 self.assertEqual(queue.get(task["id"])["status"], "waiting_approval")
+
+    def test_claim_next_samples_lease_clock_after_writer_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "tasks.sqlite3"
+            with TaskQueue(database) as queue:
+                task = queue.enqueue("lease clock lock wait", {})
+
+            queue_ready = threading.Event()
+            start_claim = threading.Event()
+            begin_attempted = threading.Event()
+            clock_sampled = threading.Event()
+            claimed = []
+            errors = []
+
+            class ClockTrackingQueue(TaskQueue):
+                def _now_datetime(self):
+                    if getattr(self, "_track_clock", False):
+                        clock_sampled.set()
+                    return super()._now_datetime()
+
+            class ConnectionProbe:
+                def __init__(self, connection):
+                    self._connection = connection
+
+                def execute(self, sql, *args, **kwargs):
+                    if str(sql).strip().upper() == "BEGIN IMMEDIATE":
+                        begin_attempted.set()
+                    return self._connection.execute(sql, *args, **kwargs)
+
+                def __getattr__(self, name):
+                    return getattr(self._connection, name)
+
+            def claim() -> None:
+                try:
+                    with ClockTrackingQueue(database) as worker_queue:
+                        worker_queue._track_clock = True
+                        worker_queue._connection = ConnectionProbe(worker_queue._connection)
+                        queue_ready.set()
+                        if not start_claim.wait(2):
+                            raise AssertionError("claim worker was not released")
+                        claimed.append(worker_queue.claim_next(
+                            worker_id="lock-wait-worker", lease_seconds=1,
+                        ))
+                except Exception as exc:
+                    errors.append(exc)
+
+            thread = threading.Thread(target=claim, daemon=True)
+            thread.start()
+            locker = None
+            try:
+                self.assertTrue(queue_ready.wait(2), "worker queue did not initialize")
+                locker = sqlite3.connect(str(database), timeout=5.0, isolation_level=None)
+                locker.execute("BEGIN IMMEDIATE")
+                start_claim.set()
+                self.assertTrue(begin_attempted.wait(2), "claim did not attempt its write transaction")
+                self.assertFalse(
+                    clock_sampled.wait(0.1),
+                    "claim_next sampled its lease clock before acquiring the SQLite writer lock",
+                )
+            finally:
+                if locker is not None:
+                    try:
+                        locker.commit()
+                    finally:
+                        locker.close()
+                start_claim.set()
+                thread.join(5)
+
+            self.assertFalse(thread.is_alive(), "claim worker did not finish after writer lock release")
+            if errors:
+                raise errors[0]
+            self.assertTrue(clock_sampled.is_set())
+            self.assertEqual(len(claimed), 1)
+            self.assertEqual(claimed[0]["id"], task["id"])
+            lease_expires = datetime.fromisoformat(claimed[0]["lease_expires_at"])
+            self.assertGreater(lease_expires, datetime.now(timezone.utc))
+
+    def test_heartbeat_waiting_for_writer_lock_cannot_revive_expired_lease(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "tasks.sqlite3"
+            with TaskQueue(database) as queue:
+                task = queue.enqueue("heartbeat lease lock wait", {})
+                claimed = queue.claim_next(worker_id="worker-a", lease_seconds=30)
+                self.assertEqual(claimed["id"], task["id"])
+                before_events = [
+                    event for event in queue.events(task["id"])
+                    if event["event_type"] == "assignment.lease_heartbeat"
+                ]
+
+            queue_ready = threading.Event()
+            start_heartbeat = threading.Event()
+            write_attempted = threading.Event()
+            clock_sampled = threading.Event()
+            results = []
+            errors = []
+
+            class ClockTrackingQueue(TaskQueue):
+                def _now_datetime(self):
+                    if getattr(self, "_track_clock", False):
+                        clock_sampled.set()
+                    return super()._now_datetime()
+
+            class ConnectionProbe:
+                def __init__(self, connection):
+                    self._connection = connection
+
+                def execute(self, sql, *args, **kwargs):
+                    normalized = " ".join(str(sql).strip().upper().split())
+                    if normalized == "UPDATE TASKS SET UPDATED_AT = UPDATED_AT WHERE ID = ?":
+                        write_attempted.set()
+                    return self._connection.execute(sql, *args, **kwargs)
+
+                def __getattr__(self, name):
+                    return getattr(self._connection, name)
+
+            def heartbeat() -> None:
+                try:
+                    with ClockTrackingQueue(database) as worker_queue:
+                        worker_queue._track_clock = True
+                        worker_queue._connection = ConnectionProbe(worker_queue._connection)
+                        queue_ready.set()
+                        if not start_heartbeat.wait(2):
+                            raise AssertionError("heartbeat worker was not released")
+                        results.append(worker_queue.heartbeat(
+                            task["id"], worker_id="worker-a", lease_seconds=30,
+                        ))
+                except Exception as exc:
+                    errors.append(exc)
+
+            thread = threading.Thread(target=heartbeat, daemon=True)
+            thread.start()
+            locker = None
+            expired_lease = None
+            try:
+                self.assertTrue(queue_ready.wait(2), "heartbeat queue did not initialize")
+                locker = sqlite3.connect(str(database), timeout=5.0, isolation_level=None)
+                locker.execute("BEGIN IMMEDIATE")
+                expired_lease = datetime.fromtimestamp(time.time() + 0.2, timezone.utc).isoformat()
+                locker.execute(
+                    "UPDATE tasks SET lease_expires_at = ? WHERE id = ?",
+                    (expired_lease, task["id"]),
+                )
+                start_heartbeat.set()
+                self.assertTrue(write_attempted.wait(2), "heartbeat did not attempt its lock-acquiring write")
+                self.assertFalse(
+                    clock_sampled.is_set(),
+                    "heartbeat sampled its lease clock before acquiring the SQLite writer lock",
+                )
+                time.sleep(0.35)
+            finally:
+                if locker is not None:
+                    try:
+                        locker.commit()
+                    finally:
+                        locker.close()
+                start_heartbeat.set()
+                thread.join(5)
+
+            self.assertFalse(thread.is_alive(), "heartbeat worker did not finish after writer lock release")
+            if errors:
+                raise errors[0]
+            self.assertTrue(clock_sampled.is_set())
+            self.assertLess(datetime.fromisoformat(expired_lease), datetime.now(timezone.utc))
+            self.assertEqual(results, [None])
+            with TaskQueue(database) as queue:
+                after = [
+                    event for event in queue.events(task["id"])
+                    if event["event_type"] == "assignment.lease_heartbeat"
+                ]
+                self.assertEqual(after, before_events)
+                self.assertEqual(queue.get(task["id"])["lease_expires_at"], expired_lease)
+
+    def test_recover_expired_samples_clock_after_writer_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "tasks.sqlite3"
+            with TaskQueue(database):
+                pass
+
+            queue_ready = threading.Event()
+            start_recovery = threading.Event()
+            begin_attempted = threading.Event()
+            clock_sampled = threading.Event()
+            results = []
+            errors = []
+
+            class ClockTrackingQueue(TaskQueue):
+                def _now_datetime(self):
+                    if getattr(self, "_track_clock", False):
+                        clock_sampled.set()
+                    return super()._now_datetime()
+
+            class ConnectionProbe:
+                def __init__(self, connection):
+                    self._connection = connection
+
+                def execute(self, sql, *args, **kwargs):
+                    if str(sql).strip().upper() == "BEGIN IMMEDIATE":
+                        begin_attempted.set()
+                    return self._connection.execute(sql, *args, **kwargs)
+
+                def __getattr__(self, name):
+                    return getattr(self._connection, name)
+
+            def recover() -> None:
+                try:
+                    with ClockTrackingQueue(database) as worker_queue:
+                        worker_queue._track_clock = True
+                        worker_queue._connection = ConnectionProbe(worker_queue._connection)
+                        queue_ready.set()
+                        if not start_recovery.wait(2):
+                            raise AssertionError("recovery worker was not released")
+                        results.append(worker_queue.recover_expired())
+                except Exception as exc:
+                    errors.append(exc)
+
+            thread = threading.Thread(target=recover, daemon=True)
+            thread.start()
+            locker = None
+            try:
+                self.assertTrue(queue_ready.wait(2), "recovery queue did not initialize")
+                locker = sqlite3.connect(str(database), timeout=5.0, isolation_level=None)
+                locker.execute("BEGIN IMMEDIATE")
+                start_recovery.set()
+                self.assertTrue(begin_attempted.wait(2), "recovery did not attempt its write transaction")
+                self.assertFalse(
+                    clock_sampled.is_set(),
+                    "recover_expired sampled its clock before acquiring the SQLite writer lock",
+                )
+            finally:
+                if locker is not None:
+                    try:
+                        locker.commit()
+                    finally:
+                        locker.close()
+                start_recovery.set()
+                thread.join(5)
+
+            self.assertFalse(thread.is_alive(), "recovery worker did not finish after writer lock release")
+            if errors:
+                raise errors[0]
+            self.assertTrue(clock_sampled.is_set())
+            self.assertEqual(results, [0])
+
+
+
     def test_recovery_policy_accepts_only_retry_or_manual(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             with TaskQueue(Path(directory) / "tasks.sqlite3") as queue:

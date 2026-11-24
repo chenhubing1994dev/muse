@@ -1,4 +1,4 @@
-"""Read-only, loopback-only status API for the Muse desktop client."""
+"""Loopback-only status API with narrow authenticated Muse write routes."""
 from __future__ import annotations
 
 import argparse
@@ -2677,28 +2677,154 @@ def create_status_server(
                     if len(raw) != length:
                         raise ValueError("incomplete request body")
                     payload = json.loads(raw.decode("utf-8"))
-                    allowed = {"feedback", "decision", "reviewer", "source", "evolution_cycle_id"}
+                    allowed = {
+                        "feedback", "decision", "reviewer", "source", "evolution_cycle_id",
+                        "idempotency_key", "product_version", "feedback_kind",
+                    }
                     required = {"feedback", "decision"}
                     if not isinstance(payload, dict) or not required.issubset(payload) or set(payload) - allowed:
                         raise ValueError("body requires feedback and decision with only documented optional fields")
-                    from muse.initiative_engine import InitiativeStore
+                    initiative_id = initiative_feedback_match.group(1)
+                    idempotency_key = payload.get("idempotency_key")
+                    product_version = payload.get("product_version")
+                    feedback_kind = payload.get("feedback_kind")
+                    feedback_kinds = {"usability", "support", "counter_evidence", "experiment_result", "other"}
+                    if idempotency_key is not None and (
+                        not isinstance(idempotency_key, str)
+                        or not re.fullmatch(r"[0-9a-f]{32}", idempotency_key)
+                    ):
+                        raise ValueError("idempotency_key must be a 32-character lowercase hexadecimal request ID")
+                    if product_version is not None:
+                        if not isinstance(product_version, str) or not re.fullmatch(r"[0-9a-f]{20}", product_version):
+                            raise ValueError("product_version must be a valid 20-character product version ID")
+                        if idempotency_key is None:
+                            raise ValueError("product feedback requires an idempotency_key")
+                        if feedback_kind not in feedback_kinds:
+                            raise ValueError("product feedback requires a supported feedback_kind")
+                        if (not isinstance(payload["feedback"], str) or not payload["feedback"].strip()
+                                or len(payload["feedback"].strip()) > 2000 or "\x00" in payload["feedback"]):
+                            raise ValueError("product feedback must contain 1-2000 characters")
+                        if products_path is None or knowledge_path is None or not knowledge_path.is_file():
+                            self._send(503, {"error": "product feedback stores are not configured"})
+                            return
+                        try:
+                            _, product_manifest, _ = _verified_product_files(products_path, initiative_id, product_version)
+                        except FileNotFoundError:
+                            self._send(404, {"error": "product version not found"})
+                            return
+                        except (ValueError, ProductBuildError):
+                            self._send(409, {"error": "product version failed integrity verification"})
+                            return
+                        if product_manifest.get("product_kind", "offline_product") != "offline_product":
+                            self._send(404, {"error": "feedback is only supported for offline product prototypes"})
+                            return
+                        if (product_manifest.get("initiative_id") not in (None, initiative_id)
+                                or product_manifest.get("version_id") not in (None, product_version)):
+                            self._send(409, {"error": "product version does not match the requested initiative"})
+                            return
+                    elif feedback_kind is not None:
+                        raise ValueError("feedback_kind requires a product_version")
+                    from muse.initiative_engine import FeedbackIdempotencyConflict, InitiativeStore
                     with InitiativeStore(initiatives_path) as initiatives:
+                        initiative = initiatives.get_by_id(initiative_id)
+                        if initiative is None:
+                            self._send(404, {"error": "initiative not found"})
+                            return
+                        status_before = initiative["status"]
                         try:
                             saved = initiatives.record_feedback(
-                                initiative_feedback_match.group(1), payload["feedback"],
+                                initiative_id, payload["feedback"],
                                 decision=payload["decision"], reviewer=payload.get("reviewer", "creator"),
                                 source=payload.get("source", "dashboard"),
                                 evolution_cycle_id=payload.get("evolution_cycle_id"),
+                                idempotency_key=idempotency_key,
                             )
+                        except FeedbackIdempotencyConflict as exc:
+                            self._send(409, {"error": str(exc)})
+                            return
                         except KeyError:
                             self._send(404, {"error": "initiative not found"})
                             return
-                    self._send(201, {"api_version": 1, "feedback": {
-                        "id": saved["id"], "decision": saved["decision"],
-                        "created_at": saved["created_at"],
-                        "evolution_cycle_id": saved["evolution_cycle_id"],
-                    }})
-                except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+                        feedback_result = {
+                            "id": saved["id"], "decision": saved["decision"],
+                            "created_at": saved["created_at"],
+                            "evolution_cycle_id": saved["evolution_cycle_id"],
+                            "deduplicated": bool(saved.get("deduplicated", False)),
+                        }
+                        if product_version is not None:
+                            feedback_text = payload["feedback"].strip()
+                            feedback_sha256 = hashlib.sha256(feedback_text.encode("utf-8")).hexdigest()
+                            source_node_id = next((
+                                ref.split(":", 1)[1]
+                                for ref in initiative.get("inspiration_refs", [])
+                                if isinstance(ref, str) and ref.startswith("inspiration:")
+                                and re.fullmatch(r"[0-9a-f]{32}", ref.split(":", 1)[1])
+                            ), None)
+                            with ResearchKnowledgeStore(knowledge_path) as knowledge:
+                                node = knowledge.upsert_node(
+                                    "decision",
+                                    f"产品反馈：{initiative.get('title') or initiative_id}（{payload['decision']}）"[:500],
+                                    feedback_text,
+                                    external_ref=f"initiative-feedback:{initiative_id}:{saved['id']}",
+                                    metadata={
+                                        "origin": "creator_product_feedback",
+                                        "source_kind": "web_portal_product_feedback",
+                                        "initiative_id": initiative_id,
+                                        "product_version": product_version,
+                                        "initiative_feedback_id": saved["id"],
+                                        "idempotency_key": idempotency_key,
+                                        "decision": payload["decision"],
+                                        "feedback_kind": feedback_kind,
+                                        "feedback_sha256": feedback_sha256,
+                                        "epistemic_status": "creator_feedback_observation_not_independent_evidence",
+                                        "creator_context_is_evidence": False,
+                                        "requires_support_and_counter_evidence": True,
+                                        "review_state": "not_researched",
+                                        "allow_external_research": False,
+                                        "reported_experiment_result": feedback_kind == "experiment_result",
+                                        "verified_experiment_result": False,
+                                        "source_inspiration_node_id": source_node_id or "",
+                                        "approval_required_for_status_change": True,
+                                    },
+                                    provenance=[
+                                        f"initiative:{initiative_id}",
+                                        f"product:{initiative_id}:{product_version}",
+                                        f"initiative_feedback:{saved['id']}",
+                                    ],
+                                    status="active",
+                                )
+                                source_claim_linked = False
+                                if source_node_id and knowledge.get_node(source_node_id) is not None:
+                                    knowledge.add_edge(
+                                        source_node_id, node["id"], "relates",
+                                        metadata={
+                                            "origin": "creator_product_feedback",
+                                            "feedback_kind": feedback_kind,
+                                            "product_version": product_version,
+                                            "evidence_status": "unverified_creator_report",
+                                        },
+                                    )
+                                    source_claim_linked = True
+                            initiatives.record_knowledge_link(
+                                initiative_id, node["id"], node_type="decision", relationship="related",
+                            )
+                            current = initiatives.get_by_id(initiative_id)
+                            feedback_result.update({
+                                "product_version": product_version,
+                                "feedback_kind": feedback_kind,
+                                "knowledge_node_id": node["id"],
+                                "research_wiki_linked": True,
+                                "source_claim_linked": source_claim_linked,
+                                "initiative_status": current["status"],
+                                "status_changed": current["status"] != status_before,
+                                "epistemic_status": "creator_feedback_observation_not_independent_evidence",
+                                "review_state": "not_researched",
+                                "allow_external_research": False,
+                            })
+                    self._send(200 if saved.get("deduplicated") else 201, {
+                        "api_version": 1, "feedback": feedback_result,
+                    })
+                except (UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError) as exc:
                     self._send(400, {"error": str(exc)})
                 except (OSError, sqlite3.Error):
                     self._send(503, {"error": "initiative feedback store unavailable"})

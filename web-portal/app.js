@@ -36,20 +36,24 @@ async function loadDashboard() {
   loading = true;
   $("connection-state").textContent = "SYNCING";
   try {
-    const [overview, agents, inspirations, knowledge, plugins, tasks] = await Promise.all([
+    const [overview, agents, inspirations, knowledge, plugins, tasks, products] = await Promise.all([
       api("/api/v1/portal/overview"), api("/api/v1/portal/agents"),
       api("/api/v1/portal/inspirations"), api("/api/v1/portal/knowledge"),
       api("/api/v1/portal/plugins"),
       api("/api/v1/portal/tasks").catch((error) => ({ tasks: [], error: error.message })),
+      api("/api/v1/portal/products").catch((error) => ({ products: [], error: error.message })),
     ]);
     const runtime = overview.autonomous_runtime || {};
     const runtimeState = $("runtime-state");
     if (runtimeState) {
-      runtimeState.textContent = runtime.stale
-        ? "AUTONOMOUS RUNTIME · HEARTBEAT STALE"
-        : runtime.running
-          ? "AUTONOMOUS RUNTIME · ONLINE"
-          : "AUTONOMOUS RUNTIME · STOPPED — Commander tickets wait in queue";
+      const intentionallyStopped = runtime.state === "stopped" && !runtime.owner_id && !runtime.pid;
+      runtimeState.textContent = intentionallyStopped
+        ? "AUTONOMOUS RUNTIME · STOPPED — Start to resume routines"
+        : runtime.stale
+          ? "AUTONOMOUS RUNTIME · HEARTBEAT STALE"
+          : runtime.running
+            ? "AUTONOMOUS RUNTIME · ONLINE"
+            : "AUTONOMOUS RUNTIME · STOPPED";
     }
     document.querySelectorAll("[data-runtime-action]").forEach((button) => {
       const action = button.dataset.runtimeAction;
@@ -92,6 +96,31 @@ async function loadDashboard() {
         </div>
       </article>`;
     }).join("") || '<p class="empty">暂无灵感记录</p>';
+    const offlineProducts = (products.products || []).filter((product) => product && product.kind === "offline_product");
+    const productCards = offlineProducts.map((product) => {
+      const initiativeId = String(product.initiative_id || "");
+      const versionId = String(product.version_id || "");
+      if (!/^[0-9a-f]{32}$/.test(initiativeId) || !/^[0-9a-f]{20}$/.test(versionId)) return "";
+      const expectedPreviewPath = "/api/v1/products/" + initiativeId + "/" + versionId + "/preview";
+      const expectedDownloadPath = "/api/v1/products/" + initiativeId + "/" + versionId + "/download";
+      if (product.preview_path !== expectedPreviewPath || product.download_path !== expectedDownloadPath) return "";
+      const portalBase = "/api/v1/portal/products/" + initiativeId + "/" + versionId;
+      const statusLabels = { testing: "待人工验收", shipped: "已交付", archived: "已归档" };
+      const statusLabel = statusLabels[product.status] || "待验收";
+      return '<article class="product">' +
+        '<div class="product-heading"><b>' + escapeHtml(product.name || "Muse 离线产品") +
+        '</b><span class="status">' + escapeHtml(statusLabel) + '</span></div>' +
+        '<small>' + escapeHtml(product.version || "v1") + ' · ' + escapeHtml(product.modified_at || "") + '</small>' +
+        '<p class="muted">完整性复核通过 · ' + number(product.size_bytes) + ' B · 未自动发布</p>' +
+        '<div class="product-actions">' +
+        '<a class="quiet" href="' + portalBase + '/preview" target="_blank" rel="noopener noreferrer">预览原型</a>' +
+        '<a class="quiet" href="' + portalBase + '/download">下载 ZIP</a>' +
+        '</div></article>';
+    }).filter(Boolean);
+    $("product-list").innerHTML = products.error
+      ? '<p class="empty">产品库暂不可用：' + escapeHtml(products.error) + '</p>'
+      : (productCards.join("") || '<p class="empty">暂无离线产品原型；可在灵感工作台选择「演化并创建离线产品原型」。</p>');
+
     const totals = knowledge.totals || {};
     const nodes = knowledge.nodes || [];
     const summary = '<div class="event"><i></i><div><b>' + number(totals.active_nodes) +
@@ -132,6 +161,32 @@ async function loadDashboard() {
     $("connection-state").textContent = "CONNECTION DEGRADED";
     $("events").innerHTML = '<p class="empty">' + escapeHtml(error.message) + "</p>";
   } finally { loading = false; }
+}
+
+async function waitForCommanderTask(taskId, status) {
+  const id = String(taskId || "");
+  if (!id) return "unknown";
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    if (!csrfToken) return "cancelled";
+    await new Promise((resolve) => window.setTimeout(resolve, 2500));
+    try {
+      const result = await api("/api/v1/portal/tasks");
+      const task = (result.tasks || []).find((item) => item.id === id);
+      if (task?.status === "succeeded" || task?.status === "failed" || task?.status === "cancelled") {
+        return task.status;
+      }
+      if (task?.status === "waiting_approval") {
+        status.textContent = "Commander 任务正在等待人工审批；审批通过后会继续创建产品原型…";
+      } else if (task?.status === "running") {
+        status.textContent = "Commander 正在执行灵感演化与离线产品构建…";
+      } else {
+        status.textContent = "Commander 任务已排队；完成后会自动刷新产品库…";
+      }
+    } catch (error) {
+      status.textContent = "暂时无法读取任务状态；仍可稍后手动刷新产品库。";
+    }
+  }
+  return "timeout";
 }
 async function restoreSession() {
   try {
@@ -188,6 +243,21 @@ $("inspirations").addEventListener("click", async (event) => {
     delete button.dataset.requestId;
     status.textContent = `已提交至 Muse Commander：${result.task_id}；当前状态：${result.status === "queued" ? "排队中" : result.status}。${createOfflineProduct ? "离线产品原型将进入 testing 并等待人工验收。" : "研究、提案和蓝图将在后台处理。"}代码修改与视频生成仍需各自审批。`;
     await loadDashboard();
+    if (createOfflineProduct && result.task_id) {
+      status.textContent += " 正在等待任务完成，完成后自动刷新产品库…";
+      const completion = await waitForCommanderTask(result.task_id, status);
+      if (completion === "succeeded") {
+        await loadDashboard();
+        status.textContent = "产品原型已生成并加入原型库；当前状态 testing，等待人工验收。";
+      } else if (completion === "failed") {
+        status.textContent = "产品化任务失败；请检查 Commander 任务账本，原型未被标记为已交付。";
+      } else if (completion === "cancelled") {
+        status.textContent = "任务已取消或会话已结束；可稍后刷新查看产品库。";
+      } else {
+        status.textContent = "任务仍在后台执行或等待审批；完成后点击右上角“刷新”即可查看产品原型。";
+      }
+    }
+
   } catch (error) {
     status.textContent = error.message;
   } finally {

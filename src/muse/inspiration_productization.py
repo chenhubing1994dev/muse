@@ -35,13 +35,13 @@ def _bounded_rows(values: Iterable[str] | None, name: str, *, maximum_rows: int 
     if isinstance(values, (str, bytes, dict)):
         raise InspirationProductizationError(f"{name} must be a list of text items")
     try:
-        rows = list(values)
+        iterator = iter(values)
     except TypeError as exc:
         raise InspirationProductizationError(f"{name} must be iterable") from exc
-    if len(rows) > maximum_rows:
-        raise InspirationProductizationError(f"{name} exceeds {maximum_rows} items")
     result: list[str] = []
-    for item in rows:
+    for index, item in enumerate(iterator):
+        if index >= maximum_rows:
+            raise InspirationProductizationError(f"{name} exceeds {maximum_rows} items")
         if not isinstance(item, str) or not item.strip() or len(item) > 2000:
             raise InspirationProductizationError(f"{name} contains invalid text")
         result.append(item.strip())
@@ -145,6 +145,11 @@ def build_offline_inspiration_product(
     if not isinstance(synthesis, dict):
         raise InspirationProductizationError("offline report synthesis must be an object")
     clean_hypotheses = _bounded_rows(hypotheses, "hypotheses")
+    creator_hypotheses = [
+        f"【创作者假设／待验证，非证据】{item}"
+        for item in _bounded_rows(synthesis.get("creator_hypotheses", []), "creator_hypotheses")
+    ]
+    clean_hypotheses = _bounded_rows([*creator_hypotheses, *clean_hypotheses], "hypotheses")
     clean_uncertainties = _bounded_rows(
         uncertainties if uncertainties is not None else synthesis.get("uncertainties", []),
         "uncertainties",
@@ -157,6 +162,10 @@ def build_offline_inspiration_product(
         experiments if experiments is not None else synthesis.get("testable_experiments", []),
         "experiments",
     )
+    if not clean_hypotheses:
+        raise InspirationProductizationError("product readiness requires at least one testable hypothesis")
+    if not clean_experiments:
+        raise InspirationProductizationError("product readiness requires at least one experiment")
     executive_summary = _bounded_text(
         synthesis.get("executive_summary", clean_summary),
         "executive_summary",
@@ -169,10 +178,15 @@ def build_offline_inspiration_product(
         "inspiration_title": clean_title,
         "key_discoveries": {
             "executive_summary": executive_summary,
+            "creator_hypothesis_summary": executive_summary,
+            "epistemic_status": "creator_inspired_hypothesis_only",
+            "evidence_review_state": "not_researched",
             "creator_inspired_hypotheses": clean_hypotheses,
             "uncertainties": clean_uncertainties,
             "counter_evidence": clean_counter_evidence,
             "testable_experiments": clean_experiments,
+            "tags": _bounded_rows(synthesis.get("tags", []), "tags", maximum_rows=12),
+            "research_domains": _bounded_rows(synthesis.get("research_domains", []), "research_domains", maximum_rows=12),
         },
         "inspiration_productization": {
             "schema_version": 1,

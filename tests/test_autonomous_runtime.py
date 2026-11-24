@@ -661,6 +661,36 @@ class AutonomousRuntimeTests(unittest.TestCase):
                 store.release(owner)
                 self.assertEqual(store.status()["state"], "stopped")
 
+    def test_stopped_runtime_does_not_report_inactive_heartbeat_as_stale(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "runtime.sqlite3"
+            with RuntimeStateStore(database) as store:
+                store.acquire("stopped-owner")
+                store.release("stopped-owner")
+                status = store.status()
+            self.assertEqual(status["state"], "stopped")
+            self.assertFalse(status["running"])
+            self.assertFalse(status["stale"])
+            self.assertEqual(status["heartbeat_status"], "inactive")
+
+    def test_active_runtime_with_old_heartbeat_is_stale(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "runtime.sqlite3"
+            with RuntimeStateStore(database) as store:
+                store.acquire("stale-owner")
+                store.db.execute(
+                    "UPDATE autonomous_runtime SET heartbeat_at=? WHERE singleton=1",
+                    ("2000-01-01T00:00:00+00:00",),
+                )
+                store.db.commit()
+                status = store.status(stale_after_seconds=30)
+                store.release("stale-owner")
+            self.assertEqual(status["state"], "running")
+            self.assertTrue(status["stale"])
+            self.assertFalse(status["running"])
+            self.assertEqual(status["heartbeat_status"], "stale")
+
+
     def test_run_loop_observes_stop_request_and_releases_owner(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
