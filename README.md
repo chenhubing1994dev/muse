@@ -1,203 +1,167 @@
-# Muse — 个人 AI 伙伴
+# Muse — 把灵感编译为真实创造的本地优先智能体平台
 
-Muse 是一个面向个人长期协作的 AI 伙伴项目。目标是把对话陪伴、个人知识与记忆、主动任务编排，以及经授权的电脑/项目执行整合成一个可审计、可逐步扩展的系统。
+> **让知识之火不断传递，让未知成为探索的起点。**
+>
+> 状态快照：**2026-11-24（B390）** · 持续开发中 · 本介绍按「已验证 / 已实现待验收 / 开发中 / 规划中」诚实分层，不把路线图包装成现成功能。
 
-## 当前阶段
+Muse 是一个由创造者发起的长期智能体项目：以唯一的 **Muse Commander** 为调度中枢，把长期记忆、研究求证、专家协作、内容创作与验证改进连接进同一条可追溯、可审计的工作循环。它不是单轮聊天助手，也不是要堆叠一群聊天机器人；"意识体""宇宙最强"等表述仅作品牌修辞与长期愿景，**不代表软件已被证明拥有主观意识或客观排名**。
 
-目前已實現可測試的本地 Agent 雛形：SQLite 長期記憶與修訂歷史、對話 checkpoint、持久任務隊列與人工批准/恢復流程、帶租約/心跳的 Worker、進度事件及 Watchdog、自適應閒置監測、多 Agent 並行編排、改進提案審核、LM Studio 模型客戶端、自主規劃器、唯讀研究介面、持久化 Routine Scheduler，以及事件准入、結構化規則評估、耐久 Outbox 和人工批准工作提案。來源入口包括離線 fixture，以及需明確指定公開倉庫的唯讀 GitHub Issues adapter；尚未連接飛書/IM、webhook、私有倉庫或背景持續輪詢。未部署 Windows 常駐服務，亦未宣稱 ChatGPT 會在對話結束後於雲端持續運作。
-- `config/`：非敏感配置样例
-- `data/memory/`：本地记忆数据目录（运行数据不纳入版本控制）
-- `data/tasks/`：任务状态数据目录（运行数据不纳入版本控制）
-- `logs/`：本地日志目录
-- `tests/`：基础测试
-- `docs/`：架构与安全边界
-- `docs/PROGRESS.md`：持续进度、验证结果与下一步
-- `docs/VISION.md`：Muse 四大核心支柱与长期产品宪章
-- `docs/UPSTREAM_FUSION_RESEARCH.md`：Super Agent Party 与 dsh-superagent 源码审查及 Muse 融合路线
+---
 
-- `docs/UI_PRODUCT_SPEC.md`：Cyber-Mythic Pixel 桌面调度中心产品规格
-- `docs/API_CONTRACT.md`：本机只读状态 API v1 契约
-- `ui-prototype/`：真实 API 驱动的只读桌面 UI（无连接时明确显示空态/错误）
-- `desktop/src-tauri/`：Tauri 2 + Rust 桌面壳源码；Release EXE 位于 `desktop/src-tauri/target/release/muse-desktop.exe`，启用 `custom-protocol` 后使用内嵌生产前端，不依赖 Vite 1420 端口。
-- `src/muse/local_dashboard.py`：loopback-only 本地浏览器控制台宿主，向同源 UI 临时注入内存 API 会话，不落盘 token。
-- `scripts/Muse-Desktop.ps1`：构建生产 UI 与 Tauri Rust 客户端并启动桌面版；`scripts/Install-Muse-Desktop-Shortcut.ps1` 创建 `Muse.lnk` / `Muse-Desktop.lnk` 桌面快捷方式。
-- `scripts/Muse-Start.ps1` / `scripts/Muse-Stop.ps1`：日常启动/停止本地自主运行时和浏览器控制台。
-## 环境要求
+## 一、产品宪章：五大支柱
 
-- Python 3.11 或以上
-- 仅使用 Python 标准库；当前无需安装第三方依赖
+完整宪章见 [`docs/VISION.md`](docs/VISION.md) 与 [`docs/MUSE_CONSTITUTION.md`](docs/MUSE_CONSTITUTION.md)，精神纲领见 [`docs/PROJECT_PROMETHEUS.md`](docs/PROJECT_PROMETHEUS.md)。
 
-## 快速检查
+1. **灵感与记忆根基** — 从已批准记忆、用户目标与跨领域知识提出假设；易经、紫微、奇门、大六壬等传统术数只作文化象征与灵感生成，输出一律标记为「玄学推演／待验证假设」，绝不伪装成事实、科学证据或确定预测。不把 Agent 推测自动写成用户事实。
+2. **超融合研究与代码进化** — 研究本地授权项目、官方文档、GitHub、论文与社区，保存 URL、日期、版本、license、内容哈希与可信度限制；按职责复用/适配 Ruflo（Agent/Swarm）、dsh（Ticket/授权/恢复）、Super Agent Party、agent-desktop，不复制重复控制平面。
+3. **唯一 Commander 与专家调度** — Commander 是唯一权限与总调度权威；Ruflo、dsh、Party 等只能在授权范围内作适配器，不形成第二套队列或调度中心。选择执行者依据能力、在线状态、历史成功率、独立审查通过率、成本与权限匹配；没有真实可用 Agent 时明确阻塞，不伪造派发。
+4. **资源感知并行引擎** — 并发受真实 CPU、可用 RAM、Runner 上限与 Provider 配额共同约束；保留系统余量，硬上限、背压、超时、取消、失败隔离、有限重试不可省略。GPU/显存只有实测验证后才参与调度，未知即标记 unknown，不超卖。
+5. **万象超融合与灵感变现实** — 任何学科、文化、艺术、工程与个人灵感都可作为入口；建立「灵感捕获 → 解构 → 跨域组合 → 方案与任务图 → 专业工具编排 → 原型与作品 → 测试反馈 → 知识沉淀」闭环，创造目标不限软件，含视频、影视、艺术、音乐、游戏与虚拟世界。
 
-在项目根目录执行：
+工作循环：观察 → 找缺口 → 研究 → 提案 → 多 Agent 分工 → 实现 → 测试 → 独立审查 → 授权整合 → 经验回写 → 再检查。循环必须由真实任务、证据和验收驱动，不空转、不虚报。
+
+---
+
+## 二、当前状态速览（2026-11-24 / B390）
+
+| 成熟度 | 能力 | 证据 |
+|---|---|---|
+| **已验证** | 本地任务队列、Worker 租约/心跳、崩溃回收、Watchdog；SQLite 双轨记忆与修订历史；受约束 DAG 规划、专家路由、独立审查门禁；公开来源研究管线与 Research Wiki 图谱；Web Portal 登录态/只读状态 API；Linux x86_64 原生构建与 Debian 包 | 隔离 Linux 副本全仓 **2,475 tests / 0 failures / 0 errors**；Node **66/66**；Rust `cargo test` **15 passed**，`clippy -D warnings` 通过；Debian 包 smoke test 通过。详见 [`docs/PROGRESS_B384_LINUX_NATIVE_CROSS_PLATFORM.md`](docs/PROGRESS_B384_LINUX_NATIVE_CROSS_PLATFORM.md) |
+| **已实现待完整验收** | 粤语本地 TTS/ASR 与旁白封装；视频产品打包与 ZIP 哈希校验；GPU 资源租约与 Supervisor 让位；Web Portal 离线产品原型库（预览/下载受控代理）；创作者反馈回写 Research Wiki | 有真实本地合成/测试封装记录与专项回归，但人工听感、真实 Wan 镜头旁白、端到端发布门禁仍未完成。详见 [`docs/MUSE_PRODUCT_EVIDENCE_MAP_2026-11-17.md`](docs/MUSE_PRODUCT_EVIDENCE_MAP_2026-11-17.md)、[`docs/PROGRESS_B387_PORTAL_PRODUCT_VAULT.md`](docs/PROGRESS_B387_PORTAL_PRODUCT_VAULT.md)、[`docs/PROGRESS_B135_GPU_RESOURCE_ARBITRATION.md`](docs/PROGRESS_B135_GPU_RESOURCE_ARBITRATION.md) |
+| **开发中（本轮 B386–B390）** | TaskQueue 锁等待后的租约时钟重采样；自主运行状态语义修复（停止不再误报 stale）；失败诊断只记录受限 `exception_type`、不落盘异常消息；严格 JSON 解析（拒绝重复键）；产品反馈回链到源灵感 claim（`tested_by`）；插件执行沙箱审计（默认 fail-closed） | B390 专项：Worker 40/40、失败分类 149/149、自主运行+Status API+Portal 168/168、Portal 19/19；反馈import 6/6、跨管线 38/38。详见 `docs/PROGRESS_B38{6,7,8,9}_*.md` 与 `docs/PROGRESS_B390_*.md` |
+| **规划中** | 经用户授权的 Windows 常驻服务与无人值守；多平台 OAuth/API 发布、数据回流与收益复盘；Android APK/AAB、iOS/macOS 构建与真机 PWA 验收；动态插件执行（WASM 隔离 + 能力代理 + 资源配额 + 审批 + 回滚）；公网部署与反向代理安全验收 | 尚无对应实现/授权，不作已可用宣传。Android 仅完成只读 preflight（报告 JDK/SDK/Rust target 缺失，未构建） |
+
+> 统计口径：2,475 为 B385 隔离副本全量基线；B386–B390 多为**专项回归**而非重跑全量，逐项范围以对应进度文档为准。正式 `data/` 曾因早期并行测试留下历史写入痕迹，已做 workspace 隔离修复，历史记录未被删除或回滚，后续只做只读取证。
+
+---
+
+## 三、核心能力地图
+
+### 1. Commander、任务与专家协作
+- **Muse Commander**：统一目标、权限、预算、TaskQueue/Ticket、审批、停止/取消与最终验收；不新增平行调度器。
+- **任务生命周期**：SQLite 持久化队列、租约与心跳、`BEGIN IMMEDIATE` 原子领取、过期回收、有限重试、fencing 防止旧 Worker 完成已被接管的任务。
+- **专家路由与 DAG**：角色 allowlist、依赖校验、safe fallback、并行 wave；32 是架构硬上限，**不代表 32 个真实 Agent 常驻在线或已跑满 32 路推理**。
+- **独立审查门禁**：Reviewer 与 Builder 身份分离；高危发现可否决，但审查器不是自动正确性证明。
+- 相关文档：[`docs/AGENT_COMMANDER.md`](docs/AGENT_COMMANDER.md)、[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+
+### 2. 记忆、研究与 Research Wiki
+- **双轨记忆**：User Track（用户事实）与 Agent Track（工作经验）分存；内容、来源、时间、版本、置信度、审批状态齐备；修订历史与软删除可追溯。
+- **Obsidian 镜像**：SQLite 为权威源，Obsidian Vault 为**单向、只读哈希审计**的 Markdown 镜像，不双向同步。
+- **研究管线**：多角度搜索（Bing RSS 无需 key、SearXNG 可配置）、来源抓取与归因、内容哈希、主张拆分、支持/反证/替代解释。
+- **Research Wiki**：`idea / claim / source / experiment / decision / failure` 节点，配 `supports / refutes / relates / alternative / tested_by / addresses_gap` 等关系与证据审查数据模型。当前快照有规模积累（约 910 活跃节点、2,459 边、281 条证据候选），但 **证据审查与来源独立性数据仍不足**——这是「已有机制」，不是「所有主张均已独立审查」。
+- 只读审计工具：`muse-research-wiki-audit`，`mode=ro` + `query_only`，不写知识库。
+
+### 3. 灵感、玄学与超融合
+科学、工程、艺术、文化、神话与个人灵感都可触发问题；易经、紫微斗数、奇门遁甲、大六壬等只用于象征观察、类比与假设生成，**不是科学证据**。每个灵感尽量转化为：清晰问题 → 可检验假设与替代解释 → 研究/实验计划 → 可体验原型 → 含成功/失败/局限的复盘。玄学灵感引擎（ziwei / qimen-rs / kinliuren）已做隔离依赖安装与版本核验（B384），但**尚未全部接入生产工作流**。
+
+### 4. 视频生产线（真实链路，非低质批量生成）
+`选题 → 研究 → 脚本/分镜 → 素材 → 视频生成 → 剪辑包装 → 质量检查 → 产品交付 → 发布复盘`
+
+- 本地 Wan / ComfyUI 生成镜头，FFmpeg 完成画幅/转场/字幕/音轨，Remotion 负责动效图形，输出 MP4 + 工程 ZIP + QA 报告 + manifest。
+- **真实试产记录（2026-11）**：一条 24.5 秒、9:16、1080×1920、24 FPS 的粤语字幕短片《AI 讲得咁肯定，就一定啱？｜三步查证法》，技术 QA 与 ZIP 完整性通过。该片**复用此前生成的 Wan 2.1 镜头**，本轮未重新推理；**无旁白、仍处 testing、未发布、无收入数据**。它证明的是一条真实的本地视频合成与交付路径，不是自动商业发布。
+- **AI 视频审批门禁**：`POST /api/v1/video-products` 的 `prompt_to_video` 直通 Wan 路径已 fail-closed（HTTP 409 `video.commander_admission_required`）；AI 视频必须经持久化 Commander 审批与 Video Admission 后由 `VideoTaskWorker` 执行，纯本地素材 + FFmpeg 路径保留。
+- GPU 资源租约：Wan 生成与 llama.cpp 模型服务共享 AMD GPU 时，通过 SQLite WAL 独占租约、心跳续租、TTL 回收、实测显存 ≥70% 空闲才确认释放；未知状态 fail-closed，不猜测显存。
+- 相关文档：[`docs/MUSE_HIGH_VALUE_VIDEO_FACTORY.md`](docs/MUSE_HIGH_VALUE_VIDEO_FACTORY.md)、[`docs/COMMERCIAL_VIDEO_PILOT_20261114.md`](docs/COMMERCIAL_VIDEO_PILOT_20261114.md)
+
+### 5. 桌面、Web Portal 与平台
+- **桌面壳**：Tauri 2 + Rust（`desktop/src-tauri/`），启用 `custom-protocol` 后用内嵌生产前端，不依赖 Vite 端口。
+- **本地控制台**：loopback-only 浏览器宿主与 Status API v1（Bearer 认证），只读展示 Agent、DAG、任务、审查、知识与真实事件时间线；无连接时明确显示空态/错误。
+- **Web Portal 产品库（B387）**：灵感/Commander TaskQueue/演化 Worker/Initiative → 离线产品原型，Portal 只展示 `offline_product`，对 Initiative ID、版本 ID、预览/下载路径做严格校验与 HTML 转义；固定 allowlist 只读代理、服务端 Bearer、禁用代理与重定向、仅 HTML/ZIP MIME、20 MiB 上限、严格 CSP + sandbox，缺失策略即 fail-closed。产品创建成功后轮询 Commander 账本自动刷新。
+- **反馈闭环（B388–B390）**：离线产品导出的 JSON 由本地 CLI 显式导入，严格 schema、1 MiB 上限、拒绝重复键、校验产物哈希、幂等内容摘要；创作者观察作为**未验证** `experiment` 节点写入 Research Wiki，并以 `tested_by` 回链到源灵感 claim——记录测试关系，不等于支持/反驳/升级主张。
+- **跨平台**：Linux x86_64 原生工作副本 + Debian 包（`artifacts/linux/Muse_0.1.0_amd64.deb`，SHA-256 `cd2b20ce…`，见 B384）；Android 仅只读 preflight，iOS/macOS 未构建。
+
+### 6. 安全、审计与自我进化
+- 本地处理私人记忆；未经明确同意不上云；不接付费 API/fallback，额度未知即 fail-closed。
+- 改进闭环：研究提案 → 来源/授权审查 → 能力缺口 → Ticket → 专家执行 → 测试 → 独立 Reviewer → 人工批准/整合 → 经验回写；提案者不得自批。
+- 失败诊断只持久化受限 `exception_type`（ASCII 标识符、≤80 字符），**不记录异常 message、traceback、payload、路径或 token**（B390）。
+- 插件执行默认关闭；当前登记/签名只是准入审计，`execution_enabled=false`。真实执行需补齐 WASM 隔离、能力代理、资源配额、Commander 一次性授权、审计撤销与 kill switch（[`docs/PLUGIN_SANDBOX_EXECUTION_AUDIT_B387.md`](docs/PLUGIN_SANDBOX_EXECUTION_AUDIT_B387.md)）。
+- 高风险、不可逆、对外发送、付款、删除或私人资料外传必须明确批准；系统需有停止/暂停、资源上限、审计、恢复与回滚。
+
+---
+
+## 四、环境要求与快速开始
+
+**环境**：Python 3.11+（核心仅用标准库；部分研究/语音/测试依赖按模块可选）；Node.js（Web Portal / UI）；Rust + Tauri（桌面壳）。无需安装全局依赖即可运行核心 CLI。
 
 ```powershell
+# 核心自检
 $env:PYTHONPATH = 'src'
 py -3.14 -m unittest discover -s tests -v
 py -3.14 -m muse.main --check
-py -3.14 -m muse.memory_cli --help
 
-# 當 Muse 本機進度靜默時，自動產生續接提示（預設單次檢查）
-py -3.11 -m muse.idle_watch --once
-# 持續本機監測；Ctrl+C 停止，不會自動傳訊息入 ChatGPT
-py -3.11 -m muse.idle_watch --loop --interval 60
-# 由本機 LM Studio 模型每 30 分鐘提出一項 Muse 下一步（需先啟動 LM Studio）
-py -3.11 -m muse.autonomy --loop --interval-seconds 1800
-# 查看已保存的自主規劃提案
-py -3.11 -m muse.autonomy --list
-# 批准/拒絕提案（PLAN_ID 使用清單中顯示的實際 ID）
-py -3.11 -m muse.autonomy --approve PLAN_ID --reviewed-by local-user
-py -3.11 -m muse.autonomy --reject PLAN_ID --reviewed-by local-user --reason "not now"
-# 查看已批准任務並執行一次 Worker（會建立 data/approved_plans/ 工作包）
-py -3.11 -m muse.worker --db data/tasks/muse.sqlite3
-# 可选：按实时 CPU/RAM 快照自动选择安全并发；32 是硬上限，默认 Worker 仍为单并发
-py -3.11 -m muse.worker --auto-workers --max-workers 32
-# 基于 User Track 历史记忆生成象征视角灵感简报（离线、只读、不自动写回）
-py -3.11 -m muse.inspiration "为 Muse 设计下一阶段的突破方向" --project muse
-# 使用已配置的 SearXNG 搜尋公開資料並保存來源（先設定 MUSE_SEARXNG_URL）
+# 本地模型与记忆
+py -3.14 -m muse.chat_cli "你好，Muse" --thread main
+py -3.14 -m muse.memory_cli add "偏好简洁回复" --project profile --source confirmed --kind preference --track user
+
+# 灵感 → 研究 → 自主规划
+py -3.11 -m muse.inspiration "为 Muse 设计下一阶段突破方向" --project muse
 py -3.11 -m muse.research "Muse autonomous agent frameworks"
-# 多角度并行研究（Bing RSS 无需 API key；证据与脱敏进度事件分别保存到本地 SQLite）
-py -3.11 -m muse.research_pipeline "Muse Ruflo official documentation" --angle "LM Studio local server API" --provider bing-rss
-# 通过统一测试入口运行 unittest，并把开始/结果写入本机进度账本
-py -3.11 -m muse.test_runner --start-directory tests
-# 对单一已排队 Ticket 执行 Muse Commander DAG（需要显式确认及已配置的 Ruflo Provider：Anthropic 或 ChatAnywhere）
-# 默认只尝试本机 LM Studio（MUSE_LMSTUDIO_URL/MUSE_LMSTUDIO_MODEL）；不可用时自动回退到已验证的安全 DAG 模板
-py -3.11 -m muse.unified_runtime commander-once --task-id TICKET_ID --approve --max-workers 4
-# 一次性 ChatAnywhere -> Ruflo -> Muse 真实 Agent 验收：隐藏输入 Key、使用临时工作区、测试后停止 Ruflo daemon，不保存 Key
-py -3.11 -m muse.chatanywhere_smoke
-# 建立每 30 分鐘自主規劃 routine，並在前台啟動排程器（Ctrl+C 停止）
-py -3.11 -m muse.routines add autonomous-planner autonomy_plan --interval-seconds 1800
-py -3.11 -m muse.routines --list
-py -3.11 -m muse.routines --loop
-# 建立本機提醒（時間必須包含時區），查詢到期提醒並確認完成
-py -3.11 -m muse.reminders add --title "Review Muse" --message "Check the next milestone" --at "2026-11-02T18:00:00+08:00"
-py -3.11 -m muse.reminders due
-py -3.11 -m muse.reminders ack REMINDER_ID
-# 預覽已到期提醒（不顯示、不標記已通知）；正式執行會呼叫 Windows 通知區氣泡
-py -3.11 -m muse.reminders notify-due --dry-run
-py -3.11 -m muse.reminders notify-due
-# 自然语言建立提醒（支持「提醒我半小时后检查报告」「明天 09:30 提醒我开会」）
-py -3.11 -m muse.reminders capture --text "提醒我半小时后检查报告" --timezone Asia/Singapore
-# 延后提醒；通知默认 22:00–08:00 静音，可显式关闭静音窗口
-py -3.11 -m muse.reminders snooze REMINDER_ID --until "2026-11-02T20:00:00+08:00"
-py -3.11 -m muse.reminders notify-due --no-quiet-hours
-# 从自然语言意图入口明确保存提醒（不带 --create-reminder 只预览计划）
-py -3.11 -m muse.intent_cli "提醒我半小时后检查报告" --create-reminder --timezone Asia/Singapore
+py -3.11 -m muse.autonomy --loop --interval-seconds 1800
+py -3.11 -m muse.autonomy --list
 
-# 本機事件准入試跑（示例策略預設 observe，不會自動派工；先替換已核實的 actor ID）
-py -3.11 -m muse.intake_runtime --policy config/intake-policy.example.json --fixture config/intake-fixture.example.json --intake-db data/intake/muse.sqlite3 --task-db data/tasks/muse.sqlite3
-# 只讀拉取一個公開 GitHub 倉庫的 open issues（需明確指定 repo；不使用 Token；最多一頁 100 條）
-py -3.11 -m muse.intake_runtime --policy config/intake-policy.example.json --github-repo OWNER/REPO --intake-db data/intake/muse.sqlite3 --task-db data/tasks/muse.sqlite3
-
-# 只有你明確把 policy 的 mode 改成 auto，且規則匹配，才會建立工作提案；Worker 仍會先暫停等待人工批准
-# 查看任務、批准 TASK_ID，批准後 Worker 只會產生本地 proposal packet，不會執行來源 payload
+# 任务队列与 Worker（等待人工批准）
 py -3.11 -m muse.worker --db data/tasks/muse.sqlite3
 py -3.11 -m muse.task_cli --db data/tasks/muse.sqlite3 approve TASK_ID --by local-user
-py -3.11 -m muse.worker --db data/tasks/muse.sqlite3
+py -3.11 -m muse.worker --auto-workers --max-workers 32   # 硬上限，默认单并发
 
-# 已存在的 \\MuseHourlyWatchdog 每 30 分鐘呼叫 watchdog 腳本，會順帶檢查並通知到期提醒
+# Commander DAG（需显式批准与已配置 Provider）
+py -3.11 -m muse.unified_runtime commander-once --task-id TICKET_ID --approve --max-workers 4
 
+# 研究 Wiki 只读审计 / 产品反馈导入
+py -3.11 -m muse.research-wiki-audit
+py -3.11 -m muse.research-wiki-audit --limit 3
+py -3.11 scripts/import_product_feedback.py --workspace . --file .\muse-inspiration-lab-<initiative-id>.json
 
-# 与本地 LM Studio 模型聊天（需先在 LM Studio 手动启动服务并加载聊天模型）
-py -3.14 -m muse.chat_cli "你好，Muse" --thread main
-# 后续继续同一段对话，历史会自动从 SQLite 恢复
-py -3.14 -m muse.chat_cli "继续刚才的话题" --thread main
-# 若 LM Studio 已加载聊天模型并启动 Local Server，可在同一 thread 继续聊天；默认地址 http://127.0.0.1:1234/v1。
-# Chat CLI 会在本地记忆库已存在时检索相关的手动保存记忆；临时上下文不会写回聊天历史
-py -3.14 -m muse.chat_cli "请用粤语回复" --thread main --memory-db data/memory/muse.sqlite3
-# 单轮禁用记忆读取
-py -3.14 -m muse.chat_cli "这次不要读取旧记忆" --thread main --no-memory
-
-# 保存与检索记忆（首次执行会创建本地 SQLite 数据库）
-py -3.14 -m muse.memory_cli add "这里填写要保存的内容" --project general --source manual
-py -3.14 -m muse.memory_cli search "关键词"
-py -3.14 -m muse.memory_cli export
-py -3.14 -m muse.memory_cli list --project general
-
-# 记忆分类与双轨：用户记忆与 Agent 操作经验分开保存/检索
-py -3.14 -m muse.memory_cli add "偏好简洁粤语回复" --project profile --source confirmed --kind preference --track user
-py -3.14 -m muse.memory_cli propose "Muse 发布前必须执行全量测试" --project Muse --source runbook --kind skill --track agent
-py -3.14 -m muse.memory_cli search "发布测试" --track agent --kind skill
-py -3.14 -m muse.memory_cli list --track user --kind preference
-py -3.14 -m muse.memory_cli revise MEMORY_ID "修订后的内容" --confidence 0.9
-py -3.14 -m muse.memory_cli history MEMORY_ID
-py -3.14 -m muse.memory_cli delete MEMORY_ID  # 软删除，保留历史
- 
-# 从最近 24 小时的脱敏运行指标生成排序改进提案（不会自动批准或执行）
-py -3.11 -m muse.capability_radar --task-db data/tasks/muse.sqlite3 --improvement-db data/improvements/muse.sqlite3
-# 按优先级查看提案；继续研究、补来源和审批仍需人工操作
-py -3.11 -m muse.improvement_cli --db data/improvements/muse.sqlite3 list
- 
-# 显式记录结构化反馈（只存分类标签与严重度，不保存自由文本）
-py -3.11 -m muse.feedback_cli --db data/improvements/muse.sqlite3 add --category reliability --tag repeated_manual_fix --severity 4
-py -3.11 -m muse.feedback_cli --db data/improvements/muse.sqlite3 list --since-hours 24
-
-# 本机桌面控制台 API（Tauri 会自动启动；CLI 手动启动时需提供各数据库路径）
-py -3.11 -m muse.status_api --task-db data/tasks/muse.sqlite3 --progress-db data/progress/muse.sqlite3 --capability-db data/capabilities/muse.sqlite3 --agent-db data/agents/muse.sqlite3 --improvement-db data/improvements/muse.sqlite3 --port 0
-# 桌面控制台可记录结构化回馈、查看提案，并由用户手动触发 24 小时能力雷达扫描。
-# Obsidian Vault（只讀稽核，不回寫）
-py -3.11 -m muse.memory_cli export-obsidian --vault 'D:\\AI AGENT\\Muse\\vault'
-py -3.11 -m muse.memory_cli audit-obsidian --vault 'D:\\AI AGENT\\Muse\\vault'
-
-# 放入一項安全的 echo 示例任務，再由 one-shot Worker 執行
-py -3.14 -c "from muse.task_queue import TaskQueue; q=TaskQueue('data/tasks/muse.sqlite3'); print(q.enqueue('echo demo', {'kind':'echo','input':'hello Muse'})); q.close()"
-py -3.14 -m muse.worker --db data/tasks/muse.sqlite3
-
-# 批准一個已進入 waiting_approval 的任務（TASK_ID 換成實際任務 ID）
-py -3.14 -m muse.task_cli --db data/tasks/muse.sqlite3 approve TASK_ID --by user
-# 取消尚未開始或正在等待批准的任務（不會強制終止 running handler）
-py -3.14 -m muse.task_cli --db data/tasks/muse.sqlite3 cancel TASK_ID --by user --reason "no longer needed"
-# 查看任務隊列統計與活動任務摘要（不輸出 payload）
-py -3.14 -m muse.task_cli --db data/tasks/muse.sqlite3 list --limit 20
-FFmpeg 任務採人工崩潰恢復策略：若 Worker 租約過期，任務會回到 waiting_approval，先檢查舊程序/輸出，再重新批准；不會自動重複啟動。
-FFmpeg 任務採人工崩潰恢復策略：若 Worker 租約過期，任務會回到 waiting_approval，先檢查舊程序/輸出，再重新批准；不會自動重複啟動。
-
-# Agent 管理：只探測明確列出的本機健康端點，不掃描端口、不啟動未知程序
-py -3.11 -m muse.agent_discovery --config config/agent-discovery.example.json --db data/agents/muse.sqlite3
-# 持續刷新健康狀態；前台運行，Ctrl+C 停止，不會安裝 Windows 服務
-py -3.11 -m muse.agent_discovery --config config/agent-discovery.example.json --db data/agents/muse.sqlite3 --loop --interval-seconds 30
-# 本地 Agent 调用协议：POST /api/v1/invoke，JSON 请求 {"agent_id":"coder","prompt":"..."}，响应 {"agent_id":"coder","output":"..."}
-# 在应用启动时显式注册：router.register_local_http_agent(profile, "http://127.0.0.1:9000/api/v1/invoke")
-# 桌面状态 API 可选传入 --agent-db data/agents/muse.sqlite3，读 GET /api/v1/agents
-如需从源码目录运行模块：
-
-```powershell
-$env:PYTHONPATH = 'src'
-python -m muse.main --check
+# 本机状态 API 与桌面
+py -3.11 -m muse.status_api --task-db data/tasks/muse.sqlite3 --progress-db data/progress/muse.sqlite3 --port 0
+scripts\Muse-Desktop.ps1
 ```
-## 一键本地视频合成（B-031 第一阶段）
 
-将一个素材文件夹中的图片和视频按文件名自然顺序自动剪辑合成为 MP4：
+**日常 Windows 使用（无需 ChatGPT）**：运行 `scripts\Install-Muse-Shortcut.ps1` 安装快捷方式，双击打开本机 App 窗口；停止用 `scripts\Muse-Stop.ps1`。主电脑访问 `http://127.0.0.1:8766/`；其他设备同 Wi-Fi 连接需首次配对码（每次重启轮换，授权 12 小时）。共享服务只绑私有网络地址，**不要在公共 Wi-Fi 或端口转发环境使用**，HTTP 局域网流量未加密。
 
+**一键视频合成（已有素材）**：
 ```powershell
 scripts\muse-video.cmd make "D:\Media\素材" "D:\Media\成片.mp4" --audio "D:\Media\bgm.mp3" --audio-mode music --size 1920x1080
+scripts\muse-video.cmd engines   # 只读探测 ComfyUI / Velorn MCP，不启动服务
 ```
+支持图片/视频混合、循环 BGM 或旁白补静音、AMF/软件编码、FFprobe 校验；不覆盖已有输出，不修改源素材。
 
-- 支持图片/视频混合；图片默认每张 4 秒，视频保留原时长。
-- `--audio-mode music` 循环背景音乐；`--audio-mode narration` 将旁白补静音至视频结尾。
-- `--encoder auto` 优先使用已检测到的 AMD AMF H.264；也可选 `software`（CPU x264）或 `amf`（强制硬件编码）。
-- 支持 `1920x1080`、`1080x1920`、`1080x1080`，最终由 FFprobe 检查视频流、尺寸和时长；不覆盖已有输出，不修改源素材。
-- 这是已有素材的自动剪辑/合成。另已接入本地 AI 视频产品入口：提示词 → Wan 2.1 / ComfyUI → Remotion 动效包装 → FFmpeg → MP4、工程 ZIP 与 QA 报告；两条制作路径分别记录。
-- Wan 2.1 实机验收尚未完成：本机 AMD 首次推理已执行采样，但在 VAE 解码遇到 HIP launch failure；当前改用 tiled VAE + CPU VAE 复验，成功生成并通过 MP4 检查前不会标记完工。详见 `docs/PROGRESS_B128_VIDEO.md`。
-- 引擎状态检查：`scripts\muse-video.cmd engines` 只读探测 ComfyUI 与 Velorn MCP；不会启动服务或提交生成任务。
-## Windows 日常使用（无需 ChatGPT）
+---
 
-1. 首次安装桌面快捷方式：powershell -NoProfile -ExecutionPolicy Bypass -File scripts\Install-Muse-Shortcut.ps1。
-2. 双击桌面的 Muse 快捷方式：按需启动已配置的本机模型服务（若存在）、本地 AutonomousSupervisor 和局域网配对控制台，并以 Edge App 窗口打开本机界面。
-3. 关闭后台运行：执行 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\Muse-Stop.ps1；暂停/恢复可在项目根目录运行 py -3.11 -m muse.autonomous_runtime pause / resume。
-4. 本地日常能力包括队列、知识完整性、能力雷达、Watchdog 和有界自主研究；研究可使用已配置的本机模型与公开来源。ChatGPT 不是运行依赖。网络搜索不可用时不承诺在线研究成功；模型不可用时本地维护任务仍可运行。
-5. 此入口是本机浏览器 App 窗口，不是已打包的 Tauri EXE。当前机器没有 Rust/Cargo 工具链，且 Tauri bundle 尚未启用；不会擅自安装工具链。
-6. 主电脑必须使用 `http://127.0.0.1:8766/`（桌面快捷方式默认打开此地址），不需要配对；如果主电脑误打开 `192.168.x.x:8766`，会看到给其他设备使用的配对页。手机/平板连接同一 Wi-Fi 后打开桌面 Muse“灵感工坊”显示的局域网地址，首次输入主电脑显示的 8 位配对码。每次 Muse 重启会轮换配对码，设备授权 12 小时。Windows 防火墙只尝试开放 Private Profile + LocalSubnet 的 TCP 8766；若未获权限，需要手动允许该规则。
-7. 在“灵感工坊”提交 1–2000 字灵感。默认只写入本地 Research Wiki；勾选“允许联网研究”后，才将灵感加入自主研究候选池并用于公开资料检索。灵感历史在左栏，生成的 Markdown 研究报告在右栏下载。当前流程交付研究报告、假设和待审核改进提案；尚未实现从灵感自动产出可发布产品，也不会自动修改 Muse 代码。视频创作现有独立的本地 AI 提示词入口和素材合成入口；Wan 2.1 的 AMD VAE 解码稳定性仍在实机复验，尚不等于可发布完工；从空白提示词直接生成图片/音频尚未接入。报告原件在 `data/research/reports`，知识记录在 `data/research/knowledge.sqlite3`。
-8. 共享服务只绑定私有网络地址，远程设备必须配对；不要在公共 Wi-Fi、访客网络或互联网端口转发环境下使用。HTTP 局域网流量未加密，敏感环境请先加 VPN/HTTPS。
-- The two Task Scheduler entries MuseAutonomousRuntime and MuseDesktopDashboard are registered without logon/startup triggers; the desktop shortcut starts them on demand. They run as the current user at Limited privilege, not as Windows services.
+## 五、验证证据与复现口径
 
+- **全量基线（B385，隔离 Linux 副本）**：Python 2,475 passed / 0 failures / 0 errors / 59 skipped，`compileall` 通过；Node 类型检查 + 66/66 tests + Vite 构建通过；Rust fmt/test/clippy/check 通过，Debian 包 6,432,880 bytes，SHA-256 `cd2b20cea19411798993191e9b4281e0d15b42c6d35b53e9250ce384b7ef6be1`，包内 Status API smoke test（loopback / Bearer / health）通过。
+- **B390 专项**：Worker 40/40（canonical Windows 副本）、失败分类 149/149、自主运行 + Research + Status API + Portal 168/168、Portal 19/19、产品反馈 import 6/6、跨管线 38/38；Python `py_compile` 与 `node --check` 通过。
+- **事实核验底稿**：[`docs/MUSE_PRODUCT_EVIDENCE_MAP_2026-11-17.md`](docs/MUSE_PRODUCT_EVIDENCE_MAP_2026-11-17.md) 记录两批目标测试（8 文件 140 项 + 7 文件扩展）与 Research Wiki 只读快照；运行环境为项目 `.venv` Python 3.11.9，标准库 `unittest`；**环境无 pytest，不宣称 pytest 验证通过**。
+- **口径纪律**：代码存在 ≠ 端到端验收；测试存在 ≠ 本轮已执行；测试夹具/合成测试音 ≠ 真实作品或真实旁白。统计均标注范围与日期，不跨基线混算。
 
-## 原则
+---
+
+## 六、目录导览
+
+| 路径 | 用途 |
+|---|---|
+| `src/muse/` | 核心运行时：Commander、任务队列、记忆、研究、审查、视频、状态 API 等 |
+| `tests/` | unittest 回归（全仓 2,475 项隔离基线） |
+| `scripts/` | 启动/停止、桌面构建、GitHub 同步、视频、反馈导入、Linux/Android 预检等 |
+| `docs/` | 产品宪章、架构、路线图、逐批进度与事实核验底稿；从 [`docs/PROGRESS.md`](docs/PROGRESS.md) 起步 |
+| `web-portal/` | 本机浏览器控制台（状态、灵感、原型库、反馈） |
+| `desktop/src-tauri/` | Tauri 2 + Rust 桌面壳源码 |
+| `ui-prototype/` | 真实 API 驱动的只读桌面 UI 原型 |
+| `config/` | 非敏感配置样例（真实密钥/配置不入库） |
+| `deploy/`、`tools/` | 部署与本地工具脚本 |
+
+运行态目录 `data/`、`artifacts/`、`models/`、`vault/`、`.venv/`、`node_modules/`、`target/` 等**不纳入版本控制**。
+
+---
+
+## 七、原则与边界
+
 1. 主动触达必须由明确配置的定时/事件触发器完成，不假设模型会在后台自行思考。
-2. 记忆可查看、可导出、可修订；敏感资料默认不收集。
-3. 电脑操作按最小权限执行；删除、覆盖、付款、发送消息、部署等动作必须有独立授权。
-4. 每项自动化都要有日志、结果状态和失败说明。
-5. 不把模型生成的推测写成用户事实。
+2. 记忆可查看、可导出、可修订；敏感资料默认不收集，私人资料默认本地保存。
+3. 电脑操作按最小权限执行；删除、覆盖、付款、发送消息、部署、外部发布须独立授权。
+4. 每项自动化都要有日志、结果状态和失败说明；不把模型推测写成用户事实。
+5. 玄学内容只作灵感与假设；证据用于校准结论与落地风险，不作为灵感的准入门槛。
+6. 未来愿景必须与当前已实现功能明确分开，不把概念演示包装成已上线能力。
 
-详见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
+详细运行手册见 [`docs/WEBCODEX_INTERFACE.md`](docs/WEBCODEX_INTERFACE.md)，Git 工作流见 [`docs/GIT_WORKFLOW.md`](docs/GIT_WORKFLOW.md)，功能逐项交付规范见 [`docs/MUSE_FEATURE_DELIVERY_DOCTRINE.md`](docs/MUSE_FEATURE_DELIVERY_DOCTRINE.md)。
