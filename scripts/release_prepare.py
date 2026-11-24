@@ -26,6 +26,7 @@ MANIFESTS = (
     ROOT / "pyproject.toml",
     ROOT / "desktop" / "src-tauri" / "Cargo.toml",
     ROOT / "desktop" / "src-tauri" / "tauri.conf.json",
+    ROOT / "server" / "rust" / "Cargo.toml",
 )
 
 VERSION_RE = re.compile(

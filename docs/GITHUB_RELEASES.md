@@ -24,10 +24,23 @@
 
 | 平台 | Runner | 产物（构建成功时） |
 |---|---|---|
-| Windows | `windows-latest` | `.msi` / `.exe`（+ 签名文件，若配置了 Tauri 签名密钥） |
-| Linux | `ubuntu-22.04` | `.deb` / `.AppImage` / `.rpm`（+ 签名文件） |
-| macOS Intel | `macos-13` | `.dmg` / `.app.tar.gz`（+ 签名文件） |
-| macOS Apple Silicon | `macos-14` | `.dmg` / `.app.tar.gz`（+ 签名文件） |
+| Windows | `windows-latest` | `.exe` + `Muse-Windows-portable.zip` 便携版（无 `.msi`） |
+| Linux x86_64 | `ubuntu-22.04` | `.deb` / `.AppImage`（+ 签名文件） |
+| Linux aarch64 | `ubuntu-22.04`（交叉编译） | `.deb` / `.AppImage`（aarch64） |
+| macOS Intel | `macos-13` | 仅 `.dmg`（无 `.app.tar.gz`） |
+| macOS Apple Silicon | `macos-14` | 仅 `.dmg`（无 `.app.tar.gz`） |
+
+另有独立的 `server` job 构建 Muse Server（Rust）原生服务二进制：
+
+| 平台 | 产物 |
+|---|---|
+| Linux x86_64 | `muse-server-linux-x86_64.tar.gz` |
+| Linux aarch64 | `muse-server-linux-aarch64.tar.gz` |
+| Windows x86_64 | `muse-server-windows-x86_64.zip` |
+| macOS Intel | `muse-server-macos-intel.tar.gz` |
+| macOS ARM | `muse-server-macos-arm.tar.gz` |
+
+每个 server 包内含二进制、`web-portal/` 静态资源、配置说明与 `.sha256` 校验。
 
 每个平台共同产出：
 
@@ -56,9 +69,11 @@
 
 ## 已知边界
 
-- 未配置 Apple 开发者 ID / 公证凭据，macOS 包为 ad-hoc 签名，首次打开可能触发 Gatekeeper 提示。
-- Windows `.msi` / `.exe` 未配置代码签名证书，可能出现 SmartScreen 提示。
-- Android APK/AAB、iOS 应用未纳入本流水线：当前环境缺少 Android SDK/NDK 与 Xcode/macOS 签名条件（见 `docs/PROGRESS_B384_LINUX_NATIVE_CROSS_PLATFORM.md`）。这里的“全平台”指 Muse 当前具备构建条件的 Windows / Linux / macOS 桌面平台 + Python/Web 包。
+- 未配置 Apple 开发者 ID / 公证凭据，macOS `.dmg` 为 ad-hoc 签名，首次打开可能触发 Gatekeeper 提示。
+- Windows `.exe` 与便携版未配置代码签名证书，可能出现 SmartScreen 提示。
+- Android 手机版 / Android TV 版：已列入规划（按全平台 Rust/Tauri 路线），当前缺少 Android SDK/NDK 与 Tauri Android 构建条件，未纳入本流水线；iOS 同样未纳入。
+- Muse Server 首版为单用户、本机/可信网络优先，默认绑定 `127.0.0.1:8767`；公网需前置 TLS 反向代理并显式配置 `MUSE_SERVER_PUBLIC_URL`。
+- Rust 服务器首版没有内建鉴权，鉴权与业务读写全部代理给现有 Python `web_portal.py` / `status_api.py`；它不写业务 SQLite，也不是第二调度器。
 - 流水线不运行全仓 Python 测试套件（约 2,475 项，耗时较长），只运行与构建直接相关的检查；完整回归仍需按 `docs/PROGRESS_B384_LINUX_NATIVE_CROSS_PLATFORM.md` 在开发环境执行。
 - 若某个平台构建失败，Release 会只包含成功平台的产物；发布说明中的“若对应平台构建成功”即指此情况。
 

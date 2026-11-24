@@ -72,6 +72,9 @@ jobs:
             label: windows
           - os: ubuntu-22.04
             label: linux
+          - os: ubuntu-22.04
+            label: linux-aarch64
+            target: aarch64-unknown-linux-gnu
           - os: macos-13
             label: macos-intel
           - os: macos-14
@@ -99,13 +102,27 @@ jobs:
       - name: 写入本次版本号
         run: python scripts/release_prepare.py --apply
 
-      - name: 安装 Linux 系统依赖
+      - name: 安装 Linux x86_64 系统依赖
         if: matrix.label == 'linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
             librsvg2-dev patchelf libxdo-dev libssl-dev
+
+      - name: 安装 Linux aarch64 交叉编译依赖
+        if: matrix.label == 'linux-aarch64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu pkg-config \
+            libwebkit2gtk-4.1-dev:arm64 libgtk-3-dev:arm64 \
+            libayatana-appindicator3-dev:arm64 librsvg2-dev:arm64 \
+            libssl-dev:arm64 libxdo-dev:arm64 patchelf
+          rustup target add aarch64-unknown-linux-gnu
+          echo "PKG_CONFIG_ALLOW_CROSS=1" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
 
       - name: 安装 macOS 系统依赖
         if: startsWith(matrix.os, 'macos')
@@ -148,6 +165,7 @@ jobs:
           workspaces: desktop/src-tauri
 
       - name: Rust 检查与单元测试
+        if: matrix.label != 'linux-aarch64'
         shell: bash
         working-directory: desktop/src-tauri
         run: |
@@ -155,7 +173,25 @@ jobs:
           cargo test --locked
           cargo clippy --all-targets -- -D warnings
 
+      - name: 构建 Tauri 桌面应用（交叉编译）
+        if: matrix.label == 'linux-aarch64'
+        uses: tauri-apps/tauri-action@v0
+        id: tauri-cross
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PKG_CONFIG_ALLOW_CROSS: "1"
+        with:
+          projectPath: desktop/src-tauri
+          tauriScript: npm --prefix ../ui-prototype run build
+          args: --ci --target aarch64-unknown-linux-gnu
+          tagName: ${{ needs.prepare.outputs.tag }}
+          releaseName: Muse ${{ needs.prepare.outputs.version }}
+          releaseDraft: true
+          prerelease: false
+          includeUpdaterJson: false
+
       - name: 构建 Tauri 桌面应用
+        if: matrix.label != 'linux-aarch64'
         uses: tauri-apps/tauri-action@v0
         id: tauri
         env:
@@ -170,14 +206,19 @@ jobs:
           prerelease: false
           includeUpdaterJson: false
 
-      - name: 收集构建产物
+      - name: 按平台策略收集桌面产物
         shell: bash
         run: |
-          python scripts/collect_release_artifacts.py \
-            --stage release-stage/${{ matrix.label }} \
+          python scripts/stage_desktop_bundles.py \
+            --stage release-stage/${{ matrix.label }}/desktop \
             --platform ${{ matrix.label }}
+
+      - name: 收集通用产物
+        shell: bash
+        run: |
           mkdir -p release-stage/${{ matrix.label }}/dist-py
           cp -v dist-py/* release-stage/${{ matrix.label }}/dist-py/ 2>/dev/null || true
+          cp -v dist/muse-web-portal-*.zip release-stage/${{ matrix.label }}/ 2>/dev/null || true
 
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
@@ -187,9 +228,96 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+  server:
+    name: 构建 Muse Server ${{ matrix.label }}
+    needs: prepare
+    if: needs.prepare.outputs.skip == 'false'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            label: linux-x86_64
+            target: x86_64-unknown-linux-gnu
+            ext: tar.gz
+          - os: ubuntu-22.04
+            label: linux-aarch64
+            target: aarch64-unknown-linux-gnu
+            ext: tar.gz
+          - os: windows-latest
+            label: windows-x86_64
+            target: x86_64-pc-windows-msvc
+            ext: zip
+          - os: macos-13
+            label: macos-intel
+            target: x86_64-apple-darwin
+            ext: tar.gz
+          - os: macos-14
+            label: macos-arm
+            target: aarch64-apple-darwin
+            ext: tar.gz
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 写入本次版本号
+        shell: bash
+        run: python3 scripts/release_prepare.py --apply || python scripts/release_prepare.py --apply
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server/rust
+
+      - name: 安装 Linux aarch64 链接器
+        if: matrix.label == 'linux-aarch64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+
+      - name: 构建 Server 二进制
+        shell: bash
+        run: |
+          cargo build --release --manifest-path server/rust/Cargo.toml --target ${{ matrix.target }}
+          BIN="server/rust/target/${{ matrix.target }}/release/muse-server"
+          [[ "${{ matrix.os }}" == "windows-latest" ]] && BIN="server/rust/target/${{ matrix.target }}/release/muse-server.exe"
+          mkdir -p server-stage
+          cp "$BIN" server-stage/
+          cp docs/GITHUB_RELEASES.md server-stage/ 2>/dev/null || true
+          cp -r web-portal server-stage/portal
+          if [[ "${{ matrix.ext }}" == "zip" ]]; then
+            python3 -c "import shutil; shutil.make_archive('muse-server-${{ matrix.label }}', 'zip', 'server-stage')"
+          else
+            tar -czf "muse-server-${{ matrix.label }}.tar.gz" -C server-stage .
+          fi
+          ls -lh muse-server-${{ matrix.label }}.*
+
+      - name: 生成 Server 校验清单
+        shell: bash
+        run: |
+          F="muse-server-${{ matrix.label }}.${{ matrix.ext }}"
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$F" > "muse-server-${{ matrix.label }}.sha256"
+          else
+            certutil -hashfile "$F" SHA256 > "muse-server-${{ matrix.label }}.sha256"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: muse-server-${{ matrix.label }}-${{ needs.prepare.outputs.short_date }}
+          path: |
+            muse-server-${{ matrix.label }}.${{ matrix.ext }}
+            muse-server-${{ matrix.label }}.sha256
+          if-no-files-found: error
+          retention-days: 7
+
   release:
     name: 汇总并发布 Releases
-    needs: [prepare, build]
+    needs: [prepare, build, server]
     if: needs.prepare.outputs.skip == 'false'
     runs-on: ubuntu-latest
     steps:
@@ -216,14 +344,16 @@ jobs:
               "",
               "## 本版包含",
               "- Muse Commander、任务队列、双轨记忆、研究/Research Wiki、视频生产链路的当前源码快照",
-              "- Windows / Linux / macOS（Intel + Apple Silicon）桌面安装包（若对应平台构建成功）",
+              "- Windows：exe 安装包 + zip 便携版；Linux：x86_64 与 aarch64 的 deb/AppImage；macOS：Intel + Apple Silicon 的 dmg",
+              "- Muse Server Rust 原生服务二进制（Linux x86_64/aarch64、Windows、macOS）",
               "- Python wheel 与 sdist、Web Portal 静态站点包",
               "- 每个平台的 SHA256SUMS 校验清单",
               "",
               "## 安装提示",
-              "- Windows：运行 `.msi` 或 `.exe` 安装包。",
-              "- Linux：使用 `sudo apt install ./Muse_*.deb` 或 AppImage。",
-              "- macOS：打开 `.dmg`，或解压 `.app.tar.gz`。若出现 Gatekeeper 提示，请在“系统设置 → 隐私与安全性”中允许。",
+              "- Windows：运行 `.exe` 安装包，或解压 `Muse-Windows-portable.zip` 便携版。",
+              "- Linux：x86_64 / aarch64 使用 `sudo apt install ./Muse_*.deb` 或对应架构 AppImage。",
+              "- macOS：打开 `.dmg`。若出现 Gatekeeper 提示，请在“系统设置 → 隐私与安全性”中允许。",
+              "- Muse Server：解压对应平台 `muse-server-*` 包，按 docs/GITHUB_RELEASES.md 配置并运行。",
               "- Python 包：`pip install muse_personal_agent-*.whl`（需 Python 3.11+）。",
               "",
               "## 校验",
