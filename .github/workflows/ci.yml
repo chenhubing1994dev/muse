@@ -1,0 +1,105 @@
+name: Muse CI（推送即验证）
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
+      - "reports/**"
+      - "vault/**"
+  pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
+      - "reports/**"
+      - "vault/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: muse-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.11"
+  NODE_VERSION: "22"
+
+jobs:
+  python:
+    name: Python 全量测试与编译
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: 全量 unittest + compileall
+        env:
+          PYTHONPATH: src
+        run: python scripts/validate_python_suite.py
+
+  frontend:
+    name: 前端类型检查 / 测试 / 构建
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: ui-prototype/package-lock.json
+      - name: 安装依赖
+        working-directory: ui-prototype
+        run: npm ci --no-audit --no-fund
+      - name: 类型检查
+        working-directory: ui-prototype
+        run: npm run check
+      - name: 单元测试
+        working-directory: ui-prototype
+        run: npm test
+      - name: 生产构建
+        working-directory: ui-prototype
+        run: npm run build
+      - name: Web Portal Service Worker 语法检查
+        run: node --check web-portal/sw.js
+
+  rust-desktop:
+    name: Rust 桌面壳（fmt / test / clippy）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+      - name: fmt / test / clippy
+        shell: bash
+        working-directory: desktop/src-tauri
+        run: |
+          cargo fmt -- --check
+          cargo test
+          cargo clippy --all-targets -- -D warnings
+
+  rust-server:
+    name: Rust Server（fmt / test / clippy）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server/rust
+      - name: fmt / test / clippy
+        shell: bash
+        working-directory: server/rust
+        run: |
+          cargo fmt -- --check
+          cargo test
+          cargo clippy --all-targets -- -D warnings
