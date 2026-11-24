@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "local.muse.command-center",
   "build": {
-    "beforeDevCommand": "npm --prefix ../ui-prototype run dev -- --host 127.0.0.1",
+    "beforeDevCommand": "npm --prefix ../../ui-prototype run dev -- --host 127.0.0.1",
     "devUrl": "http://127.0.0.1:1420",
-    "beforeBuildCommand": "npm --prefix ../ui-prototype run build",
+    "beforeBuildCommand": "npm --prefix ../../ui-prototype run build",
     "frontendDist": "../../ui-prototype/dist"
   },
   "app": {

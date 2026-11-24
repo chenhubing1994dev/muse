@@ -164,13 +164,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           projectPath: desktop/src-tauri
-          tauriScript: npm --prefix ../ui-prototype run build
           args: --ci
-          tagName: ${{ needs.prepare.outputs.tag }}
-          releaseName: Muse ${{ needs.prepare.outputs.version }}
-          releaseDraft: true
-          prerelease: false
-          includeUpdaterJson: false
 
       - name: 按平台策略收集桌面产物
         shell: bash
