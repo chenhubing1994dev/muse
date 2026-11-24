@@ -53,7 +53,7 @@ def make_windows_portable(stage: Path) -> Path | None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--stage", required=True)
-    parser.add_argument("--platform", required=True, choices=["windows", "linux", "macos-intel", "macos-arm"])
+    parser.add_argument("--platform", required=True, choices=["windows", "linux", "linux-aarch64", "macos-intel", "macos-arm"])
     args = parser.parse_args(argv)
 
     stage = Path(args.stage)
@@ -66,7 +66,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"windows: kept exe, portable={portable.name if portable else 'none'}")
         return 0
 
-    if args.platform == "linux":
+    if args.platform in ("linux", "linux-aarch64"):
         suffixes = (".deb", ".AppImage", ".rpm")
         for suffix in suffixes:
             for path in iter_files(BUNDLE, suffix):

@@ -26,7 +26,7 @@
 |---|---|---|
 | Windows | `windows-latest` | `.exe` + `Muse-Windows-portable.zip` 便携版（无 `.msi`） |
 | Linux x86_64 | `ubuntu-22.04` | `.deb` / `.AppImage`（+ 签名文件） |
-| Linux aarch64 | `ubuntu-22.04`（交叉编译） | `.deb` / `.AppImage`（aarch64） |
+| Linux aarch64 | `ubuntu-24.04-arm`（原生 ARM runner） | `.deb` / `.AppImage`（aarch64） |
 | macOS Intel | `macos-13` | 仅 `.dmg`（无 `.app.tar.gz`） |
 | macOS Apple Silicon | `macos-14` | 仅 `.dmg`（无 `.app.tar.gz`） |
 

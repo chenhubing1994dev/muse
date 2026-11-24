@@ -39,7 +39,9 @@ test("PWA service worker precaches the app shell during install", async () => {
   let installPromise;
   listeners.get("install")({ waitUntil(promise) { installPromise = promise; } });
   await installPromise;
-  assert.equal(calls.cacheName, "muse-portal-shell-v5");
+  const current = source.match(/const CACHE\s*=\s*["']([^"']+)["']/);
+  assert.ok(current, "sw.js must declare a CACHE name");
+  assert.equal(calls.cacheName, current[1]);
   assert.deepEqual(calls.addAll[0], ["/", "/styles.css", "/app.js", "/manifest.webmanifest", "/icon.svg", "/apple-touch-icon.png", "/icon-192.png", "/icon-512.png"]);
   assert.equal(calls.skipWaiting, 1);
 });
