@@ -154,7 +154,7 @@ jobs:
         working-directory: desktop/src-tauri
         run: |
           cargo fmt -- --check
-          cargo test --locked
+          cargo test
           cargo clippy --all-targets -- -D warnings
 
       - name: 构建 Tauri 桌面应用
