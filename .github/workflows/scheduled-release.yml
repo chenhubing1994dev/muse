@@ -273,15 +273,10 @@ jobs:
           cargo build --release --manifest-path server/rust/Cargo.toml --target ${{ matrix.target }}
           BIN="server/rust/target/${{ matrix.target }}/release/muse-server"
           [[ "${{ matrix.os }}" == "windows-latest" ]] && BIN="server/rust/target/${{ matrix.target }}/release/muse-server.exe"
-          mkdir -p server-stage
-          cp "$BIN" server-stage/
-          cp docs/GITHUB_RELEASES.md server-stage/ 2>/dev/null || true
-          cp -r web-portal server-stage/portal
-          if [[ "${{ matrix.ext }}" == "zip" ]]; then
-            python3 -c "import shutil; shutil.make_archive('muse-server-${{ matrix.label }}', 'zip', 'server-stage')"
-          else
-            tar -czf "muse-server-${{ matrix.label }}.tar.gz" -C server-stage .
-          fi
+          python3 scripts/stage_server_package.py \
+            --bin "$BIN" \
+            --label "${{ matrix.label }}" \
+            --ext "${{ matrix.ext }}"
           ls -lh muse-server-${{ matrix.label }}.*
 
       - name: 生成 Server 校验清单

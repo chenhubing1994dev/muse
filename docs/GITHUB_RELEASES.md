@@ -56,7 +56,11 @@
 | macOS Intel | `muse-server-macos-intel.tar.gz` — 当前临时禁用 |
 | macOS ARM | `muse-server-macos-arm.tar.gz` — 当前临时禁用 |
 
-每个 server 包内含二进制、`web-portal/` 静态资源、配置说明与 `.sha256` 校验。
+每个 server 包是**自包含包**（由 `scripts/stage_server_package.py` 生成）：Rust 二进制 + 完整 `src/muse/` Python 源码（217 个文件）+ `web-portal/` 静态资源 + 跨平台启动脚本（`start.sh` / `start.bat`）+ README + `.sha256`。启动脚本会先拉起本机 Python Status API（8766），再启动 Rust 代理（8767）。目标机需预装 Python 3.11+（核心仅标准库）；**不含**模型、运行数据、密钥与第三方引擎。
+
+Windows 便携版（由 `scripts/stage_desktop_bundles.py` 生成）是真正的绿色包：裸 `muse-desktop.exe` + `pyproject.toml` + `src/muse/` + 配置样例 + README（219 个文件，约 3.7 MB），解压即用（需本机 Python 3.11+），不再是只含安装器的假便携版。
+
+> 为什么安装包远小于 Muse 工作区：`.gitignore` 与 Tauri `resources` 只纳入 `src/muse/`（约 4 MB）+ 前端 + Rust 二进制；`data/`（数据库）、`models/`、`tts-engines/`（CosyVoice 等）、`third_party/`、`target/` 编译缓存、`.venv/` 全部排除。这是有意设计——大型资产与隐私数据不随分发包传播。
 
 每个平台共同产出：
 
