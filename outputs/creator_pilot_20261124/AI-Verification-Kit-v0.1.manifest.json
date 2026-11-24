@@ -1,0 +1,38 @@
+{
+  "schema": "muse.digital-product-package.v1",
+  "status": "draft_not_published",
+  "file": "AI-Verification-Kit-v0.1.zip",
+  "sha256": "82135aba1febffdbf9dd00631b45e4412108d21513d41ec51b46308266311a32",
+  "bytes": 8614,
+  "entry_count": 11,
+  "entries": [
+    "examples/nist-ai600-1-example.md",
+    "LICENSE-DRAFT.md",
+    "product-manifest.json",
+    "product-page-copy.md",
+    "README.md",
+    "templates/claim-register.csv",
+    "templates/cost-revenue-ledger.csv",
+    "templates/counter-evidence.md",
+    "templates/publishing-checklist.md",
+    "templates/rights-manifest.template.json",
+    "templates/source-card.md"
+  ],
+  "price_hypothesis_usd": 9.0,
+  "price_validated": false,
+  "sales_channel": "not_connected",
+  "published": false,
+  "orders": 0,
+  "settled_revenue": 0,
+  "commercial_use_allowed": false,
+  "validation": {
+    "generation_json_valid": true,
+    "base_video_hash": "passed",
+    "voice_preview_hash": "passed",
+    "voice_asr_cer": 0.0625,
+    "rights_gate": "preserved_blocked_pending_review",
+    "publish_gate": "preserved_draft_only",
+    "digital_product_zip_crc": "passed",
+    "production_database": "isolated sandbox only"
+  }
+}

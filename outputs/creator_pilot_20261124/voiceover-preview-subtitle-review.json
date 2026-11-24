@@ -1,0 +1,13 @@
+{
+  "schema": "muse.creator.subtitle-review.v1",
+  "status": "reference_aligned_draft_not_human_approved",
+  "source_file": "voiceover-preview.srt",
+  "corrected_file": "voiceover-preview-edited.srt",
+  "asr_status": "passed",
+  "asr_cer": 0.0625,
+  "reference_text": "人工智能可以答得好快，但未必答得啱。先查來源，再搵反證。唔肯定，就先唔好信。",
+  "correction_note": "The ASR transcript rendered 反證 as the homophone 反正; this draft aligns subtitles to the supplied narration reference text. No human listening review has been performed.",
+  "human_listening_review_required": true,
+  "human_subtitle_review_required": true,
+  "commercial_use_allowed": false
+}

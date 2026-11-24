@@ -243,15 +243,19 @@ def build_offline_inspiration_product(
         builder = LocalProductBuilder(root)
         product = builder.build(store, initiative["id"], evolution_cycle_id=evolution_cycle_id)
         verified = builder.verify(store, initiative["id"])
-        if not verified.get("validated"):
-            raise ProductBuildError("offline inspiration product did not pass verification")
+        if verified.get("package_integrity") != "passed":
+            raise ProductBuildError("offline inspiration product package integrity did not pass")
+        initiative_status = (store.get_by_id(initiative["id"]) or {}).get("status", "proposed")
 
     return {
         "status": "completed",
         "initiative_id": initiative["id"],
-        "initiative_status": "testing",
+        "initiative_status": initiative_status,
         "product": product,
-        "verified": bool(verified.get("validated")),
+        "verified": verified.get("package_integrity") == "passed",
+        "package_integrity": verified.get("package_integrity"),
+        "validated": False,
+        "publishable": False,
         "provenance": {
             "source": "offline_inspiration",
             "inspiration_id": inspiration_key,

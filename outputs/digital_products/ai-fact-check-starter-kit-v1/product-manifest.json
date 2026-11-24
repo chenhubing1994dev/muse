@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "product_id": "ai-fact-check-starter-kit-v1",
+  "title": "AI 答案查证工具包",
+  "version": "1.0-draft",
+  "status": "internal_review_draft",
+  "suggested_test_price": {
+    "currency": "USD",
+    "amount": "7.00",
+    "is_market_validated": false
+  },
+  "lead_magnet": {
+    "suggested_price": "0+",
+    "file": "FREE_CHECKLIST.md",
+    "status": "not_published"
+  },
+  "contents": [
+    "README.md",
+    "FREE_CHECKLIST.md",
+    "CHECKLIST.md",
+    "CLAIM_LEDGER_TEMPLATE.md",
+    "COUNTEREVIDENCE_WORKSHEET.md",
+    "PROMPT_PACK.md",
+    "SAMPLE_CASE.md",
+    "SOURCE_NOTES.md",
+    "LICENSE_DRAFT.md"
+  ],
+  "rights": {
+    "template_content": "original Muse-authored text",
+    "third_party_media_assets": false,
+    "external_reference": "NIST AI 600-1 cited as a source; no NIST endorsement implied",
+    "license_review": "human_review_required"
+  },
+  "release": {
+    "can_publish": false,
+    "payment_processor": "not_connected",
+    "storefront": "not_created",
+    "human_editorial_review": "pending",
+    "final_license_review": "pending",
+    "refund_policy": "pending"
+  },
+  "metrics": {
+    "sales": 0,
+    "settled_revenue_usd": "0.00",
+    "market_validation": "not_started"
+  }
+}

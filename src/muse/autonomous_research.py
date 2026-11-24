@@ -3239,7 +3239,22 @@ class AutonomousResearchEngine:
                     )
                     report["value_forge"] = value_forge_result
                     synthesis = report.get("synthesis") or {}
-                    executive_summary = str(synthesis.get("executive_summary", ""))[:1200]
+                    executive_summary = str(synthesis.get("executive_summary", ""))[:300]
+                    research_question = str(topic.get("question") or topic.get("title") or "本轮研究问题")[:180]
+                    hypothesis_brief = str(topic.get("creator_hypothesis_summary") or "")[:300]
+                    narration_research_text = "\n".join(
+                        value for value in (
+                            f"研究问题：{research_question}",
+                            f"研究摘要：{executive_summary}",
+                            f"待验证假设：{hypothesis_brief}",
+                        ) if value.split("：", 1)[-1].strip()
+                    )[:550]
+                    scene_hypothesis = (hypothesis_brief or executive_summary or research_question)[:160]
+                    video_prompt = (
+                        "Create a cinematic, source-grounded visual explainer about: "
+                        + research_question
+                        + (". Research context: " + executive_summary if executive_summary else "")
+                    )[:350]
                     creator_brief = {
                         "schema_version": 1,
                         "source_evolution_cycle_id": cycle_id,
@@ -3257,13 +3272,40 @@ class AutonomousResearchEngine:
                         "video": {
                             "mode": "prompt_to_video", "status": "queued_for_resource_scheduler",
                             "title": str(topic.get("title", "Muse Research Film"))[:140],
-                            "prompt": ("Create a cinematic, source-grounded visual explainer about: "
-                                       + str(topic.get("question", topic.get("title", "")))[:700]
-                                       + (". Research context: " + executive_summary[:700] if executive_summary else ""))[:1900],
+                            "prompt": video_prompt,
                             "negative_prompt": "fabricated facts, fake citations, text artifacts, watermarks, distorted faces",
-                            "aspect_ratio": "9:16", "duration_seconds": 2.0, "steps": 8,
+                            "aspect_ratio": "9:16", "duration_seconds": 9.0, "steps": 8,
+                            "scenes": [
+                                {
+                                    "prompt": ("Vertical cinematic establishing shot about "
+                                               + research_question[:140] + ". Atmospheric visual hook, no text."),
+                                    "duration_seconds": 3.0,
+                                },
+                                {
+                                    "prompt": ("Visual metaphor for an unverified hypothesis: "
+                                               + scene_hypothesis[:140] + ". No readable labels."),
+                                    "duration_seconds": 3.0,
+                                },
+                                {
+                                    "prompt": ("Show a reversible experiment related to "
+                                               + research_question[:140] + ". No invented results or text."),
+                                    "duration_seconds": 3.0,
+                                },
+                            ],
                             "resolution_tier": "preview_512", "voice_locale": "yue-HK",
-                            "voice_status": "not_generated_requires_tts_capability_check",
+                            "voice_status": "queued_for_local_cantonese_tts",
+                            "narration": {
+                                "enabled": True, "language": "zh-HK", "style": "yujie_canto",
+                                "segments": 3, "research_text": narration_research_text,
+                                "inspiration": ("用自然香港粤语解释研究问题与待验证假设；明确区分来源支持、推断与未知。"
+                                                "不要把假设或玄学灵感说成事实，不编造数字、引用、效果或市场需求。"),
+                                "claim_grounded": False, "asr_enabled": False,
+                            },
+                            "media_asset_search": {
+                                "enabled": True, "style": "cosmic", "limit": 8,
+                                "target_ratio": 9 / 16,
+                                "rights_policy": "candidate_only_requires_human_review",
+                            },
                             "requires_human_content_review": True,
                         },
                         "offline_product": {
@@ -3323,8 +3365,26 @@ class AutonomousResearchEngine:
                         experiment_candidates.append(
                             experiment_text + ("；证伪条件：" + falsifier_text if falsifier_text else "")
                         )
-                    creator_hypotheses = [str(topic.get("hypothesis") or "")[:1000] if topic.get("hypothesis") else ""]
-                    creator_hypotheses = [item for item in creator_hypotheses if item]
+                    raw_hypotheses = synthesis.get("creator_inspired_hypotheses")
+                    if not isinstance(raw_hypotheses, list):
+                        raw_hypotheses = []
+                    if topic.get("hypothesis"):
+                        raw_hypotheses = [topic.get("hypothesis"), *raw_hypotheses]
+                    creator_hypotheses = [
+                        str(item)[:1000] for item in raw_hypotheses[:3]
+                        if isinstance(item, (str, int, float)) and str(item).strip()
+                    ]
+                    if not experiment_candidates:
+                        for hypothesis in creator_hypotheses:
+                            if "检验：" not in hypothesis:
+                                continue
+                            candidate = hypothesis.split("检验：", 1)[1]
+                            for stop_marker in ("；证伪条件：", "证伪条件："):
+                                candidate = candidate.split(stop_marker, 1)[0]
+                            candidate = candidate.strip("；。 ")
+                            if candidate:
+                                experiment_candidates.append(candidate[:500])
+                                break
                     raw_uncertainties = synthesis.get("uncertainties")
                     if not isinstance(raw_uncertainties, list):
                         raw_uncertainties = []

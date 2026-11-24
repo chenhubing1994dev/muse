@@ -1,0 +1,53 @@
+{
+  "archive": "muse-static-site-preview.zip",
+  "bytes": 23675,
+  "sha256": "008e1ba7990657ac4cc01d75d1b6a09f62e0ea7362090447a7722a2eef3ecb34",
+  "member_count": 8,
+  "zip_crc": "passed",
+  "entries": [
+    {
+      "path": "index.html",
+      "bytes": 14293,
+      "sha256": "6b4c8909ab3beb7ac9ce0001311a551644022884ee7e6406488cd1fa0ffd4314"
+    },
+    {
+      "path": "showcase.html",
+      "bytes": 14293,
+      "sha256": "6b4c8909ab3beb7ac9ce0001311a551644022884ee7e6406488cd1fa0ffd4314"
+    },
+    {
+      "path": "products.html",
+      "bytes": 6361,
+      "sha256": "60f35168dfd2aa2fc66bed12de37b24b529b3269f6c4ddb2a8f4e02a3f0237c0"
+    },
+    {
+      "path": "showcase.css",
+      "bytes": 16416,
+      "sha256": "81926f0110e1f7ae419a9974e22bf4157de3cd6d6c98a57ec11f20758d4b89dc"
+    },
+    {
+      "path": "commerce.css",
+      "bytes": 2783,
+      "sha256": "5c1054641a6e06ff5a8b240e4d8297482990a0ed9936b0e63f6205d982722b8d"
+    },
+    {
+      "path": "products.css",
+      "bytes": 3411,
+      "sha256": "1772503d9027cd017f3b759891d74f2f08464d57b37c5587825d761c695727cc"
+    },
+    {
+      "path": "commerce.js",
+      "bytes": 1165,
+      "sha256": "35ce1330f0f92550ad565e7b79880d33a135f0b0ae12d6866f28363101a45395"
+    },
+    {
+      "path": "README.md",
+      "bytes": 997,
+      "sha256": "cc4b0a273ce3c82e47afc220630c7389e09e9ceecb9a245f45afae6aebee66ae"
+    }
+  ],
+  "deployment_state": "local_preview_not_deployed",
+  "checkout_connected": false,
+  "analytics_connected": false,
+  "can_publish_product": false
+}

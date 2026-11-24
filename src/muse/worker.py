@@ -354,8 +354,7 @@ def trigger_work_proposal_handler(payload: dict[str, Any]) -> dict[str, Any]:
     return {"status": "proposal_packet_prepared", "path": str(destination), "trigger_id": trigger_id}
 
 
-DEFAULT_APPROVAL_REQUIRED_KINDS = frozenset({"trigger_work_proposal", "approved_code_change", "software_reconstruction", "open_design_run"})
-
+DEFAULT_APPROVAL_REQUIRED_KINDS = frozenset({"trigger_work_proposal", "approved_code_change", "software_reconstruction", "open_design_run", "video_pipeline"})
 DEFAULT_HANDLERS: dict[str, Handler] = {
     "echo": echo_handler,
     "approved_plan_intake": approved_plan_intake_handler,
@@ -734,8 +733,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     with ExitStack() as stack:
         handlers = dict(DEFAULT_HANDLERS)
-        from muse.pipeline_control import PipelineTaskHandler
-        handlers["video_pipeline"] = PipelineTaskHandler(Path.cwd())
+        # Legacy video_pipeline tickets are approval-gated but intentionally have no CLI handler.
+        # Real generation must use VideoTaskWorker's persisted Commander DAG, live GPU lease and one-shot grant.
         from muse.software_crafting import SoftwareReconstructionHandler
         handlers["software_reconstruction"] = SoftwareReconstructionHandler(
             workspace=Path.cwd(), database=args.db,

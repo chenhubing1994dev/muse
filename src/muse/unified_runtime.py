@@ -7,6 +7,7 @@ was registered in Ruflo.
 from __future__ import annotations
 
 import argparse
+import hashlib
 from contextlib import contextmanager
 import json
 import os
@@ -21,7 +22,7 @@ from muse.mempalace_adapter import MemPalaceAdapter, load_mempalace_adapter
 from muse.mempalace_projection import MemPalaceProjectionOutbox
 from muse.ruflo_adapter import RufloMCPAdapter, RufloError, load_muse_model_config, resolve_lmstudio_ruflo_config
 from muse.task_queue import TaskQueue
-from muse.commander_planner import CommanderPlanner, CommanderPlanConsensus
+from muse.commander_planner import CommanderPlan, CommanderPlanner, CommanderPlanConsensus, PlannedStep
 from muse.local_planner import LocalModelCommanderPlanner
 from muse.orchestration import AgentRoleRegistry, AgentSpec, MultiAgentOrchestrator, OrchestrationStore
 from muse.memory import MemoryStore
@@ -420,10 +421,10 @@ class MuseRuntime:
             selected_payload = selected.get("payload") or {}
             if (isinstance(selected_payload, dict)
                     and selected_payload.get("kind") in {
-                        "creator_initiative_video_approval", "business_opportunity_video_approval",
+                        "creator_initiative_video_approval", "business_opportunity_video_approval", "video_pipeline",
                     }):
                 raise RuntimeBlocked(
-                    "video approval tickets require VideoTaskWorker; generic dispatch is forbidden"
+                    "video approval/video_pipeline tickets require the dedicated video dispatcher; generic dispatch is forbidden"
                 )
             if (isinstance(selected_payload, dict)
                     and (selected_payload.get("kind") == "plugin_capability_request"
@@ -473,6 +474,229 @@ class MuseRuntime:
                 queue.finish(task_id, status="failed", result={"error": type(exc).__name__, "message": str(exc)[:500]}, worker_id=worker_id)
                 raise
 
+    @staticmethod
+    def _restore_commander_plan_snapshot(snapshot: Any, expected_dag_sha256: str) -> CommanderPlan:
+        """Restore one immutable, digest-verified Commander DAG without replanning."""
+        snapshot_fields = {
+            "schema", "plan_id", "goal", "source", "steps", "parallel_waves",
+        }
+        if not isinstance(snapshot, dict) or set(snapshot) != snapshot_fields:
+            raise RuntimeBlocked("persisted Commander DAG snapshot has an invalid schema")
+        if snapshot.get("schema") != "muse-commander-plan-snapshot-v1":
+            raise RuntimeBlocked("persisted Commander DAG snapshot version is unsupported")
+        if (not isinstance(expected_dag_sha256, str) or len(expected_dag_sha256) != 64
+                or any(char not in "0123456789abcdef" for char in expected_dag_sha256)):
+            raise RuntimeBlocked("persisted Commander DAG digest is malformed")
+        try:
+            encoded = json.dumps(
+                snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
+            ).encode("utf-8")
+        except (TypeError, ValueError, UnicodeError) as exc:
+            raise RuntimeBlocked("persisted Commander DAG snapshot is not canonical JSON") from exc
+        actual_digest = hashlib.sha256(encoded).hexdigest()
+        if actual_digest != expected_dag_sha256:
+            raise RuntimeBlocked("persisted Commander DAG digest does not match its snapshot")
+
+        plan_id = snapshot.get("plan_id")
+        goal = snapshot.get("goal")
+        source = snapshot.get("source")
+        if (not isinstance(plan_id, str) or len(plan_id) != 32
+                or any(char not in "0123456789abcdef" for char in plan_id)
+                or not isinstance(goal, str) or not goal.strip() or len(goal) > 8000
+                or not isinstance(source, str) or source not in {"model", "safe_fallback"}):
+            raise RuntimeBlocked("persisted Commander DAG identity, goal or source is invalid")
+        raw_steps = snapshot.get("steps")
+        if not isinstance(raw_steps, list) or not 2 <= len(raw_steps) <= 16:
+            raise RuntimeBlocked("persisted Commander DAG must contain 2 to 16 steps")
+
+        role_capabilities = {
+            "researcher": ("research",),
+            "architect": ("design",),
+            "developer": ("coding", "testing"),
+            "reviewer": ("review",),
+            "operator": ("desktop.observe",),
+            "writer": ("writing", "documentation"),
+            "analyst": ("analysis", "research"),
+        }
+        planned_steps: list[PlannedStep] = []
+        for item in raw_steps:
+            if not isinstance(item, dict) or set(item) != {
+                "step_id", "role", "objective", "depends_on", "required_capabilities",
+            }:
+                raise RuntimeBlocked("persisted Commander DAG step schema is invalid")
+            step_id, role, objective = item.get("step_id"), item.get("role"), item.get("objective")
+            dependencies = item.get("depends_on")
+            capabilities = item.get("required_capabilities")
+            if (not isinstance(step_id, str) or not step_id.strip() or len(step_id) > 64
+                    or not isinstance(role, str) or role not in CommanderPlanner.ALLOWED_ROLES
+                    or not isinstance(objective, str) or not objective.strip() or len(objective) > 1000
+                    or not isinstance(dependencies, list)
+                    or any(not isinstance(value, str) or not value.strip() or len(value) > 64 for value in dependencies)
+                    or not isinstance(capabilities, list)
+                    or any(not isinstance(value, str) or not value.strip() or len(value) > 128 for value in capabilities)):
+                raise RuntimeBlocked("persisted Commander DAG step fields are invalid")
+            expected_capabilities = list(role_capabilities[role])
+            if capabilities != sorted(set(capabilities)) or capabilities != expected_capabilities:
+                raise RuntimeBlocked(f"persisted Commander DAG role capability grant is invalid for {role}")
+            if len(set(dependencies)) != len(dependencies) or step_id in dependencies:
+                raise RuntimeBlocked("persisted Commander DAG contains duplicate or self dependencies")
+            planned_steps.append(PlannedStep(
+                step_id, role, objective.strip(), tuple(dependencies), tuple(capabilities),
+            ))
+
+        ids = [step.step_id for step in planned_steps]
+        if len(set(ids)) != len(ids):
+            raise RuntimeBlocked("persisted Commander DAG step IDs are not unique")
+        by_id = {step.step_id: step for step in planned_steps}
+        for step in planned_steps:
+            if any(dependency not in by_id for dependency in step.depends_on):
+                raise RuntimeBlocked("persisted Commander DAG references an unknown dependency")
+        if sum(step.role == "reviewer" for step in planned_steps) != 1:
+            raise RuntimeBlocked("persisted Commander DAG must contain exactly one independent Reviewer")
+
+        pending = set(ids)
+        completed: set[str] = set()
+        computed_waves: list[tuple[str, ...]] = []
+        while pending:
+            wave = tuple(
+                step.step_id for step in planned_steps
+                if step.step_id in pending and set(step.depends_on) <= completed
+            )
+            if not wave:
+                raise RuntimeBlocked("persisted Commander DAG contains a dependency cycle")
+            computed_waves.append(wave)
+            completed.update(wave)
+            pending.difference_update(wave)
+        raw_waves = snapshot.get("parallel_waves")
+        expected_waves = [list(wave) for wave in computed_waves]
+        if raw_waves != expected_waves:
+            raise RuntimeBlocked("persisted Commander DAG parallel_waves do not match its dependency graph")
+        return CommanderPlan(plan_id, goal.strip(), tuple(planned_steps), source, tuple(computed_waves))
+
+    @staticmethod
+    def _validate_video_pipeline_execution_ticket(
+        queue: TaskQueue, ticket: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Validate one queued video execution Ticket and its exact approved DAG snapshot."""
+        if not isinstance(ticket, dict) or ticket.get("status") != "queued":
+            raise RuntimeBlocked("video_pipeline execution Ticket must exist and remain queued")
+        payload = ticket.get("payload")
+        if not isinstance(payload, dict) or payload.get("kind") != "video_pipeline":
+            raise RuntimeBlocked("dedicated video dispatcher accepts only kind=video_pipeline Tickets")
+        required = (
+            "approval_task_id", "approval_event_id", "approved_by", "attempt_id", "initiative_id",
+            "brief_sha256", "commander_plan_id", "commander_plan_source",
+            "commander_plan_snapshot", "dag_sha256",
+        )
+        if any(not isinstance(payload.get(field), str) or not payload[field].strip()
+               for field in required if field not in {"commander_plan_snapshot"}):
+            raise RuntimeBlocked("video_pipeline execution Ticket is missing required approval or DAG bindings")
+        for field in ("brief_sha256", "dag_sha256"):
+            value = payload.get(field)
+            if (not isinstance(value, str) or len(value) != 64
+                    or any(char not in "0123456789abcdef" for char in value)):
+                raise RuntimeBlocked(f"video_pipeline execution Ticket {field} is malformed")
+        plan = MuseRuntime._restore_commander_plan_snapshot(
+            payload.get("commander_plan_snapshot"), payload["dag_sha256"],
+        )
+        if (payload.get("commander_plan_id") != plan.plan_id
+                or payload.get("commander_plan_source") != plan.source):
+            raise RuntimeBlocked("video_pipeline execution Ticket Commander plan identity differs from its snapshot")
+
+        approval_ticket = queue.get(payload["approval_task_id"])
+        if approval_ticket is None or approval_ticket.get("status") != "queued":
+            raise RuntimeBlocked("video_pipeline requires its exact approved Commander approval Ticket")
+        approval_payload = approval_ticket.get("payload")
+        approval_kind = approval_payload.get("kind") if isinstance(approval_payload, dict) else None
+        if (not isinstance(approval_payload, dict)
+                or not isinstance(approval_kind, str)
+                or approval_kind not in {
+                    "business_opportunity_video_approval", "creator_initiative_video_approval",
+                }
+                or approval_payload.get("_approved") is not True
+                or approval_payload.get("approval_scope") != "one_video_attempt_only"):
+            raise RuntimeBlocked("video_pipeline approval Ticket is not an approved one-attempt video authorization")
+        for field, expected in (
+            ("attempt_id", payload["attempt_id"]),
+            ("initiative_id", payload["initiative_id"]),
+            ("commander_plan_id", plan.plan_id),
+            ("commander_plan_source", plan.source),
+            ("commander_plan_snapshot", payload["commander_plan_snapshot"]),
+            ("dag_sha256", payload["dag_sha256"]),
+            ("video_brief_sha256", payload["brief_sha256"]),
+        ):
+            if approval_payload.get(field) != expected:
+                raise RuntimeBlocked(f"video_pipeline approval Ticket {field} differs from the execution Ticket")
+        video_brief = approval_payload.get("video_brief")
+        if (not isinstance(video_brief, dict)
+                or not isinstance(video_brief.get("title"), str) or not video_brief["title"].strip()
+                or not isinstance(video_brief.get("prompt"), str) or not video_brief["prompt"].strip()):
+            raise RuntimeBlocked("video_pipeline approval Ticket has no valid frozen video brief")
+        brief_digest = hashlib.sha256(
+            json.dumps(video_brief, sort_keys=True, ensure_ascii=False).encode("utf-8")
+        ).hexdigest()
+        if brief_digest != payload["brief_sha256"]:
+            raise RuntimeBlocked("video_pipeline brief digest does not match the approved brief")
+
+        approval = approval_payload.get("_approval")
+        if (not isinstance(approval, dict)
+                or not isinstance(approval.get("approved_by"), str)
+                or not approval["approved_by"].strip()
+                or not isinstance(approval.get("approved_at"), str)
+                or not approval["approved_at"].strip()
+                or approval["approved_by"] != payload["approved_by"]):
+            raise RuntimeBlocked("video_pipeline approval actor does not match the persisted approval")
+        decisions = [
+            event for event in queue.events(payload["approval_task_id"], limit=500)
+            if event.get("event_type") == "human.decision"
+        ]
+        latest = decisions[-1] if decisions else None
+        if (not isinstance(latest, dict)
+                or latest.get("event_id") != payload["approval_event_id"]
+                or latest.get("actor") != payload["approved_by"]
+                or not isinstance(latest.get("payload"), dict)
+                or latest["payload"].get("decision") != "approved"
+                or not TaskQueue.approval_timestamp_matches_event(
+                    approval.get("approved_at"), latest.get("created_at"),
+                )):
+            raise RuntimeBlocked("video_pipeline requires the latest matching persisted human approval event")
+        return {
+            "ticket": ticket,
+            "approval_ticket": approval_ticket,
+            "approval_evidence": {
+                "approval_task_id": payload["approval_task_id"],
+                "approval_event_id": payload["approval_event_id"],
+                "approved_by": payload["approved_by"],
+            },
+            "video_brief": video_brief,
+            "commander_plan": plan,
+            "dag_sha256": payload["dag_sha256"],
+        }
+
+    def preflight_video_pipeline_ticket(self, task_id: str) -> dict[str, Any]:
+        """Read-only preflight for one approved video execution Ticket; never claims it."""
+        if not isinstance(task_id, str) or not task_id.strip() or len(task_id) > 128:
+            raise RuntimeBlocked("video pipeline preflight requires one explicit execution Ticket ID")
+        with TaskQueue(self.database) as queue:
+            ticket = queue.get(task_id)
+            context = self._validate_video_pipeline_execution_ticket(queue, ticket)
+        payload = context["ticket"]["payload"]
+        plan = context["commander_plan"]
+        return {
+            "status": "preflight_passed",
+            "scope": "ticket_approval_and_dag_integrity_only",
+            "execution_ready": False,
+            "ticket_id": task_id,
+            "initiative_id": payload["initiative_id"],
+            "attempt_id": payload["attempt_id"],
+            "brief_sha256": payload["brief_sha256"],
+            "commander_plan_id": plan.plan_id,
+            "commander_plan_source": plan.source,
+            "dag_sha256": context["dag_sha256"],
+            "approval_evidence": context["approval_evidence"],
+            "claimed": False,
+        }
+
     def dispatch_commander_once(
         self, *, task_id: str | None = None, approved: bool = False,
         worker_id: str = "muse-commander", max_workers: int = 4,
@@ -495,10 +719,10 @@ class MuseRuntime:
             selected_payload = selected.get("payload") or {}
             if (isinstance(selected_payload, dict)
                     and selected_payload.get("kind") in {
-                        "creator_initiative_video_approval", "business_opportunity_video_approval",
+                        "creator_initiative_video_approval", "business_opportunity_video_approval", "video_pipeline",
                     }):
                 raise RuntimeBlocked(
-                    "video approval tickets require VideoTaskWorker; generic dispatch is forbidden"
+                    "video approval/video_pipeline tickets require the dedicated video dispatcher; generic dispatch is forbidden"
                 )
             if (isinstance(selected_payload, dict)
                     and (selected_payload.get("kind") == "plugin_capability_request"
@@ -1310,6 +1534,147 @@ class MuseRuntime:
                 approval_task_id=approval_task_id,
             )
 
+
+    def dispatch_video_pipeline_once(
+        self,
+        *,
+        task_id: str,
+        approved: bool = False,
+        worker_id: str = "muse-video-commander",
+        video_worker: Any | None = None,
+    ) -> dict[str, Any]:
+        """Claim one approved video_pipeline execution Ticket, bind workflow.bound, then route to VideoTaskWorker.
+
+        This is the sole Commander entry point for video execution. Generic dispatch is forbidden.
+        The VideoTaskWorker is responsible for all GPU admission and generation; this method only
+        claims the ticket, validates/restores the DAG snapshot, persists workflow.bound, and hands off.
+        """
+        if not approved:
+            raise RuntimeBlocked("video pipeline dispatch requires explicit per-ticket approval")
+        if not isinstance(task_id, str) or not task_id.strip():
+            raise RuntimeBlocked("video pipeline dispatch requires an explicit task_id")
+        with TaskQueue(self.database) as queue:
+            ticket = queue.get(task_id)
+            if ticket is None or ticket.get("status") != "queued":
+                raise RuntimeBlocked("video_pipeline execution Ticket must exist and remain queued")
+            payload = ticket.get("payload") or {}
+            if not isinstance(payload, dict) or payload.get("kind") != "video_pipeline":
+                raise RuntimeBlocked("dedicated video dispatcher accepts only kind=video_pipeline Tickets")
+            # Validate the full ticket (approval Ticket, DAG digest, approval event, etc.)
+            context = self._validate_video_pipeline_execution_ticket(queue, ticket)
+            if not callable(getattr(video_worker, "run_approved_ticket", None)):
+                raise RuntimeBlocked(
+                    "video_pipeline requires a dedicated run_approved_ticket Worker; no ticket was claimed"
+                )
+            claimed = queue.claim_next(
+                worker_id=worker_id, lease_seconds=3600, task_id=task_id,
+            )
+            if claimed is None:
+                raise RuntimeBlocked("video_pipeline execution Ticket is no longer claimable")
+        # Under the active lease, reconstruct the plan and persist workflow.bound.
+        plan = context["commander_plan"]
+        try:
+            with TaskQueue(self.database) as queue:
+                workflow = WorkflowController(queue, artifact_root=self.workspace)
+                workflow_contract = WorkflowContract.from_plan(plan)
+                workflow.bind_plan_to_ticket(
+                    plan, task_id, worker_id=worker_id,
+                    profile=WorkflowProfile.team(),
+                    contract=workflow_contract,
+                )
+                queue.record_event(
+                    task_id, "commander.video_pipeline_bound", actor="commander",
+                    payload={
+                        "plan_id": plan.plan_id,
+                        "plan_source": plan.source,
+                        "step_ids": [step.step_id for step in plan.steps],
+                        "approval_task_id": payload["approval_task_id"],
+                        "approval_event_id": payload["approval_event_id"],
+                        "attempt_id": payload["attempt_id"],
+                        "initiative_id": payload["initiative_id"],
+                    },
+                )
+        except Exception as exc:
+            # On binding failure, release the lease and fail the ticket.
+            with TaskQueue(self.database) as queue:
+                queue.record_event(
+                    task_id, "commander.video_pipeline_bind_failed", actor="commander",
+                    payload={"error_type": type(exc).__name__, "message": str(exc)[:500]},
+                )
+                queue.finish(
+                    task_id, status="failed",
+                    result={"error": type(exc).__name__, "message": str(exc)[:500]},
+                    worker_id=worker_id,
+                )
+            raise RuntimeBlocked(
+                f"video_pipeline workflow binding failed ({type(exc).__name__}): {exc}"
+            ) from exc
+
+        # Route to the dedicated VideoTaskWorker.  The worker owns all GPU/generation
+        # decisions; this dispatcher must not start generation directly.
+        if callable(getattr(video_worker, "run_approved_ticket", None)):
+            try:
+                worker_result = video_worker.run_approved_ticket(
+                    execution_task_id=task_id,
+                    commander_plan=plan,
+                    dag_sha256=context["dag_sha256"],
+                    approval_task_id=context["approval_evidence"]["approval_task_id"],
+                    approval_event_id=context["approval_evidence"]["approval_event_id"],
+                    approved_by=context["approval_evidence"]["approved_by"],
+                    worker_id=worker_id,
+                )
+                if not isinstance(worker_result, dict):
+                    worker_result = {"status": "invalid_worker_result", "result_type": type(worker_result).__name__}
+            except Exception as exc:
+                with TaskQueue(self.database) as queue:
+                    queue.record_event(
+                        task_id, "commander.video_pipeline_worker_failed", actor="commander",
+                        payload={"error_type": type(exc).__name__, "message": str(exc)[:500]},
+                    )
+                    queue.finish(
+                        task_id, status="failed",
+                        result={"error": type(exc).__name__, "message": str(exc)[:500]},
+                        worker_id=worker_id,
+                    )
+                raise
+            with TaskQueue(self.database) as queue:
+                queue.finish(
+                    task_id,
+                    status="succeeded" if worker_result.get("status") == "succeeded" else "failed",
+                    result=worker_result,
+                    worker_id=worker_id,
+                )
+            return {
+                "status": worker_result.get("status", "unknown"),
+                "task_id": task_id,
+                "attempt_id": payload["attempt_id"],
+                "initiative_id": payload["initiative_id"],
+                "workflow_bound": True,
+                "worker_result": worker_result,
+            }
+        # A bound plan is not execution; absence of a worker is a retryable failure.
+        with TaskQueue(self.database) as queue:
+            queue.record_event(
+                task_id, "commander.video_pipeline_worker_unavailable", actor="commander",
+                payload={"error_code": "video_worker_unavailable", "execution_started": False,
+                         "workflow_bound": True},
+            )
+            queue.finish(
+                task_id, status="failed",
+                result={"error_code": "video_worker_unavailable", "failure_category": "worker", "retryable": True, "recovery_guidance": "Inject the dedicated VideoTaskWorker and retry this approved ticket."},
+                worker_id=worker_id,
+            )
+        return {
+            "status": "worker_unavailable",
+            "task_id": task_id,
+            "attempt_id": payload["attempt_id"],
+            "initiative_id": payload["initiative_id"],
+            "workflow_bound": True,
+            "execution_started": False,
+            "error_code": "video_worker_unavailable",
+            "commander_plan_id": plan.plan_id,
+            "commander_plan_source": plan.source,
+        }
 
     def desktop_snapshot(self, *, app: str | None = None, task_id: str | None = None) -> dict[str, Any]:
         """Capture a read-only desktop snapshot; optionally attach a privacy-minimal event to a ticket."""

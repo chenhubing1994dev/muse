@@ -1,0 +1,13 @@
+{
+  "status": "technical_pass_editorial_review_required",
+  "duration_seconds": 55.0,
+  "width": 1080,
+  "height": 1920,
+  "fps": 24,
+  "video_codec": "h264",
+  "audio_stream": false,
+  "full_decode": "passed",
+  "scene_count": 5,
+  "distinct_visual_concept": "source-trace",
+  "ready_to_publish": false
+}

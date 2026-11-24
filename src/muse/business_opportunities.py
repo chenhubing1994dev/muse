@@ -38,6 +38,54 @@ def _url(value):
     return value
 
 
+def _build_video_commander_plan_snapshot(title: str, brief_sha256: str) -> dict:
+    """Build a deterministic minimal Commander plan snapshot for one approved video brief.
+
+    The snapshot schema matches ``MuseRuntime._restore_commander_plan_snapshot`` exactly.
+    source is ``safe_fallback`` because no LM planning is performed at approval time;
+    the brief digest is embedded in the goal so the plan is unique per brief.
+    """
+    plan_id = hashlib.sha256(
+        f"video-approval-plan:{brief_sha256}".encode("utf-8")
+    ).hexdigest()[:32]
+    snapshot = {
+        "schema": "muse-commander-plan-snapshot-v1",
+        "plan_id": plan_id,
+        "goal": f"Produce one approved video asset: {title[:120]} [brief:{brief_sha256[:16]}]",
+        "source": "safe_fallback",
+        "steps": [
+            {
+                "step_id": "research",
+                "role": "researcher",
+                "objective": "Verify the approved video brief and its source claims.",
+                "depends_on": [],
+                "required_capabilities": ["research"],
+            },
+            {
+                "step_id": "build",
+                "role": "developer",
+                "objective": "Build the approved video draft from the brief.",
+                "depends_on": ["research"],
+                "required_capabilities": ["coding", "testing"],
+            },
+            {
+                "step_id": "review",
+                "role": "reviewer",
+                "objective": "Review the video draft and verify the evidence.",
+                "depends_on": ["build"],
+                "required_capabilities": ["review"],
+            },
+        ],
+        "parallel_waves": [["research"], ["build"], ["review"]],
+    }
+    encoded = json.dumps(
+        snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    dag_sha256 = hashlib.sha256(encoded).hexdigest()
+    return snapshot, dag_sha256
+
+
 class BusinessOpportunityStore:
     """SQLite ledger for opportunity candidates, evidence and lifecycle events."""
     def __init__(self,database):
@@ -302,14 +350,22 @@ class BusinessOpportunityStore:
             raise ValueError("initiative does not contain a valid creator_brief.video")
         attempt_id="biz-"+hashlib.sha256(opportunity_id.encode("utf-8")).hexdigest()[:32]
         idem=f"business-video-approval:{opportunity_id}"
+        brief_sha256=hashlib.sha256(json.dumps(brief,sort_keys=True,ensure_ascii=False).encode("utf-8")).hexdigest()
+        plan_snapshot, dag_sha256 = _build_video_commander_plan_snapshot(
+            brief.get("title",""), brief_sha256
+        )
         payload={
             "kind":"business_opportunity_video_approval",
             "opportunity_id":opportunity_id,
             "initiative_id":initiative["id"],
             "attempt_id":attempt_id,
-            "video_brief_sha256":hashlib.sha256(json.dumps(brief,sort_keys=True,ensure_ascii=False).encode("utf-8")).hexdigest(),
+            "video_brief_sha256":brief_sha256,
             "video_brief":brief,
             "approval_scope":"one_video_attempt_only",
+            "commander_plan_id":plan_snapshot["plan_id"],
+            "commander_plan_source":plan_snapshot["source"],
+            "commander_plan_snapshot":plan_snapshot,
+            "dag_sha256":dag_sha256,
         }
         with TaskQueue(task_database) as queue:
             ticket=queue.enqueue(
@@ -319,7 +375,7 @@ class BusinessOpportunityStore:
                 require_approval=True,workload_class="media",
             )
         stored=ticket.get("payload",{})
-        if stored.get("kind")!="business_opportunity_video_approval" or stored.get("opportunity_id")!=opportunity_id or stored.get("initiative_id")!=initiative["id"] or stored.get("video_brief_sha256")!=payload["video_brief_sha256"]:
+        if stored.get("kind")!="business_opportunity_video_approval" or stored.get("opportunity_id")!=opportunity_id or stored.get("initiative_id")!=initiative["id"] or stored.get("video_brief_sha256")!=payload["video_brief_sha256"] or stored.get("commander_plan_id")!=payload["commander_plan_id"] or stored.get("dag_sha256")!=payload["dag_sha256"]:
             raise ValueError("Commander idempotency key is already bound to a different approval request")
         linked=any(
             json.loads(row["details_json"]).get("ticket_id")==ticket["id"]
@@ -377,6 +433,11 @@ class BusinessOpportunityStore:
         if not isinstance(stored,dict) or digest(stored)!=payload.get("video_brief_sha256") or digest(stored)!=digest(brief):
             raise ValueError("approved video brief no longer matches the initiative source")
         attempt_id=payload.get("attempt_id")
+        # Derive a stable recipe fingerprint: use the brief's own if present,
+        # otherwise use the brief digest (same logic as the test helper).
+        brief_recipe_sha256 = brief.get("recipe_sha256") or hashlib.sha256(
+            json.dumps(brief,sort_keys=True,ensure_ascii=False).encode("utf-8")
+        ).hexdigest()
         with InitiativeStore(initiative_database) as initiatives:
             existing=initiatives.get_video_attempt(attempt_id)
             if existing is not None:
@@ -384,7 +445,7 @@ class BusinessOpportunityStore:
                     raise ValueError("deterministic video attempt ID is already bound to another task")
                 if existing.get("approval_task_id")!=approval_task_id:
                     raise ValueError("existing video attempt is not bound to this Commander approval ticket")
-                if existing.get("recipe_sha256") != brief.get("recipe_sha256"):
+                if existing.get("recipe_sha256") != brief_recipe_sha256:
                     raise ValueError("existing video attempt is bound to a different approved recipe fingerprint")
                 attempt=existing
                 created=False
@@ -392,7 +453,7 @@ class BusinessOpportunityStore:
                 attempt=initiatives.start_video_attempt(
                     attempt_id,mode="prompt_to_video",initiative_id=initiative["id"],
                     approval_task_id=approval_task_id,
-                    recipe_sha256=brief.get("recipe_sha256"),
+                    recipe_sha256=brief_recipe_sha256,
                 )
                 created=True
         linked=any(
@@ -402,10 +463,52 @@ class BusinessOpportunityStore:
                 (opportunity_id,),
             ).fetchall()
         )
+        # Retrieve the approval event_id from the latest human.decision event.
+        approval_event_id=None
+        with TaskQueue(task_database) as queue:
+            for event in reversed(queue.events(approval_task_id,limit=500)):
+                if (event.get("event_type")=="human.decision"
+                        and event.get("actor")==approval.get("approved_by")
+                        and isinstance(event.get("payload"),dict)
+                        and event["payload"].get("decision")=="approved"):
+                    approval_event_id=event.get("event_id")
+                    break
+        if not isinstance(approval_event_id,str) or not approval_event_id:
+            raise ValueError("video_pipeline execution ticket requires the approval event_id")
+        # Freeze the Commander plan snapshot from the approval ticket.
+        plan_snapshot=payload.get("commander_plan_snapshot")
+        dag_sha256=payload.get("dag_sha256")
+        commander_plan_id=payload.get("commander_plan_id")
+        commander_plan_source=payload.get("commander_plan_source")
+        if not all(isinstance(v,str) and v for v in [commander_plan_id,commander_plan_source,dag_sha256]) or not isinstance(plan_snapshot,dict):
+            raise ValueError("approved ticket is missing required Commander plan bindings")
+        # Idempotently enqueue the execution ticket.
+        exec_idem=f"video-pipeline-execution:{attempt_id}"
+        exec_payload={
+            "kind":"video_pipeline",
+            "approval_task_id":approval_task_id,
+            "approval_event_id":approval_event_id,
+            "approved_by":approval.get("approved_by"),
+            "attempt_id":attempt_id,
+            "initiative_id":initiative["id"],
+            "brief_sha256":payload.get("video_brief_sha256"),
+            "commander_plan_id":commander_plan_id,
+            "commander_plan_source":commander_plan_source,
+            "commander_plan_snapshot":plan_snapshot,
+            "dag_sha256":dag_sha256,
+        }
+        with TaskQueue(task_database) as queue:
+            exec_ticket=queue.enqueue(
+                f"执行已批准视频生成：{brief.get('title','')[:80]}",
+                exec_payload,priority=max(0,min(100,round(opportunity["score"]))),
+                recovery_policy="manual",idempotency_key=exec_idem,
+                workload_class="media",
+            )
+        exec_ticket_id=exec_ticket["id"]
         if not linked:
-            self._event(opportunity_id,"video_attempt_queued",details={"attempt_id":attempt_id,"approval_task_id":approval_task_id,"initiative_id":initiative["id"]})
+            self._event(opportunity_id,"video_attempt_queued",details={"attempt_id":attempt_id,"approval_task_id":approval_task_id,"initiative_id":initiative["id"],"execution_ticket_id":exec_ticket_id})
             self.connection.commit()
-        return {"attempt":attempt,"created":created,"approval_task_id":approval_task_id,"gpu_execution":"not_started"}
+        return {"attempt":attempt,"created":created,"approval_task_id":approval_task_id,"execution_ticket_id":exec_ticket_id,"gpu_execution":"not_started"}
 
     def close(self): self.connection.close()
     def __enter__(self): return self

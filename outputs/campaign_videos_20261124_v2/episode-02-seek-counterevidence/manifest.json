@@ -1,0 +1,23 @@
+{
+  "title": "主动寻找反面证据",
+  "concept": "balanced-evidence",
+  "duration_seconds": 55.0,
+  "resolution": [
+    1080,
+    1920
+  ],
+  "fps": 24,
+  "voiceover": "none",
+  "release_state": "internal_review_only",
+  "ready_to_publish": false,
+  "files": {
+    "episode-02-seek-counterevidence-55s-silent.mp4": "251a5d0e528f2f11e032b27f9d69a6da5a719068c365c1ab6482994966d137e5",
+    "rights-manifest.json": "4b6643b262178c64ace6d27cf23e2b54ffb031f3c8c0b1efb7007e61a19e1b2b",
+    "qa-report.json": "95110c98de707a3f8458c49fac08157e8dd6a7f902b45a83aac9f01326014322",
+    "scenes/scene-01.png": "0755712992d057a6213c9ad48e3a4a618c019401ec025bc72a8b2fdea4e05a53",
+    "scenes/scene-02.png": "0f69a57e4180b713b3163b2a1e2f4472298bcbf4bef00c1700785ccef26ddfc4",
+    "scenes/scene-03.png": "0145f7b7a480daf99a94680ffe4edfbd6842daac2aeade39c697af3d676771f8",
+    "scenes/scene-04.png": "12602d60fa6655c3823254b9261e1219efc64df027d1346e51051b79734871a9",
+    "scenes/scene-05.png": "9e9cceb33987d9c99ecb14afc86b3ff198c6ef38434703ab4d3aef8304637d48"
+  }
+}

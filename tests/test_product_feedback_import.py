@@ -27,14 +27,33 @@ class OfflineProductFeedbackImportTests(unittest.TestCase):
         self.initiative_store = InitiativeStore(self.initiative_db)
         self.initiative = self.initiative_store.propose(
             "Muse offline worksheet fixture", kind="tool", creator_value="Creator worksheet test",
-            concept=json.dumps({"inspiration_productization": {"inspiration_id": self.inspiration["id"]}}),
+            concept=json.dumps({
+                "research_question": "结构化记录能否提高重复任务的可审计性？",
+                "creator_hypothesis_summary": "假设：结构化记录可减少遗漏；若重复试验没有稳定改善则证伪。",
+                "key_discoveries": {
+                    "creator_inspired_hypotheses": ["结构化记录可减少关键步骤遗漏。"],
+                    "testable_experiments": ["在同一组10项任务上交替使用两种记录格式，比较遗漏数量。"],
+                    "counter_evidence": ["小样本和操作者熟练度可能解释观察到的差异。"],
+                    "sources": [],
+                    "uncertainties": ["仍需扩大样本并独立复核。"],
+                },
+                "inspiration_productization": {"inspiration_id": self.inspiration["id"]},
+            }, ensure_ascii=False),
             first_step="Run a reversible experiment", expected_output="An offline worksheet",
             capability_gap="Capture creator experiment feedback", priority=60, autonomy_level="draft",
         )
-        self.product = LocalProductBuilder(self.root).build(self.initiative_store, self.initiative["id"])
+        builder = LocalProductBuilder(self.root)
+        draft = builder.build(self.initiative_store, self.initiative["id"])
+        self.assertFalse(draft["validated"])
+        self.assertEqual(draft["status"], "draft")
+        self.product = builder.approve_for_testing(
+            self.initiative_store, self.initiative["id"], reviewed_by="test-reviewer",
+        )
+        self.assertTrue(self.product["validated"])
+        self.assertEqual(self.product["status"], "testing")
+        self.assertEqual(self.initiative_store.get_by_id(self.initiative["id"])["status"], "testing")
         self.payload = {
-            "initiative_id": self.initiative["id"],
-            "title": self.initiative["title"],
+            "initiative_id": self.initiative["id"],            "title": self.initiative["title"],
             "objective": "Test whether structured notes improve repeatability.",
             "stable": "Keep the same test inputs.",
             "changing": "Try two note-taking formats.",

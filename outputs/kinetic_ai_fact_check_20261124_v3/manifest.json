@@ -1,0 +1,33 @@
+{
+  "product_id": "muse-ai-fact-check-kinetic-64s-v2",
+  "created_at": "2026-11-24T10:42:42.148455+00:00",
+  "duration_seconds": 64.0,
+  "dimensions": [
+    1080,
+    1920
+  ],
+  "fps": 24,
+  "voiceover": {
+    "status": "not_used",
+    "reason": "Silent kinetic typography master; narration is intentionally omitted."
+  },
+  "source_assets": [],
+  "files": {
+    "muse-ai-fact-check-64s-silent.mp4": "89f1a2af660b3e8695e3e64b17afe55795e770f2ea80447117b7cdd540aadf7a",
+    "README.md": "cf06f6ea083d7c828eaaafc60580510f63be2f5ce825b5201e84a251dea008da",
+    "rights-manifest.json": "f4d246e9411e705ece686d779cb6160178da3f5d0b3660eb37108aecd224e84f",
+    "qa-report.json": "ed04cc03e3f44327913ed87e91cc581e4091aabd0a47eb2e55d5cf3a884b7e4b",
+    "social-copy.md": "653bceb378d064faf6d8964e682621511648d87135d76699e6dc9a4b3c71f486",
+    "scenes/scene-01.png": "d433d798286c3f8195ae641a058eb6dd0fe3cc41f79c63903288337dcc43dc0b",
+    "scenes/scene-02.png": "23f5106d6db21d9ec9f89a7fa4e7188d811b901eff1f990aa4fad3e5fd4b5632",
+    "scenes/scene-03.png": "d4fb12d25832735bf7a60c9d12102be44cf24cd037405c82cba9be00c288515d",
+    "scenes/scene-04.png": "87eb0361fc9bb62032079331693c707c1419828d63d69d3763d13441fd3a5951",
+    "scenes/scene-05.png": "058034b3d8f28afadb9be89f3ef4c41f002e68bce676ddf591bb37c6d5a11880",
+    "scenes/scene-06.png": "69c1581e484f2804bacf751b48853b5cc378f1bb9e468117400cd2fa3c271789",
+    "scenes/scene-07.png": "be4fc83bbe6811e9dd02241e9c1219b9055252eea45fc894fad12638bc769878",
+    "scenes/scene-08.png": "4940f571a7605933ae8aadb44a147cb731462ea2bf492cb865f72cb634b6eee2"
+  },
+  "release_state": "draft_only",
+  "ready_to_publish": false,
+  "rights_review_required": true
+}

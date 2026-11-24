@@ -41,6 +41,65 @@ _STYLE_TERMS = {
 _SUPPORTED_STYLES = frozenset(_STYLE_TERMS)
 
 
+def classify_commercial_license(value: Any) -> dict[str, Any]:
+    """Classify a declared license label conservatively; this is not proof of ownership.
+
+    Only a narrow allowlist of Creative Commons/public-domain labels is recognized.
+    Non-commercial and no-derivatives labels are blocked for commercial video use.
+    Unknown labels stay unknown, and callers must still obtain/verify the actual
+    license evidence before allowing reuse.
+    """
+    if not isinstance(value, str) or not value.strip():
+        canonical = ""
+    else:
+        raw = value.strip().casefold()
+        canonical = raw
+        if raw.startswith(("http://", "https://")):
+            parsed = urlparse(raw)
+            parts = [part for part in parsed.path.split("/") if part]
+            if parsed.hostname in {"creativecommons.org", "www.creativecommons.org"}:
+                if len(parts) >= 3 and parts[:2] == ["publicdomain", "zero"]:
+                    canonical = "cc0-" + parts[2]
+                elif len(parts) >= 3 and parts[0] == "licenses":
+                    canonical = "cc-" + parts[1] + "-" + parts[2]
+                else:
+                    canonical = ""
+            else:
+                canonical = ""
+        canonical = "-".join(canonical.replace("_", " ").split()).strip("-")
+        canonical = canonical.replace("creative-commons-", "cc-")
+
+    if canonical in {"cc0", "cc0-1.0", "public-domain", "public-domain-mark", "pdm"}:
+        status, attribution, share_alike = "commercial_allowed", False, False
+        reason = "declared_public_domain_or_cc0_label"
+    elif canonical in {"cc-by-3.0", "cc-by-4.0", "cc-by-sa-3.0", "cc-by-sa-4.0"}:
+        status, attribution = "attribution_required", True
+        share_alike = "-sa-" in canonical
+        reason = "declared_creative_commons_commercial_license_with_conditions"
+    elif (
+        "nc" in canonical.split("-")
+        or canonical in {"all-rights-reserved", "arr", "proprietary", "no-commercial-use"}
+    ):
+        status, attribution, share_alike = "prohibited", None, None
+        reason = "declared_noncommercial_or_all_rights_reserved"
+    elif "-nd-" in canonical or canonical.endswith("-nd"):
+        status, attribution, share_alike = "blocked_for_derivative_video_use", None, None
+        reason = "no_derivatives_restriction_blocks_video_adaptation"
+    else:
+        status, attribution, share_alike = "unknown", None, None
+        reason = "license_label_unrecognized_or_missing"
+
+    return {
+        "declared_license": value if isinstance(value, str) else "",
+        "canonical_license": canonical or None,
+        "commercial_use_status": status,
+        "attribution_required": attribution,
+        "share_alike_required": share_alike,
+        "basis": reason,
+        "license_evidence_review_required": True,
+    }
+
+
 def _safe_media_url(value: Any) -> str | None:
     if not isinstance(value, str) or not value or len(value) > 4096:
         return None
@@ -223,10 +282,17 @@ def download_asset(
             target = root / f"asset-{os.urandom(8).hex()}.{extension}"
             temporary.replace(target)
             temporary = None
+            rights = classify_commercial_license(asset.license)
             return {
                 "path": str(target.resolve()), "bytes": written, "source_url": url,
                 "host": host, "sha256": __import__("hashlib").sha256(target.read_bytes()).hexdigest(),
-                "license_status": "unreviewed", "reuse_allowed": False,
+                "license_status": "unreviewed",
+                "commercial_use_status": rights["commercial_use_status"],
+                "attribution_required": rights["attribution_required"],
+                "share_alike_required": rights["share_alike_required"],
+                "license_evidence_review_required": True,
+                "reuse_allowed": False,
+                "rights_assessment": rights,
                 "manifest": asdict(asset),
             }
     finally:

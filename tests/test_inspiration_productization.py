@@ -47,8 +47,11 @@ class OfflineInspirationProductizationTests(unittest.TestCase):
     def test_builds_verified_offline_product_without_dispatch_or_publication(self):
         result = build_offline_inspiration_product(**self.kwargs)
         self.assertEqual(result["status"], "completed")
-        self.assertEqual(result["initiative_status"], "testing")
+        self.assertEqual(result["initiative_status"], "proposed")
         self.assertTrue(result["verified"])
+        self.assertEqual(result["package_integrity"], "passed")
+        self.assertFalse(result["validated"])
+        self.assertFalse(result["publishable"])
         self.assertFalse(result["published"])
         self.assertFalse(result["dispatch_started"])
         self.assertFalse(result["gpu_work_started"])
@@ -56,9 +59,10 @@ class OfflineInspirationProductizationTests(unittest.TestCase):
         with InitiativeStore(self.root / "data" / "initiatives" / "muse.sqlite3") as store:
             initiative = store.get_by_id(result["initiative_id"])
             verified = LocalProductBuilder(self.root).verify(store, result["initiative_id"])
-        self.assertEqual(initiative["status"], "testing")
+        self.assertEqual(initiative["status"], "proposed")
         self.assertEqual(initiative["autonomy_level"], "draft")
-        self.assertTrue(verified["validated"])
+        self.assertFalse(verified["validated"])
+        self.assertEqual(verified["package_integrity"], "passed")
         concept = json.loads(initiative["concept"])
         epistemic = concept["inspiration_productization"]
         self.assertEqual(epistemic["epistemic_status"], "symbolic_hypothesis_only")

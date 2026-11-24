@@ -220,12 +220,13 @@ class AutonomousResearchTests(unittest.TestCase):
     def test_creator_inspired_hypotheses_are_persisted_idempotently_with_provenance(self):
         synthesis = {
             "executive_summary": "两份研究材料都强调反馈与复盘 [S1][S2]。",
-            "cross_source_agreements": [], "differences": [], "counter_evidence": [],
+            "cross_source_agreements": ["两份材料都强调反馈与复盘需要保留可追溯来源 [S1][S2]"], "differences": [],
+            "counter_evidence": ["反方材料提示来源关系图可能增加整理成本，需要用相同任务集比较净收益 [S2]"],
             "design_implications_for_muse": [],
             "creator_inspired_hypotheses": [
                 "假设：结合创造者强调的失败复盘经验，来源关系图能减少重复研究；检验：通过重复任务实验比较重复率；证伪条件：若重复率没有下降则否定假设 [S1][S2]。"
             ],
-            "testable_experiments": [], "uncertainties": [],
+            "testable_experiments": ["在相同任务集上比较有无来源关系图时的重复选题率，并记录样本与失败项 [S1]。"], "uncertainties": [],
         }
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -237,6 +238,8 @@ class AutonomousResearchTests(unittest.TestCase):
                 synthesizer=lambda topic, sources: synthesis,
             )
             result = engine.run_once()
+            self.assertEqual(result.get("status"), "completed", msg=result)
+
             report = result["report"]
             self.assertEqual(report["creator_inspired_hypothesis_persistence_status"], "completed")
             self.assertEqual(report["value_forge"]["epistemic_status"], "hypothesis_only")
@@ -244,14 +247,23 @@ class AutonomousResearchTests(unittest.TestCase):
             self.assertTrue(all(item["evaluation"]["ratings"]["recurrence"] == 1
                                 for item in report["value_forge"]["candidates"]))
             self.assertFalse(report["value_forge"]["dispatch_started"])
-            self.assertEqual(report["creator_brief"]["value_opportunities_epistemic_status"], "hypothesis_only")
-            self.assertGreaterEqual(len(report["creator_brief"]["value_opportunities"]), 1)
-
-
-            product = report["creator_initiatives"][0]["product"]
-            self.assertEqual(product["status"], "testing")
-            self.assertTrue(product["validated"])
-            self.assertTrue((root / product["package_path"]).is_file())
+            creator_brief = report["creator_brief"]
+            self.assertFalse(creator_brief["autonomy_policy"]["auto_publish"])
+            self.assertEqual(
+                creator_brief["autonomy_policy"]["gpu_generation"],
+                "queued_only_no_gpu_work_in_research_cycle",
+            )
+            self.assertEqual(len(report["creator_initiatives"]), 1)
+            product_result = report["creator_initiatives"][0]["product"]
+            # Autonomous builds are intact drafts; promotion needs a named human review.
+            self.assertFalse(product_result["validated"])
+            self.assertEqual(product_result["status"], "draft")
+            self.assertEqual(product_result["package_integrity"], "passed")
+            self.assertTrue((root / product_result["package_path"]).is_file())
+            self.assertEqual(report["creator_video_task"]["status"], "queued")
+            self.assertFalse(report["creator_video_task"]["gpu_started"])
+            self.assertEqual(report["creator_video_approval"]["status"], "waiting_approval")
+            self.assertFalse(report["creator_video_approval"]["approved"])
             self.assertEqual(len(report["creator_inspired_hypothesis_nodes"]), 1)
             first_id = report["creator_inspired_hypothesis_nodes"][0]["id"]
             self.assertEqual(report["creator_inspired_hypothesis_nodes"][0]["novelty_status"],
@@ -979,6 +991,17 @@ class AutonomousResearchTests(unittest.TestCase):
                 self.assertEqual(brief["source_evolution_cycle_id"], result["evolution_cycle_id"])
                 self.assertIn("video", brief["deliverables"])
                 self.assertIn("offline_product", brief["deliverables"])
+                video_brief = brief["video"]
+                self.assertEqual(len(video_brief["scenes"]), 3)
+                self.assertAlmostEqual(sum(scene["duration_seconds"] for scene in video_brief["scenes"]), 9.0)
+                self.assertTrue(video_brief["narration"]["enabled"])
+                self.assertEqual(video_brief["narration"]["language"], "zh-HK")
+                self.assertEqual(video_brief["narration"]["style"], "yujie_canto")
+                self.assertIn("待验证假设", video_brief["narration"]["inspiration"])
+                self.assertFalse(video_brief["narration"]["claim_grounded"])
+                self.assertEqual(video_brief["media_asset_search"]["target_ratio"], 9 / 16)
+                self.assertEqual(video_brief["media_asset_search"]["rights_policy"], "candidate_only_requires_human_review")
+
                 attempts = initiatives.list_video_attempts(limit=10)
                 self.assertEqual(len(attempts), 1)
                 self.assertEqual(attempts[0]["status"], "queued")

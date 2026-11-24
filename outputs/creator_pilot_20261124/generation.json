@@ -1,0 +1,225 @@
+{
+  "status": "completed",
+  "title": "AI講得好肯定，就一定係真？三步查證法",
+  "evolution_cycle_id": "cycle_30cef7814dc64231870712976eaacb8e",
+  "mp4": {
+    "path": "outputs/creator_pilot_20261124/ai-verification-three-steps-9x16.mp4",
+    "bytes": 22053074,
+    "sha256": "47acafe30d77b1e16cef09fa4f23d21fc8942d54d5eb2e15a3b3409000ed7229",
+    "duration_seconds": 24.5,
+    "width": 1080,
+    "height": 1920,
+    "fps": 24,
+    "codec": "h264",
+    "audio_codec": "aac",
+    "audio_sample_rate": 48000,
+    "encoder": "h264_amf",
+    "full_decode": "passed"
+  },
+  "cover": {
+    "path": "outputs/creator_pilot_20261124/cover.jpg",
+    "sha256": "0d0eaa767569cb0b7081f2b6b572076987965e5d5663fdbadc91f04de5b4fa80"
+  },
+  "product": {
+    "relative_path": ".muse-video-pilot-workspace-20261124\\data\\products\\5d8e4a058ea37814c61fa25b138a4e62\\a448d971e85f97611878",
+    "initiative_id": "5d8e4a058ea37814c61fa25b138a4e62",
+    "version_id": "a448d971e85f97611878",
+    "title": "AI講得好肯定，就一定係真？三步查證法",
+    "kind": "video_creator",
+    "status": "testing",
+    "video_metadata": {
+      "bytes": 22053074,
+      "model": "Wan 2.1 T2V 1.3B (six existing AI shots) + FFmpeg editorial assembly",
+      "height": 1920,
+      "has_audio": true,
+      "status": "completed",
+      "aspect_ratio": "9:16",
+      "fps": 24.0,
+      "frames": 588,
+      "width": 1080,
+      "duration_seconds": 24.5,
+      "source_duration_seconds": 24.5,
+      "source_frames": 588,
+      "output": "video.mp4",
+      "motion": {
+        "status": "disabled",
+        "profile": "none"
+      }
+    },
+    "quality_gate": {
+      "schema_version": 1,
+      "status": "passed",
+      "passed": true,
+      "ready_to_publish": false,
+      "blocking_reason": "editorial_rights_disclosure_platform_and_account_review_required",
+      "review_warning_count": 5,
+      "review_warning_codes": [
+        "audio_loudness_low",
+        "frozen_frames"
+      ],
+      "warning_review_required": true,
+      "report": "qa-report.json"
+    },
+    "source_assets": [],
+    "subtitles": null,
+    "narration_asr": null,
+    "clip_provenance": null,
+    "subtitle_review": null,
+    "background_music": null,
+    "package_sha256": "056cafcad15baa7da601430adf0a39958ed0399bda5c212b1003307b312a5910",
+    "mp4_sha256": "47acafe30d77b1e16cef09fa4f23d21fc8942d54d5eb2e15a3b3409000ed7229",
+    "manifest_sha256": "6bfcfe0efd5f3fc605a5263ac285488df7682f7cab772ebcea4abcbc324a825b",
+    "recipe_sha256": null,
+    "storyboard_sha256": "97bd36c1fd264484b58bcecd234479d4f686754e46d9093395a5667b8b94ef46",
+    "readme_sha256": "b73ad2da3e9a1fdc1264bd23932c0b93f5da6ab8d3fcf12697ab7996360db805",
+    "validation_summary": {
+      "validated": true,
+      "checks": [
+        "mp4_container",
+        "sha256",
+        "zip_crc",
+        "zip_members",
+        "zip_content_hashes"
+      ]
+    },
+    "created": false,
+    "validated": true,
+    "creator_initiative_id": "d14f762216e84f6bbffec44309596fa0",
+    "ledger_event_id": "fcc78b6ca67140fab6babc1eb5f39313",
+    "knowledge_linkage": {
+      "status": "linked",
+      "artifact_node_id": "e1893916767f8d69e1382a0a27e5ac1d",
+      "linked_cycle_nodes": 3,
+      "already_linked_cycle_nodes": 0,
+      "new_cycle_links": 3,
+      "evolution_cycle_id": "cycle_30cef7814dc64231870712976eaacb8e",
+      "scan_limit": 500
+    },
+    "evolution_cycle_id": "cycle_30cef7814dc64231870712976eaacb8e"
+  },
+  "product_validation": {
+    "relative_path": ".muse-video-pilot-workspace-20261124\\data\\products\\5d8e4a058ea37814c61fa25b138a4e62\\a448d971e85f97611878",
+    "initiative_id": "5d8e4a058ea37814c61fa25b138a4e62",
+    "version_id": "a448d971e85f97611878",
+    "title": "AI講得好肯定，就一定係真？三步查證法",
+    "kind": "video_creator",
+    "status": "testing",
+    "video_metadata": {
+      "bytes": 22053074,
+      "model": "Wan 2.1 T2V 1.3B (six existing AI shots) + FFmpeg editorial assembly",
+      "height": 1920,
+      "has_audio": true,
+      "status": "completed",
+      "aspect_ratio": "9:16",
+      "fps": 24.0,
+      "frames": 588,
+      "width": 1080,
+      "duration_seconds": 24.5,
+      "source_duration_seconds": 24.5,
+      "source_frames": 588,
+      "output": "video.mp4",
+      "motion": {
+        "status": "disabled",
+        "profile": "none"
+      }
+    },
+    "quality_gate": {
+      "schema_version": 1,
+      "status": "passed",
+      "passed": true,
+      "ready_to_publish": false,
+      "blocking_reason": "editorial_rights_disclosure_platform_and_account_review_required",
+      "review_warning_count": 5,
+      "review_warning_codes": [
+        "audio_loudness_low",
+        "frozen_frames"
+      ],
+      "warning_review_required": true,
+      "report": "qa-report.json"
+    },
+    "source_assets": [],
+    "subtitles": null,
+    "narration_asr": null,
+    "clip_provenance": null,
+    "subtitle_review": null,
+    "background_music": null,
+    "package_sha256": "056cafcad15baa7da601430adf0a39958ed0399bda5c212b1003307b312a5910",
+    "mp4_sha256": "47acafe30d77b1e16cef09fa4f23d21fc8942d54d5eb2e15a3b3409000ed7229",
+    "manifest_sha256": "6bfcfe0efd5f3fc605a5263ac285488df7682f7cab772ebcea4abcbc324a825b",
+    "recipe_sha256": null,
+    "storyboard_sha256": "97bd36c1fd264484b58bcecd234479d4f686754e46d9093395a5667b8b94ef46",
+    "readme_sha256": "b73ad2da3e9a1fdc1264bd23932c0b93f5da6ab8d3fcf12697ab7996360db805",
+    "validation_summary": {
+      "validated": true,
+      "checks": [
+        "mp4_container",
+        "sha256",
+        "zip_crc",
+        "zip_members",
+        "zip_content_hashes"
+      ]
+    },
+    "created": false,
+    "validated": true
+  },
+  "research_nodes": {
+    "source_node_id": "a33beedd494e84cbeb7c07b73d361970",
+    "claim_node_id": "53035e5c6565353942e9f72aeaa5e0d4",
+    "idea_node_id": "ebfe13e1a65d02ed26dd7abe3595a101",
+    "knowledge_linkage": {
+      "status": "linked",
+      "artifact_node_id": "e1893916767f8d69e1382a0a27e5ac1d",
+      "linked_cycle_nodes": 3,
+      "already_linked_cycle_nodes": 0,
+      "new_cycle_links": 3,
+      "evolution_cycle_id": "cycle_30cef7814dc64231870712976eaacb8e",
+      "scan_limit": 500
+    }
+  },
+  "bundle": {
+    "path": "outputs/creator_pilot_20261124/delivery-bundle.zip",
+    "bytes": 46415567,
+    "sha256": "5560151bd8da476dcca481590e542d6e1b177bb6da7faa369983fc29373a6fc3",
+    "entries": 9,
+    "crc_valid": true
+  },
+  "voiceover": {
+    "status": "not_used"
+  },
+  "narration_asr": null,
+  "subtitle_review": null,
+  "status_note": "testing; human listening and editorial review required before publication",
+  "completed_at": "2026-11-24T09:44:40.508558+00:00",
+  "publish_package": {
+    "status": "completed",
+    "release_state": "draft_only",
+    "can_publish": false,
+    "output_dir": ".muse-video-pilot-workspace-20261124/data/products/5d8e4a058ea37814c61fa25b138a4e62/a448d971e85f97611878/publish-package-v1",
+    "package_path": ".muse-video-pilot-workspace-20261124/data/products/5d8e4a058ea37814c61fa25b138a4e62/a448d971e85f97611878/publish-package-v1/publish-package.zip",
+    "package_bytes": 45550502,
+    "package_sha256": "f6097596092827c6bd87fce45aaa46368210d47229c32732b796003f3a247627",
+    "platforms": [
+      "youtube_shorts",
+      "tiktok",
+      "instagram_reels",
+      "bilibili"
+    ],
+    "files": 19,
+    "technical_qa": "passed",
+    "review_warning_count": 5,
+    "review_warning_codes": [
+      "audio_loudness_low",
+      "frozen_frames"
+    ],
+    "release_quality_status": "blocked_pending_human_review",
+    "release_blocker_count": 11,
+    "official_publish_api_called": false,
+    "account_authorization": "not_connected",
+    "contact_sheet_generation": {
+      "status": "completed",
+      "path": "contact-sheet.png",
+      "sha256": "483faae7afc0917ecd4e00cb5dcf081a7e3519fa7826246e51bf39621a811181",
+      "human_review_required": true
+    }
+  }
+}

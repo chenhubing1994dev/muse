@@ -154,6 +154,15 @@ class CantoneseASRTests(unittest.TestCase):
         self.assertGreater(poor["cer"], 0.2)
         self.assertEqual(poor["status"], "needs_review")
 
+    def test_transcript_comparison_rejects_identically_corrupted_unicode(self):
+        corrupted = "人工智能\ufffdб"
+        result = compare_cantonese_transcript(corrupted, corrupted)
+        self.assertEqual(result["cer"], 0.0)
+        self.assertEqual(result["status"], "needs_review")
+        self.assertEqual(result["encoding_integrity"], "failed")
+        self.assertIn("replacement_character", result["encoding_issues"])
+        self.assertIn("unexpected_letter_script", result["encoding_issues"])
+
 
 if __name__ == "__main__":
     unittest.main()

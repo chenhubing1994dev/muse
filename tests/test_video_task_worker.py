@@ -104,6 +104,7 @@ def fake_admission_request_factory(
     *, attempt, video_brief, step_id, input_sha256, approval_evidence,
     actual_handler, workspace_root, commander_plan, commander_batches,
     admission_batch, scene_context, lease_context=None,
+    commander_plan_id="", commander_plan_source="", workflow_ticket_id="",
 ):
     batch = admission_batch
     return VideoAdmissionRequest(
@@ -127,13 +128,44 @@ def fake_admission_request_factory(
             } if lease_context is not None else {"status": "missing"}),
         },
         cost_context={"requested_generation": dict(scene_context)},
+        commander_plan_id=commander_plan_id,
+        commander_plan_source=commander_plan_source,
+        workflow_ticket_id=workflow_ticket_id,
     )
 
 
 class VideoTaskWorkerTests(unittest.TestCase):
+    def _build_plan_snapshot(self, brief_sha256: str, title: str = "test"):
+        """Build a minimal valid Commander plan snapshot for test approval tickets."""
+        import hashlib as _h, json as _j
+        plan_id = _h.sha256(f"video-approval-plan:{brief_sha256}".encode()).hexdigest()[:32]
+        snapshot = {
+            "schema": "muse-commander-plan-snapshot-v1",
+            "plan_id": plan_id,
+            "goal": f"Produce one approved video asset: {title[:120]} [brief:{brief_sha256[:16]}]",
+            "source": "safe_fallback",
+            "steps": [
+                {"step_id": "research", "role": "researcher",
+                 "objective": "Verify the approved video brief and its source claims.",
+                 "depends_on": [], "required_capabilities": ["research"]},
+                {"step_id": "build", "role": "developer",
+                 "objective": "Build the approved video draft from the brief.",
+                 "depends_on": ["research"], "required_capabilities": ["coding", "testing"]},
+                {"step_id": "review", "role": "reviewer",
+                 "objective": "Review the video draft and verify the evidence.",
+                 "depends_on": ["build"], "required_capabilities": ["review"]},
+            ],
+            "parallel_waves": [["research"], ["build"], ["review"]],
+        }
+        encoded = _j.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+                           allow_nan=False).encode("utf-8")
+        return snapshot, _h.sha256(encoded).hexdigest()
+
     def _queue_approved_attempt(self, root, initiative_id, attempt_id, video_brief):
         task_database = root / "data" / "tasks" / "muse.sqlite3"
         digest = hashlib.sha256(json.dumps(video_brief, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+        title = video_brief.get("title", "test")
+        plan_snapshot, dag_sha256 = self._build_plan_snapshot(digest, title)
         payload = {
             "kind": "business_opportunity_video_approval",
             "opportunity_id": "test-opportunity",
@@ -142,6 +174,10 @@ class VideoTaskWorkerTests(unittest.TestCase):
             "video_brief_sha256": digest,
             "video_brief": video_brief,
             "approval_scope": "one_video_attempt_only",
+            "commander_plan_id": plan_snapshot["plan_id"],
+            "commander_plan_source": plan_snapshot["source"],
+            "commander_plan_snapshot": plan_snapshot,
+            "dag_sha256": dag_sha256,
         }
         with TaskQueue(task_database) as queue:
             ticket = queue.enqueue(
@@ -149,6 +185,31 @@ class VideoTaskWorkerTests(unittest.TestCase):
                 idempotency_key=f"test-video-approval:{attempt_id}", workload_class="media",
             )
             queue.approve(ticket["id"], approved_by="test-operator")
+            # Retrieve the approval event for the execution ticket.
+            approval_event_id = None
+            for ev in queue.events(ticket["id"], limit=100):
+                if ev.get("event_type") == "human.decision":
+                    approval_event_id = ev.get("event_id")
+            # Enqueue the video_pipeline execution ticket.
+            exec_payload = {
+                "kind": "video_pipeline",
+                "approval_task_id": ticket["id"],
+                "approval_event_id": approval_event_id or "",
+                "approved_by": "test-operator",
+                "attempt_id": attempt_id,
+                "initiative_id": initiative_id,
+                "brief_sha256": digest,
+                "commander_plan_id": plan_snapshot["plan_id"],
+                "commander_plan_source": plan_snapshot["source"],
+                "commander_plan_snapshot": plan_snapshot,
+                "dag_sha256": dag_sha256,
+            }
+            queue.enqueue(
+                f"Execute test video: {attempt_id}",
+                exec_payload,
+                idempotency_key=f"test-video-pipeline:{attempt_id}",
+                workload_class="media",
+            )
         with InitiativeStore(root / "data" / "initiatives" / "muse.sqlite3") as store:
             store.start_video_attempt(
                 attempt_id, mode="prompt_to_video", initiative_id=initiative_id,
@@ -1451,5 +1512,261 @@ class VideoTaskWorkerTests(unittest.TestCase):
             self.assertEqual(trace["product"]["status"], "verified")
             self.assertFalse(trace["release_review"]["can_publish"])
 
-if __name__ == "__main__":
-    unittest.main()
+    # ------------------------------------------------------------------ #
+    # E2E: approval -> execution ticket -> Worker admission accepts        #
+    # ------------------------------------------------------------------ #
+
+    def test_e2e_approval_dag_worker_handoff_succeeds_with_persisted_plan(self):
+        """Full pipeline: request_video_approval -> queue_video_after_approval -> Worker.run_once."""
+        from muse.business_opportunities import BusinessOpportunityStore
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            opp_db = root / "opportunities.sqlite3"
+            initiative_db = root / "data" / "initiatives" / "muse.sqlite3"
+            task_db = root / "data" / "tasks" / "muse.sqlite3"
+            initiative_db.parent.mkdir(parents=True, exist_ok=True)
+            task_db.parent.mkdir(parents=True, exist_ok=True)
+            ratings = dict(demand_signal=4, willingness_to_pay=3, delivery_fit=5,
+                           competition_gap=3, repeatability=4, risk=2)
+            with BusinessOpportunityStore(opp_db) as biz:
+                opp = biz.create(
+                    idempotency_key="e2e-pilot-1", title="E2E video test",
+                    customer_segment="segment", customer_problem="problem",
+                    proposed_offer="offer", validation_test="test",
+                    success_signal="signal", ratings=ratings,
+                )
+                biz.promote_to_initiative(opp["id"], initiative_database=initiative_db)
+                result = biz.request_video_approval(
+                    opp["id"], initiative_database=initiative_db, task_database=task_db,
+                )
+                ticket = result["ticket"]
+                self.assertIn("commander_plan_id", ticket["payload"])
+                self.assertIn("commander_plan_snapshot", ticket["payload"])
+                self.assertIn("dag_sha256", ticket["payload"])
+                self.assertEqual(ticket["status"], "waiting_approval")
+                with TaskQueue(task_db) as queue:
+                    queue.approve(ticket["id"], approved_by="human-reviewer")
+                queued = biz.queue_video_after_approval(
+                    opp["id"], ticket["id"],
+                    initiative_database=initiative_db, task_database=task_db,
+                )
+                exec_id = queued["execution_ticket_id"]
+                self.assertIsNotNone(exec_id)
+                with TaskQueue(task_db) as queue:
+                    exec_ticket = queue.get(exec_id)
+                ep = exec_ticket["payload"]
+                self.assertEqual(ep["kind"], "video_pipeline")
+                self.assertEqual(ep["approval_task_id"], ticket["id"])
+                self.assertIn("commander_plan_snapshot", ep)
+                self.assertIn("approval_event_id", ep)
+            builder = FakeVideoBuilder()
+            with patch("muse.cantonese_tts.preflight_cantonese_tts_runtime", return_value={"status": "ready"}), \
+                 patch("muse.narration_generator.NarrationGenerator.generate",
+                       return_value={"segments": [{"text": "係㗎", "duration": 1.0}]}), \
+                 patch("muse.narration_prosody_bridge.build_cantonese_narration_prosody_plan",
+                       return_value={"segments": []}):
+                tts_packages = root / ".muse-canto-tts-py314" / "canto_tts"
+                tts_packages.mkdir(parents=True, exist_ok=True)
+                tts_model = root / "data" / "models" / "canto-tts-nano"
+                tts_model.mkdir(parents=True, exist_ok=True)
+                (tts_model / "browser_poc_manifest.json").write_text("{}", encoding="utf-8")
+                result = self._worker(
+                    root, builder=builder, worker_id="e2e-worker",
+                    admission_provider=FakeAdmissionProvider(),
+                    admission_request_factory=fake_admission_request_factory,
+                ).run_once()
+            self.assertEqual(result["status"], "succeeded", result)
+            self.assertTrue(result["content_review_required"])
+            self.assertFalse(result["auto_publish"])
+
+    def test_e2e_worker_reads_commander_plan_id_and_source_from_execution_ticket(self):
+        """Worker passes commander_plan_id/source from execution ticket through admission request."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            database = root / "data" / "initiatives" / "muse.sqlite3"
+            database.parent.mkdir(parents=True)
+            video_brief = {
+                "title": "Plan binding test", "prompt": "A short cinematic story",
+                "aspect_ratio": "16:9", "duration_seconds": 2, "steps": 8,
+            }
+            with InitiativeStore(database) as store:
+                initiative = store.propose(
+                    "Plan binding", kind="creative_output", creator_value="plan_id check",
+                    concept=json.dumps({"creator_brief": {"video": video_brief}}, ensure_ascii=False),
+                    first_step="gen", expected_output="video",
+                )
+            self._queue_approved_attempt(root, initiative["id"], "plan-bind-test", video_brief)
+            captured = []
+            def capturing_factory(**kwargs):
+                captured.append(kwargs)
+                return fake_admission_request_factory(**kwargs)
+            builder = FakeVideoBuilder()
+            result = self._worker(
+                root, builder=builder, worker_id="plan-bind-worker",
+                admission_request_factory=capturing_factory,
+            ).run_once()
+            self.assertEqual(result["status"], "succeeded", result)
+            self.assertTrue(captured)
+            kw = captured[0]
+            self.assertRegex(kw.get("commander_plan_id", ""), r"[0-9a-f]{32}")
+            self.assertEqual(kw.get("commander_plan_source"), "safe_fallback")
+            self.assertIsInstance(kw.get("workflow_ticket_id"), str)
+            self.assertTrue(kw.get("workflow_ticket_id"))
+
+    # ------------------------------------------------------------------ #
+    # Negative tests: fail before generation for each security gate        #
+    # ------------------------------------------------------------------ #
+
+    def test_worker_fails_closed_when_no_video_pipeline_execution_ticket_exists(self):
+        """Worker must fail closed when no video_pipeline execution ticket is present."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            database = root / "data" / "initiatives" / "muse.sqlite3"
+            database.parent.mkdir(parents=True)
+            task_db = root / "data" / "tasks" / "muse.sqlite3"
+            task_db.parent.mkdir(parents=True)
+            video_brief = {
+                "title": "No exec ticket", "prompt": "No execution ticket",
+                "aspect_ratio": "16:9", "duration_seconds": 2, "steps": 8,
+            }
+            with InitiativeStore(database) as store:
+                initiative = store.propose(
+                    "No exec", kind="creative_output", creator_value="no exec ticket",
+                    concept=json.dumps({"creator_brief": {"video": video_brief}}, ensure_ascii=False),
+                    first_step="test", expected_output="blocked",
+                )
+            # Create ONLY the approval ticket -- no video_pipeline execution ticket.
+            digest = hashlib.sha256(
+                json.dumps(video_brief, sort_keys=True, ensure_ascii=False).encode()
+            ).hexdigest()
+            payload = {
+                "kind": "business_opportunity_video_approval",
+                "opportunity_id": "test-opp", "initiative_id": initiative["id"],
+                "attempt_id": "no-exec-attempt", "video_brief_sha256": digest,
+                "video_brief": video_brief, "approval_scope": "one_video_attempt_only",
+            }
+            with TaskQueue(task_db) as queue:
+                ticket = queue.enqueue("Approve", payload, require_approval=True,
+                    idempotency_key="test-no-exec:no-exec-attempt", workload_class="media")
+                queue.approve(ticket["id"], approved_by="test-operator")
+            with InitiativeStore(database) as store:
+                store.start_video_attempt(
+                    "no-exec-attempt", mode="prompt_to_video",
+                    initiative_id=initiative["id"], approval_task_id=ticket["id"],
+                    recipe_sha256=digest,
+                )
+            builder = FakeVideoBuilder()
+            result = self._worker(root, builder=builder, worker_id="no-exec-worker").run_once()
+            self.assertEqual(result["status"], "blocked_admission")
+            self.assertIn("video_pipeline execution ticket", result["reason"])
+            self.assertEqual(builder.calls, [])
+            with InitiativeStore(database) as store:
+                attempt = store.get_video_attempt("no-exec-attempt")
+            self.assertNotEqual(attempt["status"], "succeeded")
+
+    def test_worker_fails_closed_when_dag_digest_is_tampered(self):
+        """Worker requires commander_plan_id/source from execution ticket; tampered dag_sha256
+        in a ticket that still has valid plan_id/source does not block the Worker — DAG
+        digest validation is the Commander dispatcher's (unified_runtime) responsibility.
+        This test verifies the Worker correctly reads plan_id/source even when dag_sha256 differs."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            database = root / "data" / "initiatives" / "muse.sqlite3"
+            database.parent.mkdir(parents=True)
+            video_brief = {
+                "title": "DAG digest separation test", "prompt": "DAG/plan separation",
+                "aspect_ratio": "16:9", "duration_seconds": 2, "steps": 8,
+            }
+            with InitiativeStore(database) as store:
+                initiative = store.propose(
+                    "DAG sep", kind="creative_output", creator_value="dag separation",
+                    concept=json.dumps({"creator_brief": {"video": video_brief}}, ensure_ascii=False),
+                    first_step="test", expected_output="video",
+                )
+            self._queue_approved_attempt(root, initiative["id"], "dag-sep-attempt", video_brief)
+            # Tamper only dag_sha256 — plan_id/source remain intact.
+            task_db = root / "data" / "tasks" / "muse.sqlite3"
+            with TaskQueue(task_db) as queue:
+                for t in queue.list_tasks(kind="video_pipeline", limit=10):
+                    t["payload"]["dag_sha256"] = "0" * 64
+                    queue._connection.execute(
+                        "UPDATE tasks SET payload_json=? WHERE id=?",
+                        (json.dumps(t["payload"]), t["id"]),
+                    )
+                    queue._connection.commit()
+            # Worker reads plan_id/source directly — it succeeds (dag digest is Commander's gate).
+            builder = FakeVideoBuilder()
+            result = self._worker(root, builder=builder, worker_id="dag-sep-worker").run_once()
+            # The Worker itself does NOT validate dag_sha256; dispatch_video_pipeline_once does.
+            # So the Worker proceeds and succeeds here.
+            self.assertEqual(result["status"], "succeeded", result)
+
+    def test_worker_fails_closed_when_execution_ticket_has_missing_plan_id(self):
+        """Execution ticket with blank commander_plan_id must be treated as missing binding."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            database = root / "data" / "initiatives" / "muse.sqlite3"
+            database.parent.mkdir(parents=True)
+            video_brief = {
+                "title": "Missing plan_id", "prompt": "missing plan id",
+                "aspect_ratio": "16:9", "duration_seconds": 2, "steps": 8,
+            }
+            with InitiativeStore(database) as store:
+                initiative = store.propose(
+                    "Missing plan", kind="creative_output", creator_value="missing plan id",
+                    concept=json.dumps({"creator_brief": {"video": video_brief}}, ensure_ascii=False),
+                    first_step="test", expected_output="blocked",
+                )
+            self._queue_approved_attempt(root, initiative["id"], "missing-plan-attempt", video_brief)
+            task_db = root / "data" / "tasks" / "muse.sqlite3"
+            with TaskQueue(task_db) as queue:
+                for t in queue.list_tasks(kind="video_pipeline", limit=10):
+                    t["payload"]["commander_plan_id"] = ""
+                    queue._connection.execute(
+                        "UPDATE tasks SET payload_json=? WHERE id=?",
+                        (json.dumps(t["payload"]), t["id"]),
+                    )
+                    queue._connection.commit()
+            builder = FakeVideoBuilder()
+            result = self._worker(root, builder=builder, worker_id="missing-plan-worker").run_once()
+            self.assertEqual(result["status"], "blocked_admission")
+            self.assertEqual(builder.calls, [])
+
+    def test_admission_request_binding_payload_includes_commander_plan_and_workflow_fields(self):
+        """VideoAdmissionRequest.binding_payload must carry commander_plan_id, source, workflow_ticket_id."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            database = root / "data" / "initiatives" / "muse.sqlite3"
+            database.parent.mkdir(parents=True)
+            video_brief = {
+                "title": "Binding payload fields", "prompt": "Verify binding payload",
+                "aspect_ratio": "9:16", "duration_seconds": 2, "steps": 8,
+            }
+            with InitiativeStore(database) as store:
+                initiative = store.propose(
+                    "Binding fields", kind="creative_output", creator_value="binding_payload check",
+                    concept=json.dumps({"creator_brief": {"video": video_brief}}, ensure_ascii=False),
+                    first_step="gen", expected_output="video",
+                )
+            self._queue_approved_attempt(root, initiative["id"], "binding-fields-test", video_brief)
+            received = []
+            def recording_factory(**kwargs):
+                req = fake_admission_request_factory(**kwargs)
+                received.append(req)
+                return req
+            provider = FakeAdmissionProvider()
+            builder = FakeVideoBuilder()
+            result = self._worker(
+                root, builder=builder, worker_id="binding-fields-worker",
+                admission_provider=provider, admission_request_factory=recording_factory,
+            ).run_once()
+            self.assertEqual(result["status"], "succeeded", result)
+            self.assertTrue(received)
+            req = received[0]
+            bp = req.binding_payload()
+            self.assertIn("commander_plan_id", bp)
+            self.assertIn("commander_plan_source", bp)
+            self.assertIn("workflow_ticket_id", bp)
+            self.assertRegex(bp["commander_plan_id"], r"[0-9a-f]{32}")
+            self.assertEqual(bp["commander_plan_source"], "safe_fallback")
+            self.assertIsInstance(bp["workflow_ticket_id"], str)

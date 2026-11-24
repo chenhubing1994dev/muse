@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 
 from muse.media_compositor import (
     MediaAssetStore,
+    build_scene_asset_bundle,
     compose_timeline,
     style_filter,
 )
@@ -247,6 +248,141 @@ class MediaCompositorTests(unittest.TestCase):
         self.assertTrue(all(scene["cameraMove"] for scene in scenes))
         self.assertTrue(all("vhs" in scene["vfx"] for scene in scenes))
         self.assertTrue(all(scene["src"] for scene in scenes))
+
+    def test_compose_timeline_matches_assets_by_scene_keywords(self):
+        assets = [
+            MediaAsset(title="Cosmic nebula galaxy", url="https://cdn.example/space.jpg", license="CC0"),
+            MediaAsset(title="Hong Kong city street", url="https://cdn.example/city.jpg", license="CC-BY"),
+        ]
+        narration = [
+            {"text": "宇宙星空中的星系", "start": 0.0, "end": 2.0},
+            {"text": "城市街道與天際線", "start": 2.0, "end": 4.0},
+        ]
+        scenes = compose_timeline(assets, narration, "cosmic")["props"]["scenes"]
+        self.assertEqual([scene["sourceUrl"] for scene in scenes], [
+            "https://cdn.example/space.jpg", "https://cdn.example/city.jpg",
+        ])
+        self.assertTrue(all(scene["asset_match"]["status"] == "keyword_matched" for scene in scenes))
+        self.assertIn("rights_review_required", scenes[0])
+
+    def test_compose_timeline_marks_unmatched_and_reused_assets(self):
+        assets = [MediaAsset(title="unknown image", url="https://cdn.example/unknown.jpg")]
+        narration = [{"text": "完全不相關的敘述"}, {"text": "另一個沒有匹配詞的場景"}]
+        scenes = compose_timeline(assets, narration, "pixel")["props"]["scenes"]
+        self.assertEqual(scenes[0]["asset_match"]["status"], "fallback_unmatched")
+        self.assertEqual(scenes[1]["asset_match"]["status"], "reused_fallback")
+
+    def test_scene_asset_bundle_uses_search_candidates_and_preserves_rights_provenance(self):
+        class SearchEngine:
+            def search_images(self, query, style, *, limit, min_width, target_ratio):
+                self.call = (query, style, limit, min_width, target_ratio)
+                return [
+                    {"title": "Hong Kong city street", "url": "https://cdn.example/city.jpg",
+                     "source": "catalog", "source_ref": "city-ref", "license": "CC0",
+                     "width": 1920, "height": 1080, "sha256": "a" * 64},
+                    {"title": "Duplicate city", "url": "https://cdn.example/city.jpg#duplicate",
+                     "source": "duplicate", "source_ref": "duplicate-ref", "license": "CC-BY",
+                     "width": 1920, "height": 1080},
+                    {"title": "Small city", "url": "https://cdn.example/small.jpg",
+                     "width": 640, "height": 360},
+                    {"title": "Square city", "url": "https://cdn.example/square.jpg",
+                     "width": 1200, "height": 1200},
+                    {"title": "Cosmic nebula galaxy", "url": "https://cdn.example/space.jpg",
+                     "source": "catalog", "source_ref": "space-ref", "license": "CC-BY",
+                     "width": 1920, "height": 1080},
+                ]
+
+        engine = SearchEngine()
+        bundle = build_scene_asset_bundle(
+            engine, "city and space", "cosmic",
+            [{"text": "城市街道"}, {"text": "宇宙星空"}],
+            limit=10, min_width=1280, target_ratio=16 / 9,
+        )
+        self.assertEqual(engine.call, ("city and space", "cosmic", 10, 1280, 16 / 9))
+        self.assertEqual([item["asset"]["url"] for item in bundle["scenes"]], [
+            "https://cdn.example/city.jpg", "https://cdn.example/space.jpg",
+        ])
+        self.assertTrue(all(item["asset_match"]["status"] == "keyword_matched" for item in bundle["scenes"]))
+        city = bundle["scenes"][0]["asset"]
+        self.assertEqual(city["source"], "catalog")
+        self.assertEqual(city["source_ref"], "city-ref")
+        self.assertEqual(city["license"], "CC0")
+        self.assertEqual(city["license_status"], "unreviewed")
+        self.assertFalse(city["commercial_use_allowed"])
+        self.assertEqual(city["sha256"], "a" * 64)
+        self.assertEqual(city["width"], 1920)
+        self.assertEqual(city["height"], 1080)
+        self.assertEqual(len(bundle["assets"]), 2)
+
+    def test_scene_asset_bundle_rejects_invalid_ratio_and_zero_dimensions(self):
+        class SearchEngine:
+            def search_images(self, *_args, **_kwargs):
+                return [{"title": "zero size", "url": "https://cdn.example/zero.jpg",
+                         "width": 0, "height": 0}]
+
+        with self.assertRaises(ValueError):
+            build_scene_asset_bundle(
+                SearchEngine(), "zero", "cosmic", [{"text": "zero"}],
+                min_width=0, min_height=0, target_ratio=float("nan"),
+            )
+        bundle = build_scene_asset_bundle(
+            SearchEngine(), "zero", "cosmic", [{"text": "zero"}],
+            min_width=0, min_height=0, target_ratio=1.0,
+        )
+        self.assertEqual(bundle["assets"], [])
+        self.assertEqual(bundle["scenes"][0]["asset_match"]["status"], "fallback_no_assets")
+
+    def test_scene_asset_bundle_connects_real_media_search_engine_offline(self):
+        calls = []
+
+        def search_callable(query, *, limit):
+            calls.append((query, limit))
+            return [
+                {"title": "Cosmic Hong Kong city street", "url": "https://cdn.example/city.jpg",
+                 "source": "offline-fixture", "source_ref": "city-source", "license": "CC-BY",
+                 "width": 1920, "height": 1080},
+                {"title": "Cosmic nebula galaxy", "url": "https://cdn.example/space.jpg",
+                 "source": "offline-fixture", "source_ref": "space-source",
+                 "width": 1920, "height": 1080},
+            ]
+
+        engine = MediaSearchEngine(search_callable=search_callable)
+        bundle = build_scene_asset_bundle(
+            engine, "city and space", "cosmic",
+            [{"text": "城市街道"}, {"text": "宇宙星空"}],
+        )
+        self.assertEqual(calls, [("city and space", 20)])
+        self.assertEqual([scene["asset_match"]["status"] for scene in bundle["scenes"]], [
+            "keyword_matched", "keyword_matched",
+        ])
+        self.assertEqual(bundle["scenes"][0]["asset"]["source_ref"], "city-source")
+        self.assertEqual(bundle["scenes"][1]["asset"]["source_ref"], "space-source")
+        self.assertEqual(bundle["scenes"][1]["asset"]["license_status"], "unknown")
+        self.assertFalse(bundle["scenes"][1]["asset"]["commercial_use_allowed"])
+
+    def test_scene_asset_bundle_marks_shortage_and_empty_search_as_fallback(self):
+        class SearchEngine:
+            def __init__(self, assets):
+                self.assets = assets
+
+            def search_images(self, *_args, **_kwargs):
+                return self.assets
+
+        one_asset = {"title": "city street", "url": "https://cdn.example/city.jpg",
+                     "width": 1920, "height": 1080, "license": "CC0"}
+        shortage = build_scene_asset_bundle(
+            SearchEngine([one_asset]), "city", "hk-retro",
+            [{"text": "city street"}, {"text": "underwater coral reef"}],
+        )
+        self.assertEqual(shortage["scenes"][0]["asset_match"]["status"], "keyword_matched")
+        self.assertEqual(shortage["scenes"][1]["asset_match"]["status"], "reused_fallback")
+        self.assertFalse(shortage["scenes"][1]["asset_match"]["matched_terms"])
+        empty = build_scene_asset_bundle(
+            SearchEngine([]), "nothing", "hk-retro", [{"text": "city street"}],
+        )
+        self.assertEqual(empty["scenes"][0]["asset_match"]["status"], "fallback_no_assets")
+        self.assertIsNone(empty["scenes"][0]["asset"])
+        self.assertEqual(empty["assets"], [])
 
     def test_style_filter_maps_three_styles(self):
         hk = style_filter("hk-retro")

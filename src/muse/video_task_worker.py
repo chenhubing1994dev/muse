@@ -238,6 +238,9 @@ class VideoTaskWorker:
         lease_lost: Callable[[], bool], commander_plan: Any, commander_batches: tuple[Any, ...],
         admission_batch: Any, scene_context: Mapping[str, Any],
         lease_context: Any | None = None,
+        commander_plan_id: str = "",
+        commander_plan_source: str = "",
+        workflow_ticket_id: str = "",
     ) -> dict[str, str]:
         """Issue and atomically consume one least-privilege grant for one exact Wan dispatch."""
         if self.admission_provider is None or self.admission_request_factory is None:
@@ -262,6 +265,9 @@ class VideoTaskWorker:
                 commander_plan=commander_plan, commander_batches=commander_batches,
                 admission_batch=admission_batch, scene_context=dict(scene_context),
                 lease_context=lease_context,
+                commander_plan_id=commander_plan_id,
+                commander_plan_source=commander_plan_source,
+                workflow_ticket_id=workflow_ticket_id,
             )
         except VideoAdmissionBlocked:
             raise
@@ -654,14 +660,42 @@ class VideoTaskWorker:
                 consumed_admission_steps: set[str] = set()
                 consumed_admission_grants: list[dict[str, str]] = []
                 admission_input_sha_by_step: dict[str, str] = {}
-                admission_plan_context: dict[str, Any] = {"plan": None, "batches": None}
+                admission_plan_context: dict[str, Any] = {"plan": None, "batches": None, "workflow_ticket_id": None}
+
+                # Load workflow-level Commander binding from the persisted execution ticket.
+                # This is the high-level plan (research/build/review) that proved Commander
+                # authorisation was obtained. It is distinct from the scene-level admission plan.
+                _workflow_commander_plan_id: str = ""
+                _workflow_commander_plan_source: str = ""
+                _workflow_ticket_id: str = ""
+                _approval_id = attempt.get("approval_task_id")
+                if isinstance(_approval_id, str) and _approval_id:
+                    with TaskQueue(self.task_database) as _wq:
+                        for _wt in _wq.list_tasks(kind="video_pipeline", limit=50):
+                            _wp = _wt.get("payload") or {}
+                            if (isinstance(_wp, dict)
+                                    and _wp.get("approval_task_id") == _approval_id
+                                    and _wp.get("attempt_id") == attempt_id):
+                                _workflow_commander_plan_id = _wp.get("commander_plan_id") or ""
+                                _workflow_commander_plan_source = _wp.get("commander_plan_source") or ""
+                                _workflow_ticket_id = _wt.get("id") or ""
+                                break
+                # Fail closed: a video_pipeline execution ticket with plan bindings is required.
+                if not _workflow_commander_plan_id or not _workflow_commander_plan_source:
+                    raise VideoAdmissionBlocked(
+                        "no persisted video_pipeline execution ticket found for this video attempt; "
+                        "Commander approval and DAG binding are required before GPU dispatch"
+                    )
 
                 def admission_context_for_step(step_id: str):
+                    """Return the scene-level (video generation) plan for this step."""
                     plan = admission_plan_context["plan"]
                     if plan is None:
+                        # Single-shot path: build a deterministic one-step scene plan from the
+                        # brief. Source is safe_fallback because no model planning is performed.
                         from muse.commander_planner import CommanderPlan, PlannedStep
                         plan_seed = json.dumps(
-                            [attempt_id, attempt.get("recipe_sha256"), step_id, "single-video-step-v1"],
+                            [attempt_id, attempt.get("recipe_sha256"), "single-video-step-v2"],
                             ensure_ascii=False, separators=(",", ":"),
                         )
                         plan = CommanderPlan(
@@ -671,7 +705,7 @@ class VideoTaskWorker:
                                 step_id, "developer", f"生成并验证镜头 {step_id}", (),
                                 ("comfyui_generation",),
                             ),),
-                            source="video_task_worker_single_step_v1",
+                            source="safe_fallback",
                             parallel_waves=((step_id,),),
                         )
                         admission_plan_context["plan"] = plan
@@ -748,6 +782,9 @@ class VideoTaskWorker:
                         admission_batch=admission_batch,
                         scene_context=dict(scene_context) if isinstance(scene_context, Mapping) else {},
                         lease_context=lease_context,
+                        commander_plan_id=_workflow_commander_plan_id,
+                        commander_plan_source=_workflow_commander_plan_source,
+                        workflow_ticket_id=_workflow_ticket_id,
                     )
                     if heartbeat.lease_lost:
                         raise VideoAdmissionBlocked(f"video attempt lease was lost after consuming {step_id} grant")

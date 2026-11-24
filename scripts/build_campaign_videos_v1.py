@@ -1,0 +1,230 @@
+from __future__ import annotations
+
+import hashlib
+import importlib
+import json
+import shutil
+import subprocess
+import zipfile
+from datetime import datetime, timezone
+from pathlib import Path
+
+from PIL import Image, ImageDraw
+
+ROOT = Path.cwd()
+OUT = ROOT / "outputs" / "campaign_videos_20261124_v2"
+FPS = 24
+WIDTH, HEIGHT = 1080, 1920
+FRAMES_PER_SCENE = 11 * FPS
+
+EPISODES = [
+    {
+        "slug": "episode-01-citation-is-not-proof",
+        "title": "引用不是证据",
+        "concept": "source-trace",
+        "slides": [
+            ("MUSE CAMPAIGN 01 / HOOK", "AI 有引用链接\n就代表答案有根据？", "先别急着相信", "link"),
+            ("01 / OPEN SOURCE", "打开原始页面\n别只看摘要", "核对标题 · 作者 · 日期", "browser"),
+            ("02 / MATCH THE CLAIM", "找到原文段落\n逐句对照主张", "来源存在 ≠ 支持结论", "match"),
+            ("03 / RECORD STATUS", "支持 / 不支持\n部分支持 / 未核实", "不要替来源补完证据", "status"),
+            ("MUSE / TAKEAWAY", "引用只是线索\n证据才决定结论", "免费查证清单 · 上线后提供", "checklist"),
+        ],
+    },
+    {
+        "slug": "episode-02-seek-counterevidence",
+        "title": "主动寻找反面证据",
+        "concept": "balanced-evidence",
+        "slides": [
+            ("MUSE CAMPAIGN 02 / HOOK", "所有文章都支持你\n就等于证明了吗？", "小心只看见同一边", "bias"),
+            ("01 / COUNTEREXAMPLE", "先找反例\n再找相反结果", "主动挑战自己的假设", "counter"),
+            ("02 / SOURCE QUALITY", "比较原始数据\n勘误与更新记录", "来源质量比数量重要", "quality"),
+            ("03 / BALANCE THE LEDGER", "支持与反面证据\n放在同一张记录表", "不要隐藏不利材料", "ledger"),
+            ("MUSE / TAKEAWAY", "结论先保持暂定\n直到证据足够", "记录什么新证据会改变判断", "provisional"),
+        ],
+    },
+    {
+        "slug": "episode-03-unknown-is-valid",
+        "title": "不知道也是有效结论",
+        "concept": "uncertainty-map",
+        "slides": [
+            ("MUSE CAMPAIGN 03 / HOOK", "最危险的答案\n可能错得很自信", "流畅不等于已核实", "warning"),
+            ("01 / FOUR LABELS", "事实 · 推断\n预测 · 未知", "先分清不同知识状态", "four"),
+            ("02 / FACT", "事实要能打开来源\n并核对适用范围", "写明来源与日期", "fact"),
+            ("03 / INFERENCE", "推断写明前提\n预测写明条件", "不要把推测包装成事实", "inference"),
+            ("MUSE / TAKEAWAY", "证据到哪一步\n结论就到哪一步", "冲突保留分歧 · 未知保持未知", "unknown"),
+        ],
+    },
+]
+
+BODIES = {
+ "source-trace": [
+  "很多 AI 回答会附上链接，看起来很可靠。但链接存在，不代表它真的支持这句话。",
+  "点进原始页面，确认标题、作者、发布日期，不要只读 AI 给你的摘要。",
+  "在原文里找到对应段落，逐句对照：原文到底说了什么，有没有被夸大？",
+  "给每条主张标记状态：支持、不支持、部分支持、未核实。",
+  "收藏这条，下次问 AI 时照着做。下一期：怎样主动寻找反面证据。"],
+ "balanced-evidence": [
+  "搜到的文章全都支持你？可能只是因为你只搜了支持的那一边。",
+  "换个问法搜索：「X 反例」「X 被推翻」「X 争议」，主动挑战自己的假设。",
+  "比较原始数据、样本规模、勘误与更新记录。十篇转载不如一篇原始研究。",
+  "把支持和反对的证据放进同一张表，不要悄悄删掉不利材料。",
+  "证据足够之前，结论保持暂定，并写下什么新证据会改变你的判断。"],
+ "uncertainty-map": [
+  "AI 的语气越流畅、越笃定，越容易让人放下戒心。但流畅不等于已核实。",
+  "把每句话归类：事实、推断、预测、未知。四种状态，处理方式完全不同。",
+  "事实必须能打开来源核对，并写明来源、日期和适用范围。",
+  "推断要写清前提，预测要写清条件。别把猜测包装成事实。",
+  "证据走到哪一步，结论就说到哪一步。「目前不知道」也是诚实的答案。"],
+}
+
+def add_motif(path: Path, kind: str, scene_index: int) -> None:
+    image = Image.open(path).convert("RGB")
+    draw = ImageDraw.Draw(image, "RGBA")
+    draw.font = importlib.import_module("muse.kinetic_explainer")._load_font(30, bold=True)
+    gold = (233, 199, 123, 230)
+    cyan = (124, 232, 239, 235)
+    muted = (187, 201, 225, 210)
+    # A distinct visual grammar per campaign: trace, balance, and uncertainty map.
+    if kind == "source-trace":
+        labels = ["LINK", "ORIGINAL", "CLAIM", "MATCH"]
+        x0, y0, w, gap = 120, 1080, 185, 26
+        for i, label in enumerate(labels):
+            x = x0 + i * (w + gap)
+            draw.rounded_rectangle((x, y0, x + w, y0 + 112), radius=16,
+                                   fill=(12, 35, 58, 220), outline=cyan if i == scene_index % 4 else muted, width=3)
+            draw.text((x + 18, y0 + 40), label, fill=gold if i == scene_index % 4 else muted)
+            if i < 3:
+                draw.line((x + w + 4, y0 + 56, x + w + gap - 5, y0 + 56), fill=gold, width=4)
+        draw.rounded_rectangle((120, 1240, 960, 1360), radius=18,
+                               outline=gold, width=3)
+        draw.text((154, 1280), ["SOURCE TO CLAIM", "AUTHOR / DATE / TITLE", "DOES IT SUPPORT?", "VERIFIED / UNKNOWN", "EVIDENCE DECIDES"][scene_index % 5], fill=cyan)
+    elif kind == "balanced-evidence":
+        # Two evidence columns with a deliberate balance beam; active side changes per scene.
+        draw.line((540, 1080, 540, 1320), fill=gold, width=6)
+        draw.line((260, 1140, 820, 1140), fill=cyan, width=6)
+        for cx, label, active in [(290, "SUPPORT", scene_index in (1, 3)), (790, "COUNTER", scene_index in (2, 3))]:
+            draw.ellipse((cx - 22, 1118, cx + 22, 1162), fill=gold if active else muted)
+            draw.line((cx, 1140, cx - 90, 1280), fill=gold if active else muted, width=4)
+            draw.line((cx, 1140, cx + 90, 1280), fill=gold if active else muted, width=4)
+            draw.rounded_rectangle((cx - 135, 1280, cx + 135, 1360), radius=14,
+                                   fill=(12, 35, 58, 225), outline=gold if active else muted, width=3)
+            draw.text((cx - 95, 1310), label, fill=cyan)
+        draw.text((370, 1400), "EVIDENCE LEDGER", fill=gold)
+    else:
+        labels = [("FACT", 120, 1080), ("INFERENCE", 560, 1080),
+                  ("PREDICTION", 120, 1240), ("UNKNOWN", 560, 1240)]
+        active = scene_index % 4
+        for i, (label, x, y) in enumerate(labels):
+            draw.rounded_rectangle((x, y, x + 390, y + 118), radius=20,
+                                   fill=(12, 35, 58, 225), outline=gold if i == active else muted,
+                                   width=4 if i == active else 2)
+            draw.text((x + 28, y + 42), label, fill=cyan if i == active else muted)
+        draw.text((260, 1400), "MATCH CONFIDENCE TO EVIDENCE", fill=gold)
+    image.save(path, format="PNG", optimize=True)
+
+def sha(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+def probe(ffprobe: str, path: Path) -> dict:
+    result = subprocess.run([ffprobe, "-v", "error", "-show_entries",
+        "format=duration:stream=codec_type,codec_name,width,height,avg_frame_rate",
+        "-of", "json", str(path)], capture_output=True, text=True, encoding="utf-8",
+        errors="replace", timeout=90, check=True)
+    return json.loads(result.stdout)
+
+def main() -> None:
+    if OUT.exists():
+        raise FileExistsError(f"Refusing to overwrite {OUT}")
+    ffmpeg, ffprobe = shutil.which("ffmpeg"), shutil.which("ffprobe")
+    if not ffmpeg or not ffprobe:
+        raise RuntimeError("ffmpeg and ffprobe are required")
+    renderer = importlib.import_module("muse.kinetic_explainer")
+    font = ROOT / "assets" / "fonts" / "NotoSansCJKhk-VF.ttf"
+    license_file = ROOT / "assets" / "fonts" / "NotoCJK-OFL.txt"
+    if not font.is_file() or not license_file.is_file():
+        raise FileNotFoundError("Pinned font and OFL license must both exist")
+    license_text = license_file.read_text(encoding="utf-8")
+    if "SIL OPEN FONT LICENSE" not in license_text or "Version 1.1" not in license_text:
+        raise RuntimeError("Font license check failed")
+    OUT.mkdir(parents=True)
+    results = []
+    for episode in EPISODES:
+        folder = OUT / episode["slug"]
+        scenes_dir = folder / "scenes"
+        scenes_dir.mkdir(parents=True)
+        slides = []
+        for i, (eyebrow, title, tag, motif) in enumerate(episode["slides"]):
+            slides.append({"eyebrow": eyebrow, "title": title,
+                "body": BODIES[episode["concept"]][i],
+                "tag": tag})
+        renderer.SLIDES = slides
+        scene_paths = []
+        for i, slide in enumerate(slides):
+            scene = scenes_dir / f"scene-{i+1:02d}.png"
+            renderer.render_scene(i, slide, scene)
+            add_motif(scene, episode["concept"], i)
+            scene_paths.append(scene)
+        video = folder / (episode["slug"] + "-55s-silent.mp4")
+        command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y"]
+        for scene in scene_paths:
+            command += ["-i", str(scene)]
+        filters, labels = [], []
+        for i in range(len(scene_paths)):
+            label = f"v{i}"
+            filters.append(f"[{i}:v]zoompan=z='min(zoom+0.00010,1.018)':d={FRAMES_PER_SCENE}:s={WIDTH}x{HEIGHT}:fps={FPS},setsar=1,format=yuv420p[{label}]")
+            labels.append(f"[{label}]")
+        filters.append("".join(labels) + f"concat=n={len(scene_paths)}:v=1:a=0[outv]")
+        command += ["-filter_complex", ";".join(filters), "-map", "[outv]", "-an",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "22", "-pix_fmt",
+            "yuv420p", "-movflags", "+faststart", str(video)]
+        subprocess.run(command, cwd=ROOT, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=2400, check=True)
+        metadata = probe(ffprobe, video)
+        stream = next(s for s in metadata["streams"] if s["codec_type"] == "video")
+        duration = float(metadata["format"]["duration"])
+        if (stream.get("width"), stream.get("height")) != (WIDTH, HEIGHT):
+            raise RuntimeError(f"Unexpected dimensions: {stream}")
+        if not 54.8 <= duration <= 55.2 or any(s["codec_type"] == "audio" for s in metadata["streams"]):
+            raise RuntimeError(f"Unexpected duration/audio stream: {metadata}")
+        decode = subprocess.run([ffmpeg, "-v", "error", "-i", str(video), "-f", "null", "-"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=900)
+        if decode.returncode != 0:
+            raise RuntimeError(f"Full decode failed: {decode.stderr[-2000:]}")
+        rights = {"status": "editorial_review_required", "visuals": "original_programmatic_typography_and_diagrams",
+            "third_party_video": [], "third_party_photography": [], "third_party_music": [],
+            "voiceover": "not_used", "font": {"family": "Noto Sans CJK HK",
+            "license": "SIL Open Font License 1.1", "font_sha256": sha(font),
+            "license_sha256": sha(license_file)}, "commercial_release_authorized": False}
+        qa = {"status": "technical_pass_editorial_review_required", "duration_seconds": round(duration, 3),
+            "width": WIDTH, "height": HEIGHT, "fps": FPS, "video_codec": stream.get("codec_name"),
+            "audio_stream": False, "full_decode": "passed", "scene_count": len(scene_paths),
+            "distinct_visual_concept": episode["concept"], "ready_to_publish": False}
+        (folder / "rights-manifest.json").write_text(json.dumps(rights, ensure_ascii=False, indent=2)+"\n", encoding="utf-8")
+        (folder / "qa-report.json").write_text(json.dumps(qa, ensure_ascii=False, indent=2)+"\n", encoding="utf-8")
+        payload = [video, folder / "rights-manifest.json", folder / "qa-report.json", *scene_paths]
+        manifest = {"title": episode["title"], "concept": episode["concept"],
+            "duration_seconds": round(duration, 3), "resolution": [WIDTH, HEIGHT], "fps": FPS,
+            "voiceover": "none", "release_state": "internal_review_only", "ready_to_publish": False,
+            "files": {p.relative_to(folder).as_posix(): sha(p) for p in payload}}
+        (folder / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2)+"\n", encoding="utf-8")
+        package = folder / "delivery-package.zip"
+        with zipfile.ZipFile(package, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
+            for p in payload + [folder / "manifest.json"]:
+                z.write(p, p.relative_to(folder).as_posix())
+        with zipfile.ZipFile(package) as z:
+            if z.testzip() is not None:
+                raise RuntimeError("ZIP CRC failure")
+        results.append({"title": episode["title"], "video": str(video.relative_to(ROOT)),
+            "duration_seconds": round(duration, 3), "bytes": video.stat().st_size,
+            "sha256": sha(video), "full_decode": "passed", "package": str(package.relative_to(ROOT)),
+            "package_sha256": sha(package), "ready_to_publish": False})
+    (OUT / "campaign-video-manifest.json").write_text(json.dumps({
+        "created_at": datetime.now(timezone.utc).isoformat(), "status": "internal_review_only",
+        "episodes": results, "public_posting_authorized": False, "public_deployment_authorized": False,
+        "payments_enabled": False, "sales": 0, "settled_revenue_usd": "0.00"
+    }, ensure_ascii=False, indent=2)+"\n", encoding="utf-8")
+    print(json.dumps({"status": "completed", "episodes": results}, ensure_ascii=False, indent=2))
+
+if __name__ == "__main__":
+    main()

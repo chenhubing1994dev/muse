@@ -1,0 +1,11 @@
+{
+  "currency": "USD",
+  "paid_tts_api_cost": 0,
+  "paid_stock_asset_cost": 0,
+  "cloud_compute_cost": 0,
+  "local_tts_model_license": "Apache-2.0",
+  "local_cpu_compute_cost": "electricity not metered",
+  "settled_revenue": 0,
+  "revenue_status": "no_sales_or_settlements_recorded",
+  "note": "Review-only voice preview; no external speech service or paid API was used."
+}

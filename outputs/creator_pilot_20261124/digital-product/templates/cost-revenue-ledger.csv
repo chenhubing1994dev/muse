@@ -1,0 +1,2 @@
+date,project_id,asset_id,task,provider,quantity,unit_cost,currency,paid_api_cost,stock_asset_cost,local_compute_cost_estimate,platform_fee,tax,refunds,gross_sales,settled_revenue,settlement_reference,verification_status,notes
+2026-11-24,creator-pilot-001,,,,0,0,USD,0,0,,0,0,0,0,0,,unverified,"Template row only; enter actual values and attach evidence"

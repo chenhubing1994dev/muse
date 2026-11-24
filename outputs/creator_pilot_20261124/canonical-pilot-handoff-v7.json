@@ -1,0 +1,55 @@
+{
+  "schema": "muse.canonical-pilot-handoff.v7",
+  "status": "draft_only_human_review_required",
+  "pilot_dir": "data/monetization/first-cantonese-pilot-2026-11-24-v7",
+  "videos": {
+    "vertical": {
+      "file": "video-9x16.mp4",
+      "sha256": "ec84dceb94e11f1b89a11142992912f4f24a4dc936c91b97eebb3b8927e4e1d8",
+      "bytes": 22157193,
+      "width": 1080,
+      "height": 1920,
+      "duration_seconds": 24.68,
+      "subtitle_track": "mov_text",
+      "audio_normalized": true,
+      "technical_qa": "passed"
+    },
+    "horizontal": {
+      "file": "video-16x9.mp4",
+      "sha256": "c0e716321943a8446b78b2eacc67410c3b2e17e8e4f983f5aa00e097d6dd6eee",
+      "bytes": 24581843,
+      "width": 1920,
+      "height": 1080,
+      "duration_seconds": 24.68,
+      "subtitle_track": "mov_text",
+      "audio_normalized": true,
+      "technical_qa": "passed"
+    }
+  },
+  "audio_normalization": {
+    "method": "FFmpeg loudnorm",
+    "target_integrated_lufs": -16.0,
+    "target_true_peak_dbfs": -1.5,
+    "measured_peak_dbfs": -1.4,
+    "measurement_tool": "ebur128",
+    "audio_stream_codec": "aac"
+  },
+  "motion_warning_count": 0,
+  "technical_decode": "passed",
+  "standalone_voiceover_asr_cer": 0.0625,
+  "mixed_audio_asr": "not_run",
+  "rights_review_required": true,
+  "commercial_use_allowed": false,
+  "publishable": false,
+  "release_state": "draft_only",
+  "account_authorization": "not_connected",
+  "publish_api_called": false,
+  "delivery_package_sha256": "cf6e41d333e5765ed67933e912488e0c51be0bdd84a1a4c8f974a0b23bd2cfe7",
+  "delivery_package_zip_crc": "passed",
+  "paid_api_cost_usd": 0,
+  "paid_asset_cost_usd": 0,
+  "local_compute_cost": "not_metered",
+  "orders": 0,
+  "settled_revenue": 0,
+  "production_database_touched": false
+}

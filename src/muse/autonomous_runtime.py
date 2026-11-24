@@ -9,19 +9,26 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import sqlite3
 import sys
+import tempfile
 import threading
 import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Sequence
+from urllib.parse import urlsplit
 
 from muse.capability_radar import scan_capabilities
 from muse.autonomous_research import AutonomousResearchEngine
+from muse.autonomous_value_radar import (
+    MAX_REPORTS, ROUTINE_INTERVAL_SECONDS, ROUTINE_KIND, ROUTINE_NAME,
+    make_value_radar_routine_handler,
+)
 from muse.evolution_executor import run_feedback_research_experiment
 from muse.research_knowledge import ResearchKnowledgeStore
 from muse.routines import (
@@ -312,6 +319,7 @@ class AutonomousSupervisor:
         ("queue-health", "queue_health", 300),
         ("idle-autonomous-research", "autonomous_research", 3600),
         ("creator-video-queue", "video_worker", 300),
+        (ROUTINE_NAME, ROUTINE_KIND, ROUTINE_INTERVAL_SECONDS),
     )
     WORKFLOW_ACTIONS = {
         "queue_snapshot", "knowledge_search", "knowledge_lint",
@@ -363,6 +371,9 @@ class AutonomousSupervisor:
             "queue_health": self._queue_health,
             "autonomous_research": self._autonomous_research,
             "video_worker": self._video_worker,
+            ROUTINE_KIND: make_value_radar_routine_handler(
+                workspace=self.workspace, report_loader=self._load_value_radar_reports,
+            ),
         }
 
     def _queue_health(self, _payload: dict[str, Any]) -> dict[str, Any]:
@@ -496,6 +507,240 @@ class AutonomousSupervisor:
         except Exception as exc:
             return None, None, {"status": "unavailable", "error_type": type(exc).__name__}, None
 
+    def _research_report_root(self) -> Path | None:
+        workspace = self.workspace.resolve()
+        database = self.knowledge_db
+        if not database.is_absolute():
+            database = workspace / database
+        report_root = database.parent / "reports"
+        if report_root.is_symlink():
+            return None
+        resolved = report_root.resolve()
+        try:
+            resolved.relative_to(workspace)
+        except ValueError:
+            return None
+        return resolved
+
+    @staticmethod
+    def _safe_value_radar_text_list(value: Any, *, limit: int = 12) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [
+            item.strip()[:500] for item in value[:limit]
+            if isinstance(item, str) and item.strip() and not any(ord(char) < 32 for char in item)
+        ]
+
+    def _persist_value_radar_input(self, report: Any, report_path: Any) -> str | None:
+        """Persist a minimal public-evidence projection; never copy local inspiration context."""
+        if not isinstance(report, dict) or not isinstance(report_path, str) or not report_path.strip():
+            return None
+        if len(report_path) > 4096 or any(ord(char) < 32 for char in report_path):
+            return None
+        report_root = self._research_report_root()
+        if report_root is None:
+            return None
+        source = Path(report_path)
+        if not source.is_absolute():
+            source = self.workspace / source
+        if source.is_symlink():
+            return None
+        source = source.resolve()
+        try:
+            source.relative_to(report_root)
+        except ValueError:
+            return None
+        if source.suffix.lower() != ".md" or not source.is_file():
+            return None
+
+        raw_sources = report.get("sources")
+        safe_sources = []
+        if isinstance(raw_sources, list):
+            for item in raw_sources[:50]:
+                if not isinstance(item, dict):
+                    continue
+                url = item.get("url")
+                if not isinstance(url, str) or not url.strip() or len(url) > 2048:
+                    continue
+                if any(ord(char) < 32 for char in url):
+                    continue
+                try:
+                    parsed = urlsplit(url)
+                except ValueError:
+                    continue
+                if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+                    continue
+                title = item.get("title")
+                safe_sources.append({
+                    "url": url.strip(),
+                    "title": str(title or "Untitled source").replace("\n", " ").replace("\r", " ")[:180],
+                })
+        if not safe_sources:
+            return None
+
+        synthesis = report.get("synthesis")
+        synthesis = synthesis if isinstance(synthesis, dict) else {}
+        summary = synthesis.get("executive_summary")
+        summary = summary.strip()[:1200] if isinstance(summary, str) else ""
+        experiments = self._safe_value_radar_text_list(synthesis.get("testable_experiments"))
+        counter_evidence = self._safe_value_radar_text_list(synthesis.get("counter_evidence"))
+        uncertainties = self._safe_value_radar_text_list(synthesis.get("uncertainties"))
+        if not (summary or experiments or counter_evidence):
+            return None
+        coverage = report.get("evidence_coverage_score", 0)
+        if (isinstance(coverage, bool) or not isinstance(coverage, (int, float))
+                or not math.isfinite(float(coverage))):
+            coverage = 0
+        public_report = {
+            "evidence_coverage_score": float(coverage),
+            "sources": safe_sources,
+            "synthesis": {
+                "executive_summary": summary,
+                "testable_experiments": experiments,
+                "counter_evidence": counter_evidence,
+                "uncertainties": uncertainties,
+            },
+        }
+        relative_report_path = source.relative_to(self.workspace.resolve()).as_posix()
+        envelope = {
+            "schema_version": 1,
+            "source_kind": "muse_public_research_value_radar_input",
+            "report_path": relative_report_path,
+            "report": public_report,
+        }
+        serialized = json.dumps(
+            envelope, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False,
+        ) + "\n"
+        input_dir = report_root / "value-radar-inputs"
+        if input_dir.is_symlink():
+            return None
+        input_dir.mkdir(parents=True, exist_ok=True)
+        input_root = input_dir.resolve()
+        try:
+            input_root.relative_to(report_root)
+        except ValueError:
+            return None
+        stem = re.sub(r"[^A-Za-z0-9_-]+", "-", source.stem).strip("-")[:120]
+        if not stem:
+            return None
+        destination = input_root / (stem + ".json")
+        if destination.is_symlink():
+            return None
+        if destination.is_file() and destination.read_text(encoding="utf-8") == serialized:
+            return destination.relative_to(self.workspace.resolve()).as_posix()
+
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", newline="\n",
+                prefix=".value-radar-input-", suffix=".tmp", dir=input_root, delete=False,
+            ) as handle:
+                temporary = Path(handle.name)
+                handle.write(serialized)
+                handle.flush()
+                os.fsync(handle.fileno())
+            if destination.is_symlink():
+                return None
+            os.replace(temporary, destination)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+        return destination.relative_to(self.workspace.resolve()).as_posix()
+
+    def _load_value_radar_reports(self, max_reports: int) -> list[dict[str, Any]]:
+        if (isinstance(max_reports, bool) or not isinstance(max_reports, int)
+                or not 1 <= max_reports <= MAX_REPORTS):
+            raise ValueError(f"max_reports must be between 1 and {MAX_REPORTS}")
+        workspace = self.workspace.resolve()
+        report_root = self._research_report_root()
+        if report_root is None or not report_root.is_dir():
+            return []
+        input_dir = report_root / "value-radar-inputs"
+        if input_dir.is_symlink() or not input_dir.is_dir():
+            return []
+        input_root = input_dir.resolve()
+        try:
+            input_root.relative_to(report_root)
+        except ValueError:
+            return []
+
+        candidates = []
+        for path in input_root.glob("*.json"):
+            try:
+                if path.is_symlink() or not path.is_file() or path.stat().st_size > 512 * 1024:
+                    continue
+                resolved = path.resolve()
+                resolved.relative_to(input_root)
+                candidates.append((path.stat().st_mtime_ns, path))
+            except (OSError, ValueError):
+                continue
+        candidates.sort(key=lambda item: (-item[0], item[1].name))
+        loaded: list[dict[str, Any]] = []
+        for _modified, path in candidates:
+            try:
+                envelope = json.loads(path.read_text(encoding="utf-8"))
+                if (not isinstance(envelope, dict)
+                        or set(envelope) != {"schema_version", "source_kind", "report_path", "report"}
+                        or envelope.get("schema_version") != 1
+                        or envelope.get("source_kind") != "muse_public_research_value_radar_input"):
+                    continue
+                report_path = envelope.get("report_path")
+                if not isinstance(report_path, str) or not report_path or len(report_path) > 4096:
+                    continue
+                relative = Path(report_path)
+                if relative.is_absolute() or any(part in {".", ".."} for part in relative.parts):
+                    continue
+                source = workspace / relative
+                if source.is_symlink():
+                    continue
+                source = source.resolve()
+                source.relative_to(report_root)
+                if source.suffix.lower() != ".md" or not source.is_file():
+                    continue
+                report = envelope.get("report")
+                if (not isinstance(report, dict)
+                        or set(report) != {"evidence_coverage_score", "sources", "synthesis"}
+                        or not isinstance(report.get("sources"), list)
+                        or not isinstance(report.get("synthesis"), dict)):
+                    continue
+                sources = []
+                for item in report["sources"][:50]:
+                    if not isinstance(item, dict):
+                        continue
+                    url = item.get("url")
+                    if not isinstance(url, str) or len(url) > 2048 or any(ord(char) < 32 for char in url):
+                        continue
+                    parsed = urlsplit(url)
+                    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+                        continue
+                    sources.append({"url": url, "title": str(item.get("title") or "Untitled source")[:180]})
+                if not sources:
+                    continue
+                synthesis = report["synthesis"]
+                summary = synthesis.get("executive_summary")
+                if not isinstance(summary, str):
+                    summary = ""
+                coverage = report.get("evidence_coverage_score", 0)
+                if (isinstance(coverage, bool) or not isinstance(coverage, (int, float))
+                        or not math.isfinite(float(coverage))):
+                    coverage = 0
+                safe_report = {
+                    "evidence_coverage_score": float(coverage),
+                    "sources": sources,
+                    "synthesis": {
+                        "executive_summary": summary[:1200],
+                        "testable_experiments": self._safe_value_radar_text_list(synthesis.get("testable_experiments")),
+                        "counter_evidence": self._safe_value_radar_text_list(synthesis.get("counter_evidence")),
+                        "uncertainties": self._safe_value_radar_text_list(synthesis.get("uncertainties")),
+                    },
+                }
+                loaded.append({"report_path": relative.as_posix(), "report": safe_report})
+                if len(loaded) >= max_reports:
+                    break
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                continue
+        return loaded
+
     @routine_handler_with_context
     def _autonomous_research(
         self, payload: dict[str, Any], *, execution_context: RoutineExecutionContext | None = None,
@@ -534,9 +779,20 @@ class AutonomousSupervisor:
                 reviewer_store.close()
         if result.get("status") == "cancelled":
             raise RoutineCancelled("autonomous research observed supervisor stop request")
+        report = result.get("report")
+        report = report if isinstance(report, dict) else {}
+        value_radar_input = {"status": "skipped", "reason": "research_report_not_complete_or_not_eligible"}
+        if result.get("status") == "completed" and isinstance(result.get("report_path"), str):
+            try:
+                sidecar_path = self._persist_value_radar_input(report, result["report_path"])
+                if sidecar_path:
+                    value_radar_input = {"status": "persisted", "path": sidecar_path}
+            except (OSError, TypeError, ValueError) as exc:
+                value_radar_input = {"status": "failed", "error_type": type(exc).__name__}
         return {key: value for key, value in result.items() if key != "report"} | {
-            "report_topic": result.get("report", {}).get("topic"),
-            "feedback_reviewer_configuration": result.get("report", {}).get("feedback_reviewer_configuration", reviewer_status),
+            "report_topic": report.get("topic"),
+            "feedback_reviewer_configuration": report.get("feedback_reviewer_configuration", reviewer_status),
+            "value_radar_input": value_radar_input,
         }
 
     def _execute_action(self, action: str, step: dict[str, Any]) -> dict[str, Any]:
@@ -622,10 +878,11 @@ class AutonomousSupervisor:
         handlers = dict(DEFAULT_HANDLERS)
         handlers["local_workflow"] = self.local_workflow
         handlers["inspiration_evolution"] = self.inspiration_evolution
-        from muse.pipeline_control import PipelineTaskHandler
-        handlers["video_pipeline"] = PipelineTaskHandler(self.workspace)
+        # Legacy TaskQueue video_pipeline dispatch bypasses the persisted Commander
+        # approval/admission path used by VideoTaskWorker. Keep it unhandled until
+        # it is migrated to that single authorized execution path.
+        handlers.pop("video_pipeline", None)
         return handlers
-
     def ensure_default_routines(self) -> list[str]:
         created = []
         with RoutineStore(self.routine_db) as store:

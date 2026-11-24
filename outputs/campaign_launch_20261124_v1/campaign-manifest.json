@@ -1,0 +1,28 @@
+{
+  "campaign_id": "muse-ai-verification-campaign-20261124-v1",
+  "status": "internal_review_only",
+  "episodes": 3,
+  "platforms": [
+    "YouTube Shorts",
+    "TikTok",
+    "Instagram Reels",
+    "Bilibili",
+    "Xiaohongshu"
+  ],
+  "source": "NIST AI 600-1 §2.2",
+  "public_posting_authorized": false,
+  "public_deployment_authorized": false,
+  "payments_enabled": false,
+  "sales": 0,
+  "settled_revenue_usd": "0.00",
+  "files": {
+    "CAMPAIGN.md": {
+      "bytes": 4357,
+      "sha256": "c6409576ce5c3ac8ac8bd854c1c67d4a824b4ace6e75b1636c6f893f63edc500"
+    },
+    "FUNNEL_METRICS.csv": {
+      "bytes": 213,
+      "sha256": "86aa491bee3068bf4bdd55e8b72258c649e69f510198b0c64f602ec309341435"
+    }
+  }
+}

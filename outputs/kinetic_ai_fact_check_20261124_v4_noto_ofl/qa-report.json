@@ -1,0 +1,14 @@
+{
+  "status": "technical_pass_editorial_review_required",
+  "duration_seconds": 64.0,
+  "width": 1080,
+  "height": 1920,
+  "fps": 24,
+  "video_codec": "h264",
+  "audio_stream": false,
+  "decode_check": "ffprobe_stream_metadata_passed",
+  "scenes": 8,
+  "font_license_status": "verified_sil_ofl_1_1",
+  "human_review_required": true,
+  "ready_to_publish": false
+}

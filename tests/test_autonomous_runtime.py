@@ -377,6 +377,13 @@ class AutonomousRuntimeTests(unittest.TestCase):
             self.assertEqual(result["status"], "disabled")
             self.assertFalse(result.get("claimed", False))
 
+    def test_legacy_video_pipeline_task_handler_is_not_registered(self):
+        with tempfile.TemporaryDirectory() as directory:
+            supervisor = self.make_supervisor(Path(directory))
+            handlers = supervisor.handlers()
+        self.assertNotIn("video_pipeline", handlers)
+
+
     def test_commander_video_worker_dispatches_one_task_when_opted_in(self):
         with tempfile.TemporaryDirectory() as directory:
             supervisor = self.make_supervisor(Path(directory))
@@ -514,18 +521,108 @@ class AutonomousRuntimeTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 enqueue_local_workflow(database, "search", [{"action": "knowledge_search"}])
 
+    def test_autonomous_research_feeds_sanitized_local_value_radar(self):
+        import json
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            report_dir = root / "reports"
+            report_dir.mkdir()
+            source_report = report_dir / "autonomous-research-sample-20261124.md"
+            source_report.write_text("# public research report\n", encoding="utf-8")
+            report = {
+                "topic": "Public workflow research",
+                "evidence_coverage_score": 72,
+                "sources": [
+                    {"url": "https://example.com/source-a", "title": "Source A"},
+                    {"url": "mailto:invalid@example.com", "title": "Invalid source"},
+                ],
+                "synthesis": {
+                    "executive_summary": "Public sources describe a repeatable workflow problem.",
+                    "testable_experiments": ["Compare manual and templated production time."],
+                    "counter_evidence": ["A small sample cannot establish broad demand."],
+                    "uncertainties": ["Willingness to pay remains unknown."],
+                    "creator_inspired_hypotheses": ["creator-context-sentinel"],
+                },
+                "inspiration_context": {
+                    "multi_source_context": [{"title": "memory-context-sentinel"}],
+                },
+            }
+            supervisor = self.make_supervisor(root)
+            with (
+                patch.object(supervisor, "_build_feedback_reviewer", return_value=(None, None, {"status": "disabled"}, None)),
+                patch(
+                    "muse.autonomous_runtime.AutonomousResearchEngine.run_once",
+                    return_value={"status": "completed", "report": report, "report_path": str(source_report)},
+                ),
+            ):
+                result = supervisor._autonomous_research({})
+
+            self.assertEqual(result["value_radar_input"]["status"], "persisted")
+            sidecar_path = root / result["value_radar_input"]["path"]
+            self.assertTrue(sidecar_path.is_file())
+            sidecar_text = sidecar_path.read_text(encoding="utf-8")
+            self.assertNotIn("memory-context-sentinel", sidecar_text)
+            self.assertNotIn("creator-context-sentinel", sidecar_text)
+
+            loaded = supervisor._load_value_radar_reports(20)
+            self.assertEqual(len(loaded), 1)
+            self.assertEqual(loaded[0]["report"]["synthesis"]["executive_summary"],
+                             "Public sources describe a repeatable workflow problem.")
+            self.assertEqual(len(loaded[0]["report"]["sources"]), 1)
+            self.assertEqual(loaded[0]["report"]["sources"][0]["url"], "https://example.com/source-a")
+
+            handler = supervisor._routine_handlers["autonomous_value_radar"]
+            class Context:
+                def raise_if_cancelled(self):
+                    return None
+            radar_result = handler({}, execution_context=Context())
+            self.assertEqual(radar_result["status"], "ranked_hypotheses")
+            self.assertGreaterEqual(radar_result["candidate_count"], 1)
+            self.assertFalse(radar_result["external_actions_performed"])
+            self.assertTrue(radar_result["approval_required"])
+            radar_path = root / radar_result["report_path"]
+            self.assertTrue(radar_path.is_file())
+            radar = json.loads(radar_path.read_text(encoding="utf-8"))
+            self.assertEqual(radar["candidates"][0]["evidence_state"], "hypothesis_only")
+            self.assertIsNone(radar["candidates"][0]["revenue_forecast"])
+
+    def test_value_radar_loader_rejects_absolute_report_paths(self):
+        import json
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            report_dir = root / "reports"
+            input_dir = report_dir / "value-radar-inputs"
+            input_dir.mkdir(parents=True)
+            outside_report = root / "outside.md"
+            outside_report.write_text("# outside", encoding="utf-8")
+            envelope = {
+                "schema_version": 1,
+                "source_kind": "muse_public_research_value_radar_input",
+                "report_path": str(outside_report.resolve()),
+                "report": {
+                    "evidence_coverage_score": 80,
+                    "sources": [{"url": "https://example.com/a", "title": "A"}],
+                    "synthesis": {"executive_summary": "Candidate only."},
+                },
+            }
+            (input_dir / "outside.json").write_text(json.dumps(envelope), encoding="utf-8")
+            supervisor = self.make_supervisor(root)
+            self.assertEqual(supervisor._load_value_radar_reports(20), [])
+
     def test_default_routines_are_idempotent_and_model_free(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             supervisor = self.make_supervisor(root)
             first = supervisor.ensure_default_routines()
             second = supervisor.ensure_default_routines()
-            self.assertEqual(len(first), 6)
+            self.assertEqual(len(first), 7)
             self.assertEqual(second, [])
             status = supervisor.status()
             self.assertFalse(status["architecture"]["local_model_required"])
             self.assertFalse(status["architecture"]["third_party_ai_api_required"])
-            self.assertEqual(len(status["routines"]), 6)
+            self.assertEqual(len(status["routines"]), 7)
 
         from muse.improvement import ImprovementStore
 

@@ -1,0 +1,48 @@
+{
+  "status": "internal_review_only",
+  "source_campaign_manifest": "outputs/campaign_videos_20261124_v2/campaign-video-manifest.json",
+  "public_posting_authorized": false,
+  "public_deployment_authorized": false,
+  "payments_enabled": false,
+  "episodes": [
+    {
+      "title": "引用不是证据",
+      "local_preview": "assets/campaign-review/episode-01.mp4",
+      "duration_seconds": 55,
+      "width": 1080,
+      "height": 1920,
+      "fps": 24,
+      "audio_stream": false,
+      "voiceover": "not_used",
+      "rights_status": "editorial_review_required",
+      "commercial_release_authorized": false,
+      "sha256": "7d302dbe9b846e9b9bc1d5e97a5d7eccd3d1124a184e901df295568f2065214c"
+    },
+    {
+      "title": "主动寻找反面证据",
+      "local_preview": "assets/campaign-review/episode-02.mp4",
+      "duration_seconds": 55,
+      "width": 1080,
+      "height": 1920,
+      "fps": 24,
+      "audio_stream": false,
+      "voiceover": "not_used",
+      "rights_status": "editorial_review_required",
+      "commercial_release_authorized": false,
+      "sha256": "251a5d0e528f2f11e032b27f9d69a6da5a719068c365c1ab6482994966d137e5"
+    },
+    {
+      "title": "不知道也是有效结论",
+      "local_preview": "assets/campaign-review/episode-03.mp4",
+      "duration_seconds": 55,
+      "width": 1080,
+      "height": 1920,
+      "fps": 24,
+      "audio_stream": false,
+      "voiceover": "not_used",
+      "rights_status": "editorial_review_required",
+      "commercial_release_authorized": false,
+      "sha256": "77199e3f6f2946d5afe61e57a269362ad234fa8c31d21ed41ee48a0bf0fde4ee"
+    }
+  ]
+}

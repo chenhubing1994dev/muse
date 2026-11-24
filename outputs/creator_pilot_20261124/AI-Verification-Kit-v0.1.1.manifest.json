@@ -1,0 +1,34 @@
+{
+  "schema": "muse.digital-product-package.v1",
+  "product_id": "ai-claim-check-kit-v0.1.1",
+  "version": "0.1.1",
+  "status": "draft_not_published",
+  "file": "AI-Verification-Kit-v0.1.1.zip",
+  "sha256": "22f8f149540cb0adeca37ac453301298e7bba1bc0319c3413826cb703002ee32",
+  "bytes": 8635,
+  "entry_count": 11,
+  "entries": [
+    "examples/nist-ai600-1-example.md",
+    "LICENSE-DRAFT.md",
+    "product-manifest.json",
+    "product-page-copy.md",
+    "README.md",
+    "templates/claim-register.csv",
+    "templates/cost-revenue-ledger.csv",
+    "templates/counter-evidence.md",
+    "templates/publishing-checklist.md",
+    "templates/rights-manifest.template.json",
+    "templates/source-card.md"
+  ],
+  "price_hypothesis": {
+    "currency": "USD",
+    "amount": 9.0,
+    "validated": false
+  },
+  "market_validation": "desktop_research_completed_demand_unvalidated",
+  "published": false,
+  "orders": 0,
+  "settled_revenue": 0,
+  "commercial_use_allowed": false,
+  "zip_crc": "passed"
+}

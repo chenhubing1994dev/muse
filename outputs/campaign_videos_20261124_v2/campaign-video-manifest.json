@@ -1,0 +1,44 @@
+{
+  "created_at": "2026-11-24T16:25:58.753241+00:00",
+  "status": "internal_review_only",
+  "episodes": [
+    {
+      "title": "引用不是证据",
+      "video": "outputs\\campaign_videos_20261124_v2\\episode-01-citation-is-not-proof\\episode-01-citation-is-not-proof-55s-silent.mp4",
+      "duration_seconds": 55.0,
+      "bytes": 3536892,
+      "sha256": "7d302dbe9b846e9b9bc1d5e97a5d7eccd3d1124a184e901df295568f2065214c",
+      "full_decode": "passed",
+      "package": "outputs\\campaign_videos_20261124_v2\\episode-01-citation-is-not-proof\\delivery-package.zip",
+      "package_sha256": "15cd08a8733f51446fc0fca06c1c97af5d33eaa84aac5b74e8249a202ae18c52",
+      "ready_to_publish": false
+    },
+    {
+      "title": "主动寻找反面证据",
+      "video": "outputs\\campaign_videos_20261124_v2\\episode-02-seek-counterevidence\\episode-02-seek-counterevidence-55s-silent.mp4",
+      "duration_seconds": 55.0,
+      "bytes": 3632790,
+      "sha256": "251a5d0e528f2f11e032b27f9d69a6da5a719068c365c1ab6482994966d137e5",
+      "full_decode": "passed",
+      "package": "outputs\\campaign_videos_20261124_v2\\episode-02-seek-counterevidence\\delivery-package.zip",
+      "package_sha256": "026b92f45ee7d16ef0ea54fdfb89bbc669e32f1d5a7178a7ee119c438791081b",
+      "ready_to_publish": false
+    },
+    {
+      "title": "不知道也是有效结论",
+      "video": "outputs\\campaign_videos_20261124_v2\\episode-03-unknown-is-valid\\episode-03-unknown-is-valid-55s-silent.mp4",
+      "duration_seconds": 55.0,
+      "bytes": 3566089,
+      "sha256": "77199e3f6f2946d5afe61e57a269362ad234fa8c31d21ed41ee48a0bf0fde4ee",
+      "full_decode": "passed",
+      "package": "outputs\\campaign_videos_20261124_v2\\episode-03-unknown-is-valid\\delivery-package.zip",
+      "package_sha256": "135ee0fdee593561e64b5893d73cd081effc25d8fc5d77a7d4b2135de532ac98",
+      "ready_to_publish": false
+    }
+  ],
+  "public_posting_authorized": false,
+  "public_deployment_authorized": false,
+  "payments_enabled": false,
+  "sales": 0,
+  "settled_revenue_usd": "0.00"
+}

@@ -1,0 +1,43 @@
+{
+  "schema": "muse.creator.voice-preview.v1",
+  "status": "review_only",
+  "video_file": "ai-verification-three-steps-9x16-voice-review-only.mp4",
+  "video_sha256": "de800318b7a7c56a6f534586c4f2ea3ac32d42559a8dc70447365109451852d5",
+  "video_bytes": 22158232,
+  "duration_seconds": 24.592,
+  "width": 1080,
+  "height": 1920,
+  "fps": "24/1",
+  "audio_file": "voiceover-preview.wav",
+  "audio_sha256": "0e42802924b64ebe042b9ad5fd4c7979e6a6d901075ef6ff13469aa5938946b7",
+  "audio_bytes": 2365484,
+  "subtitle_file": "voiceover-preview.srt",
+  "script_file": "voiceover-script.txt",
+  "voiceover_text": "人工智能可以答得好快，但未必答得啱。先查來源，再搵反證。唔肯定，就先唔好信。",
+  "tts": {
+    "engine": "canto-tts-onnx-segmented",
+    "model_repo": "typangaa/canto-tts-nano",
+    "model_revision": "fe17418a293d9be85685ddf750b0cfef9c88abb4",
+    "license": "Apache-2.0",
+    "voice_profile": "neutral local Hong Kong Cantonese; not a mature female voice",
+    "offline": true
+  },
+  "asr": {
+    "engine": "faster-whisper-local",
+    "model_repo": "alvanlii/whisper-small-cantonese",
+    "model_revision": "b03a4e5d482f06858ce10ebbabebabec9f447a0d",
+    "model_sha256": "d343caa7ef827ddb60bc2c1c8c741b29d2bd99d5387aa5c6f96cbd26f6804b34",
+    "status": "passed",
+    "cer": 0.0625,
+    "max_cer": 0.1,
+    "transcript": "人工智能可以答得好快，但未必答得啱，先查來源，再揾反正，唔肯定就先唔好信",
+    "segment_count": 1,
+    "human_listening_review_required": true
+  },
+  "technical_decode": "passed",
+  "publishable": false,
+  "commercial_use_allowed": false,
+  "human_listening_and_editorial_review_required": true,
+  "publish_api_called": false,
+  "auto_publish": false
+}

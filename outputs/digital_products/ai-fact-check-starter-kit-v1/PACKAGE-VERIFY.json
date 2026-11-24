@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "product_id": "ai-fact-check-starter-kit-v1",
+  "archive": "ai-fact-check-starter-kit-v1-internal-review.zip",
+  "archive_bytes": 10984,
+  "archive_sha256": "0d769f4d7966c9d12ee1957452397590b93e7d76125d3e2990d5caf91a3a3771",
+  "member_count": 10,
+  "zip_crc": "passed",
+  "files": [
+    {
+      "path": "README.md",
+      "bytes": 2059,
+      "sha256": "c4353ad67a5166e1db42d8c1322d03f6c19c54080dee31ca114b3989e8ceaac1"
+    },
+    {
+      "path": "FREE_CHECKLIST.md",
+      "bytes": 1610,
+      "sha256": "ffae4c2378545ee0e63e39c1e8b7a64f70bf480a57cb77bd434a90a9b77a9576"
+    },
+    {
+      "path": "CHECKLIST.md",
+      "bytes": 1966,
+      "sha256": "9296b821053b8382e8821c489a6a9fac7ec592abb756bfe84c02d070ba59431f"
+    },
+    {
+      "path": "CLAIM_LEDGER_TEMPLATE.md",
+      "bytes": 1421,
+      "sha256": "70146990d4cbe77095c873aa61b54bf4cd6e65a893e56958d3975b4bf73ef192"
+    },
+    {
+      "path": "COUNTEREVIDENCE_WORKSHEET.md",
+      "bytes": 1393,
+      "sha256": "ca1b875de4bfd7acb04127231a29e7804c7801a3e8fc6aff9638b1106b8572cd"
+    },
+    {
+      "path": "PROMPT_PACK.md",
+      "bytes": 2405,
+      "sha256": "ec5df7273806595e5387b1819bb7bf78809f2a4f69f8c8438035acedfd25f404"
+    },
+    {
+      "path": "SAMPLE_CASE.md",
+      "bytes": 1217,
+      "sha256": "a68aec7c5f0f58ae4384bc5e597528d8891e64949dc2ffd77eef61044ba1b9c3"
+    },
+    {
+      "path": "SOURCE_NOTES.md",
+      "bytes": 1188,
+      "sha256": "e82078e09f6ad0852da965cbef63576a2adbc2eec6b4b1bb7cd7ce2fc3271292"
+    },
+    {
+      "path": "LICENSE_DRAFT.md",
+      "bytes": 743,
+      "sha256": "e5a2faeb850e85de68ae8596551928e246c5464978649a15644bd630e2546a6a"
+    },
+    {
+      "path": "product-manifest.json",
+      "bytes": 1235,
+      "sha256": "281d3ceb71f2ca293bad262ccbb6fdb5fd31a631e8df9b3f63903201963f45b6"
+    }
+  ],
+  "release_state": "internal_review_draft",
+  "can_publish": false,
+  "payment_processor": "not_connected",
+  "sales": 0,
+  "settled_revenue_usd": "0.00",
+  "blocking_items": [
+    "human editorial review",
+    "final license and refund policy review",
+    "storefront and payment processor setup",
+    "market validation"
+  ]
+}

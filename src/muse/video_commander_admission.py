@@ -48,6 +48,10 @@ class VideoAdmissionRequest:
     actual_handler: Callable[..., Any]
     resource_context: Mapping[str, Any]
     cost_context: Mapping[str, Any]
+    # Commander plan identity and workflow ticket binding (C-contract required fields).
+    commander_plan_id: str = ""
+    commander_plan_source: str = ""
+    workflow_ticket_id: str = ""
 
     def binding_payload(self) -> dict[str, Any]:
         return {
@@ -68,6 +72,9 @@ class VideoAdmissionRequest:
             "step_ids": list(self.step_ids),
             "resource_context": dict(self.resource_context),
             "cost_context": dict(self.cost_context),
+            "commander_plan_id": self.commander_plan_id,
+            "commander_plan_source": self.commander_plan_source,
+            "workflow_ticket_id": self.workflow_ticket_id,
         }
 
 
@@ -85,6 +92,9 @@ def build_video_admission_request(
     admission_batch: Any,
     scene_context: Mapping[str, Any],
     lease_context: Any | None = None,
+    commander_plan_id: str = "",
+    commander_plan_source: str = "",
+    workflow_ticket_id: str = "",
 ) -> VideoAdmissionRequest:
     """Build a request from the Worker-supplied real DAG and official singleton batch.
 
@@ -217,6 +227,9 @@ def build_video_admission_request(
             "requested_generation": requested_generation,
             "cost_assessment_required": True,
         },
+        commander_plan_id=commander_plan_id,
+        commander_plan_source=commander_plan_source,
+        workflow_ticket_id=workflow_ticket_id,
     )
 
 

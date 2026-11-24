@@ -1,0 +1,183 @@
+{
+  "schema_version": 1,
+  "title": "AI講得好肯定，就一定係真？三步查證法",
+  "production_mode": "local_wan21_ai_footage_plus_ffmpeg_edit",
+  "evolution_cycle_id": "cycle_30cef7814dc64231870712976eaacb8e",
+  "duration_seconds": 24.5,
+  "aspect_ratio": "9:16",
+  "fps": 24,
+  "width": 1080,
+  "height": 1920,
+  "voiceover": {
+    "status": "not_used"
+  },
+  "audio": "original synthesized ambient bed; voice-aware ducking enabled for Cantonese pilot",
+  "research": {
+    "source": "Artificial Intelligence Risk Management Framework: Generative Artificial Intelligence Profile",
+    "published_at": "2024-07-26",
+    "doi": "https://doi.org/10.6028/NIST.AI.600-1",
+    "pdf": "https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.600-1.pdf",
+    "scope": "NIST AI 600-1 §2.2 and suggested action MS-2.5-003",
+    "editorial_method": "The three-step checklist is practical editorial advice; counter-evidence is not a direct NIST quotation."
+  },
+  "scenes": [
+    {
+      "order": 1,
+      "id": "shot-01",
+      "source_file": "shot-01.mp4",
+      "source_sha256": "9d118a5e19ad9e3de5b135ccfdc622441d9fdf4aec89c9f79d43f669ac06122d",
+      "source_duration_seconds": 2.083333,
+      "caption": "你敢信 AI 的每一句话？",
+      "prompt": null,
+      "prompt_id": null,
+      "seed": null,
+      "generation_status": "existing_wan21_ai_source"
+    },
+    {
+      "order": 2,
+      "id": "shot-02",
+      "source_file": "shot-02.mp4",
+      "source_sha256": "00c08f6e4b414ddbc9f486ed2dee969ac326b0e83e4fdb11d54644d5c58a06c8",
+      "source_duration_seconds": 2.083333,
+      "caption": "流畅表达\n不等于真实。",
+      "prompt": null,
+      "prompt_id": null,
+      "seed": null,
+      "generation_status": "existing_wan21_ai_source"
+    },
+    {
+      "order": 3,
+      "id": "shot-03",
+      "source_file": "shot-03.mp4",
+      "source_sha256": "78afe81ea152ba6b04b667a6b6655d16449fe42228e01079658dcf211a9efcc6",
+      "source_duration_seconds": 2.083333,
+      "caption": "① 拆开主张\n人名、日期、数字、引文\n逐条核验。",
+      "prompt": null,
+      "prompt_id": null,
+      "seed": null,
+      "generation_status": "existing_wan21_ai_source"
+    },
+    {
+      "order": 4,
+      "id": "shot-04",
+      "source_file": "shot-04.mp4",
+      "source_sha256": "2c3ed1c365c1de627990e987e8edd8870f7b252ce6d203e50b73b57673a6b572",
+      "source_duration_seconds": 2.083333,
+      "caption": "② 查原始来源\n链接存在？原文支持？",
+      "prompt": "A single warm golden ember awakens in an immense deep indigo cosmic void, delicate nebula clouds and distant stars slowly emerge, cinematic macro-to-wide camera movement, awe and mystery, premium science fiction film cinematography, volumetric light, no text, no letters, no logos",
+      "prompt_id": "cf75de4e-c4ee-4b32-a39a-12cf9ddc8ab6",
+      "seed": 20261114,
+      "generation_status": "existing_wan21_ai_source"
+    },
+    {
+      "order": 5,
+      "id": "shot-05",
+      "source_file": "shot-05.mp4",
+      "source_sha256": "2f7fc7227e84b896be7aaa1e7060b51d76175a81e36ee43cf32732d5850aa05d",
+      "source_duration_seconds": 5.083333,
+      "caption": "③ 主动找反证\n什么证据会推翻它？",
+      "prompt": null,
+      "prompt_id": "5863beb5-122d-45c1-b32e-1dcd8dab2999",
+      "seed": 20261112,
+      "generation_status": "existing_wan21_ai_source"
+    },
+    {
+      "order": 6,
+      "id": "shot-06",
+      "source_file": "shot-06.mp4",
+      "source_sha256": "92fcfa3b3fa1ac9fceb49e65b4e563deecb67cd8260a61808813e84eb0f6d24e",
+      "source_duration_seconds": 5.083333,
+      "caption": "找不到来源\n就标记：未证实。",
+      "prompt": null,
+      "prompt_id": "6bd3aff6-ad05-46cb-bc2b-ef92f19a81f0",
+      "seed": 20261113,
+      "generation_status": "existing_wan21_ai_source"
+    }
+  ],
+  "source_assets": [
+    {
+      "file": "shot-01.mp4",
+      "sha256": "9d118a5e19ad9e3de5b135ccfdc622441d9fdf4aec89c9f79d43f669ac06122d",
+      "bytes": 29082,
+      "duration_seconds": 2.083333,
+      "codec": "h264",
+      "width": 288,
+      "height": 512,
+      "fps": 12,
+      "model": "Wan 2.1 T2V 1.3B",
+      "prompt_id": null,
+      "seed": null,
+      "prompt_metadata": "not retained in source folder"
+    },
+    {
+      "file": "shot-02.mp4",
+      "sha256": "00c08f6e4b414ddbc9f486ed2dee969ac326b0e83e4fdb11d54644d5c58a06c8",
+      "bytes": 33284,
+      "duration_seconds": 2.083333,
+      "codec": "h264",
+      "width": 288,
+      "height": 512,
+      "fps": 12,
+      "model": "Wan 2.1 T2V 1.3B",
+      "prompt_id": null,
+      "seed": null,
+      "prompt_metadata": "not retained in source folder"
+    },
+    {
+      "file": "shot-03.mp4",
+      "sha256": "78afe81ea152ba6b04b667a6b6655d16449fe42228e01079658dcf211a9efcc6",
+      "bytes": 65467,
+      "duration_seconds": 2.083333,
+      "codec": "h264",
+      "width": 288,
+      "height": 512,
+      "fps": 12,
+      "model": "Wan 2.1 T2V 1.3B",
+      "prompt_id": null,
+      "seed": null,
+      "prompt_metadata": "not retained in source folder"
+    },
+    {
+      "file": "shot-04.mp4",
+      "sha256": "2c3ed1c365c1de627990e987e8edd8870f7b252ce6d203e50b73b57673a6b572",
+      "bytes": 19438,
+      "duration_seconds": 2.083333,
+      "codec": "h264",
+      "width": 288,
+      "height": 512,
+      "fps": 12,
+      "model": "Wan 2.1 T2V 1.3B",
+      "prompt_id": "cf75de4e-c4ee-4b32-a39a-12cf9ddc8ab6",
+      "seed": 20261114,
+      "prompt_metadata": "retained"
+    },
+    {
+      "file": "shot-05.mp4",
+      "sha256": "2f7fc7227e84b896be7aaa1e7060b51d76175a81e36ee43cf32732d5850aa05d",
+      "bytes": 35221,
+      "duration_seconds": 5.083333,
+      "codec": "h264",
+      "width": 288,
+      "height": 512,
+      "fps": 12,
+      "model": "Wan 2.1 T2V 1.3B",
+      "prompt_id": "5863beb5-122d-45c1-b32e-1dcd8dab2999",
+      "seed": 20261112,
+      "prompt_metadata": "not retained in source folder"
+    },
+    {
+      "file": "shot-06.mp4",
+      "sha256": "92fcfa3b3fa1ac9fceb49e65b4e563deecb67cd8260a61808813e84eb0f6d24e",
+      "bytes": 177080,
+      "duration_seconds": 5.083333,
+      "codec": "h264",
+      "width": 288,
+      "height": 512,
+      "fps": 12,
+      "model": "Wan 2.1 T2V 1.3B",
+      "prompt_id": "6bd3aff6-ad05-46cb-bc2b-ef92f19a81f0",
+      "seed": 20261113,
+      "prompt_metadata": "not retained in source folder"
+    }
+  ]
+}

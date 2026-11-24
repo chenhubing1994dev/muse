@@ -1,0 +1,2 @@
+claim_id,exact_claim,claim_type,source_url,source_title,publisher,published_at,source_quote,scope_and_context,evidence_strength,counter_evidence_url,counter_evidence_summary,unresolved_gaps,status,reviewer,last_checked_at
+C-001,"Paste one atomic claim here",factual,,,,,,,,,,,not_collected,unverified,,

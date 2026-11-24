@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="一張實用的 AI 答案查證卡：拆解主張、查核原始來源、主動尋找反證。">
+<title>Muse｜AI 三步查證卡</title>
+<style>
+:root{color-scheme:dark;--bg:#10151b;--panel:#19232d;--line:#334452;--ink:#edf4f7;--muted:#a9bac5;--mint:#a8e6cf;--gold:#e7c98b}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 85% 0%,#243b43 0,transparent 42%),var(--bg);color:var(--ink);font:16px/1.7 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{width:min(960px,92vw);margin:0 auto;padding:48px 0 72px}.eyebrow{color:var(--mint);letter-spacing:.14em;font-size:.78rem;font-weight:700}.hero{padding:34px 0 30px;border-bottom:1px solid var(--line)}h1{font-size:clamp(2.2rem,7vw,4.6rem);line-height:1.12;letter-spacing:-.04em;margin:.5rem 0 1rem}h2{font-size:1.45rem;margin:0 0 12px}p{color:var(--muted);margin:.5rem 0 1rem}.lead{font-size:1.15rem;max-width:720px}.pill{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:4px 12px;color:var(--gold);font-size:.8rem}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin:26px 0}.step,.offer,.notice{background:linear-gradient(145deg,#1b2933,#151e27);border:1px solid var(--line);border-radius:18px;padding:22px}.num{font-size:.8rem;color:var(--mint);letter-spacing:.12em;font-weight:800}.step h2{margin-top:8px}.step ul{padding-left:1.2rem;color:var(--muted)}.status{display:inline-block;font-size:.78rem;color:var(--gold);border:1px solid #685b3c;border-radius:999px;padding:3px 9px}.offer{margin-top:22px;display:grid;grid-template-columns:1.3fr .7fr;gap:20px;align-items:center}.price{font-size:2rem;color:var(--ink);font-weight:750}.button{display:inline-block;border:0;border-radius:999px;padding:13px 20px;background:var(--mint);color:#10201c;font-weight:800;font-size:1rem;cursor:pointer}.button:focus-visible{outline:3px solid white;outline-offset:3px}.disabled{opacity:.45;cursor:not-allowed}.small{font-size:.85rem}.notice{margin-top:18px;border-style:dashed}.footer{margin-top:36px;padding-top:18px;border-top:1px solid var(--line);font-size:.82rem;color:var(--muted)}
+@media(max-width:700px){main{padding-top:28px}.grid{grid-template-columns:1fr}.offer{grid-template-columns:1fr}.step{padding:18px}}
+</style>
+</head>
+<body>
+<main>
+  <div class="eyebrow">MUSE · RESEARCH LITERACY</div>
+  <header class="hero">
+    <span class="pill">免費工具 · 離線可用</span>
+    <h1>AI 有引用，<br>就代表有證據嗎？</h1>
+    <p class="lead">先別問 AI 講得有幾肯定。把主張拆開、回到原始來源，再主動找反證。這張三步查證卡，幫你把「看起來可信」變成「有跡可循」。</p>
+    <button class="button" id="download">下載免費查證卡 ↓</button>
+    <p class="small">即時在瀏覽器產生 Markdown 檔案；不會提交資料，也不會連接第三方服務。</p>
+  </header>
+  <section class="grid" aria-label="三步查證方法">
+    <article class="step"><div class="num">STEP 01</div><h2>拆開主張</h2><ul><li>圈出人名、日期、數字、引用和因果結論</li><li>一句話只保留一個可核驗主張</li><li>分清事實、推斷、意見和預測</li></ul></article>
+    <article class="step"><div class="num">STEP 02</div><h2>查原始來源</h2><ul><li>找原始文件、官方公告、論文或數據</li><li>核對作者、機構、日期和適用範圍</li><li>打開原文，確認它真的支持該主張</li></ul></article>
+    <article class="step"><div class="num">STEP 03</div><h2>主動找反證</h2><ul><li>搜尋反例、勘誤、撤回和後續研究</li><li>檢查樣本、地區、時間及統計口徑</li><li>記錄遺漏條件和其他可能解釋</li></ul></article>
+  </section>
+  <section class="notice">
+    <h2>最後，只選一個證據狀態</h2>
+    <p><strong>VERIFIED WITH SCOPE</strong>：證據支持，但有適用範圍</p>
+    <p><strong>PARTIALLY SUPPORTED</strong>：只有部分內容得到支持</p>
+    <p><strong>CONTRADICTED</strong>：可靠證據與主張衝突</p>
+    <p><strong>UNVERIFIED / UNKNOWN</strong>：證據不足或關鍵資料缺失</p>
+  </section>
+  <section class="offer">
+    <div><span class="status">內部預覽 · 尚未開售</span><h2 style="margin-top:12px">需要完整的研究工作流？</h2><p>完整工具包包含主張紀錄表、反證工作表、提示詞組合、示範案例與來源筆記。適合需要反覆查核 AI 輸出的創作者、研究者和小型團隊。</p><p class="small">不保證自動判定真偽；不取代專業審查。</p></div>
+    <div><div class="price">US$9 <span class="small">測試假設</span></div><button class="button disabled" type="button" disabled aria-disabled="true">尚未開放購買</button><p class="small">未連接商店或支付服務，不收款。</p></div>
+  </section>
+  <footer class="footer">內部本機預覽稿。NIST AI 600-1（2024-07-26）僅作為生成式 AI confabulation 風險參考；NIST 未審閱、認證或背書本工具。此內容為一般資訊素養教育，不構成法律、醫療、財務或其他專業意見。正式發布前仍須完成編輯審核、許可及退款條款審核、HTTPS 部署與平台披露檢查。</footer>
+</main>
+<script>
+const checklist = `# 免費版｜AI 三步查證卡
+
+**先別問 AI 講得有幾肯定，先問證據在哪里。**
+
+## 1. 拆開主張
+- 圈出人名、日期、數字、引用和因果結論。
+- 一句話只保留一個可以核驗的主張。
+- 區分事實、推斷、意見和預測。
+
+## 2. 查原始來源
+- 找原始文件、官方公告、研究論文或原始數據。
+- 核對作者、機構、發布日期、版本和適用範圍。
+- 打開原文，確認它真的支持這條主張。
+- 記錄頁碼、章節、表格或數據行；不要只保存 AI 給出的連結。
+
+## 3. 主動找反證
+- 搜尋相反結果、勘誤、撤回或後續研究。
+- 檢查樣本、地區、時間和統計口徑。
+- 記錄遺漏條件和其他可能解釋。
+
+## 最終只選一個狀態
+- VERIFIED WITH SCOPE：證據支持，但有明確適用範圍。
+- PARTIALLY SUPPORTED：只有部分內容得到支持。
+- CONTRADICTED：可靠證據與主張衝突。
+- UNVERIFIED / UNKNOWN：證據不足或關鍵資料缺失。
+
+## 發布前問自己
+1. 我有沒有打開原始來源？
+2. 原文是否真的支持這個說法？
+3. 我有沒有主動尋找反面證據？
+4. 有沒有把推斷寫成事實？
+5. 證據不足時，我有沒有明確標記未知？
+
+**記住：AI 可以幫你整理答案，但不能代替你核對證據。**
+
+參考：NIST AI 600-1（2024-07-26），第 2.2 節討論生成式 AI 的 confabulation 風險。三步查證卡為原創工作流程，不代表 NIST 背書。
+`;
+document.getElementById('download').addEventListener('click',()=>{const blob=new Blob([checklist],{type:'text/markdown;charset=utf-8'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='muse-ai-verification-checklist.md';a.hidden=true;document.body.appendChild(a);a.click();a.remove();window.setTimeout(()=>URL.revokeObjectURL(url),1000);});</script>
+</body>
+</html>

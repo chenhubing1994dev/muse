@@ -72,6 +72,30 @@ class VideoWorkerReverificationTests(unittest.TestCase):
         digest = hashlib.sha256(
             json.dumps(video_brief, sort_keys=True, ensure_ascii=False).encode("utf-8")
         ).hexdigest()
+        # Build a minimal Commander plan snapshot (matches business_opportunities helper).
+        import hashlib as _h, json as _j
+        plan_id = _h.sha256(f"video-approval-plan:{digest}".encode()).hexdigest()[:32]
+        snapshot = {
+            "schema": "muse-commander-plan-snapshot-v1",
+            "plan_id": plan_id,
+            "goal": f"Produce one approved video asset: 复核测试短片 [brief:{digest[:16]}]",
+            "source": "safe_fallback",
+            "steps": [
+                {"step_id": "research", "role": "researcher",
+                 "objective": "Verify the approved video brief and its source claims.",
+                 "depends_on": [], "required_capabilities": ["research"]},
+                {"step_id": "build", "role": "developer",
+                 "objective": "Build the approved video draft from the brief.",
+                 "depends_on": ["research"], "required_capabilities": ["coding", "testing"]},
+                {"step_id": "review", "role": "reviewer",
+                 "objective": "Review the video draft and verify the evidence.",
+                 "depends_on": ["build"], "required_capabilities": ["review"]},
+            ],
+            "parallel_waves": [["research"], ["build"], ["review"]],
+        }
+        encoded = _j.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+                           allow_nan=False).encode("utf-8")
+        dag_sha256 = _h.sha256(encoded).hexdigest()
         payload = {
             "kind": "business_opportunity_video_approval",
             "opportunity_id": "reverify-test",
@@ -80,6 +104,10 @@ class VideoWorkerReverificationTests(unittest.TestCase):
             "video_brief_sha256": digest,
             "video_brief": video_brief,
             "approval_scope": "one_video_attempt_only",
+            "commander_plan_id": plan_id,
+            "commander_plan_source": "safe_fallback",
+            "commander_plan_snapshot": snapshot,
+            "dag_sha256": dag_sha256,
         }
         with TaskQueue(task_database) as queue:
             ticket = queue.enqueue(
@@ -87,6 +115,31 @@ class VideoWorkerReverificationTests(unittest.TestCase):
                 idempotency_key=f"reverify:{attempt_id}", workload_class="media",
             )
             queue.approve(ticket["id"], approved_by="test-operator")
+            # Retrieve approval event_id.
+            approval_event_id = None
+            for ev in queue.events(ticket["id"], limit=50):
+                if ev.get("event_type") == "human.decision":
+                    approval_event_id = ev.get("event_id")
+            # Enqueue the video_pipeline execution ticket.
+            exec_payload = {
+                "kind": "video_pipeline",
+                "approval_task_id": ticket["id"],
+                "approval_event_id": approval_event_id or "",
+                "approved_by": "test-operator",
+                "attempt_id": attempt_id,
+                "initiative_id": initiative["id"],
+                "brief_sha256": digest,
+                "commander_plan_id": plan_id,
+                "commander_plan_source": "safe_fallback",
+                "commander_plan_snapshot": snapshot,
+                "dag_sha256": dag_sha256,
+            }
+            queue.enqueue(
+                f"Execute reverify: {attempt_id}",
+                exec_payload,
+                idempotency_key=f"reverify-exec:{attempt_id}",
+                workload_class="media",
+            )
         with InitiativeStore(database) as store:
             store.start_video_attempt(
                 attempt_id, mode="prompt_to_video",

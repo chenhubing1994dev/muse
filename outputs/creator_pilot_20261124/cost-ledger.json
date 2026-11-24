@@ -1,0 +1,29 @@
+{
+  "currency": "USD",
+  "paid_api_cost": 0,
+  "paid_stock_asset_cost": 0,
+  "cloud_compute_cost": 0,
+  "local_hardware": {
+    "video_encoder": "h264_amf",
+    "ai_video_generation_reused_existing_shots": true,
+    "new_wan_gpu_generation": false,
+    "gpu_energy_cost": "not_metered",
+    "cpu_energy_cost": "not_metered"
+  },
+  "voiceover": {
+    "status": "used",
+    "engine": "canto-tts-onnx-segmented",
+    "model_repo": "typangaa/canto-tts-nano",
+    "model_license_metadata": "Apache-2.0",
+    "license_review_status": "pending_model_terms_and_voice_review"
+  },
+  "speech_recognition": {
+    "status": "used_for_internal_qa",
+    "engine": "faster-whisper-local",
+    "model_repo": "alvanlii/whisper-small-cantonese",
+    "license_review_status": "not_yet_verified"
+  },
+  "settled_revenue": 0,
+  "revenue_status": "no_sales_or_settlements_recorded",
+  "note": "Zero paid-service spend in this run; local electricity and labor are not included. Commercial rights are not granted by this cost ledger."
+}

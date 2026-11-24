@@ -1,0 +1,23 @@
+{
+  "title": "不知道也是有效结论",
+  "concept": "uncertainty-map",
+  "duration_seconds": 55.0,
+  "resolution": [
+    1080,
+    1920
+  ],
+  "fps": 24,
+  "voiceover": "none",
+  "release_state": "internal_review_only",
+  "ready_to_publish": false,
+  "files": {
+    "episode-03-unknown-is-valid-55s-silent.mp4": "117a38ae569c9a2c183b597b3efe8c8f66683130e47256539552b99a0392db28",
+    "rights-manifest.json": "4b6643b262178c64ace6d27cf23e2b54ffb031f3c8c0b1efb7007e61a19e1b2b",
+    "qa-report.json": "0560acbcdf64ce64620f5692433d96dfb2484637a7a7e1afcc6c3da641eee3cf",
+    "scenes/scene-01.png": "eaaaa417b859460e8160b8ffcd39a675398b51cc3ea6e09e09845e70599b85f8",
+    "scenes/scene-02.png": "9b7c95f66918dd20c3d7421b0381004fcc91096a3cbad1e18d8ea97234832be2",
+    "scenes/scene-03.png": "057b47d7399f457fc6d282fe1d48be82198b5b8fe056b9e5d25d19c074c13413",
+    "scenes/scene-04.png": "94a20fa209ea58ccdb08db5ed35d74706491739d8a25d5fd6edbaf5dcfff7790",
+    "scenes/scene-05.png": "bf4f4decdc1150f75664a11e705296925c4ecc41ef7eb2a022bf8aadb772b42d"
+  }
+}

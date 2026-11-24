@@ -117,8 +117,10 @@ class InspirationEvolutionTests(unittest.TestCase):
         self.assertFalse(result["automatic_code_changes"])
         self.assertIsNone(result["offline_productization"])
         self.assertEqual(len(result["improvement_proposal_ids"]), 1)
-        self.assertEqual(len(result["queued_video_jobs"]), 1)
-        self.assertEqual(result["queued_video_jobs"][0]["recipe_id"], "inspiration_viral_9x16_v1")
+        self.assertEqual(result["queued_video_jobs"], [])
+        self.assertEqual(result["video_dispatch_status"], "blocked_admission")
+        self.assertEqual(result["video_dispatch_reason"], "persisted_commander_plan_required")
+        self.assertEqual(result["requested_video_recipes"], ["inspiration_viral_9x16_v1"])
 
         # Verify proposal advanced to ready_for_review (never approved automatically) and dossier exists
         with ImprovementStore(self.root / "data" / "improvements" / "muse.sqlite3") as store:
@@ -191,7 +193,10 @@ class InspirationEvolutionTests(unittest.TestCase):
         product = result["offline_productization"]
         self.assertEqual(product["status"], "completed")
         self.assertTrue(product["verified"])
-        self.assertEqual(product["initiative_status"], "testing")
+        self.assertEqual(product["package_integrity"], "passed")
+        self.assertFalse(product["validated"])
+        self.assertFalse(product["publishable"])
+        self.assertEqual(product["initiative_status"], "proposed")
         self.assertTrue(product["approval_required"])
         self.assertTrue(product["human_review_required"])
         self.assertFalse(product["published"])
@@ -205,7 +210,7 @@ class InspirationEvolutionTests(unittest.TestCase):
         self.assertEqual(node["metadata"]["offline_product_initiative_id"], product["initiative_id"])
         with InitiativeStore(self.root / "data" / "initiatives" / "muse.sqlite3") as initiatives:
             initiative = initiatives.get_by_id(product["initiative_id"])
-        self.assertEqual(initiative["status"], "testing")
+        self.assertEqual(initiative["status"], "proposed")
         self.assertEqual(initiative["autonomy_level"], "draft")
         discoveries = json.loads(initiative["concept"])["key_discoveries"]
         self.assertEqual(discoveries["epistemic_status"], "creator_inspired_hypothesis_only")
@@ -267,18 +272,30 @@ class InspirationEvolutionTests(unittest.TestCase):
         self.assertEqual(result["synthesis_status"], "completed_extractive_fallback")
         self.assertGreaterEqual(result["evidence_coverage_score"], 75)
         self.assertEqual(len(result["improvement_proposal_ids"]), 2)
-        self.assertEqual(len(result["queued_video_jobs"]), 2)
-        for job in result["queued_video_jobs"]:
-            with TaskQueue(self.root / "data" / "tasks" / "muse.sqlite3") as q:
-                ticket = q.get(job["job_id"])
-                self.assertEqual(ticket["payload"]["inspiration_id"], result["inspiration_id"])
-                self.assertEqual(ticket["payload"]["blueprint_path"], result["blueprint_path"])
+        self.assertEqual(result["queued_video_jobs"], [])
+        self.assertEqual(result["video_dispatch_status"], "blocked_admission")
+        self.assertEqual(result["video_dispatch_reason"], "persisted_commander_plan_required")
+        self.assertEqual(
+            result["requested_video_recipes"],
+            ["inspiration_viral_9x16_v1", "inspiration_viral_16x9_v1"],
+        )
+        blueprint = json.loads((self.root / result["blueprint_path"]).read_text(encoding="utf-8"))
+        public_copy = json.dumps({
+            "title": blueprint["title"],
+            "hook_3s": blueprint["hook_3s"],
+            "hook_caption": blueprint["hook_caption"],
+            "acts": blueprint["acts"],
+            "platform_copy": blueprint["platform_copy"],
+        }, ensure_ascii=False)
+        self.assertNotIn("90%", public_copy)
+        self.assertIn("90%", json.dumps(blueprint["dossiers"], ensure_ascii=False))
+        self.assertIn("2 条可追溯来源", public_copy)
         with ResearchKnowledgeStore(self.root / "data" / "research" / "knowledge.sqlite3") as k:
             node = k.get_node(result["inspiration_id"])
             self.assertEqual(node["metadata"]["review_state"], "researched_needs_independent_review")
             self.assertEqual(node["metadata"]["evolution_stage"], "blueprint_ready")
 
-    def test_status_api_evolves_inspiration_and_enqueues_commander_jobs(self) -> None:
+    def test_status_api_evolves_inspiration_but_blocks_video_without_persisted_commander_plan(self) -> None:
         task_db = self.root / "data" / "tasks" / "muse.sqlite3"
         progress_db = task_db
         cap_db = self.root / "data" / "capabilities" / "muse.sqlite3"
@@ -411,8 +428,11 @@ class InspirationEvolutionTests(unittest.TestCase):
             self.assertEqual(tick["task"]["status"], "succeeded")
             with TaskQueue(task_db) as queue:
                 completed_task = queue.get(task_id)
-            product_result = completed_task["payload"]["_result"]["offline_productization"]
-            self.assertEqual(product_result["initiative_status"], "testing")
+            evolution_result = completed_task["payload"]["_result"]
+            self.assertEqual(evolution_result["video_dispatch_status"], "blocked_admission")
+            self.assertEqual(evolution_result["queued_video_jobs"], [])
+            product_result = evolution_result["offline_productization"]
+            self.assertEqual(product_result["initiative_status"], "proposed")
             from muse.initiative_engine import InitiativeStore
             with InitiativeStore(self.root / "data" / "initiatives" / "muse.sqlite3") as initiatives:
                 initiative = initiatives.get_by_id(product_result["initiative_id"])
@@ -441,11 +461,14 @@ class InspirationEvolutionTests(unittest.TestCase):
             self.assertEqual(completed_node["metadata"]["evolution_stage"], "blueprint_ready")
             artifact_link = completed_node["metadata"]["offline_product_artifact"]
             self.assertEqual(artifact_link["initiative_id"], product_result["initiative_id"])
-            self.assertEqual(artifact_link["initiative_status"], "testing")
+            self.assertEqual(artifact_link["initiative_status"], "proposed")
             self.assertEqual(artifact_link["relative_path"], product_result["product"]["relative_path"])
             self.assertEqual(artifact_link["package_path"], product_result["product"]["package_path"])
             self.assertEqual(artifact_link["package_sha256"], product_result["product"]["package_sha256"])
             self.assertTrue(artifact_link["verified"])
+            self.assertEqual(artifact_link["package_integrity"], "passed")
+            self.assertFalse(artifact_link["validated"])
+            self.assertFalse(artifact_link["publishable"])
             self.assertTrue(artifact_link["human_review_required"])
             self.assertFalse(artifact_link["published"])
             deeply_nested = "[" * 1100 + "0" + "]" * 1100

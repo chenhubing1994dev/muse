@@ -1,0 +1,15 @@
+{
+  "status": "editorial_review_required",
+  "visuals": "original_programmatic_typography_and_diagrams",
+  "third_party_video": [],
+  "third_party_photography": [],
+  "third_party_music": [],
+  "voiceover": "not_used",
+  "font": {
+    "family": "Noto Sans CJK HK",
+    "license": "SIL Open Font License 1.1",
+    "font_sha256": "c485d72ca089ce65a83c483c1ddbf1791828b4c8e3c45ea5eae8063fe2164495",
+    "license_sha256": "6a73f9541c2de74158c0e7cf6b0a58ef774f5a780bf191f2d7ec9cc53efe2bf2"
+  },
+  "commercial_release_authorized": false
+}

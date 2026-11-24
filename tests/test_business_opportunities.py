@@ -190,4 +190,82 @@ class BusinessOpportunityTests(unittest.TestCase):
             self.assertEqual(reopened.connection.execute("SELECT COUNT(*) FROM business_opportunity_events").fetchone()[0],2)
         finally: reopened.close()
 
+    def test_request_video_approval_freezes_plan_snapshot_and_dag_digest(self):
+        """Approval ticket must carry a frozen CommanderPlan snapshot with valid DAG digest."""
+        opportunity=self.store.create(**self.args)
+        initiative_db=Path(self.tmp.name)/"initiatives.sqlite3"
+        task_db=Path(self.tmp.name)/"tasks.sqlite3"
+        self.store.promote_to_initiative(opportunity["id"],initiative_database=initiative_db)
+        result=self.store.request_video_approval(opportunity["id"],initiative_database=initiative_db,task_database=task_db)
+        ticket=result["ticket"]
+        payload=ticket["payload"]
+        # Commander plan snapshot must be present and self-consistent.
+        self.assertIn("commander_plan_id",payload)
+        self.assertIn("commander_plan_source",payload)
+        self.assertIn("commander_plan_snapshot",payload)
+        self.assertIn("dag_sha256",payload)
+        snapshot=payload["commander_plan_snapshot"]
+        self.assertEqual(snapshot["schema"],"muse-commander-plan-snapshot-v1")
+        self.assertEqual(snapshot["plan_id"],payload["commander_plan_id"])
+        self.assertEqual(snapshot["source"],payload["commander_plan_source"])
+        # DAG digest must be verifiable.
+        import hashlib,json
+        encoded=json.dumps(snapshot,ensure_ascii=False,sort_keys=True,separators=(",",":"),allow_nan=False).encode("utf-8")
+        self.assertEqual(hashlib.sha256(encoded).hexdigest(),payload["dag_sha256"])
+        # Must have exactly one reviewer step and a valid structure.
+        self.assertTrue(any(s["role"]=="reviewer" for s in snapshot["steps"]))
+        self.assertGreaterEqual(len(snapshot["steps"]),2)
+
+    def test_queue_video_after_approval_enqueues_video_pipeline_execution_ticket(self):
+        """After approval, an idempotent video_pipeline execution ticket must be created."""
+        opportunity=self.store.create(**self.args)
+        initiative_db=Path(self.tmp.name)/"data"/"initiatives"/"muse.sqlite3"
+        task_db=Path(self.tmp.name)/"data"/"tasks"/"muse.sqlite3"
+        self.store.promote_to_initiative(opportunity["id"],initiative_database=initiative_db)
+        requested=self.store.request_video_approval(opportunity["id"],initiative_database=initiative_db,task_database=task_db)
+        with TaskQueue(task_db) as queue:
+            queue.approve(requested["ticket"]["id"],approved_by="test-operator")
+        queued=self.store.queue_video_after_approval(opportunity["id"],requested["ticket"]["id"],initiative_database=initiative_db,task_database=task_db)
+        # Must return execution_ticket_id.
+        self.assertIn("execution_ticket_id",queued)
+        exec_id=queued["execution_ticket_id"]
+        self.assertIsInstance(exec_id,str)
+        self.assertTrue(exec_id)
+        # Execution ticket must have kind=video_pipeline and correct bindings.
+        with TaskQueue(task_db) as queue:
+            exec_ticket=queue.get(exec_id)
+        self.assertIsNotNone(exec_ticket)
+        ep=exec_ticket["payload"]
+        self.assertEqual(ep["kind"],"video_pipeline")
+        self.assertEqual(ep["approval_task_id"],requested["ticket"]["id"])
+        self.assertEqual(ep["attempt_id"],queued["attempt"]["attempt_id"])
+        self.assertEqual(ep["initiative_id"],queued["attempt"]["initiative_id"])
+        self.assertIn("commander_plan_snapshot",ep)
+        self.assertIn("dag_sha256",ep)
+        self.assertIn("commander_plan_id",ep)
+        self.assertIn("approval_event_id",ep)
+        # Idempotent replay must return same ticket.
+        replay=self.store.queue_video_after_approval(opportunity["id"],requested["ticket"]["id"],initiative_database=initiative_db,task_database=task_db)
+        self.assertEqual(replay["execution_ticket_id"],exec_id)
+
+    def test_video_pipeline_execution_ticket_dag_digest_matches_approval_ticket(self):
+        """Execution ticket DAG digest must match the approval ticket snapshot exactly."""
+        opportunity=self.store.create(**self.args)
+        initiative_db=Path(self.tmp.name)/"data"/"initiatives"/"muse.sqlite3"
+        task_db=Path(self.tmp.name)/"data"/"tasks"/"muse.sqlite3"
+        self.store.promote_to_initiative(opportunity["id"],initiative_database=initiative_db)
+        requested=self.store.request_video_approval(opportunity["id"],initiative_database=initiative_db,task_database=task_db)
+        with TaskQueue(task_db) as queue:
+            queue.approve(requested["ticket"]["id"],approved_by="test-operator")
+        queued=self.store.queue_video_after_approval(opportunity["id"],requested["ticket"]["id"],initiative_database=initiative_db,task_database=task_db)
+        with TaskQueue(task_db) as queue:
+            exec_ticket=queue.get(queued["execution_ticket_id"])
+        ep=exec_ticket["payload"]
+        ap=requested["ticket"]["payload"]
+        # Plan snapshot and digest must be identical between approval and execution tickets.
+        self.assertEqual(ep["commander_plan_snapshot"],ap["commander_plan_snapshot"])
+        self.assertEqual(ep["dag_sha256"],ap["dag_sha256"])
+        self.assertEqual(ep["commander_plan_id"],ap["commander_plan_id"])
+        self.assertEqual(ep["brief_sha256"],ap["video_brief_sha256"])
+
 if __name__=="__main__": unittest.main()

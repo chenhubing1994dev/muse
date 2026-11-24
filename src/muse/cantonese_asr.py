@@ -49,6 +49,20 @@ def _normalized_characters(text: str) -> str:
     )
 
 
+def _transcript_encoding_issues(text: str) -> list[str]:
+    """Reject replacement characters and unexpected writing systems in Cantonese text."""
+    issues: list[str] = []
+    if "\ufffd" in text:
+        issues.append("replacement_character")
+    if any(
+        unicodedata.category(character)[0] == "L"
+        and not unicodedata.name(character, "").startswith(("CJK", "LATIN"))
+        for character in text
+    ):
+        issues.append("unexpected_letter_script")
+    return issues
+
+
 def _edit_distance(left: str, right: str) -> int:
     if len(left) < len(right):
         left, right = right, left
@@ -68,17 +82,22 @@ def _edit_distance(left: str, right: str) -> int:
 def compare_cantonese_transcript(
     reference_text: str, recognized_text: str, *, max_cer: float = 0.18,
 ) -> dict[str, Any]:
-    """Compare Cantonese text with punctuation-insensitive character error rate."""
+    """Compare Cantonese text and fail closed on corrupted or implausibly encoded Unicode."""
     if not isinstance(max_cer, (int, float)) or isinstance(max_cer, bool) or not math.isfinite(max_cer) or not 0 <= max_cer <= 1:
         raise ValueError("max_cer must be a finite number between 0 and 1")
     reference = _normalized_characters(reference_text)
     recognized = _normalized_characters(recognized_text)
     if not reference:
         raise ValueError("reference_text must contain at least one letter or number")
+    encoding_issues = sorted(set(
+        _transcript_encoding_issues(reference_text)
+        + _transcript_encoding_issues(recognized_text)
+    ))
     distance = _edit_distance(reference, recognized)
     cer = distance / len(reference)
+    encoding_integrity = "failed" if encoding_issues else "passed"
     return {
-        "status": "passed" if cer <= max_cer else "needs_review",
+        "status": "passed" if cer <= max_cer and not encoding_issues else "needs_review",
         "metric": "character_error_rate",
         "cer": round(cer, 6),
         "max_cer": float(max_cer),
@@ -87,6 +106,8 @@ def compare_cantonese_transcript(
         "recognized_characters": len(recognized),
         "reference_normalized": reference,
         "recognized_normalized": recognized,
+        "encoding_integrity": encoding_integrity,
+        "encoding_issues": encoding_issues,
     }
 
 

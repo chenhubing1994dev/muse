@@ -10,8 +10,8 @@
 - 已下载 sdist 与 wheel 到 artifacts/ziwei-audit。sdist SHA-256：
   871154701c22586a42ff35782e29a8ed45a706f62b707020041042170424c01e，与 PyPI 页面显示的发布 provenance digest 一致。
 - ziwei wheel SHA-256：
-  dab8b0d8eb58da8760c520ea81e1f4635ce275bf3197960d065c116fe1a3f492。
-- 已下载 celestial-calendar 0.8.0 的 win_amd64 wheel 与 tzdata 2026.5 wheel；使用它们在 artifacts/ziwei-poc-venv 建立独立 Python 3.11 venv。未安装到 Muse 主 Python 环境。
+  dab0b8d0eb58da8760c520ea81e1f4635ce275bf3197960d065c116fe1a3f492。
+- 已下载 celestial-calendar 0.8.0 的 win_amd64 wheel 与 tzdata 2026.5 wheel；使用它们建立独立 Python 3.11 venv，规范位置为 `D:\MuseVenvs\ziwei-poc-venv`。`artifacts/ziwei-poc-venv` 是兼容 junction，未安装到 Muse 主 Python 环境。
 - 独立环境 pip check：No broken requirements found。
 - 只做了初步静态检查，不是完整安全审计；未运行未知安装脚本，也未将包源码复制进 Muse。
 

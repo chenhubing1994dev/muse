@@ -1,0 +1,21 @@
+{
+  "schema": "muse.canonical-pilot-handoff.v3-corrected",
+  "status": "superseded_snapshot_voiceover_not_muxed",
+  "pilot_dir": "data/monetization/first-cantonese-pilot-2026-11-24-v3",
+  "video_sha256": "125864347a48c2b9bfa273b89f9671287464b68b4416fe89b060b0c98a49bf93",
+  "same_video_as_v2": true,
+  "voiceover_status": "not_used_in_video",
+  "voiceover_asset": "voiceover.wav",
+  "asr_scope": "standalone voiceover.wav only",
+  "asr_cer": 0.0625,
+  "subtitles_embedded": false,
+  "subtitle_sidecar": "subtitles.srt",
+  "release_state": "draft_only",
+  "commercial_use_allowed": false,
+  "publish_api_called": false,
+  "account_authorization": "not_connected",
+  "delivery_package_sha256": "1ff99ba27e00eabb5d2aec00c1aa8bac22f4a0af99a428a1e546984f309b74d5",
+  "delivery_package_zip_crc": "passed",
+  "orders": 0,
+  "settled_revenue": 0
+}

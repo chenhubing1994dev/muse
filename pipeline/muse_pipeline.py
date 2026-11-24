@@ -47,60 +47,101 @@ def fetch_bilibili():
     req = urllib.request.Request(url, headers=UA)
     with urllib.request.urlopen(req, timeout=20) as r:
         data = json.loads(r.read().decode('utf-8'))
+    if not isinstance(data, dict) or data.get('code') != 0:
+        raise RuntimeError('Bilibili returned an unsuccessful or malformed response')
+    payload = data.get('data')
+    records = payload.get('list') if isinstance(payload, dict) else None
+    if not isinstance(records, list):
+        raise RuntimeError('Bilibili response did not contain a current ranking list')
+    retrieved_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
     items = []
-    for it in data.get('data', {}).get('list', [])[:6]:
-        stat = it.get('stat', {})
+    for it in records[:6]:
+        if not isinstance(it, dict):
+            continue
+        stat = it.get('stat')
+        title = str(it.get('title') or '').strip()
+        bvid = str(it.get('bvid') or '').strip()
+        if not title or not bvid or not isinstance(stat, dict):
+            continue
+        metrics = {key: stat.get(key) for key in ('view', 'coin', 'favorite')}
+        if any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in metrics.values()):
+            continue
         items.append({
             'source': 'bilibili',
-            'title': it.get('title', ''),
-            'view': stat.get('view', 0),
-            'coin': stat.get('coin', 0),
-            'favorite': stat.get('favorite', 0),
-            'url': 'https://www.bilibili.com/video/' + it.get('bvid', ''),
+            'title': title,
+            **metrics,
+            'url': 'https://www.bilibili.com/video/' + bvid,
+            'retrieved_at': retrieved_at,
+            'signal_type': 'platform_ranking_snapshot',
         })
     return items
 
-def fallback_samples():
-    return [
-        {'source': 'fallback', 'title': '全网刷屏的『我不是人，我是你丢掉的那只猫』现象级视频解析', 'view': 1180000, 'coin': 54000, 'favorite': 22000, 'url': 'https://example.com/cat'},
-        {'source': 'fallback', 'title': '一个视频讲透『为什么你越努力越穷』，千万人共鸣', 'view': 980000, 'coin': 41000, 'favorite': 19000, 'url': 'https://example.com/poor'},
-        {'source': 'fallback', 'title': '现象级科普：如果地球停止自转，我们会怎样？', 'view': 760000, 'coin': 33000, 'favorite': 15000, 'url': 'https://example.com/earth'},
-    ]
 
 def make_script(topic):
-    t = topic['title']
+    if not isinstance(topic, dict) or topic.get('source') != 'bilibili':
+        raise ValueError('script generation requires a live Bilibili source record')
+    title = topic.get('title')
+    url = topic.get('url')
+    if not isinstance(title, str) or not title.strip():
+        raise ValueError('trend record is missing a title')
+    if not isinstance(url, str) or not url.startswith('https://www.bilibili.com/video/'):
+        raise ValueError('trend record is missing a canonical Bilibili video URL')
+    metrics = {}
+    for key in ('view', 'coin', 'favorite'):
+        value = topic.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f'trend record has invalid {key} metric')
+        metrics[key] = value
+    retrieved_at = topic.get('retrieved_at')
+    if not isinstance(retrieved_at, str) or not retrieved_at.strip():
+        raise ValueError('trend record is missing its retrieval timestamp')
+    metric_line = (
+        f"截至本次抓取，平台记录播放量 {metrics['view']:,}、投币 {metrics['coin']:,}、"
+        f"收藏 {metrics['favorite']:,}；数据时间：{retrieved_at}。"
+    )
     return {
-        'title': t,
-        'hook': '你没看错——' + t + '。今天这条视频，就带你拆解这件全网都在讨论的事。',
+        'title': '热点观察：' + title.strip(),
+        'hook': '呢條內容點解會出現在平台熱門榜單？我哋先睇數據，再拆解佢嘅表達方式。',
         'body': [
-            '事情是这样的：' + t + '。短短几天播放量就冲破百万，评论区直接炸锅。',
-            '很多人问它凭什么能火？答案很简单——它精准戳中了大众情绪，再用最通俗的方式讲出来。',
-            '现象级爆款的底层逻辑从来不变：强情绪、低门槛、高共鸣，三秒抓人，三十秒留住人。',
+            metric_line,
+            '呢啲只係平台熱度訊號，唔代表內容事實已核實，亦唔能夠證明觀眾願意付費。',
+            '以下拆解只屬編輯假設：題材、開場、節奏同視覺呈現可能影響觀看；需要用獨立受眾測試驗證。',
         ],
-        'climax': '所以真正值得学的，不是这条视频说了什么，而是它为什么能让千万人愿意停下来看完。',
-        'ending': '觉得有启发就点个赞收藏一下。我是 Muse，下期继续带你拆解全网最火的内容。',
+        'climax': '真正值得複製嘅唔係照搬題材，而係用可核實資料，測試一個對觀眾有用嘅原創角度。',
+        'ending': '想睇更多有來源、有反證嘅內容拆解，可以留言講你最想研究嘅題目。',
         'source': topic,
+        'research_state': 'trend_signal_only',
+        'fact_check_required': True,
+        'publish_state': 'draft_only',
     }
+
 
 def cmd_research():
     try:
         items = fetch_bilibili()
-        if not items:
-            items = fallback_samples()
-    except Exception as e:
-        print('bilibili 抓取失败，使用内置样本:', e)
-        items = fallback_samples()
+    except Exception as exc:
+        raise RuntimeError(
+            '热点研究已停止：未能取得实时 Bilibili 榜单；不会使用虚构样本或旧数据代替。'
+        ) from exc
+    if not items:
+        raise RuntimeError(
+            '热点研究已停止：没有可验证的实时榜单记录；不会生成伪热点文案。'
+        )
+
     def score(x):
         return x.get('view', 0) * 0.6 + x.get('coin', 0) * 10 + x.get('favorite', 0) * 4
+
     ranked = sorted(items, key=score, reverse=True)
     top = ranked[0]
     script = make_script(top)
-    (DATA / ('topic_' + today() + '.json')).write_text(json.dumps({'picked': top, 'ranked': ranked}, ensure_ascii=False, indent=2), encoding='utf-8')
+    (DATA / ('topic_' + today() + '.json')).write_text(json.dumps({
+        'picked': top, 'ranked': ranked, 'research_state': 'trend_signal_only',
+        'fact_check_required': True, 'publish_state': 'draft_only',
+    }, ensure_ascii=False, indent=2), encoding='utf-8')
     sp = DATA / ('script_' + today() + '.json')
     sp.write_text(json.dumps(script, ensure_ascii=False, indent=2), encoding='utf-8')
-    print('PICKED:', top['title'], '| view:', top['view'])
+    print('PICKED:', top['title'], '| view:', top['view'], '| source:', top['url'])
     print('SCRIPT:', sp)
-
 def load_script():
     files = sorted(DATA.glob('script_*.json'))
     if not files:

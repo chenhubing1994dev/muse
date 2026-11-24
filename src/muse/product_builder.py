@@ -282,9 +282,8 @@ class _ProductHTMLValidator(HTMLParser):
 class LocalProductBuilder:
     """Build versioned, offline, interactive HTML products from initiative records."""
 
-    BUILDER_VERSION = 3
+    BUILDER_VERSION = 5
     MAX_SEED_ITEMS = 40
-
     def __init__(self, workspace: str | Path) -> None:
         self.workspace = Path(workspace).resolve()
         if not self.workspace.is_dir():
@@ -392,7 +391,8 @@ class LocalProductBuilder:
             "id": initiative["id"],
             "title": str(initiative.get("title") or "Muse 灵感实验台")[:300],
             "creator_value": str(initiative.get("creator_value") or "")[:2000],
-            "objective": str(concept.get("research_question") or initiative.get("concept") or "")[:4000],
+            "objective": str(concept.get("research_question") or "")[:4000],
+            "design_goal": str(concept.get("design_goal") or initiative.get("first_step") or initiative.get("expected_output") or "")[:4000],
             "hypothesis_brief": str(concept.get("creator_hypothesis_summary") or "")[:4000],
             "epistemic_status": str(discoveries.get("epistemic_status") or "not_recorded")[:120],
             "evidence_review_state": str(discoveries.get("evidence_review_state") or "not_recorded")[:120],
@@ -407,6 +407,25 @@ class LocalProductBuilder:
                 concept.get("inspiration_refs") if isinstance(concept.get("inspiration_refs"), list)
                 else initiative.get("inspiration_refs") or []
             ),
+        }
+    @staticmethod
+    def _content_readiness(seed: dict[str, Any]) -> dict[str, Any]:
+        """Separate a technically valid package from a minimally testable product idea."""
+        missing: list[str] = []
+        if not str(seed.get("objective") or "").strip():
+            missing.append("research_objective")
+        if not (seed.get("hypotheses") or str(seed.get("hypothesis_brief") or "").strip()
+                or str(seed.get("design_goal") or "").strip()):
+            missing.append("testable_hypothesis_or_design_goal")
+        if not seed.get("experiments"):
+            missing.append("testable_experiment_or_acceptance_criteria")
+        return {
+            "status": "ready_for_human_review" if not missing else "incomplete",
+            "ready_for_human_review": not missing,
+            "missing_requirements": missing,
+            "sources_state": "unreviewed" if seed.get("sources") else "not_collected",
+            "counter_evidence_state": "unreviewed" if seed.get("counter_evidence") else "not_collected",
+            "evidence_review_state": str(seed.get("evidence_review_state") or "not_recorded"),
         }
 
     @classmethod
@@ -578,17 +597,120 @@ class LocalProductBuilder:
                     raise ProductBuildError("product package README does not match")
         except (OSError, zipfile.BadZipFile, KeyError) as exc:
             raise ProductBuildError("existing product package is unreadable") from exc
-        return {
+        content_readiness = manifest.get("content_readiness")
+        if not isinstance(content_readiness, dict):
+            content_readiness = {
+                "status": "incomplete", "ready_for_human_review": False,
+                "missing_requirements": ["content_readiness_not_recorded"],
+                "sources_state": "not_collected", "counter_evidence_state": "not_collected",
+            }
+        review = self._read_review(target, input_hash, files["product.zip"])
+        result = {
             "relative_path": str(target.relative_to(self.workspace)),
             "html_path": str((target / "index.html").relative_to(self.workspace)),
             "package_path": str(package_path.relative_to(self.workspace)),
             "created": False,
-            "validated": True,
+            "validated": False,
+            "publishable": False,
+            "package_integrity": "passed",
+            "content_readiness": content_readiness,
             "input_sha256": input_hash,
             "package_sha256": files["product.zip"],
-            "status": "testing",
+            "status": "draft",
         }
+        if review is not None:
+            # Human-reviewed for creator testing only; still never publishable here.
+            result.update({
+                "validated": True,
+                "status": "testing",
+                "human_review": {
+                    "decision": review["decision"],
+                    "reviewed_by": review["reviewed_by"],
+                    "reviewed_at": review["reviewed_at"],
+                },
+            })
+        return result
 
+    REVIEW_FILE = "review.json"
+
+    def _read_review(self, target: Path, input_hash: str, package_sha256: str) -> dict[str, Any] | None:
+        """Return the human review bound to this exact artifact, or None if unreviewed.
+
+        A present-but-invalid record fails closed instead of silently downgrading.
+        """
+        path = target / self.REVIEW_FILE
+        if not path.exists() and not path.is_symlink():
+            return None
+        if path.is_symlink() or not path.is_file():
+            raise ProductBuildError("product review record is unsafe")
+        try:
+            review = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ProductBuildError("product review record is unreadable") from exc
+        reviewer = review.get("reviewed_by") if isinstance(review, dict) else None
+        if (
+            not isinstance(review, dict)
+            or review.get("schema_version") != 1
+            or review.get("decision") != "approved_for_testing"
+            or review.get("input_sha256") != input_hash
+            or review.get("package_sha256") != package_sha256
+            or not isinstance(reviewer, str) or not reviewer.strip()
+            or not isinstance(review.get("reviewed_at"), str)
+            or review.get("publishable") is not False
+        ):
+            raise ProductBuildError("product review record does not match the current artifact")
+        return review
+
+    def approve_for_testing(
+        self, store: InitiativeStore, initiative_id: str, *, reviewed_by: str, note: str = "",
+    ) -> dict[str, Any]:
+        """Record a named human review that promotes an intact draft to creator testing.
+
+        Requires complete content readiness. Does not publish, does not change hashed
+        artifact files, and is idempotent for the same artifact.
+        """
+        if (not isinstance(reviewed_by, str) or not reviewed_by.strip()
+                or len(reviewed_by) > 200 or "\x00" in reviewed_by):
+            raise ValueError("reviewed_by must name the human reviewer")
+        if not isinstance(note, str) or len(note) > 2000 or "\x00" in note:
+            raise ValueError("note must be bounded text")
+        initiative = self._get_initiative(store, initiative_id)
+        target, input_hash = self._target(initiative)
+        if not target.exists():
+            raise ProductBuildError("product has not been built")
+        current = self._verify_existing(target, input_hash, initiative_id)
+        if current["status"] != "testing":
+            readiness = current.get("content_readiness") or {}
+            if readiness.get("ready_for_human_review") is not True:
+                missing = ",".join(str(x) for x in readiness.get("missing_requirements") or []) or "unknown"
+                raise ProductBuildError(f"product content is not ready for review: {missing}")
+            review = {
+                "schema_version": 1,
+                "decision": "approved_for_testing",
+                "initiative_id": initiative_id,
+                "input_sha256": input_hash,
+                "package_sha256": current["package_sha256"],
+                "reviewed_by": reviewed_by.strip(),
+                "reviewed_at": datetime.now(timezone.utc).isoformat(),
+                "note": note.strip(),
+                "publishable": False,
+                "scope": "creator_testing_only",
+            }
+            staging = target / ".review.json.tmp"
+            staging.write_text(json.dumps(review, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            staging.replace(target / self.REVIEW_FILE)
+            current = self._verify_existing(target, input_hash, initiative_id)
+        if initiative.get("status") != "testing":
+            store.update(
+                initiative_id, status="testing",
+                outcome=f"Offline product reviewed for creator testing at {current['relative_path']}; not published.",
+                actor=reviewed_by.strip(), source="local_product_review",
+            )
+        store.record_product_artifact(
+            initiative_id, relative_path=current["relative_path"],
+            package_sha256=current["package_sha256"], validated=True,
+        )
+        return current
     def _target(self, initiative: dict[str, Any]) -> tuple[Path, str]:
         item = self._canonical_initiative(initiative)
         canonical = json.dumps(
@@ -642,6 +764,8 @@ class LocalProductBuilder:
             temporary = Path(tempfile.mkdtemp(prefix=".product-", dir=parent))
             try:
                 seed = self._seed(initiative)
+                content_readiness = self._content_readiness(seed)
+
                 html_bytes = self._render_html(seed).encode("utf-8")
                 readme_bytes = self._render_readme(seed, input_hash).encode("utf-8")
                 self._validate_html(html_bytes.decode("utf-8"))
@@ -657,12 +781,17 @@ class LocalProductBuilder:
                     "initiative_id": initiative_id,
                     "title": seed["title"],
                     "product_name": "Muse 灵感实验台",
-                    "status": "testing",
+                    "status": "draft",
+                    "validated": False,
+                    "publishable": False,
+                    "release_state": "pending_human_review",
                     "input_sha256": input_hash,
                     "epistemic_status": seed["epistemic_status"],
                     "evidence_review_state": seed["evidence_review_state"],
                     "source_candidate_count": len(seed["sources"]),
                     "counter_evidence_candidate_count": len(seed["counter_evidence"]),
+                    "content_readiness": content_readiness,
+                    "human_review_required": True,
                     "auto_publish": False,
                     "conclusion_promotion_requires_independent_review": True,
                     "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -701,10 +830,13 @@ class LocalProductBuilder:
                         "html_path": str((target / "index.html").relative_to(self.workspace)),
                         "package_path": str((target / "product.zip").relative_to(self.workspace)),
                         "created": True,
-                        "validated": True,
+                        "validated": False,
+                        "publishable": False,
+                        "package_integrity": "passed",
+                        "content_readiness": content_readiness,
                         "input_sha256": input_hash,
                         "package_sha256": manifest["files"]["product.zip"],
-                        "status": "testing",
+                        "status": "draft",
                     }
             finally:
                 if temporary.exists():
@@ -716,33 +848,31 @@ class LocalProductBuilder:
                 summary=f"Idea-to-Reality product {result.get('status', 'unknown')}: initiative {initiative_id}",
             )
             result["evolution_cycle_id"] = evolution_cycle_id
-        if initiative.get("status") != "testing":
-            store.update(
-                initiative_id,
-                status="testing",
-                outcome=f"Offline interactive product validated at {result['relative_path']}; awaiting human review.",
-            )
-        store.record_product_artifact(
-            initiative_id,
-            relative_path=result["relative_path"],
-            package_sha256=result["package_sha256"],
-            validated=result["validated"],
-        )
+        # A technically intact preview is not a human-validated product.
+        # Promotion to testing/validated artifact requires a separate review workflow.
         return result
-
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Build or verify an offline Muse product")
-    parser.add_argument("action", choices=("build", "verify"))
+    parser.add_argument("action", choices=("build", "verify", "approve"))
     parser.add_argument("initiative_id", help="Exact 32-character initiative UUID hex ID")
     parser.add_argument("--workspace", default=".")
     parser.add_argument("--db", default="")
+    parser.add_argument("--reviewed-by", default="", help="Human reviewer name (required for approve)")
+    parser.add_argument("--note", default="")
     args = parser.parse_args(argv)
     workspace = Path(args.workspace).resolve()
     database = Path(args.db) if args.db else workspace / "data" / "initiatives" / "muse.sqlite3"
     with InitiativeStore(database) as store:
         builder = LocalProductBuilder(workspace)
-        result = builder.build(store, args.initiative_id) if args.action == "build" else builder.verify(store, args.initiative_id)
+        if args.action == "build":
+            result = builder.build(store, args.initiative_id)
+        elif args.action == "approve":
+            result = builder.approve_for_testing(
+                store, args.initiative_id, reviewed_by=args.reviewed_by, note=args.note,
+            )
+        else:
+            result = builder.verify(store, args.initiative_id)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 

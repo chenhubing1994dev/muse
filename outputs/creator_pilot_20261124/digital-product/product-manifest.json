@@ -1,0 +1,22 @@
+{
+  "schema": "muse.digital-product.v1",
+  "product_id": "ai-claim-check-kit-v0.1.1",
+  "title": "AI 内容核验工作台",
+  "version": "0.1.1",
+  "status": "draft_not_published",
+  "format": ["Markdown", "CSV", "JSON"],
+  "target_audience": ["short-video creators", "independent researchers", "small teams"],
+  "price_hypothesis": {"currency": "USD", "amount": 9.0, "validated": false},
+  "market_validation": "desktop_research_completed_demand_unvalidated",
+  "sales_channel": "not_connected",
+  "published": false,
+  "publish_api_called": false,
+  "orders": 0,
+  "settled_revenue": 0,
+  "refunds": 0,
+  "commercial_use_allowed": false,
+  "rights_review_status": "review_required",
+  "license_document_status": "draft_only",
+  "source_note": "NIST AI 600-1 citation only; no long text reproduced",
+  "revenue_claims": "none"
+}

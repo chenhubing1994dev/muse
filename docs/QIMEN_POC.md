@@ -8,7 +8,7 @@
 - 包：PyPI qimen-rs==0.2.1，PyPI metadata 标示 MIT，无运行时依赖。
 - 发行 wheel：qimen_rs-0.2.1-cp310-abi3-win_amd64.whl，SHA-256：
   1a95ba7e086e46c7b8fb6c4f0726f390547853cc409ad900bef0489d443bf920，与 PyPI 发布页显示值相符。
-- 安装位置：artifacts/qimen-poc-venv，未安装到 Muse 主 Python 环境；pip check：No broken requirements found。
+- 规范安装位置：`D:\MuseVenvs\qimen-poc-venv`；`artifacts/qimen-poc-venv` 为兼容 junction，未安装到 Muse 主 Python 环境；pip check：No broken requirements found。
 - PyPI 页面未提供 build provenance。源代码包下载时，pip 构建隔离阶段因宿主代理端口解析错误失败；未因此运行构建脚本。当前只验证了固定 wheel 的哈希、metadata 和运行行为，不宣称完成源码审计。
 
 ## 2. 实际计算样例

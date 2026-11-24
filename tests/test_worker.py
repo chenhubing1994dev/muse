@@ -5,10 +5,37 @@ import unittest
 from pathlib import Path
 
 from muse.task_queue import TaskQueue
-from muse.worker import run_once
+from muse.worker import DEFAULT_APPROVAL_REQUIRED_KINDS, DEFAULT_HANDLERS, run_once
 
 
 class WorkerTests(unittest.TestCase):
+    def test_legacy_video_pipeline_requires_approval_and_is_not_a_default_handler(self) -> None:
+        self.assertIn("video_pipeline", DEFAULT_APPROVAL_REQUIRED_KINDS)
+        self.assertNotIn("video_pipeline", DEFAULT_HANDLERS)
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "tasks.sqlite3"
+            with TaskQueue(database) as queue:
+                task = queue.enqueue(
+                    "legacy video", {"kind": "video_pipeline", "recipe_id": "high_value_short_v2"}
+                )
+            result = run_once(database, task_id=task["id"])
+            self.assertEqual(result["status"], "waiting_approval")
+            with TaskQueue(database) as queue:
+                self.assertEqual(queue.get(task["id"])["status"], "waiting_approval")
+
+    def test_worker_cli_does_not_register_the_legacy_video_pipeline_handler(self) -> None:
+        from unittest.mock import patch
+        from muse.worker import main
+
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "tasks.sqlite3"
+            with patch("muse.worker.run_once", return_value=None) as run_once_mock:
+                result = main(["--db", str(database), "--workers", "1"])
+            self.assertEqual(result, 0)
+            handlers = run_once_mock.call_args.args[1]
+            self.assertNotIn("video_pipeline", handlers)
+            self.assertIn("video_pipeline", run_once_mock.call_args.kwargs["approval_required_kinds"])
+
     def test_worker_cli_can_enable_registered_media_adapters_without_auto_execution(self) -> None:
         from muse.worker import main
 

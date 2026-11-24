@@ -27,6 +27,7 @@ class LocalProductBuilderTests(unittest.TestCase):
                     ],
                     "counter_evidence": ["目前没有独立实证证明该方法有效。"],
                     "uncertainties": ["仍需真实运行数据验证。"],
+                    "testable_experiments": ["比较默认策略与候选策略的成功率，并记录失败样本。"],
                 },
             }, ensure_ascii=False),
             first_step="建立可编辑的灵感与实验工作台",
@@ -45,7 +46,9 @@ class LocalProductBuilderTests(unittest.TestCase):
             try:
                 with patch.object(InitiativeStore,"list",return_value=[]):
                     result=LocalProductBuilder(root).build(store,initiative["id"])
-                self.assertTrue(result["validated"])
+                self.assertFalse(result["validated"])
+                self.assertEqual(result["status"], "draft")
+                self.assertTrue(result["content_readiness"]["ready_for_human_review"])
             finally:
                 store.close()
 
@@ -71,7 +74,9 @@ class LocalProductBuilderTests(unittest.TestCase):
                     cycle_events = progress.list_events(category="evolution", subject_id=cycle_id, limit=10)
                 self.assertEqual(cycle_events[0]["event"], "progress")
                 self.assertIn(initiative["id"], cycle_events[0]["summary"])
-                self.assertTrue(result["validated"])
+                self.assertFalse(result["validated"])
+                self.assertFalse(result["publishable"])
+                self.assertEqual(result["status"], "draft")
                 self.assertTrue(package.is_file())
                 self.assertTrue(result["package_sha256"])
                 self.assertIn("稳定条件", html)
@@ -85,14 +90,18 @@ class LocalProductBuilderTests(unittest.TestCase):
                 self.assertIn("双击打开", readme)
                 self.assertEqual(manifest["validation"]["offline_product"], "passed")
                 self.assertEqual(manifest["title"], initiative["title"])
-                self.assertEqual(manifest["builder_version"], 3)
+                self.assertEqual(manifest["status"], "draft")
+                self.assertEqual(manifest["builder_version"], 5)
+                self.assertFalse(manifest["validated"])
+                self.assertFalse(manifest["publishable"])
                 self.assertFalse(manifest["execution"]["network_access"])
                 self.assertFalse(manifest["execution"]["arbitrary_code_executed"])
                 self.assertTrue(manifest["execution"]["browser_local_storage_only"])
                 with zipfile.ZipFile(package) as archive:
                     self.assertEqual(set(archive.namelist()), {"index.html", "README.md"})
                     self.assertEqual(archive.testzip(), None)
-                self.assertEqual(store.list(status="testing")[0]["id"], initiative["id"])
+                self.assertEqual(store.list(status="testing"), [])
+                self.assertEqual(store.get_by_id(initiative["id"])["status"], "proposed")
                 self.assertEqual(store.list(status="shipped"), [])
             finally:
                 store.close()
@@ -148,7 +157,10 @@ class LocalProductBuilderTests(unittest.TestCase):
                 self.assertEqual(manifest["evidence_review_state"], "unreviewed")
                 self.assertFalse(manifest["auto_publish"])
                 self.assertTrue(manifest["conclusion_promotion_requires_independent_review"])
-                self.assertEqual(manifest["status"], "testing")
+                self.assertEqual(manifest["status"], "draft")
+                self.assertEqual(manifest["content_readiness"]["status"], "ready_for_human_review")
+                self.assertFalse(manifest["validated"])
+                self.assertFalse(result["validated"])
             finally:
                 store.close()
 
@@ -162,19 +174,56 @@ class LocalProductBuilderTests(unittest.TestCase):
                 second = builder.build(store, initiative["id"])
                 self.assertTrue(first["created"])
                 self.assertFalse(second["created"])
-                self.assertTrue(second["validated"])
+                self.assertFalse(second["validated"])
+                self.assertEqual(second["status"], "draft")
                 self.assertEqual(first["input_sha256"], second["input_sha256"])
                 self.assertEqual(first["package_sha256"], second["package_sha256"])
                 artifact_events = [
                     event for event in store.list_events(initiative_id=initiative["id"])
                     if event["event_type"] == "product_built"
                 ]
-                self.assertEqual(len(artifact_events), 1)
-                self.assertEqual(artifact_events[0]["details"]["package_sha256"], first["package_sha256"])
+                self.assertEqual(artifact_events, [])
+                self.assertEqual(store.get_by_id(initiative["id"])["status"], "proposed")
 
                 verified = builder.verify(store, initiative["id"])
-                self.assertTrue(verified["validated"])
+                self.assertFalse(verified["validated"])
+                self.assertEqual(verified["status"], "draft")
                 self.assertEqual(verified["package_sha256"], first["package_sha256"])
+            finally:
+                store.close()
+
+    def test_incomplete_content_remains_draft_without_validated_artifact(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = InitiativeStore(root / "data" / "initiatives.sqlite3")
+            initiative = store.propose(
+                "缺少实验的产品草稿", kind="tool",
+                creator_value="将研究想法转化为可验证产品",
+                concept=json.dumps({
+                    "research_question": "该方法是否能降低创作返工？",
+                    "key_discoveries": {"creator_inspired_hypotheses": ["明确记录失败与回滚成本。"]},
+                }, ensure_ascii=False),
+                first_step="建立最小实验工作台",
+                expected_output="可离线使用的产品原型",
+            )
+            try:
+                result = LocalProductBuilder(root).build(store, initiative["id"])
+                output = root / result["relative_path"]
+                manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+                self.assertFalse(result["validated"])
+                self.assertEqual(result["status"], "draft")
+                self.assertIn("testable_experiment_or_acceptance_criteria", result["content_readiness"]["missing_requirements"])
+                self.assertEqual(manifest["validation"]["package_integrity"], "passed")
+                self.assertEqual(manifest["content_readiness"]["status"], "incomplete")
+                self.assertEqual(store.get_by_id(initiative["id"])["status"], "proposed")
+                artifact_events = [
+                    event for event in store.list_events(initiative_id=initiative["id"])
+                    if event["event_type"] == "product_built"
+                ]
+                self.assertEqual(artifact_events, [])
+                second = LocalProductBuilder(root).build(store, initiative["id"])
+                self.assertFalse(second["validated"])
+                self.assertEqual(second["status"], "draft")
             finally:
                 store.close()
 

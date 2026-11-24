@@ -1,0 +1,12 @@
+{
+  "title": "Artificial Intelligence Risk Management Framework: Generative Artificial Intelligence Profile",
+  "publisher": "National Institute of Standards and Technology",
+  "published_at": "2024-07-26",
+  "doi": "https://doi.org/10.6028/NIST.AI.600-1",
+  "pdf": "https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.600-1.pdf",
+  "relevant_sections": {
+    "2.2": "Defines confabulation as confidently presented erroneous or false generative-AI content and notes generated logic or citations can mislead.",
+    "MS-2.5-003": "Recommends reviewing and verifying sources and citations in generative-AI outputs."
+  },
+  "editorial_boundary": "NIST guidance does not supply a universal hallucination rate or certify this checklist. Counter-evidence is editorial advice."
+}

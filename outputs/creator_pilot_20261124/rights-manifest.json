@@ -1,0 +1,35 @@
+{
+  "schema": "muse.creator.rights-manifest.v1",
+  "status": "review_required",
+  "source_video": {
+    "path": "data/prometheus/high-value-short-b133/ai-verification-three-steps-9x16.mp4",
+    "origin": "locally generated Muse Wan 2.1 T2V footage assembled from six existing shots",
+    "prompt_provenance": "partial; retained metadata only",
+    "model_output_rights_review_status": "pending",
+    "commercial_use_allowed": false
+  },
+  "voiceover": {
+    "engine": "canto-tts-onnx-segmented",
+    "model_repo": "typangaa/canto-tts-nano",
+    "model_revision": "fe17418a293d9be85685ddf750b0cfef9c88abb4",
+    "model_license_metadata": "Apache-2.0",
+    "license_review_status": "pending_model_terms_and_voice_review",
+    "commercial_use_allowed": false,
+    "human_listening_review_required": true
+  },
+  "speech_recognition": {
+    "engine": "faster-whisper-local",
+    "model_repo": "alvanlii/whisper-small-cantonese",
+    "model_revision": "b03a4e5d482f06858ce10ebbabebabec9f447a0d",
+    "license_review_status": "not_yet_verified",
+    "commercial_use_allowed": false,
+    "note": "ASR is used for internal QA; do not infer commercial redistribution rights from the TTS model license."
+  },
+  "background_audio": {
+    "origin": "existing original ambient bed retained from the source edit",
+    "commercial_use_allowed": false,
+    "license_review_status": "pending"
+  },
+  "publishable": false,
+  "human_review_required": true
+}

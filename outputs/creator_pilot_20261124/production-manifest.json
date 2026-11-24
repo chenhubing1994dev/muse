@@ -1,0 +1,32 @@
+{
+  "schema": "muse.creator.pilot.v1",
+  "status": "completed_draft_pending_human_review",
+  "title": "AI講得好肯定，就一定係真？三步查證法",
+  "created_at": "2026-11-24T09:44:42.532951+00:00",
+  "video": {
+    "file": "ai-verification-three-steps-9x16.mp4",
+    "sha256": "47acafe30d77b1e16cef09fa4f23d21fc8942d54d5eb2e15a3b3409000ed7229",
+    "bytes": 22053074,
+    "duration_seconds": 24.5,
+    "width": 1080,
+    "height": 1920,
+    "fps": 24,
+    "encoder": "h264_amf",
+    "full_decode": "passed"
+  },
+  "voiceover": {
+    "status": "not_used"
+  },
+  "subtitle_review": null,
+  "source": "NIST AI 600-1, published 2024-07-26, §2.2 and MS-2.5-003",
+  "production_workspace": "isolated temporary Muse workspace; production databases untouched",
+  "fallback_reason": {
+    "attempt": "local_cantonese_tts_asr",
+    "error_type": "VideoProductError",
+    "message": "Cantonese ASR CER gate failed (status=needs_review, cer=0.344828); refusing to package narration",
+    "note": "No external TTS service was substituted; retrying with original captions and soundtrack only."
+  },
+  "publish_api_called": false,
+  "auto_publish": false,
+  "commercial_use_allowed": false
+}

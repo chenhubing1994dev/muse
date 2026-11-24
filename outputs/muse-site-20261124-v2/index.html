@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>AI 查证系列｜别把 AI 的自信当成事实 · Muse</title>
+<meta name="description" content="三步查证 AI 回答：打开原始来源、主动寻找反面证据、给每句话贴上事实/推断/预测/未知标签。免费下载一页查证卡。">
+<meta name="theme-color" content="#080d1d">
+<meta property="og:type" content="website">
+<meta property="og:title" content="AI 查证系列｜别把 AI 的自信当成事实">
+<meta property="og:description" content="引用不是证据 · 主动找反证 · 不知道也是有效结论。免费查证卡，无需注册。">
+<meta property="og:image" content="og.jpg">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>✧</text></svg>">
+<style>
+:root{--bg:#080d1d;--panel:#0f1a33;--line:#24345c;--gold:#e9c77b;--cyan:#7ce8ef;--text:#eef3ff;--muted:#a9b6d3}
+*{box-sizing:border-box}html{scroll-behavior:smooth}
+body{margin:0;background:radial-gradient(1200px 700px at 15% -10%,#14305a 0,transparent 60%),var(--bg);color:var(--text);font:16px/1.75 -apple-system,"PingFang SC","Microsoft YaHei","Noto Sans SC",sans-serif}
+a{color:var(--cyan)}
+.wrap{max-width:1080px;margin:0 auto;padding:0 20px}
+nav{display:flex;justify-content:space-between;align-items:center;padding:18px 0}
+.brand{font-weight:800;letter-spacing:.18em;color:var(--text);text-decoration:none}.brand span{color:var(--gold)}
+nav .links a{margin-left:18px;color:var(--muted);text-decoration:none;font-size:14px}
+.hero{padding:56px 0 40px}
+.eyebrow{color:var(--cyan);letter-spacing:.2em;font-size:12px;font-weight:700}
+h1{font-size:clamp(32px,6vw,58px);line-height:1.18;margin:14px 0 18px}h1 em{font-style:normal;color:var(--gold)}
+.lead{color:var(--muted);font-size:18px;max-width:640px}
+.btns{display:flex;flex-wrap:wrap;gap:12px;margin-top:26px}
+.btn{display:inline-block;padding:13px 22px;border-radius:12px;font-weight:700;text-decoration:none}
+.btn.primary{background:var(--gold);color:#1a1405}.btn.ghost{border:1px solid var(--line);color:var(--text)}
+section{padding:44px 0}
+h2{font-size:clamp(24px,4vw,34px);margin:0 0 8px}.sub{color:var(--muted);margin:0 0 26px}
+.eps{display:grid;gap:22px}
+.ep{background:var(--panel);border:1px solid var(--line);border-radius:20px;padding:22px}
+.ep h3{margin:0 0 4px;font-size:22px}.ep .no{color:var(--gold);font-size:13px;letter-spacing:.15em;font-weight:700}
+.ep p{color:var(--muted);margin:6px 0 16px}
+.strip{display:flex;gap:12px;overflow-x:auto;scroll-snap-type:x mandatory;padding-bottom:8px}
+.strip img{width:200px;aspect-ratio:9/16;border-radius:12px;scroll-snap-align:start;flex:0 0 auto;border:1px solid var(--line);cursor:zoom-in}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:18px}
+.card b{color:var(--cyan);font-size:13px;letter-spacing:.12em}
+.free{background:linear-gradient(135deg,#1a2a4f,#0f1a33);border:1px solid var(--gold);border-radius:22px;padding:30px}
+.follow{display:flex;flex-wrap:wrap;gap:12px}
+.follow a[hidden]{display:none}
+footer{color:#6f7da0;font-size:13px;padding:40px 0 60px;border-top:1px solid var(--line);margin-top:30px}
+#lb{position:fixed;inset:0;background:rgba(0,0,0,.88);display:none;align-items:center;justify-content:center;z-index:9}
+#lb img{max-height:94vh;max-width:94vw;border-radius:12px}
+@media(max-width:600px){nav .links{display:none}.strip img{width:150px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<nav><a class="brand" href="#">MUSE <span>✧</span></a><div class="links"><a href="#episodes">系列</a><a href="#method">方法</a><a href="#free">免费查证卡</a><a href="#follow">关注</a></div></nav>
+
+<header class="hero">
+  <div class="eyebrow">AI LITERACY · 信息素养</div>
+  <h1>别把 AI 的自信，<br><em>当成事实。</em></h1>
+  <p class="lead">AI 回答带了链接、语气笃定、逻辑流畅——但这些都不等于“已核实”。6 集图文：先学 3 个查证方法，再学写报告、核对数字、高质量提问的实操技巧。</p>
+  <div class="btns"><a class="btn primary" href="free-checklist.html">免费领取查证卡 →</a><a class="btn ghost" href="#episodes">先看 6 集图文</a></div>
+</header>
+
+<section id="episodes">
+  <h2>AI 查证系列</h2><p class="sub">6 集 · 每集 5 页，左右滑动查看，点击放大。前 3 集讲方法，后 3 集讲实操。</p>
+  <div class="eps">
+    <article class="ep"><div class="no">EP 01</div><h3>引用不是证据</h3><p>AI 附了链接，不代表链接支持这句话。打开原文、逐句对照、标记状态。</p><div class="strip" data-ep="01"></div></article>
+    <article class="ep"><div class="no">EP 02</div><h3>主动寻找反面证据</h3><p>搜到的全都支持你？可能只是问法只会找到一边。换问法、比质量、记进同一张表。</p><div class="strip" data-ep="02"></div></article>
+    <article class="ep"><div class="no">EP 03</div><h3>“不知道”也是有效结论</h3><p>事实、推断、预测、未知——四个标签，让结论只走到证据所在的那一步。</p><div class="strip" data-ep="03"></div></article>
+    <article class="ep"><div class="no">EP 04 · 实操</div><h3>用 AI 写报告前的 3 分钟查证</h3><p>圈出硬信息、找到原始出处、标记状态。AI 负责起草，你负责署名。</p><div class="strip" data-ep="04"></div></article>
+    <article class="ep"><div class="no">EP 05 · 实操</div><h3>AI 给的数字怎么核对</h3><p>谁统计的？哪一年、哪里？跟谁比？查不到原始数字，就别写精确值。</p><div class="strip" data-ep="05"></div></article>
+    <article class="ep"><div class="no">EP 06 · 实操</div><h3>让 AI 少编造的 5 个提问习惯</h3><p>给材料、要原话、允许说不知道、拆小问题、问反方。提问是第一道防线，查证是最后一道。</p><div class="strip" data-ep="06"></div></article>
+  </div>
+</section>
+
+<section id="method">
+  <h2>最后不只有“真”和“假”</h2><p class="sub">给每条主张选一个状态，保留适用范围和不确定性。</p>
+  <div class="cards">
+    <div class="card"><b>VERIFIED WITH SCOPE</b><p>证据支持，但有明确适用范围。</p></div>
+    <div class="card"><b>PARTIALLY SUPPORTED</b><p>只有部分内容得到支持。</p></div>
+    <div class="card"><b>CONTRADICTED</b><p>可靠证据与主张冲突。</p></div>
+    <div class="card"><b>UNVERIFIED / UNKNOWN</b><p>证据不足或关键资料缺失。</p></div>
+  </div>
+</section>
+
+<section id="free"><div class="free">
+  <div class="eyebrow">FREE · 无需注册</div>
+  <h2>一页 AI 三步查证卡</h2>
+  <p class="sub">拆开主张 → 查原始来源 → 主动找反证，外加发布前自查 5 问。打印贴在桌边，或存在手机里。</p>
+  <div class="btns"><a class="btn primary" href="free-checklist.html">在线查看 / 存为 PDF</a><a class="btn ghost" href="free-checklist.md" download>下载 Markdown</a><a class="btn ghost" id="shopBtn" href="#" hidden>完整工具包 →</a></div>
+</div></section>
+
+<section id="follow">
+  <h2>关注更新</h2><p class="sub">每周新一期：实操案例、提示词、查证工具。评论区告诉我你最常用 AI 查什么。</p>
+  <div class="follow" id="followBox"></div>
+</section>
+
+<footer>
+  © Muse · 内容为原创整理，由 AI 辅助制作，仅作信息素养教育用途，不构成法律、医疗或财务建议。<br>
+  参考：NIST AI 600-1（2024-07-26）§2.2 对生成式 AI “虚构/错误内容”风险的讨论；本方法为 Muse 原创流程，并非 NIST 官方方法或背书。字体：Noto Sans CJK（SIL OFL 1.1）。
+</footer>
+</div>
+<div id="lb" onclick="this.style.display='none'"><img alt=""></div>
+
+<script>
+/* ===== 只需改这里：填上你的账号/店铺链接，留空则自动隐藏 ===== */
+const SITE_CONFIG = {
+  xiaohongshu: "",   // 例: https://www.xiaohongshu.com/user/profile/xxxx
+  douyin: "",        // 例: https://www.douyin.com/user/xxxx
+  shipinhao: "",     // 视频号没有网页主页，可填公众号文章链接
+  bilibili: "",      // 例: https://space.bilibili.com/xxxx
+  shop: ""           // 完整工具包的购买链接（面包多/爱发电/小报童等）
+};
+/* ============================================================== */
+const names={xiaohongshu:"小红书",douyin:"抖音",shipinhao:"视频号/公众号",bilibili:"B站"};
+const fb=document.getElementById("followBox"); let any=false;
+for(const k in names){ if(SITE_CONFIG[k]){any=true;const a=document.createElement("a");a.className="btn ghost";a.href=SITE_CONFIG[k];a.target="_blank";a.rel="noopener";a.textContent=names[k]+" →";fb.appendChild(a);} }
+if(!any) document.getElementById("follow").hidden=true;
+if(SITE_CONFIG.shop){const s=document.getElementById("shopBtn");s.href=SITE_CONFIG.shop;s.hidden=false;}
+document.querySelectorAll(".strip").forEach(el=>{for(let i=1;i<=5;i++){const im=new Image();im.loading="lazy";im.src=`img/episode-${el.dataset.ep}-0${i}.jpg`;im.alt=`第${+el.dataset.ep}集 第${i}页`;im.onclick=()=>{const lb=document.getElementById("lb");lb.querySelector("img").src=im.src;lb.style.display="flex"};el.appendChild(im);}});
+</script>
+</body>
+</html>

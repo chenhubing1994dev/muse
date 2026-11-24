@@ -1,0 +1,11 @@
+{
+  "schema": "muse.creator.voice-rights.v1",
+  "voice_asset": "voiceover-preview.wav",
+  "origin": "locally synthesized with pinned Canto-TTS-Nano ONNX",
+  "model_license": "Apache-2.0",
+  "model_revision": "fe17418a293d9be85685ddf750b0cfef9c88abb4",
+  "commercial_use_allowed": false,
+  "license_review_status": "model-license-known; complete asset/editorial review pending",
+  "human_listening_review_required": true,
+  "overall_video_rights_status": "review_required"
+}

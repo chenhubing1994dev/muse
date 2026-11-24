@@ -1390,8 +1390,7 @@ class StatusApiTests(unittest.TestCase):
         from muse.research_knowledge import ResearchKnowledgeStore
         with ResearchKnowledgeStore(knowledge_db) as knowledge:
             source_claim = knowledge.upsert_node(
-                "claim", "状态变化实验工具灵感", "分层状态有助于复盘，仍需独立证据与反证。",
-                external_ref="test:creator-product-feedback-source",
+                "claim", "状态变化实验工具灵感", summary="分层状态有助于复盘，仍需独立证据与反证。",                external_ref="test:creator-product-feedback-source",
                 metadata={
                     "epistemic_status": "creator_inspired_hypothesis_only",
                     "creator_context_is_evidence": False,
@@ -1403,11 +1402,14 @@ class StatusApiTests(unittest.TestCase):
             initiative = initiatives.propose(
                 "状态变化实验工具", kind="tool", creator_value="把灵感变成实验",
                 concept=json.dumps({"research_question": "如何识别变化？",
-                                    "key_discoveries": {"creator_inspired_hypotheses": ["分层状态有助于复盘。"]}}, ensure_ascii=False),
-                first_step="记录状态", expected_output="离线实验工具",
+                                    "key_discoveries": {"creator_inspired_hypotheses": ["分层状态有助于复盘。"], "testable_experiments": ["记录不同状态变化前后的复盘完整度，并比较实验组与对照组。"]}}, ensure_ascii=False),                first_step="记录状态", expected_output="离线实验工具",
                 inspiration_refs=[f"inspiration:{source_claim['id']}"],
             )
             product = LocalProductBuilder(workspace).build(initiatives, initiative["id"])
+            self.assertEqual(product["status"], "draft")
+            self.assertFalse(product["validated"])
+            self.assertFalse(product["publishable"])
+            self.assertEqual(product["package_integrity"], "passed")
         (report_dir / report_name).write_text("# Muse report\\n\\nFinished report body", encoding="utf-8")
         (report_dir / "ignore.txt").write_text("not an artifact", encoding="utf-8")
         server, token = create_status_server(
@@ -1500,9 +1502,9 @@ class StatusApiTests(unittest.TestCase):
             self.assertEqual(len(product_items), 1)
             self.assertEqual(product_items[0]["initiative_id"], initiative["id"])
             self.assertEqual(product_items[0]["name"], initiative["title"])
-            self.assertEqual(product_items[0]["version"], "v3")
-            # Keep the API contract aligned with LocalProductBuilder v3.
-            self.assertEqual(product_items[0]["status"], "testing")
+            self.assertEqual(product_items[0]["version"], "v5")
+            # ProductBuilder v5 keeps review-ready previews in draft until human validation.
+            self.assertEqual(product_items[0]["status"], "draft")
             timeline_request = Request(
                 base + f"/api/v1/initiatives/{initiative['id']}/timeline?limit=20",
                 headers=headers,
@@ -1510,11 +1512,7 @@ class StatusApiTests(unittest.TestCase):
             with urlopen(timeline_request, timeout=3) as response:
                 timeline = json.loads(response.read())
             self.assertEqual(timeline["initiative"]["id"], initiative["id"])
-            self.assertEqual(
-                [event["event_type"] for event in timeline["events"]],
-                ["created", "status_changed", "product_built"],
-            )
-            self.assertEqual(timeline["events"][-1]["details"]["package_sha256"], product["package_sha256"])
+            self.assertEqual([event["event_type"] for event in timeline["events"]], ["created"])
             self.assertTrue(timeline["history_complete"])
 
 
@@ -1524,6 +1522,7 @@ class StatusApiTests(unittest.TestCase):
                 self.assertIn("attachment", response.headers["Content-Disposition"])
                 product_zip = response.read()
             self.assertTrue(product_zip.startswith(b"PK"))
+            self.assertEqual(hashlib.sha256(product_zip).hexdigest(), product["package_sha256"])
 
             preview_product = Request(base + product_items[0]["preview_path"], headers={"Authorization": f"Bearer {token}"})
             with urlopen(preview_product, timeout=3) as response:
@@ -1553,8 +1552,7 @@ class StatusApiTests(unittest.TestCase):
             self.assertTrue(feedback_result["source_claim_linked"])
             self.assertFalse(feedback_result["status_changed"])
             self.assertFalse(feedback_result["allow_external_research"])
-            self.assertEqual(feedback_result["initiative_status"], "testing")
-
+            self.assertEqual(feedback_result["initiative_status"], "proposed")
             duplicate_feedback = Request(
                 feedback_url, data=json.dumps(feedback_payload, ensure_ascii=False).encode("utf-8"),
                 headers=headers, method="POST",
@@ -1577,7 +1575,7 @@ class StatusApiTests(unittest.TestCase):
 
             with InitiativeStore(workspace / "data" / "initiatives" / "muse.sqlite3") as initiatives:
                 self.assertEqual(len(initiatives.list_feedback(initiative_id=initiative["id"])), 1)
-                self.assertEqual(initiatives.get_by_id(initiative["id"])["status"], "testing")
+                self.assertEqual(initiatives.get_by_id(initiative["id"])["status"], "proposed")
             with ResearchKnowledgeStore(knowledge_db) as knowledge:
                 feedback_node = knowledge.get_node(feedback_result["knowledge_node_id"])
                 self.assertEqual(feedback_node["node_type"], "decision")
@@ -1970,7 +1968,7 @@ class StatusApiTests(unittest.TestCase):
             server.server_close()
             thread.join(timeout=2)
 
-    def test_pipeline_submit_api_enqueues_commander_ticket_and_marks_cantonese_unavailable(self):
+    def test_pipeline_submit_api_rejects_legacy_video_pipeline_and_marks_cantonese_unavailable(self):
         root = Path(self.temp.name)
         script = root / "scripts" / "muse-high-value-short.py"
         script.parent.mkdir(parents=True, exist_ok=True)
@@ -1987,15 +1985,12 @@ class StatusApiTests(unittest.TestCase):
             request = Request(base + "/api/v1/pipelines/submit",
                 data=json.dumps({"recipe_id": "high_value_short_v2", "title": "API pipeline test"}).encode(),
                 headers=headers, method="POST")
-            with urlopen(request, timeout=3) as response:
-                self.assertEqual(response.status, 202)
-                job = json.loads(response.read())["job"]
+            with self.assertRaises(HTTPError) as error:
+                urlopen(request, timeout=3)
+            self.assertEqual(error.exception.code, 409)
+            error.exception.close()
             with TaskQueue(self.task_db) as queue:
-                ticket = queue.get(job["job_id"])
-            self.assertEqual(ticket["payload"]["kind"], "video_pipeline")
-            self.assertEqual(ticket["payload"]["title"], "API pipeline test")
-            self.assertEqual(job["output_dir"], ticket["payload"]["output_dir"])
-            self.assertTrue(job["output_dir"].startswith("data/prometheus/runs/high_value_short_v2/"))
+                self.assertEqual(queue.list_tasks(kind="video_pipeline", limit=100), [])
             recipes_request = Request(base + "/api/v1/pipelines/recipes", headers=headers)
             with urlopen(recipes_request, timeout=3) as response:
                 recipes = json.loads(response.read())["recipes"]

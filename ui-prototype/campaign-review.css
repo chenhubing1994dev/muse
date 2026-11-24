@@ -1,0 +1,43 @@
+:root{color-scheme:dark;--bg:#080b16;--panel:#101629;--panel2:#141d32;--line:rgba(166,190,255,.16);--text:#edf2ff;--muted:#a8b4cc;--gold:#e5c27a;--cyan:#7ed9e8;--warn:#f0c37b}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:radial-gradient(ellipse at 18% 0%,rgba(56,87,150,.24),transparent 38%),var(--bg);color:var(--text);font-family:Inter,"Noto Sans CJK SC","Microsoft YaHei",sans-serif;line-height:1.65}
+a{color:inherit}
+.review-topbar{max-width:1240px;margin:auto;padding:22px 28px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line)}
+.review-brand{display:flex;gap:12px;align-items:center;text-decoration:none;font-weight:800;letter-spacing:.12em}
+.review-brand small{display:block;font-size:9px;letter-spacing:.2em;color:var(--muted);font-weight:500}
+.brand-mark{display:grid;place-items:center;width:38px;height:38px;border:1px solid rgba(229,194,122,.7);border-radius:12px;color:var(--gold);font-family:Georgia,serif;font-size:23px}
+.review-status{display:inline-flex;align-items:center;gap:9px;padding:7px 12px;border:1px solid rgba(240,195,123,.35);border-radius:999px;color:var(--warn);font-size:10px;letter-spacing:.14em}
+.review-status i{width:7px;height:7px;border-radius:50%;background:var(--warn);box-shadow:0 0 12px var(--warn)}
+.review-shell{width:min(1180px,calc(100% - 40px));margin:0 auto;padding:56px 0 44px}
+.review-hero{max-width:850px;margin:0 auto 44px;text-align:center}
+.eyebrow{color:var(--cyan);font-size:10px;letter-spacing:.22em;font-weight:700}
+.review-hero h1{font-size:clamp(32px,5vw,58px);line-height:1.2;letter-spacing:.02em;margin:16px 0}
+.review-hero h1 em{font-style:normal;color:var(--gold)}
+.lead{max-width:700px;margin:0 auto;color:var(--muted);font-size:15px}
+.review-warning{margin:28px auto 20px;padding:17px 20px;text-align:left;border:1px solid rgba(240,195,123,.38);border-radius:16px;background:rgba(110,72,25,.14);display:grid;gap:5px}
+.review-warning strong{color:#f3d49b;font-size:14px}
+.review-warning span{color:#c7cddd;font-size:12px}
+.review-facts{display:flex;justify-content:center;flex-wrap:wrap;gap:8px}
+.review-facts span,.episode-label span{border:1px solid var(--line);border-radius:999px;padding:5px 10px;color:var(--muted);font-size:9px;letter-spacing:.12em}
+.episode-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:18px;align-items:start}
+.episode-card{padding:18px;border:1px solid var(--line);border-radius:20px;background:linear-gradient(155deg,rgba(20,29,50,.96),rgba(11,16,30,.98));box-shadow:0 18px 50px rgba(0,0,0,.2)}
+.episode-label{display:flex;justify-content:space-between;gap:8px}
+.episode-label span:first-child{color:var(--gold)}
+.episode-card h2{font-size:20px;margin:16px 0 6px}
+.episode-card>p:not(.hash){min-height:52px;color:var(--muted);font-size:12px;margin:0 0 16px}
+.video-frame{width:min(100%,310px);margin:0 auto;aspect-ratio:9/16;border-radius:12px;overflow:hidden;background:#02040a;border:1px solid rgba(255,255,255,.1)}
+.video-frame video{display:block;width:100%;height:100%;object-fit:contain;background:#02040a}
+.episode-meta{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:14px 0 4px}
+.episode-meta div{padding:8px;background:rgba(255,255,255,.035);border-radius:9px}
+.episode-meta dt{font-size:9px;color:var(--muted)}
+.episode-meta dd{margin:2px 0 0;font-size:11px}
+.hash{font:10px/1.5 ui-monospace,Consolas,monospace;color:#8190aa;overflow-wrap:anywhere;margin:12px 0 0}
+.review-next{margin-top:26px;padding:22px 24px;border:1px solid var(--line);border-radius:18px;background:rgba(16,22,41,.7);display:flex;align-items:center;justify-content:space-between;gap:24px}
+.review-next h2{font-size:20px;margin:6px 0}
+.review-next p:not(.eyebrow){color:var(--muted);font-size:12px;margin:0}
+.review-next>a{flex-shrink:0;text-decoration:none;padding:11px 15px;border-radius:999px;background:linear-gradient(110deg,#d7b56d,#f0d69c);color:#191522;font-weight:800;font-size:12px}
+.review-next>a span{margin-left:8px}
+.review-footer{text-align:center;padding:18px 20px 30px;color:#78849d;font-size:10px;letter-spacing:.08em}
+@media(max-width:900px){.episode-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:620px){.review-topbar{padding:16px 18px}.review-shell{width:min(100% - 28px,480px);padding-top:38px}.episode-grid{grid-template-columns:1fr}.episode-card{padding:16px}.episode-card>p:not(.hash){min-height:0}.review-next{align-items:flex-start;flex-direction:column}.review-next>a{width:100%;text-align:center}.review-hero h1{font-size:34px}}

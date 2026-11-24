@@ -1,0 +1,15 @@
+{
+  "status": "review_required",
+  "third_party_video": [],
+  "third_party_photography": [],
+  "third_party_music": [],
+  "original_text_and_vector_art": "muse_authored",
+  "font": {
+    "family": "Microsoft YaHei",
+    "source": "local Windows system font",
+    "commercial_license_review_required": true
+  },
+  "external_media_assets": [],
+  "commercial_use_allowed": false,
+  "reason": "Font license and final editorial review are still required; no commercial clearance is claimed."
+}

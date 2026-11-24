@@ -1,0 +1,43 @@
+{
+  "product_id": "muse-ai-fact-check-kinetic-64s-v4-noto-ofl",
+  "created_at": "2026-11-24T11:17:01.690927+00:00",
+  "duration_seconds": 64.0,
+  "dimensions": [
+    1080,
+    1920
+  ],
+  "fps": 24,
+  "voiceover": {
+    "status": "not_used",
+    "reason": "Silent kinetic typography master; narration is intentionally omitted."
+  },
+  "font": {
+    "family": "Noto Sans CJK HK",
+    "license": "SIL Open Font License 1.1",
+    "font_file": "assets/fonts/NotoSansCJKhk-VF.ttf",
+    "license_file": "assets/fonts/NotoCJK-OFL.txt",
+    "font_sha256": "c485d72ca089ce65a83c483c1ddbf1791828b4c8e3c45ea5eae8063fe2164495",
+    "license_sha256": "6a73f9541c2de74158c0e7cf6b0a58ef774f5a780bf191f2d7ec9cc53efe2bf2"
+  },
+  "source_assets": [],
+  "files": {
+    "muse-ai-fact-check-64s-silent.mp4": "cf8f2d1fbbcff7708272eace5431bfb08cfc777bd683d22e2117ea7970119367",
+    "README.md": "86c93f613b57923b934303318e7227983898f6fe804e030f1097bfb31b04aa2e",
+    "rights-manifest.json": "a61ea44dfa939c6ceea15fbd0a17f7833b7bdb7787f9f8d1d09ab870d4288a37",
+    "qa-report.json": "4a54fd9ed2957ed46e452b55308cadcdaa3b2ffbd846073b10c3357116b8fbb8",
+    "social-copy.md": "653bceb378d064faf6d8964e682621511648d87135d76699e6dc9a4b3c71f486",
+    "assets/fonts/NotoSansCJKhk-VF.ttf": "c485d72ca089ce65a83c483c1ddbf1791828b4c8e3c45ea5eae8063fe2164495",
+    "assets/fonts/NotoCJK-OFL.txt": "6a73f9541c2de74158c0e7cf6b0a58ef774f5a780bf191f2d7ec9cc53efe2bf2",
+    "scenes/scene-01.png": "121afaedb29da4cf91eb074b22b944663924d225f3d9bb31ae2dee2805fe09e0",
+    "scenes/scene-02.png": "1b522d155828c5c3fa376b12ea0c09bde6907e33a02128166770e423da23c15b",
+    "scenes/scene-03.png": "718ca0bc3a9eaba5845d47c4a96771c6f9b28322c69b7556349c97303a8ccc93",
+    "scenes/scene-04.png": "4d2b1284d348dcc0e50f47e81f440d556076c8f991fedb658e8477ad43d74fcf",
+    "scenes/scene-05.png": "7a069f28636f4f05ae39ae233d65db004429318503cebb20152f9ff58a8b60be",
+    "scenes/scene-06.png": "a1933903e6f59cda54e710795f293ac65c4cde950ec5ffd9a6879f9fa6a9b871",
+    "scenes/scene-07.png": "a97a6a4dd71ee3b6c8e1f70bde271f3242bc8fbaa8e3552fcfa32c699ea8266a",
+    "scenes/scene-08.png": "f2557ddb7bd57438a1959e867b08def178225092719bb85cfe3b893725a69efc"
+  },
+  "release_state": "draft_only",
+  "ready_to_publish": false,
+  "rights_review_required": true
+}

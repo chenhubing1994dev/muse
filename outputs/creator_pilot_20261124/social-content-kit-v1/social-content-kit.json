@@ -1,0 +1,440 @@
+{
+  "account_authorization": "not_connected",
+  "analytics_state": "not_imported",
+  "auto_publish": false,
+  "campaign": "muse-launch-2026-11",
+  "can_publish": false,
+  "note": "This kit is a manual-operation draft. Views/clicks are not revenue; only verified orders and settlements count as realized income.",
+  "package_type": "muse_social_content_kit",
+  "platforms": [
+    {
+      "caption": "AI 说得很自信，不代表它一定正确。记住三步：拆开主张、查原始来源、主动寻找反证。",
+      "compliance_review": {
+        "account_authorization": {
+          "status": "not_connected"
+        },
+        "ai_generated_visuals_and_platform_label": {
+          "note": "Synthetic voiceover or programmatic/AI media is present; select the applicable platform AI-content disclosure label before publishing.",
+          "status": "review_required"
+        },
+        "community_rules_and_upload_specifications": {
+          "status": "manual_review_required"
+        },
+        "factual_claims_and_context": {
+          "status": "editorial_review_required"
+        },
+        "music_and_audio_rights": {
+          "note": "original synthesized ambient bed; voice-aware ducking enabled for Cantonese pilot",
+          "status": "review_required"
+        },
+        "privacy_and_person_release": {
+          "status": "review_required"
+        },
+        "sponsorship_affiliate_and_product_placement": {
+          "status": "confirm_before_upload"
+        },
+        "visual_and_model_rights": {
+          "status": "review_required"
+        }
+      },
+      "copy_source": "existing_publish_package",
+      "cover_prompt": "为《AI講得好肯定，就一定係真？三步查證法》制作竖屏封面；只使用本片真实画面和已核实文案，不添加虚构数据、认证标志或不存在的产品界面。",
+      "cta": "订阅并留言：你会先核查哪一项？",
+      "description": "AI 说得很自信，不代表它一定正确。记住三步：拆开主张、查原始来源、主动寻找反证。\n\n资料来源：Artificial Intelligence Risk Management Framework: Generative Artificial Intelligence Profile；National Institute of Standards and Technology；发布日期：2024-07-26。\n参考章节/行动：2.2, MS-2.5-003。\n原始资料：https://doi.org/10.6028/NIST.AI.600-1\nPDF：https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.600-1.pdf\n\n内容边界：NIST guidance does not supply a universal hallucination rate or certify this checklist. Counter-evidence is editorial advice.\n本片为知识分享，不构成对所有 AI 系统准确率的统计结论。",
+      "duration_profile": {
+        "manual_account_specific_check_required": true,
+        "master_duration_seconds": 24.5,
+        "official_duration_limit_seconds": null,
+        "status": "master_duration_observed_official_limit_unverified"
+      },
+      "hashtags": [
+        "#AI",
+        "#事实核验",
+        "#人工智能",
+        "#知识科普"
+      ],
+      "platform": "youtube_shorts",
+      "platform_name": "YouTube Shorts",
+      "publish_api_called": false,
+      "schedule": {
+        "note": "No publishing time was supplied; choose a time using the account's own audience analytics.",
+        "publish_at": null,
+        "status": "not_scheduled"
+      },
+      "source_citations": [
+        {
+          "doi": "https://doi.org/10.6028/NIST.AI.600-1",
+          "pdf": "https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.600-1.pdf",
+          "publisher": "National Institute of Standards and Technology",
+          "title": "Artificial Intelligence Risk Management Framework: Generative Artificial Intelligence Profile"
+        }
+      ],
+      "source_release_state": "draft_only",
+      "subtitle_safe_area": {
+        "guidance": "关键字幕放在画面中部安全区域，避开顶部/底部界面遮挡和右侧交互按钮；发布前在目标平台官方 App 预览。",
+        "heuristic_only": true,
+        "manual_verification_required": true,
+        "official_platform_spec": null
+      },
+      "tags": [
+        "AI",
+        "事实核验",
+        "生成式人工智能",
+        "信息素养"
+      ],
+      "title": "AI講得好肯定，就一定係真？三步查證法",
+      "title_variants": [
+        "AI講得好肯定，就一定係真？三步查證法"
+      ],
+      "tracking": null
+    },
+    {
+      "caption": "AI 说得很自信，不代表它一定正确。记住三步：拆开主张、查原始来源、主动寻找反证。",
+      "compliance_review": {
+        "account_authorization": {
+          "status": "not_connected"
+        },
+        "ai_generated_visuals_and_platform_label": {
+          "note": "Synthetic voiceover or programmatic/AI media is present; select the applicable platform AI-content disclosure label before publishing.",
+          "status": "review_required"
+        },
+        "community_rules_and_upload_specifications": {
+          "status": "manual_review_required"
+        },
+        "factual_claims_and_context": {
+          "status": "editorial_review_required"
+        },
+        "music_and_audio_rights": {
+          "note": "original synthesized ambient bed; voice-aware ducking enabled for Cantonese pilot",
+          "status": "review_required"
+        },
+        "privacy_and_person_release": {
+          "status": "review_required"
+        },
+        "sponsorship_affiliate_and_product_placement": {
+          "status": "confirm_before_upload"
+        },
+        "visual_and_model_rights": {
+          "status": "review_required"
+        }
+      },
+      "copy_source": "existing_publish_package",
+      "cover_prompt": "为《AI講得好肯定，就一定係真？三步查證法》制作竖屏封面；只使用本片真实画面和已核实文案，不添加虚构数据、认证标志或不存在的产品界面。",
+      "cta": "留言分享你遇过的 AI 说法，我们一起查来源。",
+      "description": "AI 说得很自信，不代表它一定正确。记住三步：拆开主张、查原始来源、主动寻找反证。\n\n资料来源：Artificial Intelligence Risk Management Framework: Generative Artificial Intelligence Profile；National Institute of Standards and Technology；发布日期：2024-07-26。\n参考章节/行动：2.2, MS-2.5-003。\n原始资料：https://doi.org/10.6028/NIST.AI.600-1\nPDF：https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.600-1.pdf\n\n内容边界：NIST guidance does not supply a universal hallucination rate or certify this checklist. Counter-evidence is editorial advice.\n本片为知识分享，不构成对所有 AI 系统准确率的统计结论。",
+      "duration_profile": {
+        "manual_account_specific_check_required": true,
+        "master_duration_seconds": 24.5,
+        "official_duration_limit_seconds": null,
+        "status": "master_duration_observed_official_limit_unverified"
+      },
+      "hashtags": [
+        "#AI",
+        "#人工智能",
+        "#事实查证",
+        "#知识科普"
+      ],
+      "platform": "tiktok",
+      "platform_name": "TikTok",
+      "publish_api_called": false,
+      "schedule": {
+        "note": "No publishing time was supplied; choose a time using the account's own audience analytics.",
+        "publish_at": null,
+        "status": "not_scheduled"
+      },
+      "source_citations": [
+        {
+          "doi": "https://doi.org/10.6028/NIST.AI.600-1",
+          "pdf": "https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.600-1.pdf",
+          "publisher": "National Institute of Standards and Technology",
+          "title": "Artificial Intelligence Risk Management Framework: Generative Artificial Intelligence Profile"
+        }
+      ],
+      "source_release_state": "draft_only",
+      "subtitle_safe_area": {
+        "guidance": "关键字幕放在画面中部安全区域，避开顶部/底部界面遮挡和右侧交互按钮；发布前在目标平台官方 App 预览。",
+        "heuristic_only": true,
+        "manual_verification_required": true,
+        "official_platform_spec": null
+      },
+      "tags": [
+        "AI",
+        "人工智能",
+        "事实查证"
+      ],
+      "title": "AI講得好肯定，就一定係真？三步查證法",
+      "title_variants": [
+        "AI講得好肯定，就一定係真？三步查證法"
+      ],
+      "tracking": null
+    },
+    {
+      "caption": "AI 说得很自信，不代表它一定正确。记住三步：拆开主张、查原始来源、主动寻找反证。",
+      "compliance_review": {
+        "account_authorization": {
+          "status": "not_connected"
+        },
+        "ai_generated_visuals_and_platform_label": {
+          "note": "Synthetic voiceover or programmatic/AI media is present; select the applicable platform AI-content disclosure label before publishing.",
+          "status": "review_required"
+        },
+        "community_rules_and_upload_specifications": {
+          "status": "manual_review_required"
+        },
+        "factual_claims_and_context": {
+          "status": "editorial_review_required"
+        },
+        "music_and_audio_rights": {
+          "note": "original synthesized ambient bed; voice-aware ducking enabled for Cantonese pilot",
+          "status": "review_required"
+        },
+        "privacy_and_person_release": {
+          "status": "review_required"
+        },
+        "sponsorship_affiliate_and_product_placement": {
+          "status": "confirm_before_upload"
+        },
+        "visual_and_model_rights": {
+          "status": "review_required"
+        }
+      },
+      "copy_source": "existing_publish_package",
+      "cover_prompt": "为《AI講得好肯定，就一定係真？三步查證法》制作竖屏封面；只使用本片真实画面和已核实文案，不添加虚构数据、认证标志或不存在的产品界面。",
+      "cta": "先收藏这份三步清单，下次核查时再打开。",
+      "description": "AI 说得很自信，不代表它一定正确。记住三步：拆开主张、查原始来源、主动寻找反证。\n\n资料来源：Artificial Intelligence Risk Management Framework: Generative Artificial Intelligence Profile；National Institute of Standards and Technology；发布日期：2024-07-26。\n参考章节/行动：2.2, MS-2.5-003。\n原始资料：https://doi.org/10.6028/NIST.AI.600-1\nPDF：https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.600-1.pdf\n\n内容边界：NIST guidance does not supply a universal hallucination rate or certify this checklist. Counter-evidence is editorial advice.\n本片为知识分享，不构成对所有 AI 系统准确率的统计结论。",
+      "duration_profile": {
+        "manual_account_specific_check_required": true,
+        "master_duration_seconds": 24.5,
+        "official_duration_limit_seconds": null,
+        "status": "master_duration_observed_official_limit_unverified"
+      },
+      "hashtags": [
+        "#AI",
+        "#AIFacts",
+        "#FactChecking",
+        "#人工智能",
+        "#知识科普"
+      ],
+      "platform": "instagram_reels",
+      "platform_name": "Instagram Reels",
+      "publish_api_called": false,
+      "schedule": {
+        "note": "No publishing time was supplied; choose a time using the account's own audience analytics.",
+        "publish_at": null,
+        "status": "not_scheduled"
+      },
+      "source_citations": [
+        {
+          "doi": "https://doi.org/10.6028/NIST.AI.600-1",
+          "pdf": "https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.600-1.pdf",
+          "publisher": "National Institute of Standards and Technology",
+          "title": "Artificial Intelligence Risk Management Framework: Generative Artificial Intelligence Profile"
+        }
+      ],
+      "source_release_state": "draft_only",
+      "subtitle_safe_area": {
+        "guidance": "关键字幕放在画面中部安全区域，避开顶部/底部界面遮挡和右侧交互按钮；发布前在目标平台官方 App 预览。",
+        "heuristic_only": true,
+        "manual_verification_required": true,
+        "official_platform_spec": null
+      },
+      "tags": [
+        "AI",
+        "fact checking",
+        "media literacy"
+      ],
+      "title": "AI講得好肯定，就一定係真？三步查證法",
+      "title_variants": [
+        "AI講得好肯定，就一定係真？三步查證法"
+      ],
+      "tracking": null
+    },
+    {
+      "caption": "AI 说得很自信，不代表它一定正确。记住三步：拆开主张、查原始来源、主动寻找反证。",
+      "compliance_review": {
+        "account_authorization": {
+          "status": "not_connected"
+        },
+        "ai_generated_visuals_and_platform_label": {
+          "note": "Synthetic voiceover or programmatic/AI media is present; select the applicable platform AI-content disclosure label before publishing.",
+          "status": "review_required"
+        },
+        "community_rules_and_upload_specifications": {
+          "status": "manual_review_required"
+        },
+        "factual_claims_and_context": {
+          "status": "editorial_review_required"
+        },
+        "music_and_audio_rights": {
+          "note": "original synthesized ambient bed; voice-aware ducking enabled for Cantonese pilot",
+          "status": "review_required"
+        },
+        "privacy_and_person_release": {
+          "status": "review_required"
+        },
+        "sponsorship_affiliate_and_product_placement": {
+          "status": "confirm_before_upload"
+        },
+        "visual_and_model_rights": {
+          "status": "review_required"
+        }
+      },
+      "copy_source": "existing_publish_package",
+      "cover_prompt": "为《AI講得好肯定，就一定係真？三步查證法》制作竖屏封面；只使用本片真实画面和已核实文案，不添加虚构数据、认证标志或不存在的产品界面。",
+      "cta": "收藏本期清单，并在评论区补充你的查证方法。",
+      "description": "AI 说得很自信，不代表它一定正确。记住三步：拆开主张、查原始来源、主动寻找反证。\n\n资料来源：Artificial Intelligence Risk Management Framework: Generative Artificial Intelligence Profile；National Institute of Standards and Technology；发布日期：2024-07-26。\n参考章节/行动：2.2, MS-2.5-003。\n原始资料：https://doi.org/10.6028/NIST.AI.600-1\nPDF：https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.600-1.pdf\n\n内容边界：NIST guidance does not supply a universal hallucination rate or certify this checklist. Counter-evidence is editorial advice.\n本片为知识分享，不构成对所有 AI 系统准确率的统计结论。",
+      "duration_profile": {
+        "manual_account_specific_check_required": true,
+        "master_duration_seconds": 24.5,
+        "official_duration_limit_seconds": null,
+        "status": "master_duration_observed_official_limit_unverified"
+      },
+      "hashtags": [],
+      "platform": "bilibili",
+      "platform_name": "哔哩哔哩",
+      "publish_api_called": false,
+      "schedule": {
+        "note": "No publishing time was supplied; choose a time using the account's own audience analytics.",
+        "publish_at": null,
+        "status": "not_scheduled"
+      },
+      "source_citations": [
+        {
+          "doi": "https://doi.org/10.6028/NIST.AI.600-1",
+          "pdf": "https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.600-1.pdf",
+          "publisher": "National Institute of Standards and Technology",
+          "title": "Artificial Intelligence Risk Management Framework: Generative Artificial Intelligence Profile"
+        }
+      ],
+      "source_release_state": "draft_only",
+      "subtitle_safe_area": {
+        "guidance": "关键字幕放在画面中部安全区域，避开顶部/底部界面遮挡和右侧交互按钮；发布前在目标平台官方 App 预览。",
+        "heuristic_only": true,
+        "manual_verification_required": true,
+        "official_platform_spec": null
+      },
+      "tags": [
+        "人工智能",
+        "AI",
+        "事实核验",
+        "知识科普",
+        "信息素养"
+      ],
+      "title": "AI講得好肯定，就一定係真？三步查證法",
+      "title_variants": [
+        "AI講得好肯定，就一定係真？三步查證法"
+      ],
+      "tracking": null
+    },
+    {
+      "caption": "AI 说得很自信，不代表它一定正确。记住三步：拆开主张、查原始来源、主动寻找反证。",
+      "compliance_review": {
+        "account_authorization": {
+          "status": "not_connected"
+        },
+        "ai_generated_visuals_and_platform_label": {
+          "note": "Synthetic voiceover or programmatic/AI media is present; select the applicable platform AI-content disclosure label before publishing.",
+          "status": "review_required"
+        },
+        "community_rules_and_upload_specifications": {
+          "status": "manual_review_required"
+        },
+        "factual_claims_and_context": {
+          "status": "editorial_review_required"
+        },
+        "music_and_audio_rights": {
+          "note": "original synthesized ambient bed; voice-aware ducking enabled for Cantonese pilot",
+          "status": "review_required"
+        },
+        "privacy_and_person_release": {
+          "status": "review_required"
+        },
+        "sponsorship_affiliate_and_product_placement": {
+          "status": "confirm_before_upload"
+        },
+        "visual_and_model_rights": {
+          "status": "review_required"
+        }
+      },
+      "copy_source": "derived_from_existing_platform_draft",
+      "cover_prompt": "为《AI講得好肯定，就一定係真？三步查證法》制作竖屏封面；只使用本片真实画面和已核实文案，不添加虚构数据、认证标志或不存在的产品界面。",
+      "cta": "收藏这份查证清单，遇到类似说法时逐项核对。",
+      "description": "AI 说得很自信，不代表它一定正确。记住三步：拆开主张、查原始来源、主动寻找反证。\n\n资料来源：Artificial Intelligence Risk Management Framework: Generative Artificial Intelligence Profile；National Institute of Standards and Technology；发布日期：2024-07-26。\n参考章节/行动：2.2, MS-2.5-003。\n原始资料：https://doi.org/10.6028/NIST.AI.600-1\nPDF：https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.600-1.pdf\n\n内容边界：NIST guidance does not supply a universal hallucination rate or certify this checklist. Counter-evidence is editorial advice.\n本片为知识分享，不构成对所有 AI 系统准确率的统计结论。",
+      "duration_profile": {
+        "manual_account_specific_check_required": true,
+        "master_duration_seconds": 24.5,
+        "official_duration_limit_seconds": null,
+        "status": "master_duration_observed_official_limit_unverified"
+      },
+      "hashtags": [
+        "#AI",
+        "#事实核验",
+        "#人工智能",
+        "#知识科普"
+      ],
+      "platform": "xiaohongshu",
+      "platform_name": "小红书",
+      "publish_api_called": false,
+      "schedule": {
+        "note": "No publishing time was supplied; choose a time using the account's own audience analytics.",
+        "publish_at": null,
+        "status": "not_scheduled"
+      },
+      "source_citations": [
+        {
+          "doi": "https://doi.org/10.6028/NIST.AI.600-1",
+          "pdf": "https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.600-1.pdf",
+          "publisher": "National Institute of Standards and Technology",
+          "title": "Artificial Intelligence Risk Management Framework: Generative Artificial Intelligence Profile"
+        }
+      ],
+      "source_release_state": "draft_only",
+      "subtitle_safe_area": {
+        "guidance": "关键字幕放在画面中部安全区域，避开顶部/底部界面遮挡和右侧交互按钮；发布前在目标平台官方 App 预览。",
+        "heuristic_only": true,
+        "manual_verification_required": true,
+        "official_platform_spec": null
+      },
+      "tags": [
+        "AI",
+        "事实核验",
+        "生成式人工智能",
+        "信息素养"
+      ],
+      "title": "AI講得好肯定，就一定係真？三步查證法",
+      "title_variants": [
+        "AI講得好肯定，就一定係真？三步查證法"
+      ],
+      "tracking": null
+    }
+  ],
+  "publish_api_called": false,
+  "release_blockers": [
+    "visual_anomaly_review",
+    "subtitle_review",
+    "visual_content_review",
+    "editorial_and_fact_review",
+    "visual_and_model_rights_review",
+    "privacy_and_person_release_review",
+    "music_and_audio_rights_review",
+    "ai_generated_content_disclosure",
+    "sponsorship_affiliate_and_product_placement",
+    "platform_upload_specifications",
+    "account_authorization"
+  ],
+  "release_state": "draft_only",
+  "revenue_state": "not_observed",
+  "schema_version": 1,
+  "settlement_state": "not_observed",
+  "source_publish_package": {
+    "evolution_cycle_id": "cycle_30cef7814dc64231870712976eaacb8e",
+    "initiative_id": "5d8e4a058ea37814c61fa25b138a4e62",
+    "path": ".muse-video-pilot-workspace-20261124/data/products/5d8e4a058ea37814c61fa25b138a4e62/a448d971e85f97611878/publish-package-v1",
+    "release_quality_status": "blocked_pending_human_review",
+    "sha256": "f6097596092827c6bd87fce45aaa46368210d47229c32732b796003f3a247627",
+    "source_video_sha256": "47acafe30d77b1e16cef09fa4f23d21fc8942d54d5eb2e15a3b3409000ed7229",
+    "version_id": "a448d971e85f97611878"
+  },
+  "tracking_manifest": null,
+  "tracking_state": "awaiting_owner_controlled_destination_url"
+}

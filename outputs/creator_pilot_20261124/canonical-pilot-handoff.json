@@ -1,0 +1,103 @@
+{
+  "schema": "muse.canonical-pilot-handoff.v2",
+  "status": "draft_only_human_review_required",
+  "pilot_dir": "data/monetization/first-cantonese-pilot-2026-11-24-v2",
+  "video_file": "video.mp4",
+  "video_sha256": "125864347a48c2b9bfa273b89f9671287464b68b4416fe89b060b0c98a49bf93",
+  "video_bytes": 13798014,
+  "duration_seconds": 24.512,
+  "resolution": "1080x1920",
+  "codec": "H.264/AAC",
+  "asr_utf8_valid": true,
+  "asr_cer": 0.0625,
+  "asr_known_mistranscription": "揾反正 -> 搵反證",
+  "manual_subtitles_applied": true,
+  "raw_asr_subtitles_preserved": "subtitles.asr.srt",
+  "human_subtitle_review_required": true,
+  "human_voice_listening_review_required": true,
+  "extended_video_qa_status": "passed",
+  "extended_video_qa_warnings": [
+    {
+      "code": "sustained_black",
+      "message": "Sustained black frames detected",
+      "start_seconds": 0.0,
+      "duration_seconds": 3.0,
+      "review_threshold_seconds": 0.5
+    },
+    {
+      "code": "sustained_black",
+      "message": "Sustained black frames detected",
+      "start_seconds": 21.5,
+      "duration_seconds": 2.958333,
+      "review_threshold_seconds": 0.5
+    },
+    {
+      "code": "frozen_frames",
+      "message": "Potential frozen frame interval detected",
+      "start_seconds": 0.25,
+      "duration_seconds": 2.75,
+      "review_threshold_seconds": 1.0
+    },
+    {
+      "code": "frozen_frames",
+      "message": "Potential frozen frame interval detected",
+      "start_seconds": 3.416667,
+      "duration_seconds": 1.666667,
+      "review_threshold_seconds": 1.0
+    },
+    {
+      "code": "frozen_frames",
+      "message": "Potential frozen frame interval detected",
+      "start_seconds": 8.166667,
+      "duration_seconds": 1.083333,
+      "review_threshold_seconds": 1.0
+    },
+    {
+      "code": "frozen_frames",
+      "message": "Potential frozen frame interval detected",
+      "start_seconds": 9.375,
+      "duration_seconds": 1.958333,
+      "review_threshold_seconds": 1.0
+    },
+    {
+      "code": "frozen_frames",
+      "message": "Potential frozen frame interval detected",
+      "start_seconds": 11.458333,
+      "duration_seconds": 4.958333,
+      "review_threshold_seconds": 1.0
+    },
+    {
+      "code": "frozen_frames",
+      "message": "Potential frozen frame interval detected",
+      "start_seconds": 21.625,
+      "duration_seconds": 2.666667,
+      "review_threshold_seconds": 1.0
+    }
+  ],
+  "motion_summary": {
+    "median_mean_flow_px": 0.533186,
+    "max_mean_flow_px": 3.001075,
+    "note": "Advisory only; no universal motion pass threshold is applied."
+  },
+  "rights_review_required": true,
+  "commercial_use_allowed": false,
+  "release_state": "draft_only",
+  "account_authorization": "not_connected",
+  "publish_api_called": false,
+  "auto_publish": false,
+  "delivery_package_sha256": "b1295583160f56948b9df3605f2143c600361cfe4ebde41796074df5497d8db0",
+  "delivery_package_zip_crc": "passed",
+  "digital_product_file": "AI-Verification-Kit-v0.1.1.zip",
+  "digital_product_sha256": "22f8f149540cb0adeca37ac453301298e7bba1bc0319c3413826cb703002ee32",
+  "digital_product_version": "0.1.1",
+  "price_hypothesis_usd": 9.0,
+  "price_validated": false,
+  "orders": 0,
+  "settled_revenue": 0,
+  "paid_api_cost_usd": 0,
+  "paid_asset_cost_usd": 0,
+  "cloud_compute_cost_usd": 0,
+  "local_compute_estimate_usd": 0.02,
+  "actual_metered": false,
+  "production_database_touched": false
+}

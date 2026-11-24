@@ -1,0 +1,8 @@
+sequence_day,channel,content_type,topic,asset_gate,status,primary_metric,secondary_metric,notes
+1,YouTube Shorts,short video,Three-step AI verification,rights_and_editorial_clearance,draft,views,average_view_duration,Use only after video release gate passes
+1,TikTok,short video,Three-step AI verification,rights_and_editorial_clearance,draft,video_views,completion_rate,No auto-publish
+1,Instagram Reels,short video,Three-step AI verification,rights_and_editorial_clearance,draft,reach,saves,No auto-publish
+2,LinkedIn,text post,Confident answer is not verified claim,copy_review,draft,impressions,meaningful_comments,No unsupported NIST endorsement
+3,Bilibili,short video,Three-step AI verification,rights_and_editorial_clearance,draft,views,completion_rate,Use platform-specific disclosure
+5,Instagram carousel,educational carousel,Claim-source-counterevidence worksheet,product_editorial_review,draft,saves,profile_visits,No product download link until release approval
+7,LinkedIn,text post,What we learned from verification workflow,claim_and_source_review,draft,comments,profile_visits,Do not invent pilot metrics

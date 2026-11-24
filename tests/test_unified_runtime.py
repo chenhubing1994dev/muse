@@ -1,4 +1,5 @@
 import os
+import hashlib
 import json
 import tempfile
 import unittest
@@ -835,7 +836,7 @@ class UnifiedRuntimeTests(unittest.TestCase):
                 self.assertEqual(queue.get(task["id"])["status"], "queued")
             self.assertEqual(self.runtime.ruflo.calls, [])
     def test_video_approval_tickets_cannot_enter_generic_dispatchers(self):
-        for approval_kind in ("creator_initiative_video_approval", "business_opportunity_video_approval"):
+        for approval_kind in ("creator_initiative_video_approval", "business_opportunity_video_approval", "video_pipeline"):
             for dispatcher_name in ("dispatch_once", "dispatch_commander_once"):
                 with TaskQueue(self.db) as queue:
                     ticket = queue.enqueue(
@@ -846,7 +847,7 @@ class UnifiedRuntimeTests(unittest.TestCase):
                     )
                     queue.approve(ticket["id"], approved_by="test-operator")
                 with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}, clear=True):
-                    with self.assertRaisesRegex(RuntimeBlocked, "video approval tickets require VideoTaskWorker"):
+                    with self.assertRaisesRegex(RuntimeBlocked, "dedicated video dispatcher"):
                         if dispatcher_name == "dispatch_once":
                             self.runtime.dispatch_once(task_id=ticket["id"], approved=True)
                         else:
@@ -856,6 +857,148 @@ class UnifiedRuntimeTests(unittest.TestCase):
                 with TaskQueue(self.db) as queue:
                     self.assertEqual(queue.get(ticket["id"])["status"], "queued")
                 self.assertEqual(self.runtime.ruflo.calls, [])
+
+    @staticmethod
+    def _commander_video_plan_snapshot():
+        return {
+            "schema": "muse-commander-plan-snapshot-v1",
+            "plan_id": "a" * 32,
+            "goal": "Produce one reviewed video asset from the approved Creator Brief.",
+            "source": "safe_fallback",
+            "steps": [
+                {"step_id": "research", "role": "researcher", "objective": "Verify the brief and sources.",
+                 "depends_on": [], "required_capabilities": ["research"]},
+                {"step_id": "build", "role": "developer", "objective": "Build the approved video draft.",
+                 "depends_on": ["research"], "required_capabilities": ["coding", "testing"]},
+                {"step_id": "review", "role": "reviewer", "objective": "Review the video and evidence.",
+                 "depends_on": ["build"], "required_capabilities": ["review"]},
+            ],
+            "parallel_waves": [["research"], ["build"], ["review"]],
+        }
+
+    @staticmethod
+    def _commander_video_plan_digest(snapshot):
+        encoded = json.dumps(
+            snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def _enqueue_video_pipeline_execution_ticket(self):
+        snapshot = self._commander_video_plan_snapshot()
+        dag_sha256 = self._commander_video_plan_digest(snapshot)
+        video_brief = {"title": "Approved video draft", "prompt": "Create a factual explainer."}
+        brief_sha256 = hashlib.sha256(
+            json.dumps(video_brief, sort_keys=True, ensure_ascii=False).encode("utf-8")
+        ).hexdigest()
+        with TaskQueue(self.db) as queue:
+            approval = queue.enqueue(
+                "Approve one video attempt",
+                {
+                    "kind": "business_opportunity_video_approval",
+                    "initiative_id": "initiative-test",
+                    "attempt_id": "attempt-test",
+                    "approval_scope": "one_video_attempt_only",
+                    "video_brief": video_brief,
+                    "video_brief_sha256": brief_sha256,
+                    "commander_plan_id": snapshot["plan_id"],
+                    "commander_plan_source": snapshot["source"],
+                    "commander_plan_snapshot": snapshot,
+                    "dag_sha256": dag_sha256,
+                },
+                require_approval=True, workload_class="media",
+                idempotency_key="test-video-approval-ticket",
+            )
+            queue.approve(approval["id"], approved_by="human-reviewer")
+            approval_event = queue.events(approval["id"])[-1]
+            execution = queue.enqueue(
+                "Execute one approved video attempt",
+                {
+                    "kind": "video_pipeline",
+                    "approval_task_id": approval["id"],
+                    "approval_event_id": approval_event["event_id"],
+                    "approved_by": "human-reviewer",
+                    "attempt_id": "attempt-test",
+                    "initiative_id": "initiative-test",
+                    "brief_sha256": brief_sha256,
+                    "commander_plan_id": snapshot["plan_id"],
+                    "commander_plan_source": snapshot["source"],
+                    "commander_plan_snapshot": snapshot,
+                    "dag_sha256": dag_sha256,
+                },
+                workload_class="media", idempotency_key="test-video-execution-ticket",
+            )
+        return execution
+
+    def test_public_video_pipeline_preflight_is_read_only_and_reports_exact_bindings(self):
+        execution = self._enqueue_video_pipeline_execution_ticket()
+        result = self.runtime.preflight_video_pipeline_ticket(execution["id"])
+        self.assertEqual(result["status"], "preflight_passed")
+        self.assertFalse(result["execution_ready"])
+        self.assertEqual(result["ticket_id"], execution["id"])
+        self.assertEqual(result["initiative_id"], "initiative-test")
+        self.assertEqual(result["attempt_id"], "attempt-test")
+        self.assertEqual(result["commander_plan_id"], "a" * 32)
+        self.assertEqual(result["approval_evidence"]["approved_by"], "human-reviewer")
+        self.assertFalse(result["claimed"])
+        with TaskQueue(self.db) as queue:
+            self.assertEqual(queue.get(execution["id"])["status"], "queued")
+
+    def test_video_pipeline_preflight_restores_exact_approved_plan_and_event(self):
+        execution = self._enqueue_video_pipeline_execution_ticket()
+        with TaskQueue(self.db) as queue:
+            context = self.runtime._validate_video_pipeline_execution_ticket(
+                queue, queue.get(execution["id"]),
+            )
+            self.assertEqual(context["commander_plan"].plan_id, "a" * 32)
+            self.assertEqual(
+                context["approval_evidence"]["approval_task_id"],
+                context["ticket"]["payload"]["approval_task_id"],
+            )
+            self.assertEqual(context["approval_evidence"]["approved_by"], "human-reviewer")
+            self.assertEqual(queue.get(execution["id"])["status"], "queued")
+
+    def test_video_pipeline_preflight_rejects_nonlatest_approval_event(self):
+        execution = self._enqueue_video_pipeline_execution_ticket()
+        execution["payload"]["approval_event_id"] = "stale-event-id"
+        with TaskQueue(self.db) as queue:
+            with self.assertRaisesRegex(RuntimeBlocked, "latest matching persisted human approval"):
+                self.runtime._validate_video_pipeline_execution_ticket(queue, execution)
+
+    def test_video_pipeline_preflight_rejects_modified_approved_plan_snapshot(self):
+        execution = self._enqueue_video_pipeline_execution_ticket()
+        execution["payload"]["commander_plan_snapshot"]["goal"] = "Tampered after approval"
+        with TaskQueue(self.db) as queue:
+            with self.assertRaisesRegex(RuntimeBlocked, "DAG digest"):
+                self.runtime._validate_video_pipeline_execution_ticket(queue, execution)
+
+    def test_persisted_commander_video_plan_restores_exact_plan_identity_and_dag(self):
+        snapshot = self._commander_video_plan_snapshot()
+        digest = self._commander_video_plan_digest(snapshot)
+        plan = self.runtime._restore_commander_plan_snapshot(snapshot, digest)
+        self.assertEqual(plan.plan_id, snapshot["plan_id"])
+        self.assertEqual(plan.goal, snapshot["goal"])
+        self.assertEqual(plan.source, snapshot["source"])
+        self.assertEqual([step.step_id for step in plan.steps], ["research", "build", "review"])
+        self.assertEqual(plan.parallel_waves, (("research",), ("build",), ("review",)))
+
+    def test_persisted_commander_video_plan_rejects_digest_mismatch(self):
+        snapshot = self._commander_video_plan_snapshot()
+        digest = self._commander_video_plan_digest(snapshot)
+        snapshot["goal"] = "Tampered goal"
+        with self.assertRaisesRegex(RuntimeBlocked, "DAG digest"):
+            self.runtime._restore_commander_plan_snapshot(snapshot, digest)
+
+    def test_persisted_commander_video_plan_rejects_capability_escalation_and_wrong_waves(self):
+        snapshot = self._commander_video_plan_snapshot()
+        snapshot["steps"][1]["required_capabilities"] = ["coding", "testing", "desktop.control"]
+        digest = self._commander_video_plan_digest(snapshot)
+        with self.assertRaisesRegex(RuntimeBlocked, "role capability"):
+            self.runtime._restore_commander_plan_snapshot(snapshot, digest)
+        snapshot = self._commander_video_plan_snapshot()
+        snapshot["parallel_waves"] = [["research", "review"], ["build"]]
+        digest = self._commander_video_plan_digest(snapshot)
+        with self.assertRaisesRegex(RuntimeBlocked, "parallel_waves"):
+            self.runtime._restore_commander_plan_snapshot(snapshot, digest)
 
     def test_task_scoped_desktop_snapshot_records_metadata_without_ui_contents(self):
         task = self.runtime.enqueue("inspect UI", {"goal": "observe"})
@@ -970,4 +1113,149 @@ class UnifiedRuntimeTests(unittest.TestCase):
             self.runtime.desktop_snapshot(task_id="missing-ticket")
         self.assertEqual(self.runtime.desktop.snapshot_calls, 0)
 
+    # ------------------------------------------------------------------ #
+    # dispatch_video_pipeline_once: Commander binding + VideoTaskWorker   #
+    # ------------------------------------------------------------------ #
+
+    def test_dispatch_video_pipeline_once_requires_approval_flag(self):
+        execution = self._enqueue_video_pipeline_execution_ticket()
+        with self.assertRaisesRegex(RuntimeBlocked, "explicit per-ticket approval"):
+            self.runtime.dispatch_video_pipeline_once(task_id=execution["id"])
+
+    def test_dispatch_video_pipeline_once_requires_explicit_task_id(self):
+        with self.assertRaisesRegex(RuntimeBlocked, "explicit task_id"):
+            self.runtime.dispatch_video_pipeline_once(task_id="", approved=True)
+
+    def test_dispatch_video_pipeline_once_rejects_non_video_pipeline_ticket(self):
+        task = self.runtime.enqueue("Not a video ticket", {"kind": "general_task", "goal": "test"})
+        with self.assertRaisesRegex(RuntimeBlocked, "kind=video_pipeline"):
+            self.runtime.dispatch_video_pipeline_once(task_id=task["id"], approved=True)
+
+    def test_dispatch_video_pipeline_once_without_worker_does_not_claim_or_bind_ticket(self):
+        execution = self._enqueue_video_pipeline_execution_ticket()
+        with self.assertRaisesRegex(RuntimeBlocked, "dedicated run_approved_ticket Worker; no ticket was claimed"):
+            self.runtime.dispatch_video_pipeline_once(task_id=execution["id"], approved=True)
+        with TaskQueue(self.db) as queue:
+            self.assertEqual(queue.get(execution["id"])["status"], "queued")
+            self.assertEqual(queue.workflow_events(execution["id"]), [])
+
+    def test_dispatch_video_pipeline_once_rejects_legacy_run_once_worker_without_claim(self):
+        execution = self._enqueue_video_pipeline_execution_ticket()
+        class LegacyWorker:
+            calls = 0
+            def run_once(self):
+                self.calls += 1
+                return {"status": "succeeded"}
+        worker = LegacyWorker()
+        with self.assertRaisesRegex(RuntimeBlocked, "dedicated run_approved_ticket Worker; no ticket was claimed"):
+            self.runtime.dispatch_video_pipeline_once(
+                task_id=execution["id"], approved=True, video_worker=worker,
+            )
+        self.assertEqual(worker.calls, 0)
+        with TaskQueue(self.db) as queue:
+            self.assertEqual(queue.get(execution["id"])["status"], "queued")
+            self.assertEqual(queue.workflow_events(execution["id"]), [])
+
+    def test_dispatch_video_pipeline_once_calls_exact_approved_ticket_worker(self):
+        execution = self._enqueue_video_pipeline_execution_ticket()
+        calls = []
+        class ApprovedTicketWorker:
+            def run_approved_ticket(self, **kwargs):
+                calls.append(kwargs)
+                return {"status": "succeeded", "execution_task_id": kwargs["execution_task_id"]}
+        result = self.runtime.dispatch_video_pipeline_once(
+            task_id=execution["id"], approved=True, video_worker=ApprovedTicketWorker(),
+        )
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["execution_task_id"], execution["id"])
+        with TaskQueue(self.db) as queue:
+            approval_payload = queue.get(execution["id"])["payload"]
+        self.assertEqual(calls[0]["approval_task_id"], approval_payload["approval_task_id"])
+        self.assertEqual(calls[0]["approval_event_id"], approval_payload["approval_event_id"])
+        self.assertEqual(calls[0]["approved_by"], approval_payload["approved_by"])
+        self.assertEqual(calls[0]["commander_plan"].plan_id, self._commander_video_plan_snapshot()["plan_id"])
+
+    def test_dispatch_video_pipeline_once_persists_workflow_bound_plan_id(self):
+        execution = self._enqueue_video_pipeline_execution_ticket()
+        snapshot = self._commander_video_plan_snapshot()
+        class ApprovedTicketWorker:
+            def run_approved_ticket(self, **kwargs):
+                return {"status": "succeeded", "execution_task_id": kwargs["execution_task_id"]}
+        self.runtime.dispatch_video_pipeline_once(
+            task_id=execution["id"], approved=True, video_worker=ApprovedTicketWorker(),
+        )
+        with TaskQueue(self.db) as queue:
+            events = queue.workflow_events(execution["id"])
+        bound = next(e for e in events if e["event_type"] == "workflow.bound")
+        self.assertEqual(bound["payload"]["commander_plan_id"], snapshot["plan_id"])
+
+    def test_dispatch_video_pipeline_once_rejects_tampered_dag_digest(self):
+        """Tampered snapshot must be rejected before the ticket is claimed."""
+        execution = self._enqueue_video_pipeline_execution_ticket()
+        # Directly tamper the snapshot in the database.
+        with TaskQueue(self.db) as queue:
+            ticket = queue.get(execution["id"])
+            ticket["payload"]["commander_plan_snapshot"]["goal"] = "Tampered after approval"
+            queue._connection.execute(
+                "UPDATE tasks SET payload_json=? WHERE id=?",
+                (__import__("json").dumps(ticket["payload"]), execution["id"]),
+            )
+            queue._connection.commit()
+        with self.assertRaisesRegex(RuntimeBlocked, "DAG digest"):
+            self.runtime.dispatch_video_pipeline_once(task_id=execution["id"], approved=True)
+        # Ticket must remain queued — not claimed.
+        with TaskQueue(self.db) as queue:
+            self.assertEqual(queue.get(execution["id"])["status"], "queued")
+
+    def test_dispatch_video_pipeline_once_rejects_wrong_plan_id_in_execution_ticket(self):
+        """Execution ticket plan_id mismatching its snapshot must be rejected."""
+        execution = self._enqueue_video_pipeline_execution_ticket()
+        with TaskQueue(self.db) as queue:
+            ticket = queue.get(execution["id"])
+            ticket["payload"]["commander_plan_id"] = "0" * 32  # wrong plan_id
+            queue._connection.execute(
+                "UPDATE tasks SET payload_json=? WHERE id=?",
+                (__import__("json").dumps(ticket["payload"]), execution["id"]),
+            )
+            queue._connection.commit()
+        with self.assertRaisesRegex(RuntimeBlocked, "plan identity"):
+            self.runtime.dispatch_video_pipeline_once(task_id=execution["id"], approved=True)
+        with TaskQueue(self.db) as queue:
+            self.assertEqual(queue.get(execution["id"])["status"], "queued")
+
+    def test_dispatch_video_pipeline_once_rejects_missing_approval_ticket(self):
+        """Missing approval ticket must be rejected before claiming the execution ticket."""
+        execution = self._enqueue_video_pipeline_execution_ticket()
+        # Set a non-existent approval_task_id.
+        with TaskQueue(self.db) as queue:
+            ticket = queue.get(execution["id"])
+            ticket["payload"]["approval_task_id"] = "nonexistent-ticket-id"
+            queue._connection.execute(
+                "UPDATE tasks SET payload_json=? WHERE id=?",
+                (__import__("json").dumps(ticket["payload"]), execution["id"]),
+            )
+            queue._connection.commit()
+        with self.assertRaisesRegex(RuntimeBlocked, "exact approved Commander approval Ticket"):
+            self.runtime.dispatch_video_pipeline_once(task_id=execution["id"], approved=True)
+        with TaskQueue(self.db) as queue:
+            self.assertEqual(queue.get(execution["id"])["status"], "queued")
+
+    def test_dispatch_video_pipeline_once_rejects_stale_approval_event_id(self):
+        """Stale approval event_id (not matching latest human.decision) must be rejected."""
+        execution = self._enqueue_video_pipeline_execution_ticket()
+        with TaskQueue(self.db) as queue:
+            ticket = queue.get(execution["id"])
+            ticket["payload"]["approval_event_id"] = "stale-event-id-does-not-exist"
+            queue._connection.execute(
+                "UPDATE tasks SET payload_json=? WHERE id=?",
+                (__import__("json").dumps(ticket["payload"]), execution["id"]),
+            )
+            queue._connection.commit()
+        with self.assertRaisesRegex(RuntimeBlocked, "latest matching persisted human approval"):
+            self.runtime.dispatch_video_pipeline_once(task_id=execution["id"], approved=True)
+        with TaskQueue(self.db) as queue:
+            self.assertEqual(queue.get(execution["id"])["status"], "queued")
+
 if __name__ == "__main__": unittest.main()
+

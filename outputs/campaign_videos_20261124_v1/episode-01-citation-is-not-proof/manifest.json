@@ -1,0 +1,23 @@
+{
+  "title": "引用不是证据",
+  "concept": "source-trace",
+  "duration_seconds": 55.0,
+  "resolution": [
+    1080,
+    1920
+  ],
+  "fps": 24,
+  "voiceover": "none",
+  "release_state": "internal_review_only",
+  "ready_to_publish": false,
+  "files": {
+    "episode-01-citation-is-not-proof-55s-silent.mp4": "7d302dbe9b846e9b9bc1d5e97a5d7eccd3d1124a184e901df295568f2065214c",
+    "rights-manifest.json": "4b6643b262178c64ace6d27cf23e2b54ffb031f3c8c0b1efb7007e61a19e1b2b",
+    "qa-report.json": "bfb456587b4a1272f763a0a520c8f8c03e218719e031ecf99e1bfe4769694cac",
+    "scenes/scene-01.png": "350ccdb454a73c11629e6ac35e01d755fd5838a52e0827a9acad6f9ef6dc723c",
+    "scenes/scene-02.png": "fb0614c7b674f4d746b67153fca87b5e95e2298575e2d25c0dfc63cb4ebb071c",
+    "scenes/scene-03.png": "d6de93af0f5cfe5f4c0db4eb2312800c0954420213b7d7eef6a1ab53af8b61df",
+    "scenes/scene-04.png": "78d1a42c28d7291d5b31d02fa802634c4b3840fcca822aadae8a3d18dd9f7621",
+    "scenes/scene-05.png": "c7a667be2eb602ed9d9c80747820cf322b23f97a3c96ee32e135f779dba05155"
+  }
+}

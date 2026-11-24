@@ -1,8 +1,8 @@
-"""End-to-end closed loop: Inspiration -> Autonomous Follow-Up -> Self-Improvement -> Viral Video Blueprint.
+"""End-to-end closed loop: Inspiration -> Research -> Improvement -> Reviewable Creator Brief.
 
-Uses the authoritative Muse stores (ResearchKnowledgeStore, AutonomousResearchEngine,
-PhilosophyStore, ImprovementStore, PipelineController/TaskQueue). Never creates competing
-schedulers, never auto-approves code patches, and respects allow_external_research privacy.
+Uses existing Muse stores and Commander boundaries. Never creates competing schedulers,
+never auto-approves code patches, and respects allow_external_research privacy.
+Video dispatch remains fail-closed until an approved persisted Commander DAG is available.
 """
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ from urllib.parse import urlsplit
 from muse.autonomous_research import AutonomousResearchEngine
 from muse.improvement import ImprovementStore
 from muse.philosophy import PhilosophyStore
-from muse.pipeline_control import PipelineController
+
 from muse.research_knowledge import ResearchKnowledgeStore
 from muse.conversations import ConversationStore
 from muse.inspiration import InspirationEngine, build_symbolic_inspiration_pack
@@ -679,67 +679,71 @@ def compile_viral_video_blueprint(
     """Compile researched findings + counter-evidence into a high-retention 6-act video blueprint."""
     blueprints_dir.mkdir(parents=True, exist_ok=True)
     raw_title = _short_clean(inspiration.get("title") or "AI 灵感反证进化闭环", 44)
+    if re.search(r"(?:\d+(?:\.\d+)?\s*[%％]|百分之[零一二三四五六七八九十百千万两0-9]+|[一二三四五六七八九十]+成)", raw_title):
+        # Preserve the original claim in the research record, but never promote an
+        # unsupported percentage into public-facing copy.
+        raw_title = "主动找反证，让AI研究更可靠"
     citations = _extract_source_citations(report or {})
     support_cites = [c for c in citations if c["role"] == "supporting"] or citations[:2]
     counter_cites = [c for c in citations if c["role"] == "counter_evidence"] or citations[-1:]
     coverage_score = int((report or {}).get("evidence_coverage_score") or 0)
     domain_count = int((report or {}).get("domain_count") or 0)
     source_count = len(citations)
+    source_label = f"{source_count} 条可追溯来源" if source_count else "来源候选待补齐"
+    domain_label = f"独立域名 {domain_count} 组" if domain_count else "独立域名数量待核验"
     synthesis = (report or {}).get("synthesis") if isinstance((report or {}).get("synthesis"), dict) else {}
 
-    s1_title = _short_clean(support_cites[0]["title"], 46) if support_cites else "NIST AI RMF 600-1 与多模态学习研究"
-    c1_title = _short_clean(counter_cites[0]["title"], 46) if counter_cites else "多媒体认知负荷与 AI 幻觉边界研究"
-    implication_text = "将正反双路检索与可复现测试直接绑定到灵感→改进提案→成片流水线"
+    s1_title = _short_clean(support_cites[0]["title"], 46) if support_cites else "支持来源待核验"
+    c1_title = _short_clean(counter_cites[0]["title"], 46) if counter_cites else "反证来源待核验"
+    implication_text = "将正反双路检索与可复现测试绑定到灵感→改进提案→可审阅创作包流程"
     counter_text = _short_clean(
         (synthesis.get("counter_evidence") or ["缺乏原始出处与反例检验的流畅结论，极易把相关性误当成因果事实"])[0],
         84,
     )
-    hook_headline = f"90%的人用AI都在制造垃圾内容"
-    if "反证" not in raw_title and "闭环" not in raw_title:
-        hook_headline = raw_title[:24]
+    hook_headline = raw_title[:24]
 
     acts = [
         {
             "id": "act-01",
             "chapter": "01 / 3-SEC HOOK",
             "headline": hook_headline,
-            "subheadline": "差别不在模型贵不贵，而在有没有「反证进化闭环」",
-            "stat_value": "90% vs 1%",
-            "stat_label": "普通单次提问极易陷入「自信幻觉」与无效信息堆砌",
-            "citation_badge": "深度拆解 · AI 效率断层真相",
+            "subheadline": "差别不在提示词长短，而在是否核验来源与反例",
+            "stat_value": "证据优先",
+            "stat_label": "来源核验 · 反证检索 · 适用边界",
+            "citation_badge": "研究方法 · 来源需核验",
             "visual_mode": "hook_radar",
             "accent": "#00f0ff",
-            "narration_zh": "为什么百分之九十的人天天用 AI，产出的内容却依然没有流量和复利？问题从来不是提示词不够长，而是大多数人只让模型顺着自己编故事。",
-            "narration_yue": "點解九成人日日用 AI，做出嚟嘅內容依然冇人睇？問題唔係提示詞唔夠長，而係你只係叫模型順住你講故仔。",
-            "caption": "90%的人用AI没复利？问题不在模型，而在缺了「反证闭环」",
+            "narration_zh": "为什么有些 AI 内容看起来很流畅，却不能直接当成事实？关键不在提示词有多长，而在是否回到原始来源、主动寻找反例，并说明适用边界。",
+            "narration_yue": "點解有啲 AI 內容講得好流暢，都唔可以即刻當真？重點唔係提示詞有幾長，而係有冇返去核對原始來源、主動搵反例，同埋講清楚適用邊界。",
+            "caption": "AI内容讲得顺，不等于有证据：先核验来源，再找反例",
         },
         {
             "id": "act-02",
             "chapter": "02 / COGNITIVE TRAP",
             "headline": "流畅表达 ≠ 真实证据",
-            "subheadline": "AI 的「自信语气」是最危险的认知陷阱",
+            "subheadline": "流畅表达可能掩盖不确定性",
             "stat_value": "3大盲区",
             "stat_label": "只搜正向例证 · 把摘要当原文 · 无视受众认知负荷",
-            "citation_badge": "依据：NIST AI 600-1 §2.2",
+            "citation_badge": "来源与反证必须回到原文核验",
             "visual_mode": "pain_split",
             "accent": "#ff4d6d",
-            "narration_zh": "美国国家标准局在生成式 AI 风险框架里明确指出：模型会用极度自信的语气输出错误虚构的引文。如果不主动找反证，越聪明的 AI 越会放大你的盲区。",
-            "narration_yue": "美國標準局嘅報告寫得好清楚：模型好擅長用自信語氣講錯嘢。唔去搵反證，AI 越聰明，只會將盲區放大得更快。",
+            "narration_zh": "生成式 AI 可能把错误内容说得很流畅。遇到关键事实、数字或引用，应检查原始出处、发布时间、研究方法和反面证据。",
+            "narration_yue": "生成式 AI 有時會將錯嘅內容講到好流暢。遇到重要事實、數字或者引文，要返去睇原始出處、日期、研究方法同反面證據。",
             "caption": "流畅表达不等于事实：越自信的模型，越容易放大单一视角盲区",
         },
         {
             "id": "act-03",
             "chapter": "03 / DUAL RESEARCH",
-            "headline": f"双路并行深研：{max(2, source_count)}源互证",
+            "headline": "支持与反证双路检索",
             "subheadline": s1_title,
-            "stat_value": f"{coverage_score or 80}/90 覆盖",
-            "stat_label": f"独立域名 {max(2, domain_count)} 组 · 原文哈希快照存证",
-            "citation_badge": "正向检索 [S1] + 原文快照",
+            "stat_value": source_label,
+            "stat_label": domain_label,
+            "citation_badge": "支持来源候选 [S1] + 原文快照" if support_cites else "支持来源待补齐",
             "visual_mode": "evidence_bars",
             "accent": "#38ef7d",
-            "narration_zh": f"真正厉害的智能体怎么工作？它会把一条灵感同时拆成正向支持检索和反面拆台检索，抓取跨域名原始文献并计算哈希指纹，确保每句观点都站得住脚。",
-            "narration_yue": "真正有用嘅系統係點運作？佢會將一條靈感同時拆開正反兩條線去查證，抓出獨立來源同原文指紋，確保句句有根據。",
-            "caption": "高价值玩法第一步：一条灵感同时触发「支持 + 反证」双路检索",
+            "narration_zh": "先列出支持候选，再独立搜索反证；每条来源记录链接、原文位置、时间和审查状态。没有来源就标记待补齐，不用估算数字填空。",
+            "narration_yue": "先整理支持候選，再獨立搵反證；每條來源都記低連結、原文位置、時間同審查狀態。未有來源就標記待補，唔用估出嚟嘅數字扮完整。",
+            "caption": "真正的深研：支持与反证分开查，来源缺失就明确标记",
         },
         {
             "id": "act-04",
@@ -747,41 +751,41 @@ def compile_viral_video_blueprint(
             "headline": "主动找反证，结论反而更值钱",
             "subheadline": c1_title,
             "stat_value": "正反对抗",
-            "stat_label": "既检索支持文献，也强制排查失效边界与工具级联错误 [S2]",
-            "citation_badge": "反面检索 [S2] · 证据边界",
+            "stat_label": "记录支持证据、反例与适用边界；缺失项明确标记待补齐",
+            "citation_badge": "反证来源候选 [S2] · 证据边界" if counter_cites else "反证来源待补齐",
             "visual_mode": "counter_balance",
             "accent": "#d8b46a",
-            "narration_zh": "观众真正愿意点赞收藏的，从来不是千篇一律的吹捧，而是你帮他把反面坑位和失效边界先挑明。有证据、有边界的观点，才有穿越算法周期的长期流量。",
-            "narration_yue": "觀眾肯收藏同轉發嘅，從來唔係盲目吹捧，而係你幫佢預先拆清反面陷阱。講得清邊界嘅內容，先至有長尾價值。",
-            "caption": "好内容自带防火墙：把反面证据与失效边界拍给观众看",
+            "narration_zh": "呈现观点时，把反面证据、适用条件和失效边界一起讲清楚，避免把单一案例包装成普遍规律。",
+            "narration_yue": "講一個觀點時，要連反面證據、適用條件同失效邊界一齊交代，唔好將單一例子包裝成普遍規律。",
+            "caption": "把反面证据与适用边界讲清楚，避免单一案例被误当成普遍规律",
         },
         {
             "id": "act-05",
             "chapter": "05 / SELF-EVOLUTION",
-            "headline": "每一条灵感，都在反向升级系统",
+            "headline": "每条灵感都可以形成待审核提案",
             "subheadline": implication_text[:54],
-            "stat_value": f"+{max(1, len(dossiers))} 升级提案",
-            "stat_label": "灵感→深研→升级提案(人工门禁)→视觉成片交付",
-            "citation_badge": "Muse Commander 闭环进化",
+            "stat_value": f"{len(dossiers)} 份提案",
+            "stat_label": "研究结果 → 待审核提案 → 独立复核与回归测试",
+            "citation_badge": "Muse Commander · 人工审批门禁",
             "visual_mode": "evolution_loop",
             "accent": "#9d7cff",
-            "narration_zh": f"更关键的一步：每完成一次深研，系统会自动提炼工程改进提案写入账本，经过人工审校和回归测试后升级自身能力，再一键把研究成果编译成高清视频成片。",
-            "narration_yue": "最關鍵一步：每次研究完，系統會自動沉澱自我升級提案，過咗測試同人工審批就進化能力，再直接編譯成高清短片。",
-            "caption": "复利秘密：灵感深研 → 自我升级提案 → 自动编译高清视听成片",
+            "narration_zh": "研究结果可以沉淀成改进提案；只有经过独立审查、回归测试和明确批准，才进入能力升级。视频生成和发布也必须通过任务审批、素材授权和成品检查。",
+            "narration_yue": "研究結果可以整理成改進提案；要經過獨立審查、回歸測試同明確批准，先可以升級能力。影片生成同發布亦要先過任務審批、素材授權同成品檢查。",
+            "caption": "研究结果先变成待审提案：审查、测试、批准之后再升级",
         },
         {
             "id": "act-06",
             "chapter": "06 / ACTION CHECKLIST",
             "headline": "今天就能落地的三步进化法",
-            "subheadline": "① 写下一条反常识灵感 · ② 强制双路查反证 · ③ 沉淀提案+成片交付",
-            "stat_value": "3步复利",
-            "stat_label": "关注 + 收藏 · 评论区领完整分镜与核验清单",
+            "subheadline": "①记录灵感 · ②寻找反证 · ③整理创作包并审核",
+            "stat_value": "三步执行",
+            "stat_label": "研究问题 · 证据边界 · 发布前检查",
             "citation_badge": "MUSE · PROMETHEUS STUDIO",
             "visual_mode": "action_seal",
             "accent": "#00f0ff",
-            "narration_zh": "总结成三步直接抄作业：第一，把灵感写进结构化账本；第二，先查反证再下结论；第三，用自动化流水线一次产出多平台成片。点个收藏，去评论区拿实战清单！",
-            "narration_yue": "最後送你三步直接跟做：第一，記低靈感；第二，先搵反證；第三，一次過出片交付。記得收藏，下條片見！",
-            "caption": "三步复利公式：存灵感 → 找反证 → 进化成片｜关注收藏领清单",
+            "narration_zh": "把它落地成三步：第一，记录问题和假设；第二，主动找支持与反证；第三，整理文案、分镜、旁白和素材授权清单，完成审片后再决定是否发布。",
+            "narration_yue": "落地就係三步：第一，記低問題同假設；第二，主動搵支持同反證；第三，整理文案、分鏡、旁白同素材授權清單，審片之後先決定發唔發布。",
+            "caption": "三步把灵感变成可审阅创作包：记录 → 找反证 → 审核",
         },
     ]
 
@@ -794,34 +798,34 @@ def compile_viral_video_blueprint(
 
     douyin_desc = (
         f"{hook_text}\n\n"
-        "为什么别人用 AI 越用越强，你的灵感却转眼就忘？拆解「灵感深研 → 主动找反证 → 系统自我升级 → 自动化出片」全链路实操方法：\n"
-        "1️⃣ 00:00 为什么90%的人用AI没有复利\n"
+        "为什么有些 AI 内容看起来流畅，却不一定可靠？拆解「记录问题 → 核验来源 → 搜索反证 → 整理创作包」的可审阅流程：\n"
+        "1️⃣ 00:00 为什么AI内容需要来源核验\n"
         "2️⃣ 00:09 流畅表达 ≠ 事实（引用边界拆解）\n"
         "3️⃣ 00:18 正反双路深研与来源快照\n"
-        "4️⃣ 00:34 灵感反哺系统自我升级提案\n"
-        "5️⃣ 00:43 三步直接落地的复利清单\n\n"
+        "4️⃣ 00:34 研究结果整理为待审核提案\n"
+        "5️⃣ 00:43 三步执行与发布前检查\n\n"
         "#人工智能 #AI工具 #认知升级 #内容创作 #自我进化 #效率神器\n"
         "⚠️ 内容说明：画面由程序化动态图形生成，观点含来源边界，实操效果因场景而异。"
     )
     wechat_desc = (
         f"{hook_text}\n\n"
-        "看懂「从一条灵感走到双平台高清成片」的完整闭环。欢迎转发给同样在做 AI 与内容创作的朋友，你平时查证 AI 信息最怕踩哪个坑？评论区聊聊。\n\n"
+        "看懂「从一条灵感走到可审阅创作包」的流程。欢迎转发给同样在做 AI 与内容创作的朋友，你平时查证 AI 信息最怕踩哪个坑？评论区聊聊。\n\n"
         "#AI进化 #知识管理 #个人成长 #自媒体干货 #深度学习"
     )
     youtube_desc = (
         f"{full_title}\n\n"
         f"{hook_text}\n\n"
-        "In this breakdown, we inspect why one-shot AI prompting hits an accuracy & retention ceiling, "
-        "and how an evidence-plus-counterevidence autonomous research loop upgrades workflows and compiles dual-aspect studio video assets.\n\n"
+        "In this breakdown, we show how to record a hypothesis, inspect original sources, search for counter-evidence, "
+        "and prepare a reviewable creator brief. Video rendering and publishing remain gated by workflow admission, asset rights and human approval.\n\n"
         "Chapters:\n"
-        "00:00 Hook — Why 90% of AI Content Fails to Compound\n"
+        "00:00 Hook — Why Fluent AI Output Still Needs Verification\n"
         "00:09 Fluent Text Is Not Verified Evidence\n"
         "00:18 Dual-Channel Support & Counter-Evidence Research\n"
-        "00:27 Turning Counter-Evidence Into High-Trust Storytelling\n"
+        "00:27 Explaining Counter-Evidence and Its Limits\n"
         "00:36 Self-Improvement Proposals (Human-Gated Evolution)\n"
         "00:44 3-Step Action Checklist\n\n"
         f"Verified Source References:\n{citations_summary}\n\n"
-        "Disclosure: Programmatically animated motion graphics and synthesized voiceover with verifiable source provenance. Educational engineering analysis, not financial or revenue guarantee."
+        "Disclosure: This is a draft creator brief; no video render, synthesized voiceover or publication has been performed. Source references remain subject to review."
     )
 
     blueprint = {
@@ -838,13 +842,13 @@ def compile_viral_video_blueprint(
         "symbolic_inspiration": list(symbolic_inspiration or []),
         "acts": acts,
         "source_notes": {
-            "title": citations[0]["title"] if citations else raw_title,
-            "publisher": citations[0]["source_kind"] if citations else "Muse Local Research Store",
-            "published_at": datetime.now(timezone.utc).date().isoformat(),
-            "doi": citations[0]["url"] if citations else "https://doi.org/10.6028/NIST.AI.600-1",
+            "title": citations[0]["title"] if citations else "来源待核验",
+            "publisher": citations[0].get("source_kind", "来源记录") if citations else "本地研究记录",
+            "published_at": citations[0].get("published_at", "") if citations else "",
+            "doi": citations[0].get("doi", "") if citations else "",
             "pdf": citations[1]["url"] if len(citations) > 1 else (citations[0]["url"] if citations else ""),
             "relevant_sections": {
-                "Hook": "90% vs 1% 循环差别与认知陷阱边界",
+                "Hook": "来源核验与反证边界",
                 "Support": s1_title,
                 "Counter": c1_title,
                 "SelfImprovement": f"生成 {len(dossiers)} 份待审核升级提案",
@@ -855,20 +859,20 @@ def compile_viral_video_blueprint(
         "platform_copy": {
             "douyin": {
                 "title_variants": [
-                    "90%的人用AI都在做无用功？真正的高手靠「反证闭环」把灵感变成资产",
-                    "别再让AI顺着你编故事了！3步把随机灵感变成会自我进化的生产力",
+                    "别只让AI顺着你说：用来源核验和反证检索把灵感变成可审阅成果",
+                    "别只让AI顺着你编故事：3步把灵感整理成可验证研究计划",
                     "深度科普｜为什么AI越说越顺，你却越用越焦虑？看懂这4步闭环",
                 ],
                 "caption": hook_text,
                 "description": douyin_desc,
                 "hashtags": ["#人工智能", "#AI进化", "#认知升级", "#内容创作", "#思维模型"],
                 "tags": ["人工智能", "AI工具", "自我进化", "内容创作", "思维升级"],
-                "pinned_comment": "把「先找反证，再下结论」这8个字贴在工位上，能帮你避开90%的AI假文献和伪干货。需要分镜模板的扣1！",
+                "pinned_comment": "把「先找反证，再下结论」贴在工位上。关键事实回到原始出处核验；未核实的内容就明确标成待验证。",
             },
             "wechat_channels": {
                 "title_variants": [
-                    "为什么90%的人用AI没有复利？顶尖创作者都在用的「反证进化闭环」",
-                    "一条灵感如何自己深研、升级工具并变成高清视频？全流程拆解",
+                    "为什么AI用得多却未必积累成果？从反证检索开始",
+                    "一条灵感如何经过研究、反证与人工审核，变成可审阅创作包？",
                     "AI 时代最稀缺的能力：不是提问，而是主动找反证的思维闭环",
                 ],
                 "caption": hook_text,
@@ -879,9 +883,9 @@ def compile_viral_video_blueprint(
             },
             "youtube": {
                 "title_variants": [
-                    "Why 90% of AI Users Get Mediocre Results — The Counter-Evidence Evolution Loop",
-                    "How Autonomous Research + Counter-Evidence Turns Ideas Into Self-Improving Assets",
-                    "Stop Blindly Trusting AI: Build a Self-Evolving Research-to-Video Pipeline",
+                    "Why AI Workflows Need a Counter-Evidence Loop",
+                    "How Research and Counter-Evidence Turn Ideas Into Reviewable Creator Briefs",
+                    "Stop Blindly Trusting AI: Build a Reviewable Research-to-Creator Workflow",
                 ],
                 "caption": hook_text,
                 "description": youtube_desc,
@@ -891,7 +895,7 @@ def compile_viral_video_blueprint(
             },
             "youtube_shorts": {
                 "title_variants": [
-                    "90% Use AI Wrong — Add This 1 Counter-Evidence Loop #AI #Productivity",
+                    "Stop Blindly Trusting AI — Add a Counter-Evidence Loop #AI #Productivity",
                     "Why Fluent AI Lies & How To Turn Ideas Into Assets in 50 Seconds",
                 ],
                 "caption": hook_text,
@@ -902,8 +906,8 @@ def compile_viral_video_blueprint(
             },
             "bilibili": {
                 "title_variants": [
-                    "【硬核科普】90%的人都在无效用AI！我用自进化闭环把灵感直接变成可交付成片",
-                    "告别AI一本正经胡说八道：正反双路深研+自我升级架构实战拆解",
+                    "【硬核科普】别让AI一本正经胡说八道：正反双路深研与证据边界",
+                    "告别AI一本正经胡说八道：正反双路深研与人工审核流程",
                 ],
                 "caption": hook_text,
                 "description": youtube_desc,
@@ -913,7 +917,7 @@ def compile_viral_video_blueprint(
             },
             "tiktok": {
                 "title_variants": [
-                    "Why 90% of AI Prompts Fail — Use The Counter-Evidence Loop Instead",
+                    "Why Fluent AI Output Still Needs Verification",
                 ],
                 "caption": hook_text,
                 "description": youtube_desc,
@@ -1223,6 +1227,9 @@ def evolve_inspiration_closed_loop(
             "package_sha256": product_record.get("package_sha256"),
             "artifact_status": product_record.get("status"),
             "verified": offline_productization.get("verified") is True,
+            "package_integrity": offline_productization.get("package_integrity"),
+            "validated": False,
+            "publishable": False,
             "human_review_required": offline_productization.get("human_review_required") is True,
             "published": offline_productization.get("published") is True,
         }
@@ -1271,16 +1278,11 @@ def evolve_inspiration_closed_loop(
         )
 
     queued_jobs: list[dict[str, Any]] = []
-    if enqueue_video_recipes:
-        controller = PipelineController(root, task_db=paths["progress_db"])
-        for recipe_id in enqueue_video_recipes:
-            job = controller.submit(
-                recipe_id,
-                title=blueprint["title"],
-                inspiration_id=target_node["id"],
-                blueprint_path=rel_blueprint,
-            )
-            queued_jobs.append(job)
+    requested_video_recipes = list(enqueue_video_recipes or ())
+    video_dispatch_status = "blocked_admission" if requested_video_recipes else "not_requested"
+    video_dispatch_reason = (
+        "persisted_commander_plan_required" if requested_video_recipes else ""
+    )
 
     return {
         "status": "completed",
@@ -1307,6 +1309,9 @@ def evolve_inspiration_closed_loop(
         "blueprint_path": rel_blueprint,
         "blueprint_title": blueprint["title"],
         "offline_productization": offline_productization,
+        "requested_video_recipes": requested_video_recipes,
+        "video_dispatch_status": video_dispatch_status,
+        "video_dispatch_reason": video_dispatch_reason,
         "queued_video_jobs": queued_jobs,
         "business_bridge": business_bridge,
     }

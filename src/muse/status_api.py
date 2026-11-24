@@ -2764,8 +2764,7 @@ def create_status_server(
                                 node = knowledge.upsert_node(
                                     "decision",
                                     f"产品反馈：{initiative.get('title') or initiative_id}（{payload['decision']}）"[:500],
-                                    feedback_text,
-                                    external_ref=f"initiative-feedback:{initiative_id}:{saved['id']}",
+                                    summary=feedback_text,                                    external_ref=f"initiative-feedback:{initiative_id}:{saved['id']}",
                                     metadata={
                                         "origin": "creator_product_feedback",
                                         "source_kind": "web_portal_product_feedback",

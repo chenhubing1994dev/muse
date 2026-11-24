@@ -1,0 +1,12 @@
+{
+  "can_publish": false,
+  "files": {
+    "README.md": "b0a16d5f040c683671a0a13ecc107792a86a95ce05145769a1f986cf8ed2b03c",
+    "social-content-kit.json": "87f3c56d0bdeb9a9cd1de17335b639f2c86559f30008e05011ed789a489a4831"
+  },
+  "package_type": "muse_social_content_kit",
+  "release_state": "draft_only",
+  "schema_version": 1,
+  "source_publish_package_sha256": "f6097596092827c6bd87fce45aaa46368210d47229c32732b796003f3a247627",
+  "source_video_sha256": "47acafe30d77b1e16cef09fa4f23d21fc8942d54d5eb2e15a3b3409000ed7229"
+}

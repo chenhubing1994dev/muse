@@ -1,0 +1,26 @@
+{
+  "schema": "muse.asset-rights.v1",
+  "asset_id": "asset-001",
+  "asset_type": "video|image|audio|font|music",
+  "source": {
+    "origin": "local_generated|user_supplied|stock|web",
+    "url_or_path": "",
+    "creator_or_publisher": "",
+    "retrieved_at": "",
+    "sha256": ""
+  },
+  "license": {
+    "name": "",
+    "url": "",
+    "evidence_file": "",
+    "license_status": "unreviewed",
+    "commercial_use_allowed": false,
+    "attribution_required": null,
+    "restrictions": []
+  },
+  "ai_generated": null,
+  "human_review_required": true,
+  "reviewer": "",
+  "reviewed_at": "",
+  "decision": "blocked_pending_review"
+}

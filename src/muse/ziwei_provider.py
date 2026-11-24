@@ -20,7 +20,7 @@ from muse.calendar_context import (
 
 
 ENGINE_VERSION = "0.4.1"
-ENGINE_WHEEL_SHA256 = "dab8b0d8eb58da8760c520ea81e1f4635ce275bf3197960d065c116fe1a3f492"
+ENGINE_WHEEL_SHA256 = "dab0b8d0eb58da8760c520ea81e1f4635ce275bf3197960d065c116fe1a3f492"
 ENGINE_SOURCE_REFS = ("https://pypi.org/project/ziwei/0.4.1/",)
 ENGINE_TIMEOUT_SECONDS = 20
 _LEAP_POLICIES = {
