@@ -35,7 +35,11 @@ struct Config {
     bind: String,
 
     /// Base URL of the Python API to proxy.
-    #[arg(long, env = "MUSE_SERVER_UPSTREAM", default_value = "http://127.0.0.1:8766")]
+    #[arg(
+        long,
+        env = "MUSE_SERVER_UPSTREAM",
+        default_value = "http://127.0.0.1:8766"
+    )]
     upstream: String,
 
     /// Path to web-portal static files.
@@ -70,8 +74,7 @@ struct AppState {
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
@@ -144,7 +147,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             .fallback(proxy_or_static)
             .with_state(state.clone());
 
-        info!("muse-server listening on {addr}, upstream={}", config.upstream);
+        info!(
+            "muse-server listening on {addr}, upstream={}",
+            config.upstream
+        );
         let listener = TcpListener::bind(addr).await?;
         axum::serve(listener, app)
             .with_graceful_shutdown(shutdown_signal())
