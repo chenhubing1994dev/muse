@@ -333,15 +333,15 @@ jobs:
               "",
               "## 本版包含",
               "- Muse Commander、任务队列、双轨记忆、研究/Research Wiki、视频生产链路的当前源码快照",
-              "- Windows：exe 安装包 + zip 便携版；Linux：x86_64 与 aarch64 的 deb/AppImage；macOS：Intel + Apple Silicon 的 dmg",
-              "- Muse Server Rust 原生服务二进制（Linux x86_64/aarch64、Windows、macOS）",
+              "- Windows：exe 安装包 + zip 便携版；Linux：x86_64 与 aarch64 的 deb/AppImage（macOS dmg 当前因 runner 配额禁用，恢复后自动纳入）",
+              "- Muse Server Rust 原生服务二进制（Linux x86_64/aarch64、Windows；macOS 当前禁用）",
               "- Python wheel 与 sdist、Web Portal 静态站点包",
               "- 每个平台的 SHA256SUMS 校验清单",
               "",
               "## 安装提示",
               "- Windows：运行 `.exe` 安装包，或解压 `Muse-Windows-portable.zip` 便携版。",
               "- Linux：x86_64 / aarch64 使用 `sudo apt install ./Muse_*.deb` 或对应架构 AppImage。",
-              "- macOS：打开 `.dmg`。若出现 Gatekeeper 提示，请在“系统设置 → 隐私与安全性”中允许。",
+              "- macOS：dmg 构建当前临时禁用（runner 配额），恢复后在此提供；届时若出现 Gatekeeper 提示请在“系统设置 → 隐私与安全性”中允许。",
               "- Muse Server：解压对应平台 `muse-server-*` 包，按 docs/GITHUB_RELEASES.md 配置并运行。",
               "- Python 包：`pip install muse_personal_agent-*.whl`（需 Python 3.11+）。",
               "",
@@ -366,17 +366,22 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           TAG="${{ needs.prepare.outputs.tag }}"
+          TITLE="Muse ${{ needs.prepare.outputs.version }}"
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "Release draft from tauri-action found; merging artifacts."
+            echo "Release $TAG already exists; updating it."
           else
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
-              --title "Muse ${{ needs.prepare.outputs.version }}" \
-              --notes-file RELEASE_NOTES.md --draft
+              --title "$TITLE" --notes-file RELEASE_NOTES.md --draft
           fi
-          gh release upload "$TAG" release-stage/**/* \
-            --repo "$GITHUB_REPOSITORY" --clobber
+          # Upload regular files only (never directories such as dist-py/).
+          count=0
+          while IFS= read -r -d '' file; do
+            gh release upload "$TAG" "$file" --repo "$GITHUB_REPOSITORY" --clobber
+            count=$((count + 1))
+          done < <(find release-stage -type f -print0)
+          echo "uploaded $count files"
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" \
-            --title "Muse ${{ needs.prepare.outputs.version }}" \
-            --notes-file RELEASE_NOTES.md --draft=false
+            --title "$TITLE" --notes-file RELEASE_NOTES.md --draft=false
           echo "Published: https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG"
