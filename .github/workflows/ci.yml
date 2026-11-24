@@ -40,6 +40,22 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends ffmpeg
+      - name: 安装可选 Python 依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "cryptography>=42.0" "ziwei==0.4.1" "qimen-rs==0.2.1" "kinliuren==0.1.2.9"
+      - name: 生成本机配置测试夹具（不含任何密钥）
+        run: |
+          cp config/muse.example.toml config/muse.toml
+          python - <<'PY'
+          import pathlib
+          p = pathlib.Path("config/muse.toml")
+          s = p.read_text(encoding="utf-8")
+          s = s.replace('model = "" # empty means auto-detect the model exposed by /v1/models', 'model = "deep"')
+          s += '\n[open_design]\nopencode_config_path = "D:\\\\AI AGENT\\\\Muse\\\\config\\\\opencode.local.jsonc"\nallowed_agents = []\n'
+          p.write_text(s, encoding="utf-8")
+          print("CI config fixture written")
+          PY
       - name: 全量 unittest + compileall
         env:
           PYTHONPATH: src
@@ -81,6 +97,16 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
             librsvg2-dev patchelf libxdo-dev libssl-dev
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: ui-prototype/package-lock.json
+      - name: 构建前端（generate_context! 需要 dist 存在）
+        working-directory: ui-prototype
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
