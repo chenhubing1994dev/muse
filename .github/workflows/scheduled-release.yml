@@ -74,10 +74,13 @@ jobs:
             label: linux
           - os: ubuntu-24.04-arm
             label: linux-aarch64
-          - os: macos-13
-            label: macos-intel
-          - os: macos-14
-            label: macos-arm
+          # macOS runners are temporarily disabled: this account has no available
+          # macOS runner quota, so queued jobs never start and block `release`.
+          # Re-enable the two entries below once macOS runner capacity is available.
+          # - os: macos-13
+          #   label: macos-intel
+          # - os: macos-14
+          #   label: macos-arm
     steps:
       - uses: actions/checkout@v4
 
@@ -232,14 +235,16 @@ jobs:
             label: windows-x86_64
             target: x86_64-pc-windows-msvc
             ext: zip
-          - os: macos-13
-            label: macos-intel
-            target: x86_64-apple-darwin
-            ext: tar.gz
-          - os: macos-14
-            label: macos-arm
-            target: aarch64-apple-darwin
-            ext: tar.gz
+          # macOS runners temporarily disabled (no runner quota on this account).
+          # Re-enable once capacity is available:
+          # - os: macos-13
+          #   label: macos-intel
+          #   target: x86_64-apple-darwin
+          #   ext: tar.gz
+          # - os: macos-14
+          #   label: macos-arm
+          #   target: aarch64-apple-darwin
+          #   ext: tar.gz
     steps:
       - uses: actions/checkout@v4
 

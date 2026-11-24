@@ -27,8 +27,8 @@
 | Windows | `windows-latest` | `.exe` + `Muse-Windows-portable.zip` 便携版（无 `.msi`） |
 | Linux x86_64 | `ubuntu-22.04` | `.deb` / `.AppImage`（+ 签名文件） |
 | Linux aarch64 | `ubuntu-24.04-arm`（原生 ARM runner） | `.deb` / `.AppImage`（aarch64） |
-| macOS Intel | `macos-13` | 仅 `.dmg`（无 `.app.tar.gz`） |
-| macOS Apple Silicon | `macos-14` | 仅 `.dmg`（无 `.app.tar.gz`） |
+| macOS Intel | `macos-13` | 仅 `.dmg`（无 `.app.tar.gz`）— 当前临时禁用 |
+| macOS Apple Silicon | `macos-14` | 仅 `.dmg`（无 `.app.tar.gz`）— 当前临时禁用 |
 
 另有独立的 `server` job 构建 Muse Server（Rust）原生服务二进制：
 
@@ -37,8 +37,8 @@
 | Linux x86_64 | `muse-server-linux-x86_64.tar.gz` |
 | Linux aarch64 | `muse-server-linux-aarch64.tar.gz` |
 | Windows x86_64 | `muse-server-windows-x86_64.zip` |
-| macOS Intel | `muse-server-macos-intel.tar.gz` |
-| macOS ARM | `muse-server-macos-arm.tar.gz` |
+| macOS Intel | `muse-server-macos-intel.tar.gz` — 当前临时禁用 |
+| macOS ARM | `muse-server-macos-arm.tar.gz` — 当前临时禁用 |
 
 每个 server 包内含二进制、`web-portal/` 静态资源、配置说明与 `.sha256` 校验。
 
@@ -71,6 +71,7 @@
 
 - 未配置 Apple 开发者 ID / 公证凭据，macOS `.dmg` 为 ad-hoc 签名，首次打开可能触发 Gatekeeper 提示。
 - Windows `.exe` 与便携版未配置代码签名证书，可能出现 SmartScreen 提示。
+- **macOS 构建当前临时禁用**：该 GitHub 账户没有可用的 macOS runner 配额，macOS job 会一直 queued 并阻塞 `release` job。workflow 中保留了 macos-13/macos-14 的注释配置，runner 配额恢复后取消注释即可重新启用；产物格式要求（桌面仅 `.dmg`、server tar.gz）已就绪。
 - Android 手机版 / Android TV 版：已列入规划（按全平台 Rust/Tauri 路线），当前缺少 Android SDK/NDK 与 Tauri Android 构建条件，未纳入本流水线；iOS 同样未纳入。
 - Muse Server 首版为单用户、本机/可信网络优先，默认绑定 `127.0.0.1:8767`；公网需前置 TLS 反向代理并显式配置 `MUSE_SERVER_PUBLIC_URL`。
 - Rust 服务器首版没有内建鉴权，鉴权与业务读写全部代理给现有 Python `web_portal.py` / `status_api.py`；它不写业务 SQLite，也不是第二调度器。
