@@ -157,16 +157,27 @@ jobs:
           cargo test
           cargo clippy --all-targets -- -D warnings
 
-      - name: 禁用 CI 副本的 beforeBuildCommand（前端已单独构建）
+      - name: 配置 CI 副本的 bundle 目标与前端构建
         shell: bash
+        env:
+          PLATFORM: ${{ matrix.label }}
         run: |
           python3 - <<'PY'
-          import json, pathlib
+          import json, os, pathlib
+          platform = os.environ["PLATFORM"]
+          targets = {
+              "windows": ["nsis"],              # .exe only, no .msi
+              "linux": ["deb", "appimage"],
+              "linux-aarch64": ["deb", "appimage"],
+              "macos-intel": ["dmg"],           # .dmg only, no .app.tar.gz
+              "macos-arm": ["dmg"],
+          }[platform]
           p = pathlib.Path("desktop/src-tauri/tauri.conf.json")
           data = json.loads(p.read_text(encoding="utf-8"))
-          data["build"]["beforeBuildCommand"] = ""
+          data["build"]["beforeBuildCommand"] = ""   # frontend built in a dedicated step
+          data["bundle"]["targets"] = targets
           p.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-          print("beforeBuildCommand disabled for CI; frontendDist kept:", data["build"]["frontendDist"])
+          print("CI bundle targets:", targets, "| frontendDist:", data["build"]["frontendDist"])
           PY
 
       - name: 构建 Tauri 桌面应用
@@ -310,7 +321,8 @@ jobs:
               f"# Muse {version}",
               "",
               f"自动发布时间：{datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds')}",
-              f"版本序列：`{previous}` → `{version}`（CalVer：年.月.日）",
+              f"Release 标签：`v{version}`（CalVer：年.月.日）；安装包版本：`{previous}` → 本次构建版本",
+              "安装包版本每段均 <= 255，以兼容 WiX/msi 与 Apple/Windows 安装器；与 Release 日期标签一一对应。",
               "",
               "> 自动构建产物尚未逐项人工验收；测试通过不等于已完成端到端发布或商业闭环。",
               "",

@@ -38,8 +38,18 @@ VERSION_RE = re.compile(
 
 
 def calendar_version(day: _dt.date) -> str:
-    """Return a semver/PEP440 compatible CalVer: YYYY.M.M (no leading zero)."""
+    """Return the human-facing CalVer used for the Release tag: YYYY.M.D."""
     return f"{day.year}.{day.month}.{day.day}"
+
+
+def app_version(day: _dt.date) -> str:
+    """Return an installer-safe semver whose every segment is <= 255.
+
+    WiX/MSI rejects a major version above 255, and Apple/Windows installers
+    are happiest with classic 3-part semver.  We keep major=0, minor=month,
+    patch=day, so the value still tracks the release date while staying valid.
+    """
+    return f"0.{day.month}.{day.day}"
 
 
 def tag_for(version: str) -> str:
@@ -91,11 +101,13 @@ def main(argv: list[str] | None = None) -> int:
 
     day = _dt.date.fromisoformat(args.date) if args.date else _dt.datetime.now(_dt.timezone.utc).date()
     version = calendar_version(day)
+    build_version = app_version(day)
     previous = read_current_version()
-    changed = stamp_version(version, dry_run=args.dry_run) if (args.apply or args.dry_run) else []
+    changed = stamp_version(build_version, dry_run=args.dry_run) if (args.apply or args.dry_run) else []
 
     result = {
         "version": version,
+        "app_version": build_version,
         "tag": tag_for(version),
         "previous_version": previous,
         "short_date": day.strftime("%Y%m%d"),
