@@ -1,0 +1,263 @@
+name: Muse 定时跨平台发布
+
+on:
+  schedule:
+    # Every 3 days at 00:00 UTC (08:00 Asia/Shanghai).
+    - cron: "0 0 */3 * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "即使当天已有 Release 也强制重建"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: muse-scheduled-release
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.11"
+  NODE_VERSION: "22"
+  TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+  TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+jobs:
+  prepare:
+    name: 计算版本与发布窗口
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      short_date: ${{ steps.version.outputs.short_date }}
+      previous_version: ${{ steps.version.outputs.previous_version }}
+      skip: ${{ steps.gate.outputs.skip }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: 计算 CalVer 版本
+        id: version
+        run: python scripts/release_prepare.py
+      - name: 检查当日 Release 是否已存在
+        id: gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORCE: ${{ inputs.force || 'false' }}
+        run: |
+          if [ "$FORCE" = "true" ]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if gh release view "${{ steps.version.outputs.tag }}" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::notice::Release ${{ steps.version.outputs.tag }} 已存在，跳过本次定时发布"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: 构建 ${{ matrix.label }}
+    needs: prepare
+    if: needs.prepare.outputs.skip == 'false'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: windows
+          - os: ubuntu-22.04
+            label: linux
+          - os: macos-13
+            label: macos-intel
+          - os: macos-14
+            label: macos-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: ui-prototype/package.json
+
+      - name: 安装 Python 打包依赖
+        run: python -m pip install --upgrade pip build
+
+      - name: 安装前端依赖
+        working-directory: ui-prototype
+        run: npm install --no-audit --no-fund
+
+      - name: 写入本次版本号
+        run: python scripts/release_prepare.py --apply
+
+      - name: 安装 Linux 系统依赖
+        if: matrix.label == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            librsvg2-dev patchelf libxdo-dev libssl-dev
+
+      - name: 安装 macOS 系统依赖
+        if: startsWith(matrix.os, 'macos')
+        run: |
+          brew install dylibbundler || true
+
+      - name: 前端类型检查与测试
+        shell: bash
+        run: |
+          cd ui-prototype
+          npm run check
+          npm test
+
+      - name: 构建前端
+        shell: bash
+        run: npm --prefix ui-prototype run build
+
+      - name: 构建 Python wheel 与 sdist
+        shell: bash
+        run: |
+          python -m build --sdist --wheel --outdir dist-py .
+
+      - name: 打包 Web Portal 静态站点
+        shell: bash
+        run: |
+          mkdir -p dist
+          if command -v zip >/dev/null 2>&1; then
+            (cd web-portal && zip -r ../dist/muse-web-portal-${{ needs.prepare.outputs.short_date }}.zip .)
+          else
+            python -c "import shutil; shutil.make_archive('dist/muse-web-portal-${{ needs.prepare.outputs.short_date }}', 'zip', 'web-portal')"
+          fi
+
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+
+      - name: Rust 检查与单元测试
+        shell: bash
+        working-directory: desktop/src-tauri
+        run: |
+          cargo fmt -- --check
+          cargo test --locked
+          cargo clippy --all-targets -- -D warnings
+
+      - name: 构建 Tauri 桌面应用
+        uses: tauri-apps/tauri-action@v0
+        id: tauri
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: desktop/src-tauri
+          tauriScript: npm --prefix ../ui-prototype run build
+          args: --ci
+          tagName: ${{ needs.prepare.outputs.tag }}
+          releaseName: Muse ${{ needs.prepare.outputs.version }}
+          releaseDraft: true
+          prerelease: false
+          includeUpdaterJson: false
+
+      - name: 收集构建产物
+        shell: bash
+        run: |
+          python scripts/collect_release_artifacts.py \
+            --stage release-stage/${{ matrix.label }} \
+            --platform ${{ matrix.label }}
+          mkdir -p release-stage/${{ matrix.label }}/dist-py
+          cp -v dist-py/* release-stage/${{ matrix.label }}/dist-py/ 2>/dev/null || true
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: muse-${{ matrix.label }}-${{ needs.prepare.outputs.short_date }}
+          path: release-stage/${{ matrix.label }}/*
+          if-no-files-found: warn
+          retention-days: 7
+
+  release:
+    name: 汇总并发布 Releases
+    needs: [prepare, build]
+    if: needs.prepare.outputs.skip == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-stage
+
+      - name: 生成发布说明
+        run: |
+          python - <<'PY'
+          import datetime, hashlib, pathlib
+          version = "${{ needs.prepare.outputs.version }}"
+          previous = "${{ needs.prepare.outputs.previous_version }}"
+          date = "${{ needs.prepare.outputs.short_date }}"
+          lines = [
+              f"# Muse {version}",
+              "",
+              f"自动发布时间：{datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds')}",
+              f"版本序列：`{previous}` → `{version}`（CalVer：年.月.日）",
+              "",
+              "> 自动构建产物尚未逐项人工验收；测试通过不等于已完成端到端发布或商业闭环。",
+              "",
+              "## 本版包含",
+              "- Muse Commander、任务队列、双轨记忆、研究/Research Wiki、视频生产链路的当前源码快照",
+              "- Windows / Linux / macOS（Intel + Apple Silicon）桌面安装包（若对应平台构建成功）",
+              "- Python wheel 与 sdist、Web Portal 静态站点包",
+              "- 每个平台的 SHA256SUMS 校验清单",
+              "",
+              "## 安装提示",
+              "- Windows：运行 `.msi` 或 `.exe` 安装包。",
+              "- Linux：使用 `sudo apt install ./Muse_*.deb` 或 AppImage。",
+              "- macOS：打开 `.dmg`，或解压 `.app.tar.gz`。若出现 Gatekeeper 提示，请在“系统设置 → 隐私与安全性”中允许。",
+              "- Python 包：`pip install muse_personal_agent-*.whl`（需 Python 3.11+）。",
+              "",
+              "## 校验",
+              "下载后请对照同名 `SHA256SUMS.*.txt` 执行 `sha256sum -c` 或 `CertUtil -hashfile`。",
+              "",
+              "## 已知边界",
+              "插件执行默认关闭；AI 视频生成受 Commander 审批门禁约束；玄学内容只作灵感假设；",
+              "不宣称自动发布、稳定变现或机器主观意识。详情见仓库 README 与 docs/。",
+              "",
+          ]
+          pathlib.Path("RELEASE_NOTES.md").write_text("\n".join(lines), encoding="utf-8")
+          print("RELEASE_NOTES.md written")
+          PY
+
+      - name: 汇总校验清单
+        run: |
+          find release-stage -name 'SHA256SUMS.*.txt' -print -exec cat {} \; | tee ALL_SHA256SUMS.txt
+          cp ALL_SHA256SUMS.txt release-stage/ALL_SHA256SUMS.txt
+
+      - name: 合并 Release 草稿并正式发布
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ needs.prepare.outputs.tag }}"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release draft from tauri-action found; merging artifacts."
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --title "Muse ${{ needs.prepare.outputs.version }}" \
+              --notes-file RELEASE_NOTES.md --draft
+          fi
+          gh release upload "$TAG" release-stage/**/* \
+            --repo "$GITHUB_REPOSITORY" --clobber
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --title "Muse ${{ needs.prepare.outputs.version }}" \
+            --notes-file RELEASE_NOTES.md --draft=false
+          echo "Published: https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG"
