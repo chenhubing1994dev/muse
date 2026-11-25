@@ -111,7 +111,7 @@
 - **修复方案**：`_send_bytes`/`_send` 捕获 `ConnectionAbortedError/ConnectionResetError/BrokenPipeError` 并静默结束本次响应。
 
 ### G2 ⬜ 硬编码绝对路径（29 处）
-- 主要：`media.py`（OBS、Audacity、Studio One、Piper 可执行文件与模型路径）、`desktop_adapter.py:43`、`ruflo_adapter.py:101`、`software_crafting.py:32`、`video_capabilities.py:196`、`open_design.py:228`（已有环境变量兜底）、`inspiration_evolution.py:639`（`d:\AI AGENT\Muse\.venv\...` 测试命令）、`scripts/muse-inspiration-flagship-video.py:40-41`（`C:\Users\Administrator\...`）、`scripts/validate_desktop_rust.py:11`。
+- 主要：`media.py`（OBS、Audacity、Studio One、Piper 可执行文件与模型路径）、`desktop_adapter.py:43`、`ruflo_adapter.py:101`、`software_crafting.py:32`、`video_capabilities.py:196`、`open_design.py:228`（已有环境变量兜底）、`inspiration_evolution.py:639`（`<MUSE_ROOT>\.venv\...` 测试命令）、`scripts/muse-inspiration-flagship-video.py:40-41`（`%USERPROFILE%\...`）、`scripts/validate_desktop_rust.py:11`。
 - **修复方案**：保留现值作默认值，增加 `MUSE_*` 环境变量覆盖；`inspiration_evolution` 改为基于 `sys.executable` 与项目根推导。
 
 ### G3 ⬜ 吞掉异常（`except Exception: pass`，14 处）

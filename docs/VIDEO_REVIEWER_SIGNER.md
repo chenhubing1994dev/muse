@@ -30,7 +30,7 @@ On POSIX, configure `MUSE_VIDEO_REVIEWER_SIGNER_SERVICE_UID` and `MUSE_VIDEO_WOR
 Run the registration command as the dedicated Reviewer account after the private key and identity settings are provisioned:
 
 ```powershell
-py -3.11 -m muse.video_reviewer_signer --workspace "D:\AI AGENT\Muse" register-public-key
+py -3.11 -m muse.video_reviewer_signer --workspace "<MUSE_ROOT>" register-public-key
 ```
 
 The command writes a new trust-store file (it never overwrites an existing file) and prints:
@@ -53,7 +53,7 @@ The Worker writes one `video_pipeline.artifacts_verified` event and waits for an
 Then invoke the signer as the dedicated Reviewer account:
 
 ```powershell
-py -3.11 -m muse.video_reviewer_signer --workspace "D:\AI AGENT\Muse" sign --execution-task-id "<exact-running-execution-ticket-id>"
+py -3.11 -m muse.video_reviewer_signer --workspace "<MUSE_ROOT>" sign --execution-task-id "<exact-running-execution-ticket-id>"
 ```
 
 The signer rechecks the live Ticket lease, latest human approval, persisted Commander DAG and workflow binding, artifact manifest, MP4 and product ZIP digests, visual-review evidence, and latest ledger record. It appends exactly one signed review event. It refuses duplicate signing, stale or rejected reviews, changed approvals, mismatched artifacts, and non-model/safe-fallback plans.

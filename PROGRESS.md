@@ -7,8 +7,8 @@
 
 ## 硬性约束（每次续作前复核）
 1. 不调用/委派任何外部 Coding agent（Kiro、Claude Code、Codex、Cursor、Copilot、Amazon Q Developer 等），也不通过扩展/MCP/终端间接调用。
-2. 只在 `D:\AI AGENT\Muse` 内操作；不删除文件；不读取/外传 .env、密钥、token（`config/muse.toml`、`config/model-runtime.json`、`config/opencode.local.jsonc` 均不读）。
-3. 修改任何已有文件前，必须先完成整目录备份到 `D:\AI AGENT\Muse_backup_<日期>`。
+2. 只在 `<MUSE_ROOT>` 内操作；不删除文件；不读取/外传 .env、密钥、token（`config/muse.toml`、`config/model-runtime.json`、`config/opencode.local.jsonc` 均不读）。
+3. 修改任何已有文件前，必须先完成整目录备份到 `<MUSE_ROOT>_backup_<日期>`。
 4. 安装依赖/联网下载前先列清单征得同意。
 
 ## 阶段状态
@@ -37,7 +37,7 @@ AWS Quick 的执行环境禁止子进程、sys.path、importlib，无法自己�
 
 用户需运行的命令（PowerShell，项目根目录）：
 ```
-cd "D:\AI AGENT\Muse"
+cd "<MUSE_ROOT>"
 .\.venv\Scripts\python.exe scripts\muse_smoke.py
 ```
 （若 .venv 不可用：`py -3.11 scripts\muse_smoke.py`；需要全量测试再加 `--full`）

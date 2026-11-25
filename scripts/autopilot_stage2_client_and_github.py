@@ -59,8 +59,21 @@ SRC_TAURI = ROOT / "src-tauri"
 UI_DIR = ROOT / "ui-prototype"
 STAMP = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
 PYPI_MIRROR = "https://pypi.tuna.tsinghua.edu.cn/simple"
-# Cargo output lives on C: (no spaces, no D:\ filter-driver write lock -> no "os error 5 / 拒绝访问")
-CARGO_TARGET_DIR = Path(os.environ.get("LOCALAPPDATA", r"C:\Users\Administrator\AppData\Local")) / "muse-cargo-target"
+# Cargo output lives OUTSIDE the repo (space-free, avoids the "os error 5 / 拒绝访问" lock under the project
+# folder). Default D:/muse-cargo-target (keeps C: free); override with MUSE_CARGO_TARGET_DIR.
+LEGACY_CARGO_TARGET_DIR = Path.home() / "AppData" / "Local" / "muse-cargo-target"   # old C: cache, auto-removed
+
+
+def _default_cargo_target() -> Path:
+    override = os.environ.get("MUSE_CARGO_TARGET_DIR", "").strip()
+    if override:
+        return Path(override)
+    if Path("D:/").is_dir():
+        return Path("D:/muse-cargo-target")
+    return LEGACY_CARGO_TARGET_DIR   # machine without a D: drive
+
+
+CARGO_TARGET_DIR = _default_cargo_target()
 COLDSTART_DIR = Path(tempfile.gettempdir()) / "muse_coldstart_test"
 
 STAGE2_FILES = [
@@ -278,6 +291,40 @@ def show_path(path: Path) -> str:
         return str(path.relative_to(ROOT))
     except ValueError:
         return str(path)
+
+
+
+def cleanup_legacy_cargo_cache() -> None:
+    """Free the multi-GB C: cargo cache from earlier runs (new builds use CARGO_TARGET_DIR on D:)."""
+    legacy = LEGACY_CARGO_TARGET_DIR
+    if legacy.exists() and legacy.resolve() != CARGO_TARGET_DIR.resolve():
+        R.log(f"清理旧的 C 盘 Cargo 编译缓存 {legacy}（以后编译改用 {CARGO_TARGET_DIR}）")
+        shutil.rmtree(legacy, ignore_errors=True)
+        R.facts["legacy_cargo_cache_removed"] = not legacy.exists()
+
+
+def deliverables_ready() -> tuple[bool, str]:
+    """True when setup.exe + portable zip + SHA256SUMS.txt exist and every listed hash matches."""
+    version = tauri_version()
+    setup = OUT_DIR / f"Muse_{version}_x64-setup.exe"
+    portable = OUT_DIR / "Muse_Windows_x64_绿色免安装版.zip"
+    sums = OUT_DIR / "SHA256SUMS.txt"
+    missing = [p.name for p in (setup, portable, sums) if not p.is_file()]
+    if missing:
+        return False, "缺少 " + "、".join(missing)
+    listed: dict[str, str] = {}
+    for line in sums.read_text(encoding="utf-8").splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) == 2:
+            listed[parts[1].lstrip("*").strip()] = parts[0].lower()
+    for item in (setup, portable):
+        want = listed.get(item.name)
+        if not want:
+            return False, f"SHA256SUMS.txt 未列出 {item.name}"
+        if sha256(item) != want:
+            return False, f"{item.name} 校验和不匹配"
+    R.facts["deliverables"] = {p.name: {"bytes": p.stat().st_size, "sha256": listed[p.name]} for p in (setup, portable)}
+    return True, f"{setup.name} · {portable.name} · SHA256 校验通过"
 
 
 
@@ -733,6 +780,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--skip-build", action="store_true")
     parser.add_argument("--skip-push", action="store_true")
     parser.add_argument("--no-explorer", action="store_true")
+    parser.add_argument("--rebuild", action="store_true", help="rebuild steps 1-3 even if the installers already exist")
     args = parser.parse_args(argv)
     try:
         sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
@@ -748,12 +796,19 @@ def main(argv: list[str] | None = None) -> int:
     exit_code = 0
     try:
         cleanup_stale_packager_venv()
-        info = step_toolchain()
-        if args.skip_build:
-            R.step("2-3 构建与安装包", "skip", "--skip-build")
+        cleanup_legacy_cargo_cache()
+        ready, why = (False, "--rebuild") if args.rebuild else deliverables_ready()
+        if ready and not args.skip_build:
+            R.step("1-3 工具链/构建/安装包", "skip", f"已完工，跳过重复编译：{why}（强制重编请加 --rebuild）")
         else:
-            exe = step_local_exe(info)
-            step_installer(info, exe, open_explorer=not args.no_explorer)
+            info = step_toolchain()
+            if args.skip_build:
+                R.step("2-3 构建与安装包", "skip", "--skip-build")
+            else:
+                if not args.rebuild:
+                    R.log(f"安装包未就绪（{why}）→ 执行完整构建")
+                exe = step_local_exe(info)
+                step_installer(info, exe, open_explorer=not args.no_explorer)
         step_audit_and_sync(skip_push=args.skip_push)
     except StepFailed as exc:
         R.step("中止", "fail", str(exc))

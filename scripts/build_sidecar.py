@@ -697,8 +697,9 @@ def build_native_launcher(triple: str, exe_suffix: str, final: Path, *, skip_sel
             test_c = {"returncode": -1, "error": str(exc)}
         result["self_test_launcher_on_c_drive"] = test_c
         if test_c.get("returncode") == 0:
+            project_root = Path(__file__).resolve().parents[1]
             result["self_test_warning"] = ("launcher passes from %LOCALAPPDATA% but not from the project folder: "
-                                           "a filter driver blocks new executables under D:\\AI AGENT\\Muse; the "
+                                           f"a filter driver blocks new executables under {project_root}; the "
                                            "installed / portable app is unaffected")
             result["self_test"] = dict(test, returncode=0, original_returncode=test.get("returncode"))
     return result

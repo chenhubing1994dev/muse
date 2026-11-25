@@ -20,7 +20,7 @@
 ## 2. 顶层目录树与职责
 
 ```
-D:\AI AGENT\Muse
+<MUSE_ROOT>
 ├── src/muse/            ★ 核心运行时（220 模块，见第 4 节）
 ├── src/data/            运行态 SQLite（autonomy/initiatives/memory/research/tasks 等）
 ├── tests/               ★ unittest 回归（262 文件）

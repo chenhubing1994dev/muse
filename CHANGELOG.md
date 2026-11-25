@@ -406,7 +406,7 @@
 
     **一键冒烟测试（推荐先跑）**：不联网、不需要模型/GPU，在临时目录中验证 编译 → 全模块导入 → 配置检查 → 任务入队/审批/执行 → 灵感生成离线产品包 → 研究状态机 → Status API，结果写入 `reports\qw_smoke\latest.log` 与 `latest.json`。
     ```powershell
-    cd "D:\AI AGENT\Muse"
+    cd "<MUSE_ROOT>"
     & ".\.venv\Scripts\python.exe" "scripts\muse_smoke.py"          # 冒烟 + 重点回归测试
     & ".\.venv\Scripts\python.exe" "scripts\muse_smoke.py" --full   # 冒烟 + 全量 unittest
     ```
@@ -417,7 +417,7 @@
     - `No module named muse`：先执行 `$env:PYTHONPATH = 'src'`，或在项目根目录运行 `pip install -e .`。
     - 中文路径/输出乱码：使用 PowerShell 7 或先执行 `$env:PYTHONUTF8 = '1'`；冒烟脚本日志始终为 UTF-8。
     - 某模块提示 needs optional package：属可选能力，按 `requirements-optional.txt` 安装对应分组即可，核心流程不受影响。
-    - 路径含空格：所有命令中的 `D:\AI AGENT\Muse` 必须加双引号。
+    - 路径含空格：所有命令中的 `<MUSE_ROOT>` 必须加双引号。
     
     **日常 Windows 使用（无需 ChatGPT）**
 
@@ -743,7 +743,7 @@
 - 修改后：
 
     & ".\.venv\Scripts\python.exe" "scripts\muse_smoke.py" --full   # 冒烟 + 全量 unittest
-    & "D:\AI AGENT\Muse\run_smoke.bat"                              # 一键：自动 .venv + UTF-8 + 21 阶段分层体检与通过率汇总
+    & "<MUSE_ROOT>\run_smoke.bat"                              # 一键：自动 .venv + UTF-8 + 21 阶段分层体检与通过率汇总
     
 
 ## [MIND-API] src/muse/status_api.py
@@ -842,12 +842,12 @@
 
     **全量诊断（推荐）**：一次运行原冒烟测试 + 6 层全量诊断（静态编译/未定义名、全模块与测试导入、配置与持久化、子系统单元、离线 Mock LLM 全脑闭环、API 全路由），汇总到 `reports\qw_smoke\latest.log`、`latest.json`、`diag_matrix.json`：
     ```powershell
-    powershell -NoProfile -ExecutionPolicy Bypass -File "D:\AI AGENT\Muse\scripts\run_full_diag.ps1"
+    powershell -NoProfile -ExecutionPolicy Bypass -File "<MUSE_ROOT>\scripts\run_full_diag.ps1"
     ```
     
     **意识主循环 `muse-mind`**（感知 → 内在状态 → 记忆检索 → 反思 → 规划 → 审批门 → 执行 → 核验 → 经验固化；无模型时走确定性路径，可选本地模型 `--llm-url http://127.0.0.1:1234/v1`）：
     ```powershell
-    $env:PYTHONPATH = "D:\AI AGENT\Muse\src"; cd "D:\AI AGENT\Muse"
+    $env:PYTHONPATH = "<MUSE_ROOT>\src"; cd "<MUSE_ROOT>"
     py -3.11 -m muse.consciousness_loop perceive "请帮我规划一个离线复盘工具"   # 低风险步骤按策略自动执行，开发/运维/高危步骤等待人工审批
     py -3.11 -m muse.consciousness_loop status                                 # 内在状态、最近循环、待审批步骤
     py -3.11 -m muse.consciousness_loop approve <TASK_ID> --by 你的名字          # 人工批准；reject 会级联取消下游步骤
@@ -890,13 +890,13 @@
 - SHA-256：`11b445c6f3eabdb8…` → `28e6fe58978dfcc4…`
 - 修改前：
 
-    - 路径含空格：所有命令中的 `D:\AI AGENT\Muse` 必须加双引号。
+    - 路径含空格：所有命令中的 `<MUSE_ROOT>` 必须加双引号。
     
 
 - 修改后：
 
-    - 路径含空格：所有命令中的 `D:\AI AGENT\Muse` 必须加双引号。
-    - `.venv\Scripts\python.exe` 报 `No pyvenv.cfg file`：虚拟环境启动器损坏（Muse-Start、计划任务都会受影响）。先诊断 `powershell -NoProfile -ExecutionPolicy Bypass -File "D:\AI AGENT\Muse\scripts\Repair-MuseVenv.ps1"`，确认后加 `-Apply` 离线修复（备份原启动器，保留已装包）。`run_full_diag.ps1` / `run_smoke.bat` 会自动回退到可用解释器继续诊断。
+    - 路径含空格：所有命令中的 `<MUSE_ROOT>` 必须加双引号。
+    - `.venv\Scripts\python.exe` 报 `No pyvenv.cfg file`：虚拟环境启动器损坏（Muse-Start、计划任务都会受影响）。先诊断 `powershell -NoProfile -ExecutionPolicy Bypass -File "<MUSE_ROOT>\scripts\Repair-MuseVenv.ps1"`，确认后加 `-Apply` 离线修复（备份原启动器，保留已装包）。`run_full_diag.ps1` / `run_smoke.bat` 会自动回退到可用解释器继续诊断。
     
 
 ## [ENV-VENV] 首次真机运行结果与修复（2026-11-25 18:12）
