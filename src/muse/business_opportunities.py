@@ -38,53 +38,6 @@ def _url(value):
     return value
 
 
-def _build_video_commander_plan_snapshot(title: str, brief_sha256: str) -> dict:
-    """Build a deterministic minimal Commander plan snapshot for one approved video brief.
-
-    The snapshot schema matches ``MuseRuntime._restore_commander_plan_snapshot`` exactly.
-    source is ``safe_fallback`` because no LM planning is performed at approval time;
-    the brief digest is embedded in the goal so the plan is unique per brief.
-    """
-    plan_id = hashlib.sha256(
-        f"video-approval-plan:{brief_sha256}".encode("utf-8")
-    ).hexdigest()[:32]
-    snapshot = {
-        "schema": "muse-commander-plan-snapshot-v1",
-        "plan_id": plan_id,
-        "goal": f"Produce one approved video asset: {title[:120]} [brief:{brief_sha256[:16]}]",
-        "source": "safe_fallback",
-        "steps": [
-            {
-                "step_id": "research",
-                "role": "researcher",
-                "objective": "Verify the approved video brief and its source claims.",
-                "depends_on": [],
-                "required_capabilities": ["research"],
-            },
-            {
-                "step_id": "build",
-                "role": "developer",
-                "objective": "Build the approved video draft from the brief.",
-                "depends_on": ["research"],
-                "required_capabilities": ["coding", "testing"],
-            },
-            {
-                "step_id": "review",
-                "role": "reviewer",
-                "objective": "Review the video draft and verify the evidence.",
-                "depends_on": ["build"],
-                "required_capabilities": ["review"],
-            },
-        ],
-        "parallel_waves": [["research"], ["build"], ["review"]],
-    }
-    encoded = json.dumps(
-        snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
-        allow_nan=False,
-    ).encode("utf-8")
-    dag_sha256 = hashlib.sha256(encoded).hexdigest()
-    return snapshot, dag_sha256
-
 
 class BusinessOpportunityStore:
     """SQLite ledger for opportunity candidates, evidence and lifecycle events."""
@@ -258,8 +211,9 @@ class BusinessOpportunityStore:
                     )[:1800],
                     "negative_prompt":"fake testimonials, fabricated metrics, unreadable text, watermarks, logos not supplied",
                     "aspect_ratio":"9:16",
-                    "duration_seconds":2.0,
-                    "steps":8,
+                    "duration_seconds":5.0,
+                    "steps":20,
+                    "resolution_tier":"wan21_480p_master",
                     "narration":{
                         "enabled":True,
                         "language":"zh-HK",
@@ -333,9 +287,12 @@ class BusinessOpportunityStore:
             # Compatibility for records created before initiative_linked stored the ID.
             return next((item for item in initiatives.list(limit=200) if reference in item["inspiration_refs"]),None)
 
-    def request_video_approval(self,opportunity_id,*,initiative_database,task_database):
-        """Create a Commander approval ticket; never queue GPU work at this stage."""
+    def request_video_approval(self,opportunity_id,*,initiative_database,task_database,commander_planner):
+        """Create a Commander approval ticket from a strictly model-authored DAG."""
         from muse.task_queue import TaskQueue
+        from muse.commander_planner import CommanderPlanner
+        if not isinstance(commander_planner, CommanderPlanner) or commander_planner.strict_model is not True:
+            raise TypeError("video approval requires an explicitly injected strict CommanderPlanner")
         opportunity=self.get(opportunity_id)
         if opportunity["status"] in {"rejected","parked"}:
             raise ValueError("rejected or parked opportunities cannot request video approval")
@@ -351,9 +308,20 @@ class BusinessOpportunityStore:
         attempt_id="biz-"+hashlib.sha256(opportunity_id.encode("utf-8")).hexdigest()[:32]
         idem=f"business-video-approval:{opportunity_id}"
         brief_sha256=hashlib.sha256(json.dumps(brief,sort_keys=True,ensure_ascii=False).encode("utf-8")).hexdigest()
-        plan_snapshot, dag_sha256 = _build_video_commander_plan_snapshot(
-            brief.get("title",""), brief_sha256
+        scenes=brief.get("scenes") if isinstance(brief.get("scenes"),list) else []
+        shot_ids=[f"shot_{index:03d}" for index in range(1,max(1,len(scenes))+1)]
+        goal=(
+            f"Produce one approved video asset from the verified Creator Brief: {brief.get('title','')[:120]}. "
+            f"Return exactly these shot steps: {', '.join(shot_ids)}. Use only operator/video_preflight, developer/comfyui_generation, operator/ffmpeg+video_assembly, reviewer/media_review. "
+            "Include preflight (operator, video_preflight), each shot step (developer, comfyui_generation, no dependencies), "
+            "assemble (operator, ffmpeg and video_assembly, depends on all shots), and quality_review (reviewer, media_review, depends on assemble). "
+            "The Worker performs preflight before generation; do not make shots depend on preflight. No extra roles or capabilities."
         )
+        plan=commander_planner.plan(goal)
+        if plan.source != "model":
+            raise ValueError("video approval requires a Commander model-authored plan")
+        plan_snapshot=plan.to_snapshot()
+        dag_sha256=hashlib.sha256(json.dumps(plan_snapshot,ensure_ascii=False,sort_keys=True,separators=(",",":"),allow_nan=False).encode("utf-8")).hexdigest()
         payload={
             "kind":"business_opportunity_video_approval",
             "opportunity_id":opportunity_id,
@@ -534,7 +502,12 @@ def main(argv=None):
     queue_video=sub.add_parser("queue-approved-video"); queue_video.add_argument("opportunity_id"); queue_video.add_argument("approval_task_id"); queue_video.add_argument("--initiative-db",default="data/initiatives/muse.sqlite3"); queue_video.add_argument("--task-db",default="data/tasks/muse.sqlite3")
     args=parser.parse_args(argv)
     with BusinessOpportunityStore(args.db) as store:
-        if args.command=="add":
+        if args.command=="request-video-approval":
+            from muse.commander_planner import CommanderPlanner
+            from muse.local_planner import LocalModelCommanderPlanner
+            strict_planner=CommanderPlanner(LocalModelCommanderPlanner(memory_database=Path(args.db).parent.parent / "memory" / "muse.sqlite3", project="muse"), strict_model=True)
+            result=store.request_video_approval(args.opportunity_id,initiative_database=args.initiative_db,task_database=args.task_db,commander_planner=strict_planner)
+        elif args.command=="add":
             result=store.create(idempotency_key=args.idempotency_key,title=args.title,customer_segment=args.customer_segment,
               customer_problem=args.customer_problem,proposed_offer=args.proposed_offer,validation_test=args.validation_test,
               success_signal=args.success_signal,ratings={n:getattr(args,n) for n in DIMENSIONS},currency=args.currency,
@@ -543,10 +516,8 @@ def main(argv=None):
             result=store.add_evidence(args.opportunity_id,idempotency_key=args.idempotency_key,evidence_type=args.evidence_type,
               epistemic_status=args.epistemic_status,summary=args.summary,source_url=args.source_url)
         elif args.command=="promote": result=store.promote_to_initiative(args.opportunity_id,initiative_database=args.initiative_db)
-        elif args.command=="request-video-approval": result=store.request_video_approval(args.opportunity_id,initiative_database=args.initiative_db,task_database=args.task_db)
         elif args.command=="queue-approved-video": result=store.queue_video_after_approval(args.opportunity_id,args.approval_task_id,initiative_database=args.initiative_db,task_database=args.task_db)
         else: result=store.shortlist(limit=args.limit)
     print(json.dumps(result,ensure_ascii=False,indent=2)); return 0
-
 
 if __name__=="__main__": raise SystemExit(main())

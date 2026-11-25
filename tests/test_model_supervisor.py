@@ -175,6 +175,36 @@ class ModelSupervisorTests(unittest.TestCase):
             finally:
                 resources.release(lease_id)
 
+    def test_start_if_needed_does_not_launch_during_amf_encoding_lease(self) -> None:
+        from muse.gpu_resources import GpuResourceCoordinator
+        with tempfile.TemporaryDirectory() as directory:
+            root = self._workspace(Path(directory))
+            resources = GpuResourceCoordinator(root / "data" / "gpu-resources.sqlite3")
+            lease_id = resources.acquire("video_encoding", "amf-encode")
+            try:
+                with patch.object(model_supervisor, "_probe", return_value={"status": "unavailable"}), \
+                     patch.object(model_supervisor.subprocess, "Popen") as popen:
+                    result = model_supervisor.start_if_needed(root)
+                self.assertEqual(result["action"], "gpu_reserved_for_video")
+                self.assertEqual(result["lease_owner"], "video_encoding")
+                popen.assert_not_called()
+            finally:
+                resources.release(lease_id)
+
+    def test_supervisor_acknowledges_amf_encoding_lease_when_model_is_offline(self) -> None:
+        from muse.gpu_resources import GpuResourceCoordinator
+        with tempfile.TemporaryDirectory() as directory:
+            root = self._workspace(Path(directory))
+            resources = GpuResourceCoordinator(root / "data" / "gpu-resources.sqlite3")
+            lease_id = resources.acquire("video_encoding", "amf-encode")
+            with patch.object(model_supervisor, "_probe", return_value={"status": "unavailable"}):
+                result = model_supervisor.run_supervisor(root, once=True)
+            state = resources.supervisor_state()
+            self.assertEqual(result, 0)
+            self.assertEqual(state["action"], "paused_for_video")
+            self.assertEqual(state["acknowledged_lease_id"], lease_id)
+            resources.release(lease_id)
+
     def test_supervisor_acknowledges_video_lease_when_model_is_already_offline(self) -> None:
         from muse.gpu_resources import GpuResourceCoordinator
         with tempfile.TemporaryDirectory() as directory:

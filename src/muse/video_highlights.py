@@ -12,6 +12,7 @@ import re
 import statistics
 import subprocess
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Callable, Sequence
 from muse.ffmpeg_skill import probe_media
@@ -428,6 +429,7 @@ def render_vertical_clip(
     crop_center_x: float | None = None,
     crop_center_keyframes: list[dict[str, object]] | None = None,
     runner: Callable = subprocess.run,
+    gpu_resource_db: str | Path | None = None,
 ) -> dict[str, object]:
     target = Path(output).expanduser()
     created = False
@@ -445,7 +447,22 @@ def render_vertical_clip(
             crop_center_x=crop_center_x,
             crop_center_keyframes=crop_center_keyframes,
         )
-        result = runner(command, capture_output=True, text=True, timeout=900, check=False)
+        encoder_capability = None
+        if "h264_amf" in command:
+            from muse.video_capabilities import probe_ffmpeg_encoder
+            encoder_capability = probe_ffmpeg_encoder(ffmpeg_path, ffprobe_path, "h264_amf")
+            if encoder_capability.get("capability", {}).get("status") != "available":
+                raise RuntimeError("AMF was selected but failed real MP4/FFprobe/full-decode validation")
+            from muse.gpu_resources import gpu_video_encoding_session
+            workspace = Path(__file__).resolve().parents[2]
+            with gpu_video_encoding_session(
+                workspace, "video-highlight-" + uuid.uuid4().hex[:16], database=gpu_resource_db,
+            ):
+                result = runner(command, capture_output=True, text=True, encoding="utf-8",
+                                errors="replace", timeout=900, check=False)
+        else:
+            result = runner(command, capture_output=True, text=True, encoding="utf-8",
+                            errors="replace", timeout=900, check=False)
         created = target.is_file()
         if result.returncode != 0 or not created or target.stat().st_size == 0:
             raise RuntimeError("FFmpeg clip render failed: " + (result.stderr or "")[-1200:])
@@ -464,6 +481,7 @@ def render_vertical_clip(
         return {
             "status": "completed", "output": str(target.resolve()),
             "duration_seconds": round(duration, 3), "width": 1080, "height": 1920,
+            "encoder_capability": encoder_capability,
             "encoder": "h264_amf" if "h264_amf" in command else "libx264",
             "bytes": target.stat().st_size,
             "framing": {
@@ -487,10 +505,15 @@ def render_vertical_clip(
                 "audio_stream_count": output_probe.get("audio_stream_count"),
             },
         }
-    except (OSError, subprocess.TimeoutExpired, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+    except Exception as exc:
         if not output_preexisting and target.exists():
             target.unlink()
-        return {"status": "failed", "error": str(exc), "output": str(target)}
+        from muse.gpu_resources import GpuResourceBusy
+        if isinstance(exc, GpuResourceBusy):
+            return {"status": "blocked", "stage": "gpu_resource_lock", "error": str(exc), "output": str(target)}
+        if isinstance(exc, (OSError, subprocess.TimeoutExpired, RuntimeError, ValueError, json.JSONDecodeError)):
+            return {"status": "failed", "error": str(exc), "output": str(target)}
+        raise
 
 
 def main(argv: Sequence[str] | None = None) -> int:

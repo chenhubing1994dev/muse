@@ -13,12 +13,12 @@ Muse 是总指挥和权限所有者。成熟外部项目通过窄适配器接入
 ## 本机参考快照（2026-11-03）
 
 - Ruflo：commit 5f3dacc54b7279e39b172d6027d7989791448e2e
-  - 本地源码：D:\\AI AGENT\\reference-projects\\ruflo
+  - 本地源码：<AI_AGENT_ROOT>\\reference-projects\\ruflo
   - npm：ruflo@3.71.0；CLI 与依赖已从 npm 缓存移动到 D:\\Tools\\Ruflo\\npx-cache（没有做全局 npm 安装）。
   - 本机 MCP 工具清单实际返回 385 项。
   - 实际调用 system_status 成功，返回版本 3.71.0、status=healthy；memory_search 也成功返回，当前 patterns 命名空间为空。
 - dsh-superagent-prototype：commit 6337fc823ce20251c8de8085948165c81aaa701e
-  - 本地源码：D:\\AI AGENT\\reference-projects\\dsh-superagent-prototype
+  - 本地源码：<AI_AGENT_ROOT>\\reference-projects\\dsh-superagent-prototype
   - README 明确说明这是研究代码，并非生产就绪产品。
 - Super Agent Party：浅克隆因仓库内大型媒体/模型资产而 TLS early EOF；已删除不完整副本，没有复制其源代码。
 ## 能力边界

@@ -6,7 +6,7 @@
 ## §0 先做：复验与提交（约 3 分钟）
 
 ```powershell
-cd "D:\AI AGENT\Muse"
+cd "<MUSE_ROOT>"
 # 1) 若 .venv 启动器仍损坏，先修复（会自动备份）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\Repair-MuseVenv.ps1 -Apply
 # 2) 真机跑 B391 新测试（3.11）

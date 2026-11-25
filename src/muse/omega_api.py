@@ -109,7 +109,10 @@ def _post(path: str, payload: dict[str, Any], workspace: Path) -> tuple[int, dic
             return 200, {"result": ledger.rollback(version, actor="dashboard")}
     if path == "/api/v1/omega/xuanshu/fuse":
         from muse.xuanshu_fusion import fuse
-        return 200, {"result": fuse(str(payload.get("question", "")), seed=str(payload.get("seed", "")))}
+        from muse.xuanshu_symbolic_fallback import today_in_shanghai
+        # External chart engines are optional; the stdlib symbolic fallback keeps the lab usable everywhere.
+        return 200, {"result": fuse(str(payload.get("question", "")), seed=str(payload.get("seed", "")),
+                                    symbolic_fallback=True, moment=today_in_shanghai())}
     if path == "/api/v1/omega/feedback/upload":
         from muse.feedback_bridge import FeedbackBridge
         from muse.research_closed_loop import ClaimDossierStore

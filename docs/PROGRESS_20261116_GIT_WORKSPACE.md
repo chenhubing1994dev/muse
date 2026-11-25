@@ -2,7 +2,7 @@
 
 ## 结果
 
-- 项目路径：`D:\AI AGENT\Muse`
+- 项目路径：`<MUSE_ROOT>`
 - 已从非 Git 目录初始化为本地 Git 仓库。
 - 默认分支：`main`
 - 首次基线提交：`a8ac2f2c7c2704fc50645ccda44d2c90e43312b4`

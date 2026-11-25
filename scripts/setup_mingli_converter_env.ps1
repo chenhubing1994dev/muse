@@ -1,5 +1,5 @@
 param(
-    [string]$EnvironmentPath = "D:\AI AGENT\Muse\third_party\llama.cpp-converter-review\.venv"
+    [string]$EnvironmentPath = (Join-Path (Split-Path -Parent $PSScriptRoot) "third_party\llama.cpp-converter-review\.venv")
 )
 
 $ErrorActionPreference = "Stop"

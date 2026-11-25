@@ -200,6 +200,17 @@ class MemoryStore:
         now = self._now()
         kind = self._validate_kind(kind)
         track = self._validate_track(track)
+        # Deduplicate: an identical active memory (same project/kind/track/content)
+        # is returned instead of creating a second copy that would skew retrieval.
+        duplicate = self._connection.execute(
+            "SELECT id FROM memories WHERE deleted_at IS NULL AND project = ? AND kind = ? "
+            "AND track = ? AND content = ? ORDER BY id LIMIT 1",
+            (project, kind, track, content),
+        ).fetchone()
+        if duplicate is not None:
+            existing = self.get(int(duplicate[0]))
+            if existing is not None:
+                return existing
         cursor = self._connection.execute(
             """INSERT INTO memories
                (project, content, source, confidence, kind, track, created_at, updated_at)

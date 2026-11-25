@@ -20,7 +20,7 @@ Date: 2026-11-19
 
 ## Local installation and live qualification
 
-- Installed pinned mempalace==3.12.0 in D:\AI AGENT\MuseRuntime\MemPalace-3.12.0\venv; Muse's existing .venv was not modified.
+- Installed pinned mempalace==3.12.0 in <MUSE_ROOT>Runtime\MemPalace-3.12.0\venv; Muse's existing .venv was not modified.
 - PyPI wheel SHA-256: 3832534f377f3a81a324f741f90bf3c1ec277d49404608257cde1b5b0d52626f. The downloaded wheel, PyPI metadata and provenance statement agree; the provenance certificate identity names the official MemPalace/mempalace publish workflow at tag v3.12.0.
 - Downloaded/cached multilingual EmbeddingGemma on D: (about 330 MB). Offline search passed with HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1.
 - Local stdio MCP discovered 47 upstream tools; all 21 tools in Muse's allowlist were present. Status, taxonomy and semantic search calls succeeded.

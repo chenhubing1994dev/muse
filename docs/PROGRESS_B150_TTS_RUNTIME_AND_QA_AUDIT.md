@@ -13,7 +13,7 @@
 - Python 3.11 当前环境只读探测结果：torch 2.12.0+cpu，`torch.cuda.is_available() == false`，`torch.version.cuda == null`，`torch.version.hip == null`；onnxruntime 1.24.3 的可用 provider 只有 `AzureExecutionProvider` 与 `CPUExecutionProvider`。没有 DirectML/CUDA provider。
 - Python 3.12/3.13/3.14 环境未发现 torch、torchaudio、onnxruntime、onnxruntime-directml、modelscope、cosyvoice 或 gradio。
 - Windows 视频适配器实测包含 AMD Radeon RX 6750 GRE 12GB，驱动 32.0.21045.16010；但当前 Python 3.11 语音运行环境是 CPU-only，不能据显卡存在推断 CosyVoice fork 能调用 AMD GPU。
-- 本机检查的候选目录 `D:\AI AGENT\Muse\vendor\CosyVoice-Cantonese`、`D:\AI AGENT\CosyVoice-Cantonese`、`D:\AI AGENT\Muse\external\CosyVoice-Cantonese` 与 `.cache` 路径均不存在。因此本轮无法在本机对 fork 的 `setup_cantonese_ui_venv.ps1`、`requirements.txt`、`scripts/download_model.py` 做逐行源码审计；不得把上轮文档记录冒充成本轮重新读取的脚本证据。
+- 本机检查的候选目录 `<MUSE_ROOT>\vendor\CosyVoice-Cantonese`、`<AI_AGENT_ROOT>\CosyVoice-Cantonese`、`<MUSE_ROOT>\external\CosyVoice-Cantonese` 与 `.cache` 路径均不存在。因此本轮无法在本机对 fork 的 `setup_cantonese_ui_venv.ps1`、`requirements.txt`、`scripts/download_model.py` 做逐行源码审计；不得把上轮文档记录冒充成本轮重新读取的脚本证据。
 - 公开 README 声称支持 Python 3.10 + Windows venv，并明确写出 NVIDIA GPU 支持；这只能证明项目作者公开声明的目标，不构成本机 AMD/CPU 兼容性证明。README 的约 1.5 GB 下载说明与此前记录的 Hugging Face 完整快照约 9.75 GB 存在口径差异，未确认具体下载过滤范围前不能估算实际磁盘需求。
 
 ### 决策

@@ -11,8 +11,9 @@ import math
 import re
 import subprocess
 import tempfile
+import uuid
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Any, Callable, Sequence
 
 
 VIDEO_EXTENSIONS = frozenset({".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"})
@@ -82,6 +83,7 @@ def assemble_video_from_folder(
     encoder_preference: str = "auto",
     timeout_seconds: int = 3600,
     runner: Callable = subprocess.run,
+    gpu_resource_db: str | Path | None = None,
 ) -> dict[str, object]:
     """Render sorted still/video scenes, concatenate, optionally mix one audio track,
     and verify the resulting MP4 with ffprobe. Source assets are never modified.
@@ -124,7 +126,21 @@ def assemble_video_from_folder(
         f"fps={fps},format=yuv420p"
     )
     created_output = False
+    gpu_lease = None
     try:
+        if encoder == "h264_amf":
+            from muse.gpu_resources import GpuLeaseSession, GpuResourceCoordinator
+            database = (
+                Path(gpu_resource_db).expanduser()
+                if gpu_resource_db is not None
+                else Path(__file__).resolve().parents[2] / "data" / "gpu-resources.sqlite3"
+            )
+            coordinator = GpuResourceCoordinator(database)
+            gpu_lease = GpuLeaseSession(
+                coordinator, "video-factory-encode-" + uuid.uuid4().hex[:16],
+                owner_kind="video_encoding", model_probe=lambda: _probe_encoder_gpu_state(Path(__file__).resolve().parents[2]),
+            )
+            gpu_lease.__enter__()
         with tempfile.TemporaryDirectory(prefix="muse-video-", dir=str(target.parent)) as work:
             work_dir = Path(work)
             rendered: list[Path] = []
@@ -217,12 +233,67 @@ def assemble_video_from_folder(
             target.unlink()
         return {"status": "failed", "stage": "verification_or_setup", "error": str(exc),
                 "output": str(target)}
+    finally:
+        if gpu_lease is not None:
+            try:
+                gpu_lease.__exit__(None, None, None)
+            except RuntimeError as exc:
+                if target.exists():
+                    target.unlink()
+                return {"status": "failed", "stage": "gpu_resource_lock", "error": str(exc),
+                        "output": str(target)}
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def _probe_encoder_gpu_state(workspace: Path) -> dict[str, str]:
+    """AMF encoding waits for Muse-managed inference to yield and blocks on unknown state."""
+    from muse.gpu_resources import probe_gpu_workloads
+    return probe_gpu_workloads(workspace)
+
+def _select_verified_encoder(preference: str, capabilities: dict[str, dict[str, object]]) -> dict[str, str]:
+    if preference not in {"auto", "amf", "software"}:
+        raise ValueError("encoder preference must be auto, amf or software")
+    available = {
+        name for name in ("h264_amf", "libx264")
+        if capabilities.get(name, {}).get("capability", {}).get("status") == "available"
+    }
+    if preference == "amf":
+        if "h264_amf" not in available:
+            raise RuntimeError("requested AMD AMF H.264 encoder failed its real MP4/FFprobe/full-decode smoke test")
+        return {"encoder": "h264_amf", "requested": preference, "fallback_reason": ""}
+    if preference == "software":
+        if "libx264" not in available:
+            raise RuntimeError("requested CPU libx264 encoder failed its real MP4/FFprobe/full-decode smoke test")
+        return {"encoder": "libx264", "requested": preference, "fallback_reason": ""}
+    if "h264_amf" in available:
+        return {"encoder": "h264_amf", "requested": preference, "fallback_reason": ""}
+    if "libx264" in available:
+        return {
+            "encoder": "libx264", "requested": preference,
+            "fallback_reason": "AMF failed real encode/decode validation; explicitly selected verified CPU libx264",
+        }
+    raise RuntimeError("neither AMD AMF nor CPU libx264 passed real encode/decode validation")
+
+
+def main(argv: Sequence[str] | None = None, *, commander_planner: Any | None = None) -> int:
     parser = argparse.ArgumentParser(description="One-command local video assembly with FFmpeg")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("engines", help="read-only health check for local ComfyUI and Velorn MCP")
+    sub.add_parser("capabilities", help="probe local encoders and report service health separately from model capability")
+    create = sub.add_parser("create", help="create a topic/script/URL video package and submit one Commander approval Ticket")
+    source = create.add_mutually_exclusive_group(required=True)
+    source.add_argument("--topic", help="video topic")
+    source.add_argument("--script-file", help="UTF-8 narration script file")
+    source.add_argument("--url", help="public HTTPS source URL")
+    create.add_argument("--title", help="optional title for script or URL input")
+    create.add_argument("--audience", default="一般观众")
+    create.add_argument("--aspect-ratio", choices=("9:16", "16:9", "1:1"), default="9:16")
+    create.add_argument("--duration", type=int, choices=tuple(range(30, 61, 5)), default=30)
+    create.add_argument("--pipeline", default="animated_explainer")
+    create.add_argument("--workspace", help="Muse project workspace; defaults to the current project")
+
+    queue_approved = sub.add_parser("queue-approved", help="queue a video_pipeline execution Ticket after exact human approval")
+    queue_approved.add_argument("approval_task_id")
+    queue_approved.add_argument("--workspace", help="Muse project workspace; defaults to the current project")
     adapt = sub.add_parser("adapt-mpt", help="preview a MoneyPrinterTurbo parameter mapping; never executes providers")
     adapt.add_argument("params_json", help="JSON object or array of external video parameter candidates")
     plan = sub.add_parser("plan", help="validate a storyboard and preview its parallel Commander DAG")
@@ -247,6 +318,66 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = inspect_video_engines()
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if any(item.get("status") == "ready" for item in result.values()) else 2
+
+    if args.command == "capabilities":
+        from muse.video_capabilities import probe_ffmpeg_encoders, probe_video_services
+        from muse.media import discover_media_tools
+        inventory = discover_media_tools()
+        ffmpeg = next((item.executable for item in inventory.tools if item.tool_id == "ffmpeg"), None)
+        ffprobe = next((item.executable for item in inventory.tools if item.tool_id == "ffprobe"), None)
+        if not ffmpeg or not ffprobe:
+            print(json.dumps({"status": "blocked", "reason": "FFmpeg and FFprobe are required"}, ensure_ascii=False, indent=2))
+            return 2
+        result = {
+            "encoders": probe_ffmpeg_encoders(ffmpeg, ffprobe),
+            "services": probe_video_services(Path(__file__).resolve().parents[2]),
+        }
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        encoder_ready = any(item.get("capability", {}).get("status") == "available" for item in result["encoders"].values())
+        return 0 if encoder_ready else 2
+
+    if args.command == "create":
+        from muse.video_factory_intake import create_video_task
+        workspace = Path(args.workspace).expanduser() if args.workspace else Path(__file__).resolve().parents[2]
+        try:
+            if commander_planner is None:
+                from muse.commander_planner import CommanderPlanner
+                from muse.local_planner import LocalModelCommanderPlanner
+                commander_planner = CommanderPlanner(
+                    LocalModelCommanderPlanner(
+                        memory_database=workspace / "data" / "memory" / "muse.sqlite3",
+                        project="muse",
+                    ),
+                    strict_model=True,
+                )
+            result = create_video_task(
+                workspace,
+                commander_planner=commander_planner,
+                topic=args.topic,
+                script_file=args.script_file,
+                source_url=args.url,
+                title=args.title,
+                audience=args.audience,
+                aspect_ratio=args.aspect_ratio,
+                duration_seconds=args.duration,
+                pipeline_id=args.pipeline,
+            )
+        except (OSError, ValueError, RuntimeError, KeyError, TypeError, json.JSONDecodeError) as exc:
+            print(json.dumps({"status": "blocked", "stage": "video_factory_intake", "error": str(exc)}, ensure_ascii=False, indent=2))
+            return 2
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.command == "queue-approved":
+        from muse.video_factory_intake import queue_approved_video_pipeline
+        workspace = Path(args.workspace).expanduser() if args.workspace else Path(__file__).resolve().parents[2]
+        try:
+            result = queue_approved_video_pipeline(workspace, args.approval_task_id)
+        except (OSError, ValueError, RuntimeError, KeyError, TypeError, json.JSONDecodeError) as exc:
+            print(json.dumps({"status": "blocked", "stage": "commander_video_queue", "error": str(exc)}, ensure_ascii=False, indent=2))
+            return 2
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
 
     if args.command == "adapt-mpt":
         from muse.video_recipe import adapt_moneyprinterturbo_batch, adapt_moneyprinterturbo_params
@@ -378,13 +509,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                          ensure_ascii=False))
         return 2
     width, height = (int(part) for part in args.size.split("x"))
+    from muse.video_capabilities import probe_ffmpeg_encoders
+    encoder_capabilities = probe_ffmpeg_encoders(ffmpeg, ffprobe)
+    try:
+        encoder_selection = _select_verified_encoder(args.encoder, encoder_capabilities)
+    except (RuntimeError, ValueError) as exc:
+        print(json.dumps({"status": "blocked", "reason": str(exc),
+                          "encoder_capabilities": encoder_capabilities}, ensure_ascii=False, indent=2))
+        return 2
+    verified_encoders = {encoder_selection["encoder"]}
     result = assemble_video_from_folder(
         args.input_directory, args.output, ffmpeg_path=ffmpeg, ffprobe_path=ffprobe,
-        available_encoders=inventory.hardware_encoders, audio_path=args.audio,
+        available_encoders=verified_encoders, audio_path=args.audio,
         audio_mode=args.audio_mode, image_seconds=args.image_seconds,
         width=width, height=height, fps=args.fps, bitrate=args.bitrate,
         encoder_preference=args.encoder,
     )
+    result["encoder_capabilities"] = encoder_capabilities
+    result["encoder_selection"] = encoder_selection
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0 if result.get("status") == "completed" else 1
 

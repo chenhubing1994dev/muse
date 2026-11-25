@@ -151,7 +151,7 @@ def _probe_media_duration_seconds(path: Path, ffprobe_path: str, *, stream_type:
     result = subprocess.run(
         [ffprobe_path, "-v", "error", "-show_entries", "format=duration:stream=codec_type,duration",
          "-of", "json", str(path)],
-        capture_output=True, text=True, timeout=60, check=False,
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60, check=False,
     )
     if result.returncode != 0:
         raise VideoProductError(f"FFprobe could not measure {stream_type} duration: " + str((result.stderr or "")[-500:]))
@@ -176,7 +176,7 @@ def _probe_video_stream_metadata(path: Path, ffprobe_path: str) -> tuple[int, in
         [ffprobe_path, "-v", "error", "-select_streams", "v:0", "-count_frames",
          "-show_entries", "stream=codec_type,width,height,avg_frame_rate,r_frame_rate,nb_read_frames,nb_frames",
          "-of", "json", str(path)],
-        capture_output=True, text=True, timeout=90, check=False,
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=90, check=False,
     )
     if result.returncode != 0:
         raise VideoProductError("FFprobe could not inspect video stream metadata: " + str((result.stderr or "")[-500:]))
@@ -221,7 +221,7 @@ def _validate_narration_timeline(video_duration: float, narration_duration: floa
 
 
 def _allocate_wan_scene_durations(
-    scenes: list[dict[str, Any]], narration_duration: float, *, fps: int = 12,
+    scenes: list[dict[str, Any]], narration_duration: float, *, fps: int = 16,
     max_total_seconds: float = 60.0,
 ) -> list[dict[str, Any]]:
     """Extend shots in Wan's 4n+1 frame increments so narration fits before GPU work."""
@@ -232,12 +232,12 @@ def _allocate_wan_scene_durations(
         raise ValueError("fps must be a positive integer")
     frame_counts: list[int] = []
     for scene in scenes:
-        frames = max(13, min(61, int(round(float(scene["duration_seconds"]) * fps))))
-        frames = min(61, ((frames - 1 + 3) // 4) * 4 + 1)
+        frames = max(17, min(81, int(round(float(scene["duration_seconds"]) * fps))))
+        frames = min(81, ((frames - 1 + 3) // 4) * 4 + 1)
         frame_counts.append(frames)
     target_frames = math.ceil((float(narration_duration) + 1.0 / fps) * fps - 1e-9)
     while sum(frame_counts) < target_frames:
-        candidates = [index for index, frames in enumerate(frame_counts) if frames <= 57]
+        candidates = [index for index, frames in enumerate(frame_counts) if frames <= 77]
         if not candidates:
             raise VideoProductError(
                 "Cantonese narration exceeds the maximum duration of the supplied Wan scenes; add more scenes"
@@ -399,6 +399,35 @@ def _inspect_product_video(
     return report
 
 
+def _build_visual_quality_evidence(video_path: Path) -> tuple[dict[str, Any], bytes, dict[str, Any]]:
+    """Create bounded visual diagnostics and a manifest summary without granting release approval."""
+    from muse.video_visual_quality import analyze_video_visual_quality
+    try:
+        report = analyze_video_visual_quality(video_path)
+    except Exception as exc:
+        report = {
+            "schema_version": 1, "status": "unavailable",
+            "method": "opencv_sampled_visual_diagnostics_v1",
+            "semantic_recognition": False, "reason": f"analysis_failed:{type(exc).__name__}",
+            "frames": [], "temporal": None, "signals": [],
+        }
+    report_bytes = _safe_json(report)
+    digest = hashlib.sha256(report_bytes).hexdigest()
+    signals = report.get("signals") if isinstance(report, dict) else []
+    if not isinstance(signals, list):
+        signals = []
+    summary = {
+        "status": report.get("status", "unavailable"),
+        "report": "visual-quality-report.json",
+        "sha256": digest,
+        "method": report.get("method"),
+        "signal_count": len(signals),
+        "semantic_recognition": False,
+        "review_required": True,
+    }
+    return report, report_bytes, summary
+
+
 def _finalize_video_metadata(
     source_metadata: dict[str, Any], qa_report: dict[str, Any], output_path: Path,
     *, motion: dict[str, Any] | None = None,
@@ -530,7 +559,7 @@ def _quality_gate_summary(report: dict[str, Any]) -> dict[str, Any]:
 class VideoProductBuilder:
     """Create a product-library entry from assets in data/video_sources/<key>."""
 
-    BUILDER_VERSION = 15
+    BUILDER_VERSION = 16
 
     def __init__(self, workspace: str | Path, *, motion_workspace: str | Path | None = None) -> None:
         self.workspace = Path(workspace).resolve()
@@ -896,7 +925,7 @@ class VideoProductBuilder:
 
     def build_from_scenes(
         self, title: str, scenes: list[dict[str, Any]], *, negative_prompt: str = "",
-        aspect_ratio: str = "16:9", steps: int = 8, timeout_seconds: int = 1800,
+        aspect_ratio: str = "16:9", steps: int = 20, timeout_seconds: int = 1800,
         motion_profile: str = "none", narration_script: str | None = None,
         narration_prosody_plan: Mapping[str, Any] | None = None,
         narration_model_dir: str | Path | None = None,
@@ -1112,7 +1141,11 @@ class VideoProductBuilder:
                         resource_db=self.workspace / "data" / "gpu-resources.sqlite3",
                         workspace=self.workspace, **wan_options,
                     )
-                    generation_status = "generated"
+                    generation_status = (
+                        "generated_after_retry"
+                        if isinstance(result, Mapping) and int(result.get("retry_count", 0) or 0) > 0
+                        else "generated"
+                    )
                 if not isinstance(result, Mapping) or result.get("status") != "completed" or not clip_path.is_file():
                     raise VideoProductError(f"Wan scene {index} did not produce a completed MP4; refusing partial delivery")
                 clip_info = clip_path.lstat()
@@ -1156,6 +1189,12 @@ class VideoProductBuilder:
                         "status": "completed",
                         "prompt_id": result.get("prompt_id"),
                         "model": result.get("model", "Wan 2.1 T2V 1.3B"),
+                        "seed": result.get("seed", scene["seed"]),
+                        "requested_seed": result.get("requested_seed", scene["seed"]),
+                        "retry_count": int(result.get("retry_count", 0) or 0),
+                        "generation_attempts": result.get("generation_attempts", []),
+                        "ffprobe_validation": result.get("ffprobe_validation", {}),
+                        "full_decode_status": result.get("full_decode_status", "not_reported"),
                         "width": signature[0], "height": signature[1],
                         "fps": signature[2], "frames": frames,
                     }
@@ -1164,7 +1203,13 @@ class VideoProductBuilder:
                 scene_records.append({
                     "order": index, "prompt": scene["prompt"], "prompt_id": result.get("prompt_id"),
                     "negative_prompt": scene["effective_negative_prompt"],
-                    "seed": scene["seed"], "generation_status": generation_status,
+                    "seed": result.get("seed", scene["seed"]),
+                    "requested_seed": result.get("requested_seed", scene["seed"]),
+                    "retry_count": int(result.get("retry_count", 0) or 0),
+                    "generation_attempts": result.get("generation_attempts", []),
+                    "ffprobe_validation": result.get("ffprobe_validation", {}),
+                    "full_decode_status": result.get("full_decode_status", "not_reported"),
+                    "generation_status": generation_status,
                     "source_file": clip_path.name, "duration_seconds": measured_duration,
                     "frames": frames, "width": signature[0], "height": signature[1], "fps": signature[2],
                 })
@@ -1178,7 +1223,7 @@ class VideoProductBuilder:
             combined = staging / "combined.mp4"
             mux = subprocess.run(
                 [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-n", "-f", "concat", "-safe", "0", "-i", str(concat_list), "-c", "copy", "-movflags", "+faststart", str(combined)],
-                capture_output=True, text=True, timeout=max(900, timeout_seconds * len(clip_paths)), check=False,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=max(900, timeout_seconds * len(clip_paths)), check=False,
             )
             if mux.returncode != 0 or not combined.is_file() or combined.stat().st_size <= 12:
                 raise VideoProductError("Wan multi-scene concatenation failed: " + str((mux.stderr or "")[-1000:]))
@@ -1199,6 +1244,8 @@ class VideoProductBuilder:
                 "width": stream_signature[0], "height": stream_signature[1],
                 "steps": steps, "bytes": combined.stat().st_size, "has_audio": False,
                 "scene_count": len(scene_records),
+                "resolution_tier": "wan21_480p_master",
+                "quality_profile": "wan21_t2v_1.3b_480p_quality_first",
             }
             if recipe_sha256 is not None:
                 aggregate["recipe_sha256"] = recipe_sha256
@@ -1244,8 +1291,8 @@ class VideoProductBuilder:
 
     def build_from_prompt(
         self, title: str, prompt: str, *, negative_prompt: str = "",
-        aspect_ratio: str = "16:9", duration_seconds: float = 2.0,
-        steps: int = 8, seed: int | None = None, timeout_seconds: int = 1800,
+        aspect_ratio: str = "16:9", duration_seconds: float = 5.0,
+        steps: int = 20, seed: int | None = None, timeout_seconds: int = 1800,
         motion_profile: str = "none",
         creator_initiative_id: str | None = None, evolution_cycle_id: str | None = None,
         narration_script: str | None = None,
@@ -1299,7 +1346,8 @@ class VideoProductBuilder:
         settings = {
             "model": "Wan 2.1 T2V 1.3B", "aspect_ratio": aspect_ratio,
             "duration_seconds": float(duration_seconds), "steps": steps, "seed": seed,
-            "fps": 12, "resolution_tier": "preview_512", "negative_prompt": negative_prompt,
+            "fps": 16, "resolution_tier": "wan21_480p_master",
+            "quality_profile": "wan21_t2v_1.3b_480p_quality_first", "negative_prompt": negative_prompt,
             "vae_decode_mode": "tiled_temporal_8", "motion_profile": motion_profile,
         }
         identity = hashlib.sha256(("muse-video-ai:" + title.strip() + ":" + prompt.strip()).encode("utf-8")).hexdigest()[:32]
@@ -1375,6 +1423,7 @@ class VideoProductBuilder:
                 expected_width=generated.get("width"), expected_height=generated.get("height"),
                 expected_fps=generated.get("fps"), timeout_seconds=timeout_seconds,
             )
+            visual_quality, visual_quality_bytes, visual_quality_summary = _build_visual_quality_evidence(rendered)
             quality_gate = _quality_gate_summary(qa_report)
             video_metadata = _finalize_video_metadata(generated, qa_report, rendered, motion=motion)
             if rendered.stat().st_size > _MAX_PRODUCT_BYTES:
@@ -1398,18 +1447,21 @@ class VideoProductBuilder:
                 f"- 采样步数：{steps}\n- Seed：{seed}\n- 成片：`video.mp4`\n\n"
                 f"- Remotion 动效：{motion.get('profile')}；转场：{motion.get('transition', '无')}\n"
                 f"- 技术质检：{quality_gate['status']}；产品状态仍为 testing。\n"
+                f"- 视觉诊断：{visual_quality_summary['status']}；信号 {visual_quality_summary['signal_count']}；必须人工审片。\n"
                 "技术质检通过不代表内容、版权、披露或平台审核通过。\n"
-                "本版本属于短片预览级原型；请人工检查运动连贯性、画面质量和内容后再发布。\n"
+                "本版本为 480P 生成母版；发布前必须使用真实 AI 超分达到至少 720P，并完成逐镜人工审片。\n"
             ).encode("utf-8")
             (staging / "README.md").write_bytes(readme)
             (staging / "storyboard.json").write_bytes(_safe_json(storyboard))
             (staging / "qa-report.json").write_bytes(_safe_json(qa_report))
+            (staging / "visual-quality-report.json").write_bytes(visual_quality_bytes)
             with zipfile.ZipFile(staging / "product.zip", "w", compression=zipfile.ZIP_DEFLATED) as archive:
                 archive.write(staging / "README.md", "README.md")
                 archive.write(staging / "storyboard.json", "storyboard.json")
                 archive.write(staging / "qa-report.json", "qa-report.json")
+                archive.write(staging / "visual-quality-report.json", "visual-quality-report.json")
                 archive.write(rendered, "video.mp4")
-            files = {name: _hash_file(staging / name) for name in ("README.md", "storyboard.json", "qa-report.json", "video.mp4", "product.zip")}
+            files = {name: _hash_file(staging / name) for name in ("README.md", "storyboard.json", "qa-report.json", "visual-quality-report.json", "video.mp4", "product.zip")}
             video_metadata["output"] = "video.mp4"
             video_metadata["motion"] = motion
             manifest = {
@@ -1418,6 +1470,7 @@ class VideoProductBuilder:
                 "title": title.strip(), "status": "testing", "generated_at": datetime.now(timezone.utc).isoformat(),
                 "input_sha256": fingerprint, "files": files, "video_metadata": video_metadata,
                 "quality_gate": quality_gate,
+                "visual_quality": visual_quality_summary,
                 **({"recipe_provenance": {
                     "schema_version": 1,
                     "recipe_sha256": video_metadata["recipe_sha256"],
@@ -1826,7 +1879,7 @@ class VideoProductBuilder:
                         "-movflags", "+faststart", str(narrated),
                     ])
                 mux = subprocess.run(
-                    mux_args, capture_output=True, text=True, timeout=900, check=False,
+                    mux_args, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=900, check=False,
                 )
                 if mux.returncode != 0 or not narrated.is_file() or narrated.stat().st_size == 0:
                     raise VideoProductError("narration mux failed: " + str((mux.stderr or "")[-1000:]))
@@ -1854,6 +1907,7 @@ class VideoProductBuilder:
                 expected_fps=metadata.get("fps"),
                 require_audio=(narration is not None or metadata.get("has_audio") is True),
             )
+            visual_quality, visual_quality_bytes, visual_quality_summary = _build_visual_quality_evidence(rendered)
             quality_gate = _quality_gate_summary(qa_report)
             if narration_timeline is not None:
                 qa_report["narration_timeline"] = narration_timeline
@@ -1900,15 +1954,19 @@ class VideoProductBuilder:
                 f"- 帧率：{video_metadata.get('fps', '未知')} fps\n"
                 f"- 时长：{video_metadata.get('duration_seconds', '未知')} 秒\n"
                 f"- 旁白：{'已加入音轨' if narration else '未提供音轨'}；字幕：{'已加入' if subtitles else '未提供'}。\n"
+                f"- 视觉诊断：{visual_quality_summary['status']}；信号 {visual_quality_summary['signal_count']}；必须人工审片。\n"
+                "本版本为 480P 生成母版；发布前必须使用真实 AI 超分达到至少 720P，并完成逐镜人工审片。\n"
                 "技术质检通过不代表内容、事实、版权/肖像、披露或平台审核通过。\n"
             ).encode("utf-8")
             (staging / "README.md").write_bytes(readme)
             (staging / "storyboard.json").write_bytes(_safe_json(storyboard))
             (staging / "qa-report.json").write_bytes(_safe_json(qa_report))
+            (staging / "visual-quality-report.json").write_bytes(visual_quality_bytes)
             with zipfile.ZipFile(staging / "product.zip", "w", compression=zipfile.ZIP_DEFLATED) as archive:
                 archive.write(staging / "README.md", "README.md")
                 archive.write(staging / "storyboard.json", "storyboard.json")
                 archive.write(staging / "qa-report.json", "qa-report.json")
+                archive.write(staging / "visual-quality-report.json", "visual-quality-report.json")
                 archive.write(rendered, "video.mp4")
                 for copy_path, archive_path in scene_asset_copies:
                     archive.write(copy_path, archive_path)
@@ -1922,7 +1980,7 @@ class VideoProductBuilder:
                     archive.write(background_music, background_music_member)
                 if subtitles is not None:
                     archive.write(subtitles, "subtitles.srt")
-            file_names = ["README.md", "storyboard.json", "qa-report.json", "video.mp4", "product.zip"]
+            file_names = ["README.md", "storyboard.json", "qa-report.json", "visual-quality-report.json", "video.mp4", "product.zip"]
 
             if subtitles is not None:
                 shutil.copyfile(subtitles, staging / "subtitles.srt")
@@ -1938,6 +1996,7 @@ class VideoProductBuilder:
                 "title": title.strip(), "status": "testing", "generated_at": datetime.now(timezone.utc).isoformat(),
                 "input_sha256": fingerprint, "files": files, "video_metadata": video_metadata,
                 "quality_gate": quality_gate,
+                "visual_quality": visual_quality_summary,
                 "generated_clip": {"name": source.name, "bytes": source_size, "sha256": source_sha256},
                 **({"recipe_provenance": {
                     "schema_version": 1,
@@ -2168,7 +2227,7 @@ class VideoProductBuilder:
                 [ffprobe, "-v", "error", "-show_entries",
                  "stream=codec_type,codec_name,width,height,avg_frame_rate",
                  "-of", "json", str(source_video_copy)],
-                capture_output=True, text=True, timeout=60, check=False,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60, check=False,
             )
             if source_probe.returncode != 0:
                 raise VideoProductError("could not inspect the source MP4 before subtitle mux")
@@ -2192,7 +2251,7 @@ class VideoProductBuilder:
                  "-metadata:s:s:0", "language=yue",
                  "-metadata:s:s:0", "title=粵語人工校對字幕",
                  "-movflags", "+faststart", str(output_video)],
-                capture_output=True, text=True, timeout=900, check=False,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=900, check=False,
             )
             if mux.returncode != 0 or not output_video.is_file() or output_video.stat().st_size <= 12:
                 raise VideoProductError("approved subtitle MP4 mux failed: " + str((mux.stderr or "")[-1000:]))
@@ -2201,7 +2260,7 @@ class VideoProductBuilder:
                 [ffprobe, "-v", "error", "-show_entries",
                  "stream=codec_type,codec_name,width,height,avg_frame_rate:stream_tags=language,title",
                  "-of", "json", str(output_video)],
-                capture_output=True, text=True, timeout=60, check=False,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60, check=False,
             )
             if output_probe.returncode != 0:
                 raise VideoProductError("could not inspect the remuxed MP4")
@@ -2227,6 +2286,7 @@ class VideoProductBuilder:
                 expected_width=source_video.get("width"), expected_height=source_video.get("height"),
                 expected_fps=None, require_audio=True,
             )
+            visual_quality, visual_quality_bytes, visual_quality_summary = _build_visual_quality_evidence(output_video)
             quality_gate = _quality_gate_summary(qa_report)
             video_metadata = _finalize_video_metadata(
                 manifest.get("video_metadata", {}), qa_report, output_video,
@@ -2245,6 +2305,7 @@ class VideoProductBuilder:
             (staging / "subtitles.srt").write_bytes(subtitle_bytes)
             (staging / "subtitle-review.json").write_bytes(review_bytes)
             (staging / "qa-report.json").write_bytes(_safe_json(qa_report))
+            (staging / "visual-quality-report.json").write_bytes(visual_quality_bytes)
             storyboard = json.loads((staging / "storyboard.json").read_text(encoding="utf-8"))
             storyboard_narration = storyboard.get("narration")
             if not isinstance(storyboard_narration, dict):
@@ -2265,20 +2326,20 @@ class VideoProductBuilder:
             archive_path = source_dir / "product.zip"
             if archive_path.is_symlink() or not archive_path.is_file():
                 raise VideoProductError("source product ZIP is missing or unsafe")
-            replaced = {"README.md", "storyboard.json", "qa-report.json", "video.mp4", "subtitles.srt", "subtitle-review.json"}
+            replaced = {"README.md", "storyboard.json", "qa-report.json", "visual-quality-report.json", "video.mp4", "subtitles.srt", "subtitle-review.json"}
             with zipfile.ZipFile(archive_path, "r") as original, zipfile.ZipFile(
                 staging / "product.zip", "w", compression=zipfile.ZIP_DEFLATED,
             ) as updated:
                 for info in original.infolist():
                     if info.filename not in replaced:
                         updated.writestr(info, original.read(info.filename))
-                for name in ("README.md", "storyboard.json", "qa-report.json", "video.mp4", "subtitles.srt", "subtitle-review.json"):
+                for name in ("README.md", "storyboard.json", "qa-report.json", "visual-quality-report.json", "video.mp4", "subtitles.srt", "subtitle-review.json"):
                     updated.write(staging / name, name)
             if (staging / "product.zip").stat().st_size > _MAX_PRODUCT_BYTES:
                 raise VideoProductError("updated video product ZIP exceeds the 2 GiB limit")
 
             files = dict(manifest.get("files", {}))
-            for name in ("README.md", "storyboard.json", "qa-report.json", "video.mp4", "subtitles.srt", "subtitle-review.json", "product.zip"):
+            for name in ("README.md", "storyboard.json", "qa-report.json", "visual-quality-report.json", "video.mp4", "subtitles.srt", "subtitle-review.json", "product.zip"):
                 files[name] = _hash_file(staging / name)
             fingerprint = hashlib.sha256(_safe_json({
                 "source_version": version, "source_manifest_sha256": verified["manifest_sha256"],
@@ -2322,6 +2383,7 @@ class VideoProductBuilder:
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "input_sha256": fingerprint, "files": files,
                 "video_metadata": video_metadata, "quality_gate": quality_gate,
+                "visual_quality": visual_quality_summary,
                 "subtitles": subtitle_fact, "subtitle_review": review_record,
                 "human_reviews": human_reviews,
             })
@@ -2540,10 +2602,17 @@ class VideoProductBuilder:
         subtitle_expected = qa_expected | {"subtitles.srt"}
         reviewed_subtitle_expected = subtitle_expected | {"subtitle-review.json"}
         clip_expected = qa_expected | {"clip-captions.srt"}
+        visual_qa_expected = qa_expected | {"visual-quality-report.json"}
+        visual_subtitle_expected = subtitle_expected | {"visual-quality-report.json"}
+        visual_reviewed_subtitle_expected = reviewed_subtitle_expected | {"visual-quality-report.json"}
+        visual_clip_expected = clip_expected | {"visual-quality-report.json"}
         files = manifest.get("files")
         if (manifest.get("product_kind") != "video_creator" or manifest.get("initiative_id") != initiative_id
                 or manifest.get("version_id") != version or not isinstance(files, dict)
-                or set(files) not in (legacy_expected, qa_expected, subtitle_expected, reviewed_subtitle_expected, clip_expected)): 
+                or set(files) not in (
+                    legacy_expected, qa_expected, subtitle_expected, reviewed_subtitle_expected, clip_expected,
+                    visual_qa_expected, visual_subtitle_expected, visual_reviewed_subtitle_expected, visual_clip_expected,
+                )):
             raise VideoProductError("video product manifest is invalid")
         scene_assets = manifest.get("scene_assets", [])
         if not isinstance(scene_assets, list) or len(scene_assets) > 20:
@@ -2577,6 +2646,38 @@ class VideoProductBuilder:
             if path.stat().st_size > _MAX_PRODUCT_BYTES or _hash_file(path) != digest:
                 raise VideoProductError("video product file integrity check failed")
             resolved[name] = (path, None if name in {"video.mp4", "product.zip"} else path.read_bytes())
+
+        visual_quality = None
+        visual_quality_report_sha256 = None
+        visual_quality_summary = manifest.get("visual_quality")
+        if "visual-quality-report.json" in expected:
+            visual_report_path = resolved["visual-quality-report.json"][0]
+            if visual_report_path.stat().st_size > 2 * 1024 * 1024:
+                raise VideoProductError("video visual quality report exceeds the 2 MiB limit")
+            try:
+                visual_quality = json.loads(visual_report_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise VideoProductError("video visual quality report is invalid") from exc
+            visual_quality_report_sha256 = files["visual-quality-report.json"]
+            signals = visual_quality.get("signals") if isinstance(visual_quality, dict) else None
+            frames = visual_quality.get("frames") if isinstance(visual_quality, dict) else None
+            if (not isinstance(visual_quality, dict)
+                    or visual_quality.get("schema_version") != 1
+                    or visual_quality.get("status") not in {"observed", "unavailable"}
+                    or visual_quality.get("semantic_recognition") is not False
+                    or not isinstance(frames, list) or len(frames) > 48
+                    or not isinstance(signals, list) or len(signals) > 512
+                    or not isinstance(visual_quality_summary, dict)
+                    or visual_quality_summary.get("report") != "visual-quality-report.json"
+                    or visual_quality_summary.get("sha256") != visual_quality_report_sha256
+                    or visual_quality_summary.get("status") != visual_quality.get("status")
+                    or visual_quality_summary.get("method") != visual_quality.get("method")
+                    or visual_quality_summary.get("signal_count") != len(signals)
+                    or visual_quality_summary.get("semantic_recognition") is not False
+                    or visual_quality_summary.get("review_required") is not True):
+                raise VideoProductError("video visual quality report is not bound to the product manifest")
+        elif visual_quality_summary is not None:
+            raise VideoProductError("video visual quality metadata exists without its report artifact")
 
         subtitle_fact = manifest.get("subtitles")
         narration_asr = manifest.get("narration_asr")
@@ -2773,6 +2874,8 @@ class VideoProductBuilder:
             "version_id": version, "title": manifest["title"], "kind": "video_creator",
             "status": manifest.get("status", "testing"), "video_metadata": manifest.get("video_metadata", {}),
             "quality_gate": quality_gate, "source_assets": manifest.get("source_assets", []),
+            "visual_quality": visual_quality_summary,
+            "visual_quality_report_sha256": visual_quality_report_sha256,
             "subtitles": subtitle_fact, "narration_asr": narration_asr,
             "clip_provenance": clip_provenance,
             "subtitle_review": subtitle_review_fact,

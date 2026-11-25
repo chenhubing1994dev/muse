@@ -13,10 +13,10 @@
 
 测试源仅为此前创建的合成回执 Palace：
 
-`D:\AI AGENT\MuseData\MemPalace\ack-contract-smoke-20261119`
+`<MUSE_ROOT>Data\MemPalace\ack-contract-smoke-20261119`
 
-- 备份：`D:\AI AGENT\MuseData\MemPalace\lifecycle-smoke-20261119-backup`
-- 恢复并重建索引副本：`D:\AI AGENT\MuseData\MemPalace\lifecycle-smoke-20261119-restored2`
+- 备份：`<MUSE_ROOT>Data\MemPalace\lifecycle-smoke-20261119-backup`
+- 恢复并重建索引副本：`<MUSE_ROOT>Data\MemPalace\lifecycle-smoke-20261119-restored2`
 - 备份清单核验通过：8 个文件、1 个目录、356,608 bytes；备份复核仍为 verified。
 - 原 Palace 与恢复 Palace 的 SQLite `PRAGMA integrity_check` 均为 `ok`。
 - 第一次重建尝试使用了错误的 HF_HOME 目录，因离线缓存无法找到模型文件而失败；失败副本和上游自动归档均保留，未触碰源 Palace。随后改用 Muse 配置中的 D 盘 `hf-cache` 和 profile，离线 CPU 重建成功。

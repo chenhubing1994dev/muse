@@ -68,10 +68,11 @@ def verify_visual_review_evidence_pack(
     evidence_dir = root / EVIDENCE_DIRNAME
     manifest_path = evidence_dir / "manifest.json"
     sheet_path = evidence_dir / "contact-sheet.png"
+    visual_quality_path = evidence_dir / "visual-quality-report.json"
     product_manifest_path = root / "manifest.json"
     qa_path = root / "qa-report.json"
     video_lexical = Path(video_path)
-    for path in (evidence_dir, manifest_path, sheet_path, product_manifest_path, qa_path, video_lexical):
+    for path in (evidence_dir, manifest_path, sheet_path, visual_quality_path, product_manifest_path, qa_path, video_lexical):
         if path.is_symlink():
             raise VisualEvidencePackError("visual review evidence path is unsafe")
     if not evidence_dir.is_dir() or evidence_dir.resolve().parent != root:
@@ -92,6 +93,12 @@ def verify_visual_review_evidence_pack(
     contact_sheet = manifest.get("contact_sheet")
     product_manifest_hash = _sha256(product_manifest_path)
     qa_hash = _sha256(qa_path)
+    visual_quality = _json_object(visual_quality_path) if visual_quality_path.is_file() else None
+    visual_quality_hash = _sha256(visual_quality_path) if visual_quality_path.is_file() else None
+    visual_quality_summary = manifest.get("visual_quality")
+    expected_evidence_files = {"contact-sheet.png": sheet_hash}
+    if visual_quality_hash is not None:
+        expected_evidence_files["visual-quality-report.json"] = visual_quality_hash
     if (
         manifest.get("schema_version") != 1
         or manifest.get("evidence_type") != EVIDENCE_TYPE
@@ -116,7 +123,17 @@ def verify_visual_review_evidence_pack(
         or qa_report.get("path") != "video.mp4"
         or qa_report.get("artifact_sha256") != video_hash
         or not isinstance(sheet_hash, str)
-        or manifest.get("files") != {"contact-sheet.png": sheet_hash}
+        or manifest.get("files") != expected_evidence_files
+        or (visual_quality is not None and (
+            visual_quality.get("schema_version") != 1
+            or visual_quality.get("semantic_recognition") is not False
+            or visual_quality.get("status") not in {"observed", "unavailable"}
+            or not isinstance(visual_quality_summary, dict)
+            or visual_quality_summary.get("report") != "visual-quality-report.json"
+            or visual_quality_summary.get("status") != visual_quality.get("status")
+            or visual_quality_summary.get("method") != visual_quality.get("method")
+            or visual_quality_summary.get("review_required") is not True
+        ))
         or sheet_dimensions is None
         or not isinstance(contact_sheet, dict)
         or contact_sheet.get("image_decode") != "passed"
@@ -130,6 +147,8 @@ def verify_visual_review_evidence_pack(
         "artifact_sha256": {"video.mp4": video_hash, "contact-sheet.png": sheet_hash},
         "contact_sheet_path": str(sheet_path),
         "release_manifest_sha256": _sha256(manifest_path),
+        "visual_quality_report_sha256": visual_quality_hash,
+        "visual_quality": visual_quality,
     }
 
 
@@ -211,6 +230,21 @@ def create_visual_review_evidence_pack(
             shutil.rmtree(evidence_dir, ignore_errors=True)
             return {"status": "unavailable", "reason": "contact_sheet_generation_or_decode_failed",
                     "can_publish": False, "human_review_required": True}
+        from muse.video_visual_quality import analyze_video_visual_quality
+        try:
+            visual_quality = analyze_video_visual_quality(video_path)
+        except Exception as exc:
+            visual_quality = {
+                "schema_version": 1, "status": "unavailable",
+                "method": "opencv_sampled_visual_diagnostics_v1",
+                "semantic_recognition": False, "reason": f"analysis_failed:{type(exc).__name__}",
+                "frames": [], "temporal": None, "signals": [],
+            }
+        visual_quality_path = evidence_dir / "visual-quality-report.json"
+        visual_quality_path.write_text(
+            json.dumps(visual_quality, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+            encoding="utf-8",
+        )
         manifest = {
             "schema_version": 1, "evidence_type": EVIDENCE_TYPE,
             "initiative_id": initiative_id, "version_id": version_id,
@@ -218,7 +252,16 @@ def create_visual_review_evidence_pack(
             "source_product_manifest_sha256": _sha256(product_manifest_path),
             "source_video_sha256": _sha256(video_path),
             "source_qa_report_sha256": _sha256(qa_path),
-            "files": {"contact-sheet.png": _sha256(sheet_path)},
+            "files": {
+                "contact-sheet.png": _sha256(sheet_path),
+                "visual-quality-report.json": _sha256(visual_quality_path),
+            },
+            "visual_quality": {
+                "status": visual_quality.get("status"),
+                "report": "visual-quality-report.json",
+                "method": visual_quality.get("method"),
+                "review_required": True,
+            },
             "contact_sheet": {
                 "width": contact_result.get("width"),
                 "height": contact_result.get("height"),

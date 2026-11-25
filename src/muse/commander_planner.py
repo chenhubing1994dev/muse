@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import json
 from typing import Any, Callable, Iterable
 import uuid
 
@@ -23,17 +25,37 @@ class CommanderPlan:
     source: str
     parallel_waves: tuple[tuple[str, ...], ...]
 
+    def to_snapshot(self) -> dict[str, Any]:
+        """Serialize this validated plan into the canonical persisted DAG schema."""
+        return {
+            "schema": "muse-commander-plan-snapshot-v1",
+            "plan_id": self.plan_id,
+            "goal": self.goal,
+            "source": self.source,
+            "steps": [{
+                "step_id": step.step_id,
+                "role": step.role,
+                "objective": step.objective,
+                "depends_on": list(step.depends_on),
+                "required_capabilities": list(step.required_capabilities),
+            } for step in self.steps],
+            "parallel_waves": [list(wave) for wave in self.parallel_waves],
+        }
+
 
 class CommanderPlanner:
     """Use an injected planner when available; validate every DAG before dispatch."""
 
     ALLOWED_ROLES = frozenset({"researcher", "architect", "developer", "reviewer", "operator", "writer", "analyst"})
 
-    def __init__(self, planner: Callable[[str], Any] | None = None, *, max_steps: int = 16) -> None:
+    def __init__(self, planner: Callable[[str], Any] | None = None, *, max_steps: int = 16, strict_model: bool = False) -> None:
         if isinstance(max_steps, bool) or not isinstance(max_steps, int) or not 2 <= max_steps <= 32:
             raise ValueError("max_steps must be between 2 and 32")
+        if not isinstance(strict_model, bool):
+            raise ValueError("strict_model must be a boolean")
         self.planner = planner
         self.max_steps = max_steps
+        self.strict_model = strict_model
 
     @staticmethod
     def _fallback(goal: str) -> list[dict[str, Any]]:
@@ -109,14 +131,21 @@ class CommanderPlanner:
             raise ValueError("goal plus revision feedback exceeds the planner input limit")
         source = "model"
         raw = None
-        if self.planner is not None:
+        if self.planner is None:
+            if self.strict_model:
+                raise RuntimeError("strict Commander planning requires an available model client")
+        else:
             try:
                 raw = self.planner(planner_input)
-            except Exception:
+            except Exception as exc:
+                if self.strict_model:
+                    raise RuntimeError("strict Commander model planning failed") from exc
                 raw = None
         if isinstance(raw, dict):
             raw = raw.get("steps")
         if not isinstance(raw, list):
+            if self.strict_model:
+                raise ValueError("strict Commander model output must contain a steps array")
             raw = self._fallback(goal)
             source = "safe_fallback"
 
@@ -145,16 +174,19 @@ class CommanderPlanner:
             )
             try:
                 repaired = self.planner(repair_prompt) if self.planner is not None else None
-            except Exception:
+            except Exception as exc:
+                if self.strict_model:
+                    raise RuntimeError("strict Commander model dependency repair failed") from exc
                 repaired = None
             if isinstance(repaired, dict):
                 repaired = repaired.get("steps")
             if isinstance(repaired, list) and not has_unknown_dependency(repaired):
                 raw = repaired
+            elif self.strict_model:
+                raise ValueError("strict Commander model output contains invalid dependencies")
             else:
                 raw = self._fallback(goal)
                 source = "safe_fallback"
-
         if source == "model" and self._requires_parallel_research_design(goal) and not self._matches_parallel_research_design(raw):
             repair_prompt = (
                 planner_input
@@ -166,16 +198,19 @@ class CommanderPlanner:
             )
             try:
                 repaired = self.planner(repair_prompt) if self.planner is not None else None
-            except Exception:
+            except Exception as exc:
+                if self.strict_model:
+                    raise RuntimeError("strict Commander parallel-contract repair failed") from exc
                 repaired = None
             if isinstance(repaired, dict):
                 repaired = repaired.get("steps")
             if isinstance(repaired, list) and self._matches_parallel_research_design(repaired):
                 raw = repaired
+            elif self.strict_model:
+                raise ValueError("strict Commander model output violates parallel role contract")
             else:
                 raw = self._fallback(goal)
                 source = "safe_fallback"
-
         steps = []
         for item in raw:
             if not isinstance(item, dict):
@@ -211,7 +246,20 @@ class CommanderPlanner:
             waves.append(wave)
             completed.update(wave)
             pending.difference_update(wave)
-        return CommanderPlan(uuid.uuid4().hex, goal.strip(), tuple(steps), source, tuple(waves))
+        identity = {
+            "goal": goal.strip(),
+            "source": source,
+            "steps": [{
+                "id": step.step_id, "role": step.role, "objective": step.objective,
+                "depends_on": list(step.depends_on),
+                "required_capabilities": list(step.required_capabilities),
+            } for step in steps],
+            "parallel_waves": [list(wave) for wave in waves],
+        }
+        plan_id = hashlib.sha256(json.dumps(
+            identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
+        ).encode("utf-8")).hexdigest()[:32]
+        return CommanderPlan(plan_id, goal.strip(), tuple(steps), source, tuple(waves))
 
 
 @dataclass(frozen=True)

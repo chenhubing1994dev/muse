@@ -24,7 +24,7 @@ Web Portal 产品化补充：`docs/PROGRESS_B387_PORTAL_PRODUCT_VAULT.md`（产�
 ### 2. Python 与 Web/插件回归
 
 - Linux Python 全仓：**2,475 tests passed，0 failures，0 errors，59 skipped**；`compileall` 通过。
-- 全仓测试在隔离副本 `/home/muse/work/Muse-linux-native` 执行；该副本没有正式项目的 `data/` 目录，未对 `D:\\AI AGENT\\Muse\\data` 执行测试写入。
+- 全仓测试在隔离副本 `~/work/Muse-linux-native` 执行；该副本没有正式项目的 `data/` 目录，未对 `<MUSE_ROOT>\\data` 执行测试写入。
 - Web Portal HTTPS 登录/会话、代理配置文档、配置路径、灵感演化 API 的深层 JSON 请求限制均有专项回归验证。
 - Node 前端：类型检查通过；**66/66 tests passed**；Vite 生产构建成功（149 modules transformed）。
 - PWA Service Worker 与 API 测试包含在 Node 测试集内。

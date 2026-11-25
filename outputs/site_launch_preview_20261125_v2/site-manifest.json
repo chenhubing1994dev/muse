@@ -1,0 +1,30 @@
+{
+  "product": "muse-public-site-preview",
+  "created_at": "2026-11-24T22:19:32.881660+00:00",
+  "pages": [
+    "index.html",
+    "showcase.html",
+    "products.html",
+    "portfolio.html"
+  ],
+  "assets": {
+    "commerce.css": "c718648c051edfc3682ba3854c1047ee9b2aee547bd558d497f2a61818699d5e",
+    "commerce.js": "7311133ef213c023ed5582839da5780d10232d5b1541b71493c54806307c1df6",
+    "index.html": "52579f17bf96c4250f4c0759d072b70afcbad11680527a097c0de49ceb9196cc",
+    "media/muse-ai-fact-check-64s-silent.mp4": "cf8f2d1fbbcff7708272eace5431bfb08cfc777bd683d22e2117ea7970119367",
+    "portfolio.html": "3af4133826c20967403beae3890cfd13dc6476cf9cdee4ab2b09a968e725b8bf",
+    "products.css": "1772503d9027cd017f3b759891d74f2f08464d57b37c5587825d761c695727cc",
+    "products.html": "29ed56c44c379d7b442d507ed7ed85e3665f897efecfae0feea9db86610a2d30",
+    "README.md": "7b4c4fe90b2e06c4f7d50a6451ccb6b0f6ca9e335f60ba951b3f559455a5b24d",
+    "robots.txt": "a8f31103361fca68bef71fc69cff844b7c23bd3d64d2b872d74690cbda656bfc",
+    "showcase.css": "81926f0110e1f7ae419a9974e22bf4157de3cd6d6c98a57ec11f20758d4b89dc",
+    "showcase.html": "52579f17bf96c4250f4c0759d072b70afcbad11680527a097c0de49ceb9196cc",
+    "social-copy.md": "653bceb378d064faf6d8964e682621511648d87135d76699e6dc9a4b3c71f486"
+  },
+  "status": "preview_only",
+  "public_deployment_allowed": false,
+  "crawl_allowed": false,
+  "contact_channel_configured": false,
+  "payments_enabled": false,
+  "commercial_rights_review_required": true
+}

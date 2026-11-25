@@ -7,7 +7,7 @@ param(
 )
 
 $ErrorActionPreference = 'Continue'
-$RepoRoot = 'D:\AI AGENT\Muse'
+$RepoRoot = Split-Path -Parent $PSScriptRoot
 $SyncScript = Join-Path $RepoRoot 'scripts\Muse-GitHubSync.ps1'
 $LogDir = Join-Path $RepoRoot '.muse-sync'
 $LogFile = Join-Path $LogDir 'watch.log'

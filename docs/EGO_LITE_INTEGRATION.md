@@ -19,7 +19,7 @@ The pinned upstream source is `external/ego-lite`, tag `v2.2.0`, commit `bacaece
 Start the existing local Muse UI preview on loopback, then run:
 
 ```powershell
-py -3.11 -m muse.software_crafting --workspace "D:\AI AGENT\Muse" study-url "http://127.0.0.1:8765" --provider ego-lite --authorized --approve --output-directory "data/software_crafts/ego-lite-smoke"
+py -3.11 -m muse.software_crafting --workspace "<MUSE_ROOT>" study-url "http://127.0.0.1:8765" --provider ego-lite --authorized --approve --output-directory "data/software_crafts/ego-lite-smoke"
 ```
 
 This explicit local-target smoke test should create `capture.json`, `capture.md`, and `page.png` under the output directory. The local loopback URL is allowed only for this explicitly authorized software-study path; the autonomous research fallback remains public-only.

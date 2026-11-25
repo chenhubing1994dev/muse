@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from muse.media import (
     build_transcode_command,
@@ -104,10 +105,12 @@ class MediaTranscodeTests(unittest.TestCase):
             )
             self.assertEqual(planned["status"], "planned")
             self.assertEqual(called, [])
-            completed = transcode_video(
-                source, target, ffmpeg_path="ffmpeg.exe",
-                available_encoders={"h264_amf"}, execute=True, runner=fake_run,
-            )
+            with patch("muse.gpu_resources.probe_gpu_workloads", return_value={"status": "unavailable"}):
+                completed = transcode_video(
+                    source, target, ffmpeg_path="ffmpeg.exe",
+                    available_encoders={"h264_amf"}, execute=True, runner=fake_run,
+                    gpu_resource_db=root / "gpu-resources.sqlite3",
+                )
             self.assertEqual(completed["status"], "completed")
             self.assertEqual(len(called), 1)
             self.assertIsInstance(called[0][0], list)
@@ -132,6 +135,27 @@ class MediaTranscodeTests(unittest.TestCase):
                     codec="av1", available_encoders={"h264_amf"},
                 )
 
+
+    def test_execute_amf_transcode_holds_shared_gpu_lease(self):
+        from muse.gpu_resources import GpuResourceCoordinator
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "input.mov"
+            source.write_bytes(b"fixture")
+            target = root / "output.mp4"
+            database = root / "gpu-resources.sqlite3"
+            def fake_run(args, **kwargs):
+                lease = GpuResourceCoordinator(database).active_lease()
+                self.assertEqual(lease["owner_kind"], "video_encoding")
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+            with patch("muse.gpu_resources.probe_gpu_workloads", return_value={"status": "unavailable"}):
+                result = transcode_video(
+                    source, target, ffmpeg_path="ffmpeg.exe",
+                    available_encoders={"h264_amf"}, execute=True, runner=fake_run,
+                    gpu_resource_db=database,
+                )
+            self.assertEqual(result["status"], "completed")
+            self.assertIsNone(GpuResourceCoordinator(database).active_lease())
 
 if __name__ == "__main__":
     unittest.main()

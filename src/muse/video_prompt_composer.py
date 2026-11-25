@@ -16,9 +16,16 @@ from muse.prompt_engine import resolve_profile
 from muse.story_bible import validate_story_bible, validate_story_continuity
 from muse.video_workflow import validate_storyboard
 
-VIDEO_PROMPT_SPEC_VERSION = 1
+VIDEO_PROMPT_SPEC_VERSION = 2
 MAX_SCENES = 24
 MAX_PROMPT_CHARS = 2000
+CINEMATIC_DEFAULT_NEGATIVE_PROMPT = (
+    "low resolution, blur, soft focus, compression artifacts, banding, aliasing, oversharpening, "
+    "waxy or plastic skin, over-smoothed faces, inconsistent identity, changing hair or clothing, "
+    "duplicate subjects, extra limbs or fingers, malformed hands, fused fingers, distorted eyes or teeth, "
+    "unnatural joints, floating objects, flicker, temporal jitter, ghosting, frame tearing, "
+    "random text, gibberish letters, logo, watermark"
+)
 
 
 @dataclass(frozen=True)
@@ -337,6 +344,15 @@ def _capture_profile_guidance(profile: str) -> list[str]:
             "纪实拍摄锁定：优先自然光、可信的环境细节和克制运镜。",
             "保留合理的现场感，不添加没有来源的戏剧化细节或虚构字幕。",
         ]
+    if profile == "cinematic":
+        return [
+            "电影摄影锁定：每镜头只有一个清晰主体和一个主要动作，动作起止、重心与接触关系可信。",
+            "构图：主体轮廓清晰，前中后景有空间层次；保留头顶、视线与运动方向留白，避免边缘裁切。",
+            "镜头：每镜只采用一种有叙事动机的运镜，速度平稳；焦段、景深和运动模糊符合真实摄影。",
+            "光影：主光方向、色温与阴影跨镜连续；保留接触阴影、自然高光和可信反射。",
+            "材质：皮肤、发丝、织物、金属、玻璃与湿润表面保留真实纹理，避免蜡像皮肤和 AI 涂抹。",
+            "时序稳定：角色脸型、发型、体型、服装和道具保持一致；解剖与手部正确，避免闪烁、变形、重影。",
+        ]
     return []
 
 
@@ -459,13 +475,16 @@ def compile_video_prompt(
     style = spec.visual_style
     if bible is not None:
         style = bible["style_guide"]["visual_style"] + (f"；{style}" if style else "")
+    global_negative_prompt = spec.negative_prompt or (
+        CINEMATIC_DEFAULT_NEGATIVE_PROMPT if spec.capture_profile == "cinematic" else ""
+    )
     storyboard = validate_storyboard({
         "schema_version": 1,
         "title": spec.title,
         "aspect_ratio": spec.aspect_ratio,
         "fps": spec.fps,
         "style": style,
-        "negative_prompt": spec.negative_prompt,
+        "negative_prompt": global_negative_prompt,
         "scenes": scenes,
     })
     continuity = validate_story_continuity(bible, storyboard) if bible is not None else None

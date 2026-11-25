@@ -1,9 +1,8 @@
 name: Muse 定时跨平台发布
 
 on:
-  schedule:
-    # Every 3 days at 00:00 UTC (08:00 Asia/Shanghai).
-    - cron: "0 0 */3 * *"
+  # Superseded by weekly-cross-platform-release.yml (zero-config Tauri v2 client with frozen engine).
+  # Kept for manual runs only so two schedules never publish competing releases.
   workflow_dispatch:
     inputs:
       force:

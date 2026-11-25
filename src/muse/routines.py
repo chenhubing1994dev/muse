@@ -7,6 +7,7 @@ from contextvars import copy_context
 from dataclasses import dataclass
 
 import argparse
+import os
 import json
 import threading
 import uuid
@@ -15,6 +16,7 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 from muse.model_call_context import current_model_call_context, model_call_scope
 
+from muse.lease_recovery import _backup_database, _process_identity
 RoutineHandler = Callable[[dict[str, Any]], Any]
 
 
@@ -68,6 +70,10 @@ class RoutineStore:
             # schema migration below with BEGIN IMMEDIATE.
             if "locked" not in str(exc).casefold():
                 raise
+        existing_tables = {row[0] for row in self.connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        existing_columns = {row[1] for row in self.connection.execute("PRAGMA table_info(routines)")} if "routines" in existing_tables else set()
+        if self.path.stat().st_size > 0 and ("routines" not in existing_tables or "lease_token" not in existing_columns):
+            self._snapshot()
         self.connection.execute(
             """CREATE TABLE IF NOT EXISTS routines (
                 id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, kind TEXT NOT NULL,
@@ -90,6 +96,15 @@ class RoutineStore:
         except Exception:
             self.connection.rollback()
             raise
+
+    def _snapshot(self) -> Path:
+        stamp = self._now().strftime("%Y%m%dT%H%M%S%fZ")
+        handoff = self.path.parent.parent / "handoff" if self.path.parent.name == "routines" else self.path.parent / "handoff"
+        target = handoff / f"routine-op-{stamp}-{uuid.uuid4().hex[:10]}.sqlite3"
+        if target.exists():
+            raise RuntimeError(f"routine backup already exists; refusing overwrite: {target}")
+        _backup_database(self.path, target)
+        return target
 
     def close(self) -> None:
         self.connection.close()
@@ -116,6 +131,7 @@ class RoutineStore:
         now = self._now()
         next_run = now if run_immediately else now + timedelta(seconds=interval_seconds)
         routine_id = uuid.uuid4().hex
+        self._snapshot()
         self.connection.execute(
             "INSERT INTO routines (id,name,kind,interval_seconds,payload_json,enabled,next_run_at,created_at,updated_at) VALUES (?,?,?,?,?,1,?,?,?)",
             (routine_id, name.strip(), kind.strip(), interval_seconds,
@@ -146,23 +162,38 @@ class RoutineStore:
     def set_enabled(self, routine_id: str, enabled: bool) -> dict[str, Any]:
         if not isinstance(enabled, bool):
             raise ValueError("enabled must be boolean")
-        cursor = self.connection.execute(
-            "UPDATE routines SET enabled=?, updated_at=? WHERE id=?",
-            (int(enabled), self._now().isoformat(), routine_id),
-        )
+        self._snapshot()
+        columns = {row[1] for row in self.connection.execute("PRAGMA table_info(routines)")}
+        if "desired_state" in columns:
+            cursor = self.connection.execute(
+                "UPDATE routines SET enabled=?,desired_state=?,updated_at=? WHERE id=?",
+                (int(enabled), "running" if enabled else "stopped", self._now().isoformat(), routine_id),
+            )
+        else:
+            cursor = self.connection.execute(
+                "UPDATE routines SET enabled=?,updated_at=? WHERE id=?",
+                (int(enabled), self._now().isoformat(), routine_id),
+            )
         self.connection.commit()
         if cursor.rowcount != 1:
             raise KeyError(routine_id)
         return self.get(routine_id)
 
     def trigger(self, name: str) -> bool:
-        """Make an enabled routine due on the next supervisor tick without stealing its lease."""
+        """Make an enabled routine due without stealing its lease."""
         if not isinstance(name, str) or not name.strip() or len(name) > 120:
             raise ValueError("name must be 1-120 characters")
         stamp = self._now().isoformat()
-        cursor = self.connection.execute(
-            "UPDATE routines SET next_run_at=CASE WHEN next_run_at>? THEN ? ELSE next_run_at END, "
-            "updated_at=? WHERE name=? AND enabled=1",
+        columns = {row[1] for row in self.connection.execute("PRAGMA table_info(routines)")}
+        desired_filter = " AND desired_state='running'" if "desired_state" in columns else ""
+        eligible = self.connection.execute(
+            "SELECT 1 FROM routines WHERE name=? AND enabled=1" + desired_filter, (name.strip(),)
+        ).fetchone()
+        if eligible is None:
+            return False
+        self._snapshot()
+        cursor = self.connection.execute(            "UPDATE routines SET next_run_at=CASE WHEN next_run_at>? THEN ? ELSE next_run_at END, "
+            "updated_at=? WHERE name=? AND enabled=1" + desired_filter,
             (stamp, stamp, stamp, name.strip()),
         )
         self.connection.commit()
@@ -175,27 +206,72 @@ class RoutineStore:
         stamp = now.isoformat()
         expires = (now + timedelta(seconds=lease_seconds)).isoformat()
         token = uuid.uuid4().hex
-        self.connection.execute("BEGIN IMMEDIATE")
-        try:
-            row = self.connection.execute(
-                "SELECT * FROM routines WHERE enabled=1 AND next_run_at<=? "
-                "AND (lease_until IS NULL OR lease_until<=?) ORDER BY next_run_at,name LIMIT 1",
+        columns = {row[1] for row in self.connection.execute("PRAGMA table_info(routines)")}
+        fenced = {"heartbeat_at", "ttl_seconds", "pid", "fencing_epoch", "desired_state", "process_identity"}.issubset(columns)
+        desired_filter = " AND desired_state='running'" if fenced else ""
+        if fenced:
+            due = self.connection.execute(
+                "SELECT 1 FROM routines WHERE enabled=1 AND desired_state='running' AND next_run_at<=? "
+                "AND lease_until IS NULL AND lease_token IS NULL AND pid IS NULL LIMIT 1", (stamp,),
+            ).fetchone()
+        else:
+            due = self.connection.execute(
+                "SELECT 1 FROM routines WHERE enabled=1 AND next_run_at<=? AND (lease_until IS NULL OR lease_until<=?) LIMIT 1",
                 (stamp, stamp),
             ).fetchone()
+        if due is None:
+            return None
+        self._snapshot()
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            if fenced:
+                claim_sql = (
+                    "SELECT * FROM routines WHERE enabled=1" + desired_filter
+                    + " AND next_run_at<=? AND lease_until IS NULL AND lease_token IS NULL AND pid IS NULL "
+                    "ORDER BY next_run_at,name LIMIT 1"
+                )
+                claim_params = (stamp,)
+            else:
+                claim_sql = (
+                    "SELECT * FROM routines WHERE enabled=1 AND next_run_at<=? "
+                    "AND (lease_until IS NULL OR lease_until<=?) ORDER BY next_run_at,name LIMIT 1"
+                )
+                claim_params = (stamp, stamp)
+            row = self.connection.execute(claim_sql, claim_params).fetchone()
             if row is None:
                 self.connection.commit()
                 return None
-            self.connection.execute(
-                "UPDATE routines SET lease_until=?, lease_token=?, last_status='running', updated_at=? WHERE id=?",
-                (expires, token, stamp, row["id"]),
-            )
+            if fenced:
+                identity = _process_identity(os.getpid())
+                if not identity:
+                    raise RuntimeError("cannot verify routine worker process identity")
+                old_epoch = int(row["fencing_epoch"] or 0)
+                epoch = old_epoch + 1
+                cursor = self.connection.execute(
+                    "UPDATE routines SET lease_until=?,lease_token=?,last_status='running',updated_at=?,"
+                    "heartbeat_at=?,ttl_seconds=?,pid=?,process_identity=?,fencing_epoch=? "
+                    "WHERE id=? AND fencing_epoch=? AND desired_state='running' "
+                    "AND lease_until IS NULL AND lease_token IS NULL AND pid IS NULL",
+                    (expires, token, stamp, stamp, lease_seconds, os.getpid(), identity,
+                     epoch, row["id"], old_epoch),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError("routine claim compare-and-swap failed")
+            else:
+                self.connection.execute(
+                    "UPDATE routines SET lease_until=?,lease_token=?,last_status='running',updated_at=? WHERE id=?",
+                    (expires, token, stamp, row["id"]),
+                )
             self.connection.commit()
             return self.get(row["id"])
         except Exception:
             self.connection.rollback()
             raise
 
-    def renew_lease(self, routine_id: str, *, lease_token: str, lease_seconds: int = 300) -> dict[str, Any] | None:
+    def renew_lease(
+        self, routine_id: str, *, lease_token: str, lease_seconds: int = 300,
+        fencing_epoch: int | None = None,
+    ) -> dict[str, Any] | None:
         if not isinstance(lease_token, str) or not lease_token:
             raise ValueError("lease_token is required to renew a routine")
         if isinstance(lease_seconds, bool) or not isinstance(lease_seconds, int) or lease_seconds < 1:
@@ -203,15 +279,29 @@ class RoutineStore:
         now = self._now()
         stamp = now.isoformat()
         expires = (now + timedelta(seconds=lease_seconds)).isoformat()
-        cursor = self.connection.execute(
-            "UPDATE routines SET lease_until=?, updated_at=? "
-            "WHERE id=? AND lease_token=? AND lease_until>?",
-            (expires, stamp, routine_id, lease_token, stamp),
-        )
+        columns = {row[1] for row in self.connection.execute("PRAGMA table_info(routines)")}
+        fenced = "fencing_epoch" in columns
+        self._snapshot()
+        if fenced and (isinstance(fencing_epoch, bool) or not isinstance(fencing_epoch, int)):
+            raise ValueError("fencing_epoch is required for a migrated routine lease")
+        if fenced:
+            cursor = self.connection.execute(                "UPDATE routines SET lease_until=?,heartbeat_at=?,ttl_seconds=?,updated_at=? "
+                "WHERE id=? AND lease_token=? AND fencing_epoch=? AND lease_until>? AND desired_state='running'",
+                (expires, stamp, lease_seconds, stamp, routine_id, lease_token, fencing_epoch, stamp),
+            )
+        else:
+            cursor = self.connection.execute(
+                "UPDATE routines SET lease_until=?,updated_at=? WHERE id=? AND lease_token=? AND lease_until>?",
+                (expires, stamp, routine_id, lease_token, stamp),
+            )
         self.connection.commit()
+
         return self.get(routine_id) if cursor.rowcount == 1 else None
 
-    def finish(self, routine_id: str, *, status: str, lease_token: str) -> dict[str, Any]:
+    def finish(
+        self, routine_id: str, *, status: str, lease_token: str,
+        fencing_epoch: int | None = None,
+    ) -> dict[str, Any]:
         if status not in {"succeeded", "failed", "cancelled"}:
             raise ValueError("status must be succeeded, failed, or cancelled")
         if not isinstance(lease_token, str) or not lease_token:
@@ -221,15 +311,30 @@ class RoutineStore:
         if row is None:
             raise KeyError(routine_id)
         next_run = now if status == "cancelled" else now + timedelta(seconds=row["interval_seconds"])
-        cursor = self.connection.execute(
-            "UPDATE routines SET last_run_at=?, last_status=?, next_run_at=?, lease_until=NULL, lease_token=NULL, updated_at=? "
-            "WHERE id=? AND lease_token=? AND lease_until>?",
-            (now.isoformat(), status, next_run.isoformat(), now.isoformat(), routine_id, lease_token, now.isoformat()),
-        )
+        columns = {row[1] for row in self.connection.execute("PRAGMA table_info(routines)")}
+        fenced = "fencing_epoch" in columns
+        if fenced and (isinstance(fencing_epoch, bool) or not isinstance(fencing_epoch, int)):
+            raise ValueError("fencing_epoch is required to finish a migrated routine lease")
+        self._snapshot()
+        if fenced:
+            cursor = self.connection.execute(
+                "UPDATE routines SET last_run_at=?,last_status=?,next_run_at=?,lease_until=NULL,"
+                "lease_token=NULL,updated_at=?,heartbeat_at=NULL,pid=NULL,process_identity=NULL "
+                "WHERE id=? AND lease_token=? AND fencing_epoch=? AND lease_until>? AND desired_state='running'",
+                (now.isoformat(), status, next_run.isoformat(), now.isoformat(),
+                 routine_id, lease_token, fencing_epoch, now.isoformat()),
+            )
+        else:
+            cursor = self.connection.execute(
+                "UPDATE routines SET last_run_at=?,last_status=?,next_run_at=?,lease_until=NULL,lease_token=NULL,updated_at=? "
+                "WHERE id=? AND lease_token=? AND lease_until>?",
+                (now.isoformat(), status, next_run.isoformat(), now.isoformat(), routine_id, lease_token, now.isoformat()),
+            )
         self.connection.commit()
         if cursor.rowcount != 1:
             raise RuntimeError("routine lease was lost; stale worker cannot finish it")
         return self.get(routine_id)
+
 
 def run_due_once(
     database: str | Path, handlers: dict[str, RoutineHandler], *,
@@ -274,6 +379,7 @@ def run_due_once(
                             renewed = store.renew_lease(
                                 routine["id"], lease_token=routine["lease_token"],
                                 lease_seconds=lease_seconds,
+                                fencing_epoch=routine.get("fencing_epoch"),
                             )
                         if renewed is None:
                             heartbeat_lost.set()
@@ -309,7 +415,8 @@ def run_due_once(
             try:
                 with RoutineStore(database) as store:
                     finished = store.finish(
-                        routine["id"], status=status, lease_token=routine["lease_token"]
+                        routine["id"], status=status, lease_token=routine["lease_token"],
+                        fencing_epoch=routine.get("fencing_epoch"),
                     )
                 outcome_status = status
                 next_run_at = finished["next_run_at"]

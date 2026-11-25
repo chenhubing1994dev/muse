@@ -17,6 +17,12 @@ class FFmpegFitTests(unittest.TestCase):
         self.source = self.root / "landscape.mp4"
         self.source.write_bytes(b"source-fixture")
         self.output = self.root / "vertical.mp4"
+        self._gpu_db_patch = patch.dict("os.environ", {"MUSE_GPU_RESOURCE_DB": str(self.root / "gpu-resources.sqlite3")})
+        self._gpu_db_patch.start()
+        self.addCleanup(self._gpu_db_patch.stop)
+        self._gpu_probe_patch = patch("muse.gpu_resources.probe_gpu_workloads", return_value={"status": "unavailable"})
+        self._gpu_probe_patch.start()
+        self.addCleanup(self._gpu_probe_patch.stop)
         self.source_metadata = {
             "format": {"duration": "2.0", "format_name": "mov,mp4"},
             "streams": [

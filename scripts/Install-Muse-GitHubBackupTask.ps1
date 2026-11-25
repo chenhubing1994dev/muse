@@ -1,6 +1,6 @@
 ﻿# Register Muse GitHub realtime backup as a logon scheduled task
 $ErrorActionPreference = 'Stop'
-$RepoRoot = 'D:\AI AGENT\Muse'
+$RepoRoot = Split-Path -Parent $PSScriptRoot
 $WatchScript = Join-Path $RepoRoot 'scripts\Muse-GitHubWatch.ps1'
 $TaskName = 'Muse-GitHub-Realtime-Backup'
 

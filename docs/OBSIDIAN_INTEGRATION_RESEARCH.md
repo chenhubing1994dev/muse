@@ -12,7 +12,7 @@
 - 官方文件：<https://obsidian.md/cli>、<https://obsidian.md/help/cli>
 - 可用命令包括 search、search:context、read、create、append、tags、properties、diff 等。
 - 本机实测 Obsidian 1.14.5（installer 1.14.5）；官方 `Obsidian.com` CLI 已启用。CLI 要求 Obsidian app 运行，并可通过 `vault=<name>` 精确指定目标 Vault。
-- Muse 已验证：`version`、`vault info=path`、`vault info=files`、指定 Vault 的 `search`、`search:context` 和 `read`；目标 Vault `D:\\AI AGENT\\Muse\\vault`，名称 `vault`。
+- Muse 已验证：`version`、`vault info=path`、`vault info=files`、指定 Vault 的 `search`、`search:context` 和 `read`；目标 Vault `<MUSE_ROOT>\\vault`，名称 `vault`。
 - 决策：优先使用官方 CLI，当前不安装任何社区插件、不启动额外服务。
 
 ### 2. Local REST API with MCP（首選 Agent bridge）

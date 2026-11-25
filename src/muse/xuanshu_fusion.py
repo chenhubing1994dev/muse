@@ -82,7 +82,8 @@ def _provider_lens(name: str, provider: Any, context: Any) -> dict[str, Any]:
 
 
 def fuse(question: str, *, seed: str, providers: Mapping[str, Any] | None = None, context: Any = None,
-         clock: Callable[[], float] | None = None) -> dict[str, Any]:
+         clock: Callable[[], float] | None = None, symbolic_fallback: bool = False,
+         moment: Any = None) -> dict[str, Any]:
     """Run every lens and derive labelled creative prompts. Never returns advice or forecasts."""
     if not isinstance(question, str) or not 2 <= len(question.strip()) <= 500:
         raise ValueError("question must be 2-500 characters")
@@ -91,7 +92,12 @@ def fuse(question: str, *, seed: str, providers: Mapping[str, Any] | None = None
     providers = providers or {}
     lenses = {"yijing": _yijing_lens(seed)}
     for name in ("ziwei", "qimen", "liuren"):
-        lenses[name] = _provider_lens(name, providers.get(name), context)
+        lens = _provider_lens(name, providers.get(name), context)
+        if symbolic_fallback and lens["status"] == "unavailable":
+            # Zero-dependency 干支/宫位 symbolic derivation so a fresh install is usable out of the box.
+            from muse.xuanshu_symbolic_fallback import fallback_lens_payload
+            lens = _labelled(fallback_lens_payload(name, seed, moment=moment, reason=str(lens.get("reason", ""))))
+        lenses[name] = lens
     computed = [name for name, lens in lenses.items() if lens["status"] == "computed"]
     motif = lenses["yijing"]["motif"]
     prompts = [

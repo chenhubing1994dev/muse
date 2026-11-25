@@ -9,7 +9,7 @@
 ## 一、如何启动与快捷方式说明
 
 1. **双击桌面图标直接启动（零黑框秒开）**
-   - 桌面上已创建 `Muse.lnk` 与 `Muse-Desktop.lnk`，直接指向独立编译好的原生客户端 `D:\AI AGENT\Muse\desktop\src-tauri\target\release\muse-desktop.exe`（工作目录为 `D:\AI AGENT\Muse`）。
+   - 桌面上已创建 `Muse.lnk` 与 `Muse-Desktop.lnk`，直接指向独立编译好的原生客户端 `<MUSE_ROOT>\desktop\src-tauri\target\release\muse-desktop.exe`（工作目录为 `<MUSE_ROOT>`）。
    - 启动后，Rust 桌面壳会自动在后台拉起受 Bearer 会话保护的回环 Python 状态引擎（优先使用 `.venv\Scripts\python.exe`），关闭客户端窗口时自动回收该后台进程。
 2. **如需重新编译客户端**
    - 在项目根目录运行：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts\Muse-Desktop.ps1 -Rebuild`

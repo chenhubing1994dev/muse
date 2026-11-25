@@ -96,7 +96,7 @@ def main() -> int:
             args.db,
             args.thread,
             args.message,
-            LMStudioClient(args.base_url, model=args.model),
+            LMStudioClient(args.base_url, model=args.model, max_retries=2),
             memory_database=None if args.no_memory else args.memory_db,
             propose_memories=args.propose_memories,
         )

@@ -1,6 +1,6 @@
 # B123 — Rust 桌面客户端 MVP 编译与启动验收
 
-日期：2026-11-13；项目：D:\AI AGENT\Muse
+日期：2026-11-13；项目：<MUSE_ROOT>
 
 ## 已完成与验证
 - 沿用既有 Tauri 2 + Rust + Svelte 5/TypeScript + Python API 架构，不新增调度中心。

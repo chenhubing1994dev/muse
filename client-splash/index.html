@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MUSE · 星枢启动中</title>
+  <link rel="stylesheet" href="./splash.css">
+</head>
+<body>
+  <canvas id="stars" aria-hidden="true"></canvas>
+  <main class="core">
+    <div class="orbit orbit-a"></div>
+    <div class="orbit orbit-b"></div>
+    <div class="nucleus">✶</div>
+    <h1>MUSE · 星枢</h1>
+    <p id="phase" class="phase">正在点亮星枢…</p>
+    <p id="detail" class="detail">内置引擎启动中，无需安装 Python · 用户数据仅保存在本机</p>
+    <div class="actions hidden" id="actions">
+      <button id="retry" type="button">重新启动引擎</button>
+    </div>
+    <p class="meta"><span id="elapsed">0.0</span> 秒 · 自主守护默认关闭（安全 stopped）</p>
+  </main>
+  <script src="./splash.js"></script>
+</body>
+</html>

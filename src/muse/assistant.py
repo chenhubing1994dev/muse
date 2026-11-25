@@ -34,9 +34,17 @@ class MuseAssistant:
         memory: MemoryProvider | None = None,
         memory_limit: int = 5,
         memory_candidate_extractor: MemoryCandidateExtractor | None = None,
+        context_max_messages: int = 40,
+        context_max_chars: int = 60_000,
     ) -> None:
         if memory_limit < 1:
             raise ValueError("memory_limit must be at least 1")
+        if isinstance(context_max_messages, bool) or not isinstance(context_max_messages, int) or context_max_messages < 2:
+            raise ValueError("context_max_messages must be an integer of at least 2")
+        if isinstance(context_max_chars, bool) or not isinstance(context_max_chars, int) or context_max_chars < 1_000:
+            raise ValueError("context_max_chars must be an integer of at least 1000")
+        self.context_max_messages = context_max_messages
+        self.context_max_chars = context_max_chars
         if memory_candidate_extractor is not None and (memory is None or not hasattr(memory, "propose")):
             raise ValueError("memory candidate extraction requires a writable local MemoryStore")
         self.conversations = conversations
@@ -46,12 +54,48 @@ class MuseAssistant:
         self.memory_limit = memory_limit
         self.memory_candidate_extractor = memory_candidate_extractor
 
+    def _context_window(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Bounded short-term working memory sent to the model.
+
+        Leading system messages are always kept; the most recent turns are kept
+        within ``context_max_messages`` and ``context_max_chars``. Older turns stay
+        in the persisted checkpoint and are only summarised as an omission note,
+        never silently rewritten.
+        """
+        head: list[dict[str, Any]] = []
+        index = 0
+        while index < len(messages) and isinstance(messages[index], dict) and messages[index].get("role") == "system":
+            head.append(messages[index])
+            index += 1
+        body = [item for item in messages[index:] if isinstance(item, dict)]
+        budget = self.context_max_chars - sum(len(str(item.get("content", ""))) for item in head)
+        kept: list[dict[str, Any]] = []
+        for item in reversed(body):
+            size = len(str(item.get("content", "")))
+            if len(kept) >= self.context_max_messages or (kept and size > budget):
+                break
+            kept.append(item)
+            budget -= size
+        kept.reverse()
+        # Do not start the window with an orphaned assistant reply.
+        while len(kept) > 1 and kept[0].get("role") == "assistant":
+            kept.pop(0)
+        omitted = len(body) - len(kept)
+        window = list(head)
+        if omitted > 0:
+            window.append({
+                "role": "system",
+                "content": f"{omitted} earlier message(s) in this thread were omitted to keep the context bounded.",
+            })
+        window.extend(kept)
+        return window
+
     def reply(self, thread_id: str, content: str) -> dict[str, Any]:
         if not isinstance(content, str) or not content.strip():
             raise ValueError("message content must not be empty")
         checkpoint = self.conversations.load(thread_id)
         stored_messages = [] if checkpoint is None else list(checkpoint["messages"])
-        model_messages = list(stored_messages)
+        model_messages = self._context_window(stored_messages)
         if checkpoint is None and self.system_prompt:
             model_messages.append({"role": "system", "content": self.system_prompt})
 

@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from muse.ffmpeg_skill import build_cut_command, cut_media, plan_cut
 
@@ -17,6 +18,12 @@ class FFmpegCutTests(unittest.TestCase):
         self.source = self.root / "source.mp4"
         self.source.write_bytes(b"source-fixture")
         self.output = self.root / "cut.mp4"
+        self._gpu_db_patch = patch.dict("os.environ", {"MUSE_GPU_RESOURCE_DB": str(self.root / "gpu-resources.sqlite3")})
+        self._gpu_db_patch.start()
+        self.addCleanup(self._gpu_db_patch.stop)
+        self._gpu_probe_patch = patch("muse.gpu_resources.probe_gpu_workloads", return_value={"status": "unavailable"})
+        self._gpu_probe_patch.start()
+        self.addCleanup(self._gpu_probe_patch.stop)
         self.source_metadata = {
             "format": {"duration": "12.0", "format_name": "mov,mp4"},
             "streams": [
@@ -201,6 +208,9 @@ class FFmpegCutTests(unittest.TestCase):
             if Path(command[0]).name.casefold().startswith("ffprobe"):
                 return self.probe_runner(command, **kwargs)
             if "h264_amf" in command:
+                from muse.gpu_resources import GpuResourceCoordinator
+                active = GpuResourceCoordinator(self.root / "gpu-resources.sqlite3").active_lease()
+                self.assertEqual(active["owner_kind"], "video_encoding")
                 Path(command[-1]).write_bytes(b"partial-amf")
                 return SimpleNamespace(returncode=1, stdout="", stderr="AMF device unavailable")
             Path(command[-1]).write_bytes(b"software-cut")

@@ -137,8 +137,8 @@ def start_if_needed(
     root = Path(workspace).resolve()
     resources = GpuResourceCoordinator(root / "data" / "gpu-resources.sqlite3")
     lease = resources.active_lease()
-    if lease and lease.get("owner_kind") == "video_generation":
-        return {"action": "gpu_reserved_for_video", "lease_owner": "video_generation"}
+    if lease:
+        return {"action": "gpu_reserved_for_video", "lease_owner": str(lease.get("owner_kind", "unknown"))}
     health = _probe(root)
     if health.get("status") == "healthy":
         return {"action": "already_healthy", "health": health}
@@ -221,7 +221,7 @@ def run_supervisor(workspace: str | Path, *, once: bool = False) -> int:
         acknowledged_lease_id: str | None = None
         paused_owned_model = False
         action: str
-        if lease and lease.get("owner_kind") == "video_generation":
+        if lease and lease.get("owner_kind") in {"video_generation", "video_encoding", "comfyui_generation"}:
             if child is not None and child.poll() is None:
                 try:
                     child.terminate()
@@ -284,7 +284,7 @@ def install_startup_task(workspace: str | Path) -> dict[str, object]:
     command = f'"{sys.executable}" -m muse.model_supervisor --workspace "{root}"'
     result = subprocess.run(
         ["schtasks.exe", "/Create", "/SC", "ONLOGON", "/TN", task_name, "/TR", command, "/F"],
-        capture_output=True, text=True, timeout=30, check=False,
+        capture_output=True, text=True, errors="replace", timeout=30, check=False,
     )
     return {
         "success": result.returncode == 0, "task_name": task_name,
@@ -297,7 +297,7 @@ def remove_startup_task() -> dict[str, object]:
         raise RuntimeError("Windows Task Scheduler is only available on Windows")
     result = subprocess.run(
         ["schtasks.exe", "/Delete", "/TN", "MuseLocalModelSupervisor", "/F"],
-        capture_output=True, text=True, timeout=30, check=False,
+        capture_output=True, text=True, errors="replace", timeout=30, check=False,
     )
     return {
         "success": result.returncode == 0, "returncode": result.returncode,

@@ -14,9 +14,25 @@ import re
 import shutil
 import subprocess
 import tempfile
+import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable, Sequence
+
+
+def _run_video_encode(
+    command: list[str], runner: Callable, timeout_seconds: int, *, encoder: str,
+):
+    kwargs = {
+        "capture_output": True, "text": True, "encoding": "utf-8", "errors": "replace",
+        "timeout": timeout_seconds, "check": False,
+    }
+    if encoder != "h264_amf":
+        return runner(command, **kwargs)
+    from muse.gpu_resources import gpu_video_encoding_session
+    workspace = Path(__file__).resolve().parents[2]
+    with gpu_video_encoding_session(workspace, "ffmpeg-skill-" + uuid.uuid4().hex[:16]):
+        return runner(command, **kwargs)
 
 
 UPSTREAM = {
@@ -490,8 +506,8 @@ def cut_media(
             ffmpeg_path=ffmpeg_path,
         )
         try:
-            rendered = runner(
-                command, capture_output=True, text=True, timeout=timeout_seconds, check=False,
+            rendered = _run_video_encode(
+                command, runner, timeout_seconds, encoder=encoder_selected,
             )
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError("FFmpeg cut timed out; temporary output was discarded") from exc
@@ -505,7 +521,8 @@ def cut_media(
             )
             try:
                 rendered = runner(
-                    fallback_command, capture_output=True, text=True, timeout=timeout_seconds, check=False,
+                    fallback_command, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                    timeout=timeout_seconds, check=False,
                 )
             except subprocess.TimeoutExpired as exc:
                 raise RuntimeError("AMF failed and software fallback timed out; temporary output was discarded") from exc
@@ -707,7 +724,7 @@ def join_media(sources: Sequence[str | Path], output: str | Path, *,
         command = build_join_command(paths, temp_output, has_audio=has_audio,
                                      video_encoder=selected, ffmpeg_path=ffmpeg_path)
         try:
-            rendered = runner(command, capture_output=True, text=True, timeout=timeout_seconds, check=False)
+            rendered = _run_video_encode(command, runner, timeout_seconds, encoder=selected)
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError("FFmpeg join timed out; temporary output was discarded") from exc
         failed = rendered.returncode != 0 or not temp_output.is_file() or temp_output.stat().st_size <= 0
@@ -716,7 +733,8 @@ def join_media(sources: Sequence[str | Path], output: str | Path, *,
             fallback = build_join_command(paths, temp_output, has_audio=has_audio,
                                           video_encoder="libx264", ffmpeg_path=ffmpeg_path)
             try:
-                rendered = runner(fallback, capture_output=True, text=True, timeout=timeout_seconds, check=False)
+                rendered = runner(fallback, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                                  timeout=timeout_seconds, check=False)
             except subprocess.TimeoutExpired as exc:
                 raise RuntimeError("AMF join failed and software fallback timed out") from exc
             if rendered.returncode != 0 or not temp_output.is_file() or temp_output.stat().st_size <= 0:
@@ -907,7 +925,7 @@ def fit_media(source: str | Path, output: str | Path, *,
                                     focus_x=float(plan["focus"]["x"]), focus_y=float(plan["focus"]["y"]), fps=float(plan["fps"]),
                                     has_audio=has_audio, video_encoder=selected, ffmpeg_path=ffmpeg_path)
         try:
-            rendered = runner(command, capture_output=True, text=True, timeout=timeout_seconds, check=False)
+            rendered = _run_video_encode(command, runner, timeout_seconds, encoder=selected)
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError("FFmpeg fit timed out; temporary output was discarded") from exc
         failed = rendered.returncode != 0 or not temp_output.is_file() or temp_output.stat().st_size <= 0
@@ -917,7 +935,8 @@ def fit_media(source: str | Path, output: str | Path, *,
                                           focus_x=float(plan["focus"]["x"]), focus_y=float(plan["focus"]["y"]), fps=float(plan["fps"]),
                                           has_audio=has_audio, video_encoder="libx264", ffmpeg_path=ffmpeg_path)
             try:
-                rendered = runner(fallback, capture_output=True, text=True, timeout=timeout_seconds, check=False)
+                rendered = runner(fallback, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                                  timeout=timeout_seconds, check=False)
             except subprocess.TimeoutExpired as exc:
                 raise RuntimeError("AMF fit failed and software fallback timed out") from exc
             if rendered.returncode != 0 or not temp_output.is_file() or temp_output.stat().st_size <= 0:

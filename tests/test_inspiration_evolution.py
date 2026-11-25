@@ -647,12 +647,14 @@ class InspirationEvolutionTests(unittest.TestCase):
         from muse.task_queue import TaskQueue
 
         business_db = self.root / "data" / "business" / "opportunities.sqlite3"
+        from test_video_task_worker import strict_test_planner
         brief, ratings = self._business_bridge_inputs()
         result = evolve_inspiration_closed_loop(
             self.root,
             create_if_missing={"title": "产品样片先审批再生产", "content": "将研究灵感转为视频产品草案，并先进入人工审批。", "allow_external_research": False},
             business_brief=brief, business_ratings=ratings, business_database=business_db,
             create_business_initiative=True, request_business_video_approval=True,
+            commander_planner=strict_test_planner(),
         )
         bridge = result["business_bridge"]
         self.assertTrue(bridge["initiative_created"])

@@ -1,0 +1,12 @@
+{
+  "schema": "muse.social-content-kit-manifest.v1",
+  "source_video_sha256": "ec84dceb94e11f1b89a11142992912f4f24a4dc936c91b97eebb3b8927e4e1d8",
+  "source_video_voiceover_used": true,
+  "status": "draft_only",
+  "can_publish": false,
+  "files": {
+    "README.md": "ac440ea6f3e97682b187d09fafd200e49c5d84baf4219e4dfb27a3e199937c0c",
+    "social-content-kit.json": "9ffad4315c47ac111723745d7b148b7e02e8c7968ac57faa2afa3f8fff71abdf",
+    "social-content-kit.md": "42d53effb04e7a062396970707099229387737e23e8b26ccda514fd2b80a6920"
+  }
+}

@@ -20,6 +20,7 @@ def main() -> int:
     parser.add_argument("--host", default="127.0.0.1", choices=("127.0.0.1",))
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--database", default="data/commerce/leads.sqlite3")
+    parser.add_argument("--static-root", default="ui-prototype", help="Project-relative static site directory to serve.")
     parser.add_argument("--retention-days", type=int, default=90)
     args = parser.parse_args()
     if not 1 <= args.port <= 65535:
@@ -32,8 +33,15 @@ def main() -> int:
     if not resolved_database.is_relative_to(ROOT.resolve(strict=True)):
         parser.error("--database must remain inside the Muse project directory")
 
+    static_root = Path(args.static_root).expanduser()
+    if not static_root.is_absolute():
+        static_root = ROOT / static_root
+    static_root = static_root.resolve(strict=True)
+    if not static_root.is_relative_to(ROOT.resolve(strict=True)) or not static_root.is_dir():
+        parser.error("--static-root must be an existing directory inside the Muse project")
+
     store = LeadStore(database, retention_days=args.retention_days)
-    handler = create_request_handler(store, ROOT / "ui-prototype")
+    handler = create_request_handler(store, static_root)
     server = ThreadingHTTPServer((args.host, args.port), handler)
     server.daemon_threads = True
     print(f"Muse local preview: http://{args.host}:{args.port}/showcase.html")

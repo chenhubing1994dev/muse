@@ -23,6 +23,20 @@ def probe(path,ffprobe):
     if r.returncode:raise RuntimeError("ffprobe failed: "+r.stderr[-1000:])
     return json.loads(r.stdout)
 
+def _qa_warning_counts(technical):
+    """Count authoritative video_qa warnings, not optical-flow observations."""
+    all_warnings = []
+    for report in technical.values():
+        if not isinstance(report, dict):
+            continue
+        warnings = report.get("warnings", [])
+        if isinstance(warnings, list):
+            all_warnings.extend(item for item in warnings if isinstance(item, dict) and isinstance(item.get("code"), str) and item.get("code"))
+    frozen_count = sum(1 for warning in all_warnings if warning.get("code") == "frozen_frames")
+    return len(all_warnings), frozen_count
+
+
+
 def main():
     if OUT.exists() or OUT.is_symlink() or HANDOFF.exists() or HANDOFF.is_symlink():
         raise FileExistsError("v7 output/handoff already exists; refusing overwrite")
@@ -70,18 +84,19 @@ def main():
     import re
     peaks=re.findall(r"Peak:\s*(-?\d+(?:\.\d+)?)\s*dBFS",log)
     true_peak=float(peaks[-1]) if peaks else None
-    motion_warnings=sum(len(v.get("warnings",[])) for v in motion.values() if isinstance(v,dict))
+    technical_warning_count,frozen_frame_warning_count=_qa_warning_counts(technical)
     qa={"schema":"muse.cantonese-pilot-v7-qa.v1",
       "technical_decode":{"status":"passed" if all(v.get("status")=="passed" for v in technical.values()) else "needs_review","by_variant":technical},
       "motion_diagnostics":motion,
       "audio_normalization":{"method":"FFmpeg loudnorm","target_integrated_lufs":-16.0,"target_true_peak_dbfs":-1.5,
         "measured_peak_dbfs":true_peak,"measurement_tool":"ebur128","audio_stream_codec":vertical_audio.get("codec_name")},
-      "visual_review_required":True,"motion_warning_count":motion_warnings,
+      "visual_review_required":True,"technical_warning_count":technical_warning_count,
+      "motion_warning_count":frozen_frame_warning_count,
       "voiceover_standalone_asr_cer":base["voiceover"]["asr_cer"],
       "mixed_audio_asr":"not_run","human_listening_review_required":True,
       "human_subtitle_review_required":True,"rights_review_required":True,
       "commercial_use_allowed":False,"publishable":False,
-      "status":"needs_review" if motion_warnings or true_peak is None or true_peak>-1.0 else "technical_pass_human_review_pending"}
+      "status":"needs_review" if technical_warning_count or true_peak is None or true_peak>-1.0 else "technical_pass_human_review_pending"}
     write(OUT/"video-qa.json",qa)
     manifest=base.copy()
     manifest["schema"]="muse.canonical-cantonese-pilot.v7"
@@ -120,16 +135,13 @@ def main():
     readme=f"""# Cantonese Pilot v7 — audio-normalized review build
 
 Derived from v6. Video streams are copied without re-encoding; AAC audio is normalized using FFmpeg loudnorm (I=-16 LUFS, TP=-1.5 dBTP), and corrected Chinese soft subtitles remain embedded as mov_text.
-
-Standalone voiceover ASR CER: {base['voiceover']['asr_cer']:.2%}; this does not validate the final mixed audio. Final audio peak scan: {true_peak if true_peak is not None else 'unavailable'} dBFS. Motion QA emitted {motion_warnings} heuristic frozen-frame warnings; visual review remains mandatory.
-
-Default neutral local Cantonese voice is not approved as a mature female voice. Rights, model terms, background audio, source/fact, privacy, disclosure, subtitle and human listening reviews remain pending. Draft-only, unpublished, commercial use not cleared. No orders or settled revenue.
-"""
+Motion QA summary: {frozen_frame_warning_count} potential frozen-frame warnings across both variants; technical warning count: {technical_warning_count}. Heuristic signals require editorial review and are not proof of an actual freeze.\n\nDefault neutral local Cantonese voice is not approved as a mature female voice. Rights, model terms, background audio, source/fact, privacy, disclosure, subtitle and human listening reviews remain pending. Draft-only, unpublished, commercial use not cleared. No orders or settled revenue."""
     (OUT/"README.md").write_text(readme,encoding="utf-8")
     handoff={"schema":"muse.canonical-pilot-handoff.v7","status":"draft_only_human_review_required",
       "pilot_dir":str(OUT.relative_to(ROOT)).replace("\\","/"),
       "videos":manifest["videos"],"audio_normalization":qa["audio_normalization"],
-      "motion_warning_count":motion_warnings,"technical_decode":qa["technical_decode"]["status"],
+      "technical_warning_count":technical_warning_count,
+      "motion_warning_count":frozen_frame_warning_count,"technical_decode":qa["technical_decode"]["status"],
       "standalone_voiceover_asr_cer":base["voiceover"]["asr_cer"],"mixed_audio_asr":"not_run",
       "rights_review_required":True,"commercial_use_allowed":False,"publishable":False,
       "release_state":"draft_only","account_authorization":"not_connected","publish_api_called":False,

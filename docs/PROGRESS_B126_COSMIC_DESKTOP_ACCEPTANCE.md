@@ -39,7 +39,7 @@ A genuine screenshot was requested. It was not attached because the Computer sna
 
 ## Recommended first-use flow
 
-1. Double-click the desktop **Muse** shortcut. If it is not available, run `D:\AI AGENT\Muse\scripts\Muse-Desktop.ps1` from PowerShell.
+1. Double-click the desktop **Muse** shortcut. If it is not available, run `<MUSE_ROOT>\scripts\Muse-Desktop.ps1` from PowerShell.
 2. Wait for the local core connection indicator to become online; use **刷新状态** if needed.
 3. Open **智能体舰队** and check whether the Agent Registry is configured and agents have recent heartbeats. Empty/offline states are real states, not demo agents.
 4. Submit a short idea in **灵感工坊**. Leave external research unchecked for a private local note; check it only when you explicitly want public-source research.

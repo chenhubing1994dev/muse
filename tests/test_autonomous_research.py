@@ -17,6 +17,25 @@ from muse.philosophy import PhilosophyStore
 from muse.initiative_engine import InitiativeStore
 from muse.improvement import ImprovementStore
 
+from muse.commander_planner import CommanderPlanner
+
+
+def strict_test_commander_planner():
+    response = {"steps": [
+        {"id": "research", "role": "researcher", "objective": "Verify creator video brief and claims", "depends_on": [], "required_capabilities": ["research"]},
+        {"id": "build", "role": "developer", "objective": "Build the approved video draft", "depends_on": ["research"], "required_capabilities": ["coding", "testing"]},
+        {"id": "review", "role": "reviewer", "objective": "Independently review the video", "depends_on": ["build"], "required_capabilities": ["review"]},
+    ]}
+    return CommanderPlanner(lambda _goal: response, strict_model=True)
+
+
+def strict_test_plan_snapshot():
+    plan = strict_test_commander_planner().plan("Create one reviewed creator video")
+    snapshot = plan.to_snapshot()
+    digest = hashlib.sha256(json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")).hexdigest()
+    return snapshot, digest
+
+
 class FakeSearch:
     def __init__(self, *, shared_domain=False):
         self.shared_domain = shared_domain
@@ -178,7 +197,8 @@ class AutonomousResearchTests(unittest.TestCase):
             self.assertEqual(result["evolution_cycle_id"], result["report"]["evolution_cycle_id"])
             self.assertEqual(result["evolution_cycle_id"], result["report"]["inspiration_context"]["evolution_cycle_id"])
             from muse.progress import ProgressEventStore
-            with ProgressEventStore(root / "tasks.sqlite3") as progress:                cycle_events = list(reversed(progress.list_events(
+            with ProgressEventStore(root / "tasks.sqlite3") as progress:
+                cycle_events = list(reversed(progress.list_events(
                     category="evolution", subject_id=result["evolution_cycle_id"], limit=10,
                 )))
             self.assertEqual([item["event"] for item in cycle_events], ["started", "progress", "completed"])
@@ -235,6 +255,7 @@ class AutonomousResearchTests(unittest.TestCase):
                 progress_db=root / "p.sqlite3", reminder_db=root / "r.sqlite3",
                 search=FakeSearch(), reader=FakeReader(), resource_aware=False,
                 workspace=root, auto_build_products=True,
+                commander_planner=strict_test_commander_planner(),
                 synthesizer=lambda topic, sources: synthesis,
             )
             result = engine.run_once()
@@ -885,7 +906,8 @@ class AutonomousResearchTests(unittest.TestCase):
                 evidence_db=root / "evidence.sqlite3", knowledge_db=root / "knowledge.sqlite3",
                 progress_db=root / "tasks.sqlite3", reminder_db=root / "reminders.sqlite3",
                 search=FakeSearch(), reader=FakeReader(), max_sources=4, resource_aware=False,
-                workspace=root,            )
+                workspace=root, commander_planner=strict_test_commander_planner(),
+            )
             result = engine.run_once()
             self.assertEqual(result["status"], "completed")
             self.assertTrue(result["reminder_created"])
@@ -1334,15 +1356,18 @@ class AutonomousResearchTests(unittest.TestCase):
                 first_initiative = initiatives.propose(title, **args)
                 second_initiative = initiatives.propose(_creator_initiative_title(topic), **args)
                 self.assertEqual(first_initiative["id"], second_initiative["id"])
+                plan_snapshot, plan_digest = strict_test_plan_snapshot()
                 first = _queue_creator_video_approval(
                     initiatives, root / "tasks.sqlite3", initiative=first_initiative, topic=topic,
                     video_brief=video_brief, recipe_sha256=recipe_sha256,
                     evolution_cycle_id="cycle_" + "c" * 32,
+                    commander_plan_snapshot=plan_snapshot, dag_sha256=plan_digest,
                 )
                 second = _queue_creator_video_approval(
                     initiatives, root / "tasks.sqlite3", initiative=second_initiative, topic=topic,
                     video_brief=video_brief, recipe_sha256=recipe_sha256,
                     evolution_cycle_id="cycle_" + "d" * 32,
+                    commander_plan_snapshot=plan_snapshot, dag_sha256=plan_digest,
                 )
                 self.assertEqual(first["attempt_id"], second["attempt_id"])
                 self.assertEqual(first["ticket"]["id"], second["ticket"]["id"])

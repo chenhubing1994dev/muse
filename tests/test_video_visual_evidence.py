@@ -48,10 +48,14 @@ class VideoVisualEvidencePackTests(unittest.TestCase):
     @patch("muse.video_visual_evidence.VideoProductBuilder.verify_path")
     def test_creates_hash_bound_evidence_pack_and_verifies_it(self, verify_path):
         verify_path.return_value = {"validated": True, "quality_gate": {"status": "passed", "passed": True}}
-        result = create_visual_review_evidence_pack(
-            self.products, "a" * 32, "b" * 20,
-            contact_sheet_factory=self._factory,
-        )
+        with patch("muse.video_visual_quality.analyze_video_visual_quality", return_value={
+            "schema_version": 1, "status": "observed", "method": "test",
+            "semantic_recognition": False, "frames": [], "temporal": None, "signals": [],
+        }):
+            result = create_visual_review_evidence_pack(
+                self.products, "a" * 32, "b" * 20,
+                contact_sheet_factory=self._factory,
+            )
         self.assertEqual(result["status"], "available")
         evidence = verify_visual_review_evidence(
             self.product, "a" * 32, "b" * 20, self.video,
@@ -60,6 +64,10 @@ class VideoVisualEvidencePackTests(unittest.TestCase):
         self.assertEqual(evidence["artifact_sha256"]["contact-sheet.png"],
                          hashlib.sha256((self.product / "visual-review-evidence-v1" / "contact-sheet.png").read_bytes()).hexdigest())
         self.assertEqual(evidence["evidence_type"], "visual-review-evidence-v1")
+        self.assertEqual(evidence["visual_quality"]["status"], "observed")
+        visual_report = self.product / "visual-review-evidence-v1" / "visual-quality-report.json"
+        self.assertEqual(evidence["visual_quality_report_sha256"], hashlib.sha256(visual_report.read_bytes()).hexdigest())
+        self.assertNotIn("visual-quality-report.json", evidence["artifact_sha256"])
         self.assertFalse(result["can_publish"])
         repeated = create_visual_review_evidence_pack(
             self.products, "a" * 32, "b" * 20,
@@ -94,20 +102,43 @@ class VideoVisualEvidencePackTests(unittest.TestCase):
     @patch("muse.video_visual_evidence.VideoProductBuilder.verify_path")
     def test_verifier_detects_contact_sheet_tampering(self, verify_path):
         verify_path.return_value = {"validated": True, "quality_gate": {"status": "passed", "passed": True}}
-        create_visual_review_evidence_pack(
-            self.products, "a" * 32, "b" * 20, contact_sheet_factory=self._factory,
-        )
+        with patch("muse.video_visual_quality.analyze_video_visual_quality", return_value={
+            "schema_version": 1, "status": "observed", "method": "test",
+            "semantic_recognition": False, "frames": [], "temporal": None, "signals": [],
+        }):
+            create_visual_review_evidence_pack(
+                self.products, "a" * 32, "b" * 20, contact_sheet_factory=self._factory,
+            )
         sheet = self.product / "visual-review-evidence-v1" / "contact-sheet.png"
         sheet.write_bytes(sheet.read_bytes() + b"tampered")
         with self.assertRaises(VisualReviewEvidenceError):
             verify_visual_review_evidence(self.product, "a" * 32, "b" * 20, self.video)
 
     @patch("muse.video_visual_evidence.VideoProductBuilder.verify_path")
+    def test_verifier_detects_visual_quality_report_tampering(self, verify_path):
+        verify_path.return_value = {"validated": True, "quality_gate": {"status": "passed", "passed": True}}
+        with patch("muse.video_visual_quality.analyze_video_visual_quality", return_value={
+            "schema_version": 1, "status": "observed", "method": "test",
+            "semantic_recognition": False, "frames": [], "temporal": None, "signals": [],
+        }):
+            create_visual_review_evidence_pack(
+                self.products, "a" * 32, "b" * 20, contact_sheet_factory=self._factory,
+            )
+        report = self.product / "visual-review-evidence-v1" / "visual-quality-report.json"
+        report.write_text(report.read_text(encoding="utf-8") + " ", encoding="utf-8")
+        with self.assertRaises(VisualReviewEvidenceError):
+            verify_visual_review_evidence(self.product, "a" * 32, "b" * 20, self.video)
+
+    @patch("muse.video_visual_evidence.VideoProductBuilder.verify_path")
     def test_verifier_detects_source_manifest_drift(self, verify_path):
         verify_path.return_value = {"validated": True, "quality_gate": {"status": "passed", "passed": True}}
-        create_visual_review_evidence_pack(
-            self.products, "a" * 32, "b" * 20, contact_sheet_factory=self._factory,
-        )
+        with patch("muse.video_visual_quality.analyze_video_visual_quality", return_value={
+            "schema_version": 1, "status": "observed", "method": "test",
+            "semantic_recognition": False, "frames": [], "temporal": None, "signals": [],
+        }):
+            create_visual_review_evidence_pack(
+                self.products, "a" * 32, "b" * 20, contact_sheet_factory=self._factory,
+            )
         self.manifest["title"] = "tampered"
         self.manifest_path.write_text(json.dumps(self.manifest), encoding="utf-8")
         with self.assertRaises(VisualReviewEvidenceError):

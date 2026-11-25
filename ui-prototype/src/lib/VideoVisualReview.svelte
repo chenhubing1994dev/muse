@@ -1,12 +1,13 @@
 <script lang="ts">
   import { createEventDispatcher } from "svelte";
-  import type { VisualReviewPayload, VisualReviewRecord, VisualReviewFinding, VisualRevisionBrief } from "./api";
+  import type { VisualReviewPayload, VisualReviewRecord, VisualReviewFinding, VisualRevisionBrief, VideoVisualQualityReport } from "./api";
 
   export let imageUrl = "";
   export let message = "";
   export let busy = false;
   export let reviews: VisualReviewRecord[] = [];
   export let revisionBrief: VisualRevisionBrief | null = null;
+  export let visualQuality: VideoVisualQualityReport | null = null;
 
   const dispatch = createEventDispatcher<{ submit: VisualReviewPayload }>();
   let reviewer = "";
@@ -44,6 +45,20 @@
       + String(totalSeconds % 60).padStart(2, "0");
   }
 
+  function formatVisualSeconds(seconds: number | undefined): string {
+    if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0) return "时间未知";
+    return seconds.toFixed(2) + "s";
+  }
+  function visualSignalLabel(code: string): string {
+    const labels: Record<string, string> = {
+      shadow_heavy_frame: "阴影占比偏高",
+      highlight_clipping_risk: "高光剪切风险",
+      low_contrast_frame: "对比度偏低",
+      low_detail_or_soft_focus: "细节不足或焦点偏软",
+      large_luminance_change: "亮度突变／可能转场",
+    };
+    return labels[code] ?? code;
+  }
   function submitReview(event: SubmitEvent) {
     event.preventDefault();
     if (busy || !checklistComplete || !findingsComplete || confirmation !== "RECORD-VISUAL-REVIEW") return;
@@ -75,6 +90,13 @@
     border-radius: 0.8rem;
     background: rgba(8, 14, 28, 0.62);
   }
+  .visual-quality-panel {
+    display: grid; gap: 0.55rem; padding: 0.8rem;
+    border: 1px solid rgba(232, 201, 139, 0.28); border-radius: 0.6rem;
+    background: rgba(30, 26, 18, 0.28);
+  }
+  .visual-quality-heading { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 0.4rem; }
+  .visual-quality-signals { margin: 0; padding-left: 1.1rem; }
   .visual-review-workbench img {
     display: block;
     width: 100%;
@@ -123,6 +145,48 @@
     <b>人工视觉审片 · 关键帧联系表</b>
     <p>先检查关键帧，再打开完整原片核对镜头之间的运动与连续性。</p>
   </div>
+  {#if visualQuality}
+    <div class="visual-quality-panel" aria-label="自动视觉诊断报告">
+      <div class="visual-quality-heading">
+        <b>自动视觉诊断 · {visualQuality.status === "observed" ? "已完成抽样" : "暂不可用"}</b>
+        {#if visualQuality.status === "observed"}
+          <small>{visualQuality.sampled_frame_count ?? 0} 帧 · {Number(visualQuality.duration_seconds ?? 0).toFixed(2)} 秒 · {Number(visualQuality.source_fps ?? 0).toFixed(2)} FPS</small>
+        {/if}
+      </div>
+      {#if visualQuality.status === "observed"}
+        {#if visualQuality.temporal}
+          <small>相邻抽样帧：最大亮度变化 {visualQuality.temporal.max_mean_luma_delta.toFixed(2)} · 中位光流 {visualQuality.temporal.median_flow_pixels.toFixed(2)} px · 运动残差 P90 {visualQuality.temporal.p90_residual_flow_pixels.toFixed(2)} px</small>
+        {/if}
+        {#if (visualQuality.signals ?? []).length > 0}
+          <b>待检查信号 · {visualQuality.signals?.length ?? 0} 项（最多显示 24 项）</b>
+          <ul class="visual-quality-signals">
+            {#each (visualQuality.signals ?? []).slice(0, 24) as signal, index}
+              <li>
+                <b>{visualSignalLabel(signal.code)}</b> · {formatVisualSeconds(signal.time_seconds)}
+                {#if typeof signal.metric === "number" && Number.isFinite(signal.metric)} · 指标 {signal.metric.toFixed(2)}{/if}
+                {#if signal.note} · {signal.note}{/if}
+              </li>
+            {/each}
+          </ul>
+        {:else}
+          <small>未触发基础图像阈值；这不代表人物一致性、动作自然度或电影审美已经合格。</small>
+        {/if}
+        <details>
+          <summary>抽样帧细节（最多 12 帧）</summary>
+          <ul class="visual-quality-signals">
+            {#each (visualQuality.frames ?? []).slice(0, 12) as frame}
+              <li>{formatVisualSeconds(frame.time_seconds)} · 清晰度 {frame.sharpness_laplacian_variance.toFixed(1)} · 对比度 {frame.contrast_stddev.toFixed(1)} · 阴影 {(frame.shadow_fraction * 100).toFixed(1)}% · 高光 {(frame.highlight_fraction * 100).toFixed(1)}%</li>
+            {/each}
+          </ul>
+        </details>
+      {:else}
+        <small>无法取得可解码帧：{visualQuality.reason ?? "本地解码器或分析依赖不可用"}。不会伪造视觉评分。</small>
+      {/if}
+      <small class="visual-review-warning">这是低层图像／光流诊断，不识别人脸、角色身份、人体动作或电影审美；不能替代逐镜人工审片，也不会自动批准发布。</small>
+    </div>
+  {:else}
+    <small role="status">此版本尚无可核验的自动视觉诊断报告。</small>
+  {/if}
   {#if imageUrl}
     <img src={imageUrl} alt="已通过本地产品证据校验的视频关键帧联系表" loading="lazy" />
     <small>联系表与原片 SHA-256 已由本地服务端核验，审核记录会绑定当前产品版本和两份素材哈希。</small>

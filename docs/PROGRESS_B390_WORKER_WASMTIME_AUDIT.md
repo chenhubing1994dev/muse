@@ -6,7 +6,7 @@ A collaborator reported an earlier Job, `wc_job_GZVE29DV4nGjCQCZ`, where
 `test_worker_persists_stable_failure_code_without_exception_message` failed
 with a missing `exception_type` in the `failure.classified` event payload.
 The collaborator clarified that this Job ran against the separate
-`/home/muse/work/Muse-linux-native` copy, not the canonical Windows workspace.
+`~/work/Muse-linux-native` copy, not the canonical Windows workspace.
 
 The canonical Windows workspace was checked directly:
 - The reported single test passed.

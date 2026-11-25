@@ -1,7 +1,7 @@
 param([switch]$SkipTTS)
 $ErrorActionPreference = "Stop"
 $Root = $PSScriptRoot
-$Lib = "C:\Users\Administrator\lemo-opuscar"
+$Lib = if ($env:MUSE_LEMO_ROOT) { $env:MUSE_LEMO_ROOT } else { Join-Path $env:USERPROFILE "lemo-opuscar" }
 $Py = Join-Path $Lib ".venv\Scripts\python.exe"
 $Node = (Get-Command node).Source
 $Ffmpeg = (Get-Command ffmpeg).Source

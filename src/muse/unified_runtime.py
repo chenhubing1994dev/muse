@@ -13,6 +13,7 @@ import json
 import os
 import sqlite3
 import uuid
+from muse.video_reviewer_attestation import verify_and_consume_video_reviewer_attestation
 from threading import BoundedSemaphore
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,7 @@ from muse.memory import MemoryStore
 from muse.research_knowledge import ResearchKnowledgeStore
 from muse.workflow_profiles import WorkflowContract, WorkflowController, WorkflowProfile
 from muse.agent_registry import AgentRegistry
+from muse.artifact_evidence import ArtifactEvidenceError, LocalArtifactEvidenceVerifier
 from muse.model_call_context import model_call_scope, record_current_model_usage
 class RuntimeBlocked(RuntimeError):
     """The requested execution cannot safely proceed with current providers/policy."""
@@ -40,7 +42,18 @@ class MuseRuntime:
                  research_knowledge_database: str | Path | None = None,
                  ruflo: RufloMCPAdapter | None = None,
                  desktop: AgentDesktopAdapter | None = None,
-                 mempalace: MemPalaceAdapter | None = None) -> None:
+                 mempalace: MemPalaceAdapter | None = None,
+                 video_reviewer_public_keys: dict[str, dict[str, Any]] | None = None) -> None:
+        if video_reviewer_public_keys is None:
+            from muse.video_reviewer_attestation import load_video_reviewer_public_keys_from_environment
+            try:
+                self.video_reviewer_public_keys = load_video_reviewer_public_keys_from_environment()
+            except (OSError, TypeError, ValueError) as exc:
+                raise RuntimeBlocked("production Reviewer trust store is invalid; video completion remains fail-closed") from exc
+        elif not isinstance(video_reviewer_public_keys, dict):
+            raise TypeError("video_reviewer_public_keys must be a mapping or None")
+        else:
+            self.video_reviewer_public_keys = dict(video_reviewer_public_keys)
         self.database = Path(database)
         data_root = self.database.parent.parent if self.database.parent.name.casefold() == "tasks" else self.database.parent
         self.agent_database = data_root / "agents" / "muse.sqlite3"
@@ -509,14 +522,17 @@ class MuseRuntime:
         if not isinstance(raw_steps, list) or not 2 <= len(raw_steps) <= 16:
             raise RuntimeBlocked("persisted Commander DAG must contain 2 to 16 steps")
 
+        # Role grants are capability allowlists, not a single mandatory bundle.
+        # Video execution uses narrow, step-scoped capabilities that are still
+        # constrained by the persisted DAG digest, approval Ticket and one-shot grant.
         role_capabilities = {
-            "researcher": ("research",),
-            "architect": ("design",),
-            "developer": ("coding", "testing"),
-            "reviewer": ("review",),
-            "operator": ("desktop.observe",),
-            "writer": ("writing", "documentation"),
-            "analyst": ("analysis", "research"),
+            "researcher": frozenset({"research"}),
+            "architect": frozenset({"design"}),
+            "developer": frozenset({"coding", "testing", "comfyui_generation"}),
+            "reviewer": frozenset({"review", "media_review"}),
+            "operator": frozenset({"desktop.observe", "video_preflight", "ffmpeg", "video_assembly"}),
+            "writer": frozenset({"writing", "documentation"}),
+            "analyst": frozenset({"analysis", "research"}),
         }
         planned_steps: list[PlannedStep] = []
         for item in raw_steps:
@@ -535,8 +551,12 @@ class MuseRuntime:
                     or not isinstance(capabilities, list)
                     or any(not isinstance(value, str) or not value.strip() or len(value) > 128 for value in capabilities)):
                 raise RuntimeBlocked("persisted Commander DAG step fields are invalid")
-            expected_capabilities = list(role_capabilities[role])
-            if capabilities != sorted(set(capabilities)) or capabilities != expected_capabilities:
+            allowed_capabilities = role_capabilities[role]
+            if (
+                not capabilities
+                or capabilities != sorted(set(capabilities))
+                or not set(capabilities).issubset(allowed_capabilities)
+            ):
                 raise RuntimeBlocked(f"persisted Commander DAG role capability grant is invalid for {role}")
             if len(set(dependencies)) != len(dependencies) or step_id in dependencies:
                 raise RuntimeBlocked("persisted Commander DAG contains duplicate or self dependencies")
@@ -671,6 +691,144 @@ class MuseRuntime:
             "video_brief": video_brief,
             "commander_plan": plan,
             "dag_sha256": payload["dag_sha256"],
+        }
+
+    def _validate_video_pipeline_completion(
+        self,
+        queue: TaskQueue,
+        *,
+        task_id: str,
+        context: dict[str, Any],
+        worker_id: str,
+        worker_result: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Independently verify one Worker artifact and its separate Reviewer decision."""
+        evidence = worker_result.get("completion_evidence")
+        required_fields = {
+            "execution_task_id", "attempt_id", "initiative_id", "commander_plan_id", "dag_sha256",
+            "approval_task_id", "approval_event_id", "approved_by", "worker_id", "manifest_sha256",
+            "reviewer_id", "review_event_id", "reviewer_attestation",
+        }
+        if not isinstance(evidence, dict) or set(evidence) != required_fields:
+            raise RuntimeBlocked("video_pipeline Worker success requires the exact completion_evidence contract")
+
+        payload = context["ticket"]["payload"]
+        expected = {
+            "execution_task_id": task_id,
+            "attempt_id": payload["attempt_id"],
+            "initiative_id": payload["initiative_id"],
+            "commander_plan_id": context["commander_plan"].plan_id,
+            "dag_sha256": context["dag_sha256"],
+            "approval_task_id": context["approval_evidence"]["approval_task_id"],
+            "approval_event_id": context["approval_evidence"]["approval_event_id"],
+            "approved_by": context["approval_evidence"]["approved_by"],
+            "worker_id": worker_id,
+        }
+        for field, expected_value in expected.items():
+            if evidence.get(field) != expected_value:
+                raise RuntimeBlocked(f"video_pipeline completion evidence {field} does not match its approved Ticket")
+
+        manifest_sha256 = evidence.get("manifest_sha256")
+        if (not isinstance(manifest_sha256, str) or len(manifest_sha256) != 64
+                or any(char not in "0123456789abcdef" for char in manifest_sha256)):
+            raise RuntimeBlocked("video_pipeline completion manifest SHA-256 is malformed")
+        reviewer_id = evidence.get("reviewer_id")
+        review_event_id = evidence.get("review_event_id")
+        if (not isinstance(reviewer_id, str) or not reviewer_id.strip()
+                or reviewer_id == worker_id
+                or not isinstance(review_event_id, str) or not review_event_id.strip()):
+            raise RuntimeBlocked("video_pipeline completion requires a distinct independent Reviewer identity and event")
+
+        approval_ticket = queue.get(expected["approval_task_id"])
+        if approval_ticket is None or approval_ticket.get("status") != "queued":
+            raise RuntimeBlocked("video_pipeline approval Ticket is no longer queued at completion")
+        approval_payload = approval_ticket.get("payload")
+        approval = approval_payload.get("_approval") if isinstance(approval_payload, dict) else None
+        decisions = [
+            event for event in queue.events(expected["approval_task_id"], limit=500)
+            if event.get("event_type") == "human.decision"
+        ]
+        latest_decision = decisions[-1] if decisions else None
+        if (not isinstance(approval_payload, dict) or approval_payload.get("_approved") is not True
+                or not isinstance(approval, dict)
+                or approval.get("approved_by") != expected["approved_by"]
+                or not isinstance(latest_decision, dict)
+                or latest_decision.get("event_id") != expected["approval_event_id"]
+                or latest_decision.get("actor") != expected["approved_by"]
+                or not isinstance(latest_decision.get("payload"), dict)
+                or latest_decision["payload"].get("decision") != "approved"
+                or not TaskQueue.approval_timestamp_matches_event(
+                    approval.get("approved_at"), latest_decision.get("created_at"),
+                )):
+            raise RuntimeBlocked("video_pipeline human approval was revoked or changed before completion")
+
+        ticket_events = queue.events(task_id, limit=500)
+        artifact_events = [event for event in ticket_events
+                           if event.get("event_type") == "video_pipeline.artifacts_verified"]
+        review_events = [event for event in ticket_events
+                         if event.get("event_type") == "video_pipeline.review_approved"]
+        completed_events = [event for event in ticket_events
+                            if event.get("event_type") == "video_pipeline.completed"]
+        if len(artifact_events) != 1 or len(review_events) != 1 or completed_events:
+            raise RuntimeBlocked("video_pipeline completion requires exactly one artifact event, one review event, and no prior completion")
+
+        artifact_event = artifact_events[0]
+        review_event = review_events[0]
+        artifact_payload = artifact_event.get("payload")
+        review_payload = review_event.get("payload")
+        if artifact_event.get("actor") != worker_id or not isinstance(artifact_payload, dict):
+            raise RuntimeBlocked("video_pipeline artifact verification event must be persisted by the exact Worker")
+        if not isinstance(review_payload, dict) or review_event.get("actor") != reviewer_id:
+            raise RuntimeBlocked("video_pipeline review event must be persisted by the independent Reviewer")
+        if review_event.get("event_id") != review_event_id:
+            raise RuntimeBlocked("video_pipeline completion review_event_id does not match the persisted review event")
+        if ticket_events.index(review_event) <= ticket_events.index(artifact_event):
+            raise RuntimeBlocked("video_pipeline independent review must follow artifact verification")
+
+        for field, expected_value in {**expected, "manifest_sha256": manifest_sha256}.items():
+            if artifact_payload.get(field) != expected_value or review_payload.get(field) != expected_value:
+                raise RuntimeBlocked(f"video_pipeline artifact/review event {field} binding mismatch")
+        if review_payload.get("reviewer_id") != reviewer_id or review_payload.get("decision") != "approved":
+            raise RuntimeBlocked("video_pipeline independent review event is not an approval by the declared Reviewer")
+
+        relative_path = artifact_payload.get("manifest_relative_path")
+        manifest_bytes = artifact_payload.get("manifest_bytes")
+        if (not isinstance(relative_path, str) or not relative_path
+                or isinstance(manifest_bytes, bool) or not isinstance(manifest_bytes, int) or manifest_bytes < 1):
+            raise RuntimeBlocked("video_pipeline artifact event is missing a bounded manifest path/byte count")
+        if (review_payload.get("manifest_relative_path") != relative_path
+                or review_payload.get("manifest_bytes") != manifest_bytes):
+            raise RuntimeBlocked("video_pipeline Reviewer did not approve the exact verified manifest")
+        try:
+            verified_manifest = LocalArtifactEvidenceVerifier(self.workspace).verify(
+                relative_path, manifest_sha256, expected_bytes=manifest_bytes,
+            )
+        except (ArtifactEvidenceError, OSError, ValueError) as exc:
+            raise RuntimeBlocked(
+                f"video_pipeline manifest failed independent local verification: {type(exc).__name__}"
+            ) from exc
+
+        reviewer_attestation_sha256 = verify_and_consume_video_reviewer_attestation(
+            self, task_id=task_id, evidence=evidence, expected=expected,
+            reviewer_id=reviewer_id, review_payload=review_payload,
+            relative_path=relative_path, manifest_bytes=manifest_bytes,
+            manifest_sha256=manifest_sha256,
+        )
+        return {
+            "execution_task_id": task_id,
+            "attempt_id": payload["attempt_id"],
+            "initiative_id": payload["initiative_id"],
+            "commander_plan_id": context["commander_plan"].plan_id,
+            "dag_sha256": context["dag_sha256"],
+            "approval_task_id": context["approval_evidence"]["approval_task_id"],
+            "approval_event_id": context["approval_evidence"]["approval_event_id"],
+            "approved_by": context["approval_evidence"]["approved_by"],
+            "worker_id": worker_id,
+            "manifest": verified_manifest,
+            "artifact_event_id": artifact_event["event_id"],
+            "reviewer_id": reviewer_id,
+            "review_event_id": review_event_id,
+            "reviewer_attestation_sha256": reviewer_attestation_sha256,
         }
 
     def preflight_video_pipeline_ticket(self, task_id: str) -> dict[str, Any]:
@@ -1638,12 +1796,92 @@ class MuseRuntime:
                     )
                 raise
             with TaskQueue(self.database) as queue:
-                queue.finish(
-                    task_id,
-                    status="succeeded" if worker_result.get("status") == "succeeded" else "failed",
-                    result=worker_result,
-                    worker_id=worker_id,
-                )
+                if worker_result.get("status") == "succeeded":
+                    try:
+                        completion = self._validate_video_pipeline_completion(
+                            queue, task_id=task_id, context=context, worker_id=worker_id,
+                            worker_result=worker_result,
+                        )
+                    except RuntimeBlocked as exc:
+                        abort = getattr(video_worker, "abort_approved_ticket", None)
+                        if callable(abort) and isinstance(worker_result.get("attempt_commit"), dict):
+                            try:
+                                abort(
+                                    attempt_commit=worker_result["attempt_commit"], worker_id=worker_id,
+                                    reason="completion_evidence_rejected",
+                                )
+                            except Exception:
+                                pass
+                        rejected_result = {
+                            **worker_result,
+                            "status": "completion_evidence_rejected",
+                            "error_code": "video_pipeline_completion_evidence_invalid",
+                            "message": str(exc)[:500],
+                            "failure_category": "review",
+                            "retryable": True,
+                            "recovery_guidance": "Retry only after the Worker supplies matching artifact verification and independent Reviewer approval evidence.",
+                        }
+                        queue.record_event(
+                            task_id, "video_pipeline.completion_rejected", actor="commander",
+                            payload={"error_code": rejected_result["error_code"], "message": rejected_result["message"]},
+                        )
+                        queue.finish(task_id, status="failed", result=rejected_result, worker_id=worker_id)
+                        worker_result = rejected_result
+                    else:
+                        finalizer = getattr(video_worker, "finalize_approved_ticket", None)
+                        try:
+                            if not callable(finalizer):
+                                raise RuntimeBlocked(
+                                    "video_pipeline Worker must implement finalize_approved_ticket; Attempt completion is withheld"
+                                )
+                            finalized = finalizer(
+                                execution_task_id=task_id, worker_id=worker_id,
+                                attempt_commit=worker_result.get("attempt_commit"),
+                                completion_evidence=worker_result.get("completion_evidence"),
+                                completion=completion,
+                            )
+                            if not isinstance(finalized, dict) or finalized.get("status") != "succeeded":
+                                raise RuntimeBlocked("Worker did not confirm the exact Runtime-verified Attempt commit")
+                        except Exception as exc:
+                            abort = getattr(video_worker, "abort_approved_ticket", None)
+                            if callable(abort) and isinstance(worker_result.get("attempt_commit"), dict):
+                                try:
+                                    abort(
+                                        attempt_commit=worker_result["attempt_commit"], worker_id=worker_id,
+                                        reason="runtime_finalization_failed",
+                                    )
+                                except Exception:
+                                    pass
+                            failed_result = {
+                                **worker_result, "status": "attempt_finalize_failed",
+                                "error_code": "video_pipeline_attempt_finalize_failed",
+                                "message": str(exc)[:500],
+                                "failure_category": "review", "retryable": True,
+                                "recovery_guidance": "Retry only after the exact Reviewer signature and Attempt lease can be revalidated.",
+                            }
+                            queue.record_event(
+                                task_id, "video_pipeline.attempt_finalize_failed", actor="commander",
+                                payload={"error_code": failed_result["error_code"], "message": failed_result["message"]},
+                            )
+                            queue.finish(task_id, status="failed", result=failed_result, worker_id=worker_id)
+                            worker_result = failed_result
+                        else:
+                            queue.record_event(
+                                task_id, "video_pipeline.completed", actor="commander",
+                                payload={**completion, "attempt_finalized": True},
+                            )
+                            queue.finish(task_id, status="succeeded", result=worker_result, worker_id=worker_id)
+                else:
+                    abort = getattr(video_worker, "abort_approved_ticket", None)
+                    if callable(abort) and isinstance(worker_result.get("attempt_commit"), dict):
+                        try:
+                            abort(
+                                attempt_commit=worker_result["attempt_commit"], worker_id=worker_id,
+                                reason="worker_result_not_succeeded",
+                            )
+                        except Exception:
+                            pass
+                    queue.finish(task_id, status="failed", result=worker_result, worker_id=worker_id)
             return {
                 "status": worker_result.get("status", "unknown"),
                 "task_id": task_id,

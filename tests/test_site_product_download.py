@@ -24,9 +24,9 @@ class SiteProductDownloadTests(unittest.TestCase):
     def test_paid_product_remains_a_hypothesis_not_a_checkout(self):
         source = PAGE.read_text(encoding="utf-8")
         self.assertIn("US$9 测试假设", source)
-        self.assertIn("尚未验证的价格假设；不是当前售价", source)        self.assertIn("内部审核 · 暂未销售", source)
+        self.assertIn("尚未验证的价格假设；不是当前售价", source)
+        self.assertIn("内部审核 · 暂未销售", source)
         self.assertNotIn("checkout", source.lower())
-
 
 if __name__ == "__main__":
     unittest.main()

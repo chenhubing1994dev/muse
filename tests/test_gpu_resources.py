@@ -1,12 +1,25 @@
 from __future__ import annotations
 
+import multiprocessing
 import tempfile
 import threading
 import unittest
 from unittest.mock import patch
 from pathlib import Path
 
-from muse.gpu_resources import GpuLeaseSession, GpuResourceBusy, GpuResourceCoordinator
+from muse.gpu_resources import GpuLeaseSession, GpuResourceBusy, GpuResourceCoordinator, probe_gpu_workloads
+
+
+def _claim_gpu_in_child(database: str, result_queue) -> None:
+    coordinator = GpuResourceCoordinator(database)
+    try:
+        lease_id = coordinator.acquire("video_generation", "child-video-job")
+    except GpuResourceBusy:
+        result_queue.put("blocked")
+    else:
+        result_queue.put("acquired")
+        coordinator.release(lease_id)
+
 
 
 class GpuResourceCoordinatorTests(unittest.TestCase):
@@ -141,6 +154,147 @@ class GpuResourceCoordinatorTests(unittest.TestCase):
             ):
                 raise RuntimeError("failure")
         self.assertIsNone(self.coordinator.active_lease())
+
+
+    def test_video_encoding_and_comfyui_share_the_exclusive_gpu_slot(self) -> None:
+        encoding = self.coordinator.acquire("video_encoding", "encode-job")
+        try:
+            with self.assertRaises(GpuResourceBusy):
+                self.coordinator.acquire("video_generation", "wan-job")
+            with self.assertRaises(GpuResourceBusy):
+                self.coordinator.acquire("comfyui_generation", "comfy-job")
+        finally:
+            self.coordinator.release(encoding)
+        generation = self.coordinator.acquire("comfyui_generation", "comfy-job")
+        try:
+            with self.assertRaises(GpuResourceBusy):
+                self.coordinator.acquire("video_encoding", "encode-job")
+        finally:
+            self.coordinator.release(generation)
+
+    def test_non_generation_gpu_session_rejects_unknown_or_active_model_state(self) -> None:
+        for status in ("healthy", "unknown"):
+            with self.subTest(status=status):
+                with self.assertRaises(GpuResourceBusy):
+                    with GpuLeaseSession(
+                        self.coordinator, "encode-job", owner_kind="video_encoding",
+                        model_probe=lambda value=status: {"status": value},
+                    ):
+                        self.fail("unsafe encoder lease must not enter")
+        self.assertIsNone(self.coordinator.active_lease())
+
+    def test_gpu_lease_is_exclusive_across_processes(self) -> None:
+        parent_lease = self.coordinator.acquire("video_encoding", "parent-amf-encode")
+        context = multiprocessing.get_context("spawn")
+        results = context.Queue()
+        process = context.Process(target=_claim_gpu_in_child, args=(str(self.db), results))
+        try:
+            process.start()
+            self.assertEqual(results.get(timeout=15), "blocked")
+            process.join(timeout=15)
+            self.assertEqual(process.exitcode, 0)
+        finally:
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=5)
+            results.close()
+            self.coordinator.release(parent_lease)
+
+class GpuWorkloadProbeTests(unittest.TestCase):
+    def _probe(self, *, running=0, pending=0, free_ratio=0.95, total=12 * 1024**3, free=None):
+        free_bytes = int(total * free_ratio) if free is None else free
+
+        class FakeComfyUIClient:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def health(self):
+                return {"status": "ready"}
+
+            def queue_status(self):
+                return {"running_jobs": running, "pending_jobs": pending}
+
+            def gpu_memory(self):
+                return {
+                    "vram_total_bytes": total,
+                    "vram_free_bytes": free_bytes,
+                    "vram_free_ratio": free_ratio,
+                }
+
+        with patch("muse.video_engines.ComfyUIClient", FakeComfyUIClient):
+            with patch("muse.model_service.probe_configured_model_service") as model_probe:
+                result = probe_gpu_workloads(Path("."))
+        model_probe.assert_not_called()
+        return result
+
+    def test_healthy_but_idle_comfyui_with_released_vram_allows_amf(self) -> None:
+        result = self._probe()
+        self.assertEqual(result["status"], "unavailable")
+        self.assertEqual(result["service_health"], "healthy")
+        self.assertEqual(result["gpu_workload"], "idle")
+        self.assertEqual(result["active_service"], "comfyui_idle")
+
+    def test_active_comfyui_queue_blocks_amf_even_when_memory_is_free(self) -> None:
+        result = self._probe(running=1)
+        self.assertEqual(result["status"], "healthy")
+        self.assertEqual(result["gpu_workload"], "active")
+
+    def test_resident_comfyui_models_block_amf_until_vram_is_released(self) -> None:
+        result = self._probe(free_ratio=0.55)
+        self.assertEqual(result["status"], "healthy")
+        self.assertEqual(result["gpu_workload"], "models_resident_or_memory_busy")
+
+    def test_unknown_queue_state_fails_closed(self) -> None:
+        class UnknownQueueClient:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def health(self):
+                return {"status": "ready"}
+
+            def queue_status(self):
+                return {"running_jobs": None, "pending_jobs": 0}
+
+        with patch("muse.video_engines.ComfyUIClient", UnknownQueueClient):
+            result = probe_gpu_workloads(Path("."))
+        self.assertEqual(result["status"], "unknown")
+
+    def test_idle_comfyui_probe_allows_shared_encoding_lease(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            coordinator = GpuResourceCoordinator(Path(temp) / "gpu.sqlite3")
+            lease_id = coordinator.acquire("video_encoding", "amf-encode")
+            try:
+                with patch("muse.video_engines.ComfyUIClient") as client_type:
+                    client = client_type.return_value
+                    client.health.return_value = {"status": "ready"}
+                    client.queue_status.return_value = {"running_jobs": 0, "pending_jobs": 0}
+                    client.gpu_memory.return_value = {
+                        "vram_total_bytes": 12 * 1024**3,
+                        "vram_free_bytes": 11 * 1024**3,
+                        "vram_free_ratio": 11 / 12,
+                    }
+                    result = coordinator.wait_for_video_access(
+                        lease_id, lambda: probe_gpu_workloads(temp), timeout_seconds=0,
+                    )
+                self.assertEqual(result["mode"], "model_offline_supervisor_not_running")
+            finally:
+                coordinator.release(lease_id)
+
+    def test_busy_comfyui_probe_blocks_shared_encoding_lease(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            coordinator = GpuResourceCoordinator(Path(temp) / "gpu.sqlite3")
+            lease_id = coordinator.acquire("video_encoding", "amf-encode")
+            try:
+                with patch("muse.video_engines.ComfyUIClient") as client_type:
+                    client = client_type.return_value
+                    client.health.return_value = {"status": "ready"}
+                    client.queue_status.return_value = {"running_jobs": 1, "pending_jobs": 0}
+                    with self.assertRaises(GpuResourceBusy):
+                        coordinator.wait_for_video_access(
+                            lease_id, lambda: probe_gpu_workloads(temp), timeout_seconds=0,
+                        )
+            finally:
+                coordinator.release(lease_id)
 
 
 if __name__ == "__main__":

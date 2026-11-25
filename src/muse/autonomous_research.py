@@ -43,6 +43,8 @@ def _queue_creator_video_approval(
     initiative_store: Any, task_database: Path | str, *, initiative: dict[str, Any],
     topic: dict[str, Any], video_brief: dict[str, Any], recipe_sha256: str | None,
     evolution_cycle_id: str,
+    commander_plan_snapshot: dict[str, Any],
+    dag_sha256: str,
 ) -> dict[str, Any]:
     """Create an idempotent human-approval ticket and bind it to one queued preview."""
     from muse.task_queue import TaskQueue
@@ -76,6 +78,26 @@ def _queue_creator_video_approval(
         "requires_human_approval": True,
         "auto_publish": False,
     }
+    if not isinstance(commander_plan_snapshot, dict) or not isinstance(dag_sha256, str):
+        raise ValueError("video approval requires a Commander model plan snapshot and DAG digest")
+    plan_id = commander_plan_snapshot.get("plan_id")
+    plan_source = commander_plan_snapshot.get("source")
+    encoded_plan = json.dumps(
+        commander_plan_snapshot, ensure_ascii=False, sort_keys=True,
+        separators=(",", ":"), allow_nan=False,
+    ).encode("utf-8")
+    if (
+        not isinstance(plan_id, str) or not plan_id.strip()
+        or plan_source != "model"
+        or hashlib.sha256(encoded_plan).hexdigest() != dag_sha256
+    ):
+        raise ValueError("Commander plan snapshot identity or DAG digest is invalid")
+    payload.update({
+        "commander_plan_id": plan_id,
+        "commander_plan_source": plan_source,
+        "commander_plan_snapshot": commander_plan_snapshot,
+        "dag_sha256": dag_sha256,
+    })
     with TaskQueue(task_database) as queue:
         ticket = queue.enqueue(
             f"审批创作者视频预览：{str(initiative.get('title') or 'Muse 创作预览')[:100]}",
@@ -90,6 +112,9 @@ def _queue_creator_video_approval(
     expected_fields = (
         "kind", "initiative_id", "attempt_id", "topic_key", "source_claim_id",
         "video_brief_sha256", "video_brief", "approval_scope",
+    ) + (
+        ("commander_plan_id", "commander_plan_source", "commander_plan_snapshot", "dag_sha256")
+        if commander_plan_snapshot is not None else ()
     )
     if any(stored.get(field) != payload[field] for field in expected_fields):
         raise ValueError("Commander idempotency key is already bound to a different creator video approval")
@@ -147,6 +172,10 @@ from muse.reminders import ReminderStore
 from muse.philosophy import PhilosophyStore
 from muse.website_knowledge import WebsiteKnowledgeCatalog
 from muse.bookmark_sources import load_creator_bookmarks, BookmarkFirstSearchAdapter
+
+
+class VideoApprovalPlanningError(RuntimeError):
+    """A model-backed video approval could not be planned; no ticket was created."""
 from muse.research import QuantumAwareSearchAdapter
 from muse.research_fetch import PublicSourceReader, ResearchEvidenceStore
 from muse.research_knowledge import ResearchKnowledgeStore
@@ -314,7 +343,8 @@ class AutonomousResearchEngine:
                  feedback_reviewer_scope: str | None = None,
                  feedback_reviewer_status: dict[str, Any] | None = None,
                  auto_build_products: bool = False, ego_browser: Any | None = None,
-                 asset_download_enabled: bool = True) -> None:
+                 asset_download_enabled: bool = True,
+                 commander_planner: Any | None = None) -> None:
         if isinstance(max_sources, bool) or not isinstance(max_sources, int) or not 1 <= max_sources <= 8:
             raise ValueError("max_sources must be between 1 and 8")
         if isinstance(max_workers, bool) or not isinstance(max_workers, int) or not 1 <= max_workers <= 8:
@@ -369,6 +399,11 @@ class AutonomousResearchEngine:
                 asset_download_enabled=asset_download_enabled,
             )
         self.asset_download_enabled = asset_download_enabled
+        if commander_planner is not None:
+            from muse.commander_planner import CommanderPlanner
+            if not isinstance(commander_planner, CommanderPlanner) or commander_planner.strict_model is not True:
+                raise TypeError("autonomous video approvals require an injected strict CommanderPlanner")
+        self.commander_planner = commander_planner
         self.max_sources = max_sources
         self.max_workers = max_workers
         if not isinstance(resource_aware, bool):
@@ -3274,7 +3309,8 @@ class AutonomousResearchEngine:
                             "title": str(topic.get("title", "Muse Research Film"))[:140],
                             "prompt": video_prompt,
                             "negative_prompt": "fabricated facts, fake citations, text artifacts, watermarks, distorted faces",
-                            "aspect_ratio": "9:16", "duration_seconds": 9.0, "steps": 8,
+                            "aspect_ratio": "9:16", "duration_seconds": 9.0, "steps": 20,
+                            "resolution_tier": "wan21_480p_master",
                             "scenes": [
                                 {
                                     "prompt": ("Vertical cinematic establishing shot about "
@@ -3292,7 +3328,7 @@ class AutonomousResearchEngine:
                                     "duration_seconds": 3.0,
                                 },
                             ],
-                            "resolution_tier": "preview_512", "voice_locale": "yue-HK",
+                            "resolution_tier": "wan21_480p_master", "steps": 20, "voice_locale": "yue-HK",
                             "voice_status": "queued_for_local_cantonese_tts",
                             "narration": {
                                 "enabled": True, "language": "zh-HK", "style": "yujie_canto",
@@ -3541,16 +3577,36 @@ class AutonomousResearchEngine:
                     if isinstance(persisted_brief, dict) and isinstance(persisted_brief.get("video"), dict):
                         creator_brief = persisted_brief
                     video_task = {"status": "not_queued_low_evidence"}
-                    if high_value:
+                    if high_value and self.commander_planner is None:
+                        video_task = {"status": "not_queued_planner_unavailable"}
+                    elif high_value:
                         recipe_sha256 = (
                             creator_brief.get("video", {}).get("recipe_sha256")
                             if isinstance(creator_brief, dict) and isinstance(creator_brief.get("video"), dict)
                             else None
                         )
+                        plan_goal = (
+                            f"Produce one approved creator video for {topic.get('title', 'the research topic')[:160]}. "
+                            "Return shot_001 plus preflight, assemble and quality_review. Use only operator/video_preflight, "
+                            "developer/comfyui_generation, operator/ffmpeg+video_assembly and reviewer/media_review. Shots have no dependencies because the Worker "
+                            "performs preflight before generation; assemble depends on shot_001 and quality_review depends on assemble."
+                        )
+                        try:
+                            commander_plan = self.commander_planner.plan(plan_goal)
+                        except Exception as exc:
+                            raise VideoApprovalPlanningError("autonomous video approval model planning failed") from exc
+                        if commander_plan.source != "model":
+                            raise VideoApprovalPlanningError("autonomous video approval requires a model-authored Commander plan")
+                        commander_snapshot = commander_plan.to_snapshot()
+                        commander_digest = hashlib.sha256(json.dumps(
+                            commander_snapshot, ensure_ascii=False, sort_keys=True,
+                            separators=(",", ":"), allow_nan=False,
+                        ).encode("utf-8")).hexdigest()
                         approval_result = _queue_creator_video_approval(
                             initiatives, self.progress_db, initiative=initiative, topic=topic,
                             video_brief=creator_brief["video"], recipe_sha256=recipe_sha256,
-                            evolution_cycle_id=cycle_id,
+                            evolution_cycle_id=cycle_id, commander_plan_snapshot=commander_snapshot,
+                            dag_sha256=commander_digest,
                         )
                         attempt = approval_result["attempt"]
                         ticket = approval_result["ticket"]
@@ -3673,8 +3729,11 @@ class AutonomousResearchEngine:
             report["evolution_cycle_id"] = cycle_id
             if report_path:
                 self._persist_report(topic["key"], report, fetched_at)
+        except VideoApprovalPlanningError:
+            raise
         except (OSError, sqlite3.Error, ValueError, TypeError, KeyError, RuntimeError) as exc:
             report["philosophy_capture"] = {"status": "failed", "error_type": type(exc).__name__}
+        report["evolution_cycle_id"] = cycle_id
         # Output-first policy: every completed cycle gets an inbox entry. Evidence coverage
         # controls the wording, not whether the user can see the work. The final report path
         # is included so the result is immediately actionable from the local reminder inbox.

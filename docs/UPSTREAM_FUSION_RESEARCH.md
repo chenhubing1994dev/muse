@@ -227,7 +227,7 @@ This is a one-shot public issue poll, not a continuous internet monitor. A real 
 - Official repository: https://github.com/morluto/rea
 - 本机 npm 包 `rea-agents` 版本 6.5.0；Node.js 24.20.0 / Windows x64。REA 目录列出 207 个 MCP tools；只读 `list_cutter_sessions` 已通过 Muse 的既有 `MCPStdioClient` 实际调用。
 - `analyze_javascript_application` 的 MCP 调用未返回 JSON-RPC tool result。Muse 为这个长分析工具使用 REA 官方 CLI 命令 `analyze-javascript-application`，不伪称 MCP 调用成功。
-- 真实自有目标分析：`D:\AI AGENT\Muse\ui-prototype`，只选择 `package.json` 与 `dist/index.html`。证据：`data/software_crafts/b100-ui-prototype/rea-js-summary-5/rea-evidence.json`（36,102,929 bytes），SHA-256 `75893b1f0f25a3cde6e0bcd2736e3c5c30b8f0bff0cbd7f96f6a64a2bb8d28c9`；旁边的 `evidence-manifest.json` 保存目标、工具、字节数、哈希与采集时间。
+- 真实自有目标分析：`<MUSE_ROOT>\ui-prototype`，只选择 `package.json` 与 `dist/index.html`。证据：`data/software_crafts/b100-ui-prototype/rea-js-summary-5/rea-evidence.json`（36,102,929 bytes），SHA-256 `75893b1f0f25a3cde6e0bcd2736e3c5c30b8f0bff0cbd7f96f6a64a2bb8d28c9`；旁边的 `evidence-manifest.json` 保存目标、工具、字节数、哈希与采集时间。
 - 本次输出包含 2,754 graph nodes、2,809 edges、1,252 semantic nodes；1,402 个未选文件只列入 inventory，并不代表已逐一分析。没有把目录清单或静态分析结果包装成功能等价证明。
 - `rea doctor` 仍报告 Ghidra/IDA/JADX 未配置、Hopper 不支持当前 Windows，以及若干客户端注册缺失/漂移；这些可选 Provider 不标记为 ready。不要未经 Node 兼容性检查升级已安装 REA。
 

@@ -77,7 +77,7 @@
 - 未有：Obsidian 双向同步、人工编辑回流、冲突解决、过期/冲突记忆治理、语义向量检索及低频 consolidation / Reflection。
 ### B-018 Obsidian 長期記憶 Vault 與 Agent 連接
 - 狀態：第一階段完成（官方 CLI 只讀搜索/讀取 + SQLite→Markdown 安全鏡像），並新增唯讀稽核。
-- 本機：Obsidian 1.14.5，安裝於 `D:\\Program Files\\Obsidian`；CLI `Obsidian.com` 已啟用。Vault：`D:\\AI AGENT\\Muse\\vault`，CLI Vault 名稱 `vault`。
+- 本機：Obsidian 1.14.5，安裝於 `D:\\Program Files\\Obsidian`；CLI `Obsidian.com` 已啟用。Vault：`<MUSE_ROOT>\\vault`，CLI Vault 名稱 `vault`。
 - 已有：`obsidian_vault.py` 安全匯出與 audit；`obsidian_cli.py` 官方 CLI version/path/search/read；`muse-memory export-obsidian`、`obsidian-search`、`obsidian-read`、`audit-obsidian`。無新增第三方 Python 依賴。
 - 安全邊界：SQLite 是權威源；匯出只建立缺失文件；audit 只讀比較 SHA-256、frontmatter ID/revision，標記外部修改、缺失、格式錯誤及孤立 managed note；不回寫 SQLite、不覆蓋/刪除 Vault 文件。
 - 開源選擇：優先 Obsidian 官方 CLI；暫不安裝 `obsidian-local-rest-api` 或其他 MCP 插件，因官方 CLI 已滿足現階段需求。
@@ -500,7 +500,7 @@
 - 状态：MP-M1 适配器基础完成；MP-M2 D 盘固定版本安装、EmbeddingGemma 缓存和本机 stdio MCP smoke 完成（CPU 推理）；MP-M3 只读检索联邦完成但默认关闭；MP-M4 Agent Track outbox、Commander 审批 Ticket、checkpoint 回执校验、备份/恢复和合成 Palace 索引重建 smoke 已实现并验证；MP-M5 只读健康 API 与赛博控制台面板已接通，远端 MCP 在线探测、索引 freshness、pause/resume 与生产启用门禁仍未完成。
 - 决策：MemPalace 只作为可选本地语义召回层；Muse MemoryStore 保留 User/Agent Track、审批与修订权威，Research Wiki 保留 claim/evidence 权威，TaskQueue/Commander 保留唯一调度权，Obsidian 继续单向镜像。
 - 实装：mempalace_adapter.py 复用 Muse MCPStdioClient，固定 argv、离线模型缓存环境、严格 allowlist；MuseRuntime.search_memories 返回 unverified_retrieval_candidate，不混合评分。mempalace_projection.py 以 memory_id/revision + SHA-256 建立 outbox；发送要求绑定精确 outbox/idempotency key 的 Commander approval Ticket 与持久化 human.decision=approved 事件。回执必须确认恰好一条 added 或 exact-content duplicate 且 errors 为空，语义近似但内容不同的 duplicate 不算成功。
-- 本机安装：固定 mempalace==3.12.0，D:\\AI AGENT\\MuseRuntime\\MemPalace-3.12.0 独立 venv；EmbeddingGemma 约 330 MB 缓存到 D 盘；PyPI wheel SHA-256 与 metadata/provenance subject 一致。Muse 原 .venv 未被修改。
+- 本机安装：固定 mempalace==3.12.0，<MUSE_ROOT>Runtime\\MemPalace-3.12.0 独立 venv；EmbeddingGemma 约 330 MB 缓存到 D 盘；PyPI wheel SHA-256 与 metadata/provenance subject 一致。Muse 原 .venv 未被修改。
 - MCP 实测：本机 stdio 发现上游 47 工具，Muse 21 项 allowlist 全部存在；status/taxonomy/search 和真实 checkpoint 回执通过；相同合成内容重放返回 exact_duplicate 且 drawer ID 一致。未启动 MemPalace HTTP daemon 或 remote hub。
 - 多语言 smoke：5 条合成粤语/中文/英文/时间/来源查询 Recall@5=5/5、Top-1=3/5；仅小型 smoke set，不代表正式 benchmark。生产 palace 仍为空且未初始化，未导入私人对话或 User Track。
 - 安全边界：outbox 只允许 confidence>=0.75 的 Agent Track skill/case/foresight，凭据样式内容拒绝；Commander Ticket 绑定单条内容哈希和 revision，不能跨投影复用；User Track 仍禁止写入；不开放 mine/delete/sync-apply/hooks/远程管理。

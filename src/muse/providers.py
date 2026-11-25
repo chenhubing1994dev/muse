@@ -13,7 +13,7 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
-from muse.provider_policy import FreeOnlyRouter, ProviderBudget
+from muse.provider_policy import CloudExecutionPolicy, FreeOnlyRouter, ProviderBudget
 from muse.model_client import LMStudioClient
 
 @dataclass(frozen=True)
@@ -152,9 +152,11 @@ class ProviderRegistry:
     def __init__(
         self, *, circuit_breaker_threshold: int = 3, circuit_cooldown_seconds: float = 30.0,
         metrics_database: str | Path | None = None,
+        allow_paid_cloud: bool = False,
     ) -> None:
         if circuit_breaker_threshold < 1 or circuit_cooldown_seconds <= 0:
             raise ValueError("invalid circuit breaker configuration")
+        self._cloud_policy = CloudExecutionPolicy(allow_paid_cloud=allow_paid_cloud)
         self._adapters: dict[str, ProviderAdapter] = {}
         self._metrics: dict[str, ProviderRuntimeMetrics] = {}
         self._lock = threading.RLock()
@@ -212,6 +214,7 @@ class ProviderRegistry:
         budgets: dict[str, ProviderBudget] | None = None,
         now=None,
         allow_local_inference: bool = False,
+        allow_paid_cloud: bool | None = None,
     ) -> ProviderAdapter:
         """Choose by capability/privacy/quota, then measured load and reliability.
 
@@ -224,6 +227,11 @@ class ProviderRegistry:
         if not required:
             raise ValueError("at least one required capability is needed")
         budgets = budgets or {}
+        paid_cloud_allowed = (
+            self._cloud_policy.allow_paid_cloud if allow_paid_cloud is None else allow_paid_cloud
+        )
+        if not isinstance(paid_cloud_allowed, bool):
+            raise ValueError("allow_paid_cloud must be a boolean")
         candidates = []
         with self._lock:
             adapters = list(self._adapters.values())
@@ -240,7 +248,15 @@ class ProviderRegistry:
                     continue
                 if metric.in_flight >= descriptor.max_concurrency or not metric.healthy:
                     continue
-                if descriptor.requires_verified_free_quota:
+                if not descriptor.is_local and not paid_cloud_allowed:
+                    budget = budgets.get(descriptor.provider_id)
+                    if budget is None:
+                        continue
+                    try:
+                        self._quota_router.select([budget], now=now)
+                    except Exception:
+                        continue
+                elif descriptor.requires_verified_free_quota and not paid_cloud_allowed:
                     budget = budgets.get(descriptor.provider_id)
                     if budget is None:
                         continue
@@ -277,15 +293,21 @@ class ProviderRegistry:
         try:
             remaining = budget
             selected = budget
-            if descriptor.requires_verified_free_quota:
+            if not descriptor.is_local:
                 if budget is None and callable(getattr(adapter, "refresh_budget", None)):
                     budget = adapter.refresh_budget()
+                selected = self._cloud_policy.authorize(provider_id, budget, self._quota_router)
+                if selected is not None:
+                    remaining = self._quota_router.consume(selected, 1)
+                else:
+                    remaining = None
+            elif descriptor.requires_verified_free_quota:
                 if budget is None or budget.provider_id != provider_id:
-                    raise ValueError("cloud adapters require a matching verified free-quota budget")
+                    raise ValueError("provider requires a matching verified free-quota budget")
                 selected = self._quota_router.select([budget])
                 remaining = self._quota_router.consume(selected, 1)
             quota_chat = getattr(adapter, "chat_with_budget", None)
-            if descriptor.requires_verified_free_quota and callable(quota_chat):
+            if selected is not None and callable(quota_chat) and descriptor.requires_verified_free_quota:
                 response = quota_chat(request, selected)
             else:
                 response = adapter.chat(request)

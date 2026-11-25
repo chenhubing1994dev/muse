@@ -26,7 +26,7 @@ After a human has listened to and reviewed every cue, prepare the answers JSON a
 
 ~~~powershell
 $env:PYTHONPATH='src'
-py -3.11 scripts/muse-review-subtitles.py --review "data/prometheus/runs/cantonese_pilot_v2/b0c67132117a4e99a48f0c07302a31b9/subtitle-review.json" --answers "data/prometheus/runs/cantonese_pilot_v2/b0c67132117a4e99a48f0c07302a31b9/subtitle-review-answers.template.json" --reviewer "<reviewer-id>" --approve --confirm APPROVE-HUMAN-REVIEW --remux-approved-product --workspace "D:\AI AGENT\Muse" --product-id "2ff1c0a9339292f7b663a1af1ab0b333" --version-id "1713600cfe751184fc96"
+py -3.11 scripts/muse-review-subtitles.py --review "data/prometheus/runs/cantonese_pilot_v2/b0c67132117a4e99a48f0c07302a31b9/subtitle-review.json" --answers "data/prometheus/runs/cantonese_pilot_v2/b0c67132117a4e99a48f0c07302a31b9/subtitle-review-answers.template.json" --reviewer "<reviewer-id>" --approve --confirm APPROVE-HUMAN-REVIEW --remux-approved-product --workspace "<MUSE_ROOT>" --product-id "2ff1c0a9339292f7b663a1af1ab0b333" --version-id "1713600cfe751184fc96"
 ~~~
 
 The answers template starts with empty reviewed indexes and corrections. After listening to each cue, fill every index that has actually been reviewed and add only the necessary corrections; the empty template deliberately cannot pass approval. The CLI writes a new reviewed JSON and approved SRT first, then creates the immutable remuxed product revision. It does not modify the original product version.

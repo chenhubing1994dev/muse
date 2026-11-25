@@ -128,6 +128,7 @@ class VideoAdmissionRuntimeTests(unittest.TestCase):
     def test_request_factory_rejects_worker_and_checkpoint_local_fallback_plans(self) -> None:
         runtime = self._build()
         for source in (
+            "safe_fallback",
             "video_task_worker_single_step_v1",
             "video_task_worker_scene_generation",
             "openmontage_inspired_video_studio:default",
@@ -151,7 +152,7 @@ class VideoAdmissionRuntimeTests(unittest.TestCase):
             )
         self.assertEqual(
             runtime.request_factory(
-                commander_plan=SimpleNamespace(plan_id="commander-plan", source="safe_fallback"),
+                commander_plan=SimpleNamespace(plan_id="commander-plan", source="model"),
             ),
             {"built": True},
         )
@@ -187,7 +188,7 @@ class VideoAdmissionRuntimeTests(unittest.TestCase):
                     "attempt_id": "attempt-1",
                     "approval_scope": "one_video_attempt_only",
                     "commander_plan_id": "plan-1",
-                    "commander_plan_source": "safe_fallback",
+                    "commander_plan_source": "model",
                 },
                 require_approval=True,
                 recovery_policy="manual",
@@ -203,7 +204,7 @@ class VideoAdmissionRuntimeTests(unittest.TestCase):
             approval_event_id=latest["event_id"],
             approved_by="reviewer",
             attempt_id="attempt-1",
-            plan=SimpleNamespace(plan_id="plan-1", source="safe_fallback"),
+            plan=SimpleNamespace(plan_id="plan-1", source="model"),
         )
         approved = runtime.provider.human_gate(request)
         self.assertEqual(approved["status"], "approved")

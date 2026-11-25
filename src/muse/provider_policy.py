@@ -10,6 +10,10 @@ class NoFreeProviderAvailable(RuntimeError):
     """No enabled provider has a verified, fresh, positive free quota."""
 
 
+class PaidCloudExecutionDisabled(PermissionError):
+    """A paid cloud request was attempted without explicit operator opt-in."""
+
+
 @dataclass(frozen=True)
 class ProviderBudget:
     provider_id: str
@@ -89,3 +93,32 @@ class FreeOnlyRouter:
         if units > budget.remaining_units:
             raise NoFreeProviderAvailable("Insufficient verified free quota; paid fallback is disabled.")
         return replace(budget, remaining_units=budget.remaining_units - units)
+
+
+@dataclass(frozen=True)
+class CloudExecutionPolicy:
+    """Fail-closed cloud policy: verified free quota is allowed; paid use is opt-in."""
+
+    allow_paid_cloud: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.allow_paid_cloud, bool):
+            raise ValueError("allow_paid_cloud must be a boolean")
+
+    def authorize(
+        self, provider_id: str, budget: ProviderBudget | None, router: FreeOnlyRouter,
+    ) -> ProviderBudget | None:
+        if budget is not None and budget.provider_id == provider_id:
+            try:
+                return router.select([budget])
+            except NoFreeProviderAvailable:
+                if not self.allow_paid_cloud:
+                    raise
+        elif budget is not None and budget.provider_id != provider_id:
+            raise NoFreeProviderAvailable("Cloud quota evidence belongs to a different provider.")
+        if self.allow_paid_cloud:
+            return None
+        raise PaidCloudExecutionDisabled(
+            "Paid cloud execution is disabled by default; provide fresh verified free quota "
+            "or explicitly enable allow_paid_cloud for this ProviderRegistry."
+        )

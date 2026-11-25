@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import time
 from dataclasses import dataclass
 from urllib.error import HTTPError, URLError
 from urllib import request as urllib_request
@@ -45,10 +46,19 @@ class LMStudioClient:
         timeout: float = 60.0,
         chat_template_kwargs: dict[str, Any] | None = None,
         bypass_proxies: bool = False,
+        max_retries: int = 0,
+        retry_backoff_seconds: float = 0.5,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.timeout = timeout
+        if isinstance(max_retries, bool) or not isinstance(max_retries, int) or not 0 <= max_retries <= 5:
+            raise ValueError("max_retries must be an integer from 0 to 5")
+        if not isinstance(retry_backoff_seconds, (int, float)) or isinstance(retry_backoff_seconds, bool) \
+                or not 0 <= retry_backoff_seconds <= 30:
+            raise ValueError("retry_backoff_seconds must be between 0 and 30")
+        self.max_retries = max_retries
+        self.retry_backoff_seconds = float(retry_backoff_seconds)
         if chat_template_kwargs is not None and not isinstance(chat_template_kwargs, dict):
             raise TypeError("chat_template_kwargs must be a dictionary")
         self.chat_template_kwargs = dict(chat_template_kwargs) if chat_template_kwargs is not None else None
@@ -140,18 +150,35 @@ class LMStudioClient:
             content=content, model=response_model, usage=safe_usage,
             usage_recorded=usage_recorded,
         )
+    @staticmethod
+    def _is_transient(exc: BaseException) -> bool:
+        """Retry only failures that a later identical request may plausibly fix."""
+        if isinstance(exc, HTTPError):
+            return exc.code == 429 or 500 <= exc.code < 600
+        if isinstance(exc, json.JSONDecodeError):
+            return False
+        return isinstance(exc, (URLError, TimeoutError, ConnectionError))
+
     def _request(self, method: str, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
         data = None if body is None else json.dumps(body).encode("utf-8")
         headers = {"Accept": "application/json"}
         if data is not None:
             headers["Content-Type"] = "application/json"
         request = urllib_request.Request(self.base_url + path, data=data, headers=headers, method=method)
-        try:
-            opener = self._opener.open if self._opener is not None else urllib_request.urlopen
-            with opener(request, timeout=self.timeout) as response:
-                result = json.loads(response.read().decode("utf-8"))
-        except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
-            raise ModelError(f"Local model request failed: {exc}") from exc
+        attempt = 0
+        while True:
+            try:
+                opener = self._opener.open if self._opener is not None else urllib_request.urlopen
+                with opener(request, timeout=self.timeout) as response:
+                    result = json.loads(response.read().decode("utf-8"))
+                break
+            except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+                if attempt < self.max_retries and self._is_transient(exc):
+                    # Exponential backoff: 0.5s, 1s, 2s ... capped at 8s.
+                    time.sleep(min(8.0, self.retry_backoff_seconds * (2 ** attempt)))
+                    attempt += 1
+                    continue
+                raise ModelError(f"Local model request failed: {exc}") from exc
         if not isinstance(result, dict):
             raise ModelError("The local model endpoint returned a non-object response")
         return result

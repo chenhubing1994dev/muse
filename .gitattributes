@@ -1,1 +1,22 @@
 * text=auto
+# Windows launchers must keep CRLF; shell scripts LF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+*.sh text eol=lf
+*.rs text eol=lf
+*.py text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+# Binary assets
+*.png binary
+*.ico binary
+*.icns binary
+*.jpg binary
+*.exe binary
+*.msi binary
+*.dmg binary
+*.zip binary
+*.db binary
+*.sqlite binary
+*.sqlite3 binary

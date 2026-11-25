@@ -95,6 +95,30 @@ class CommanderPlannerTests(unittest.TestCase):
 
 
 
+    def test_strict_mode_rejects_unavailable_model(self):
+        with self.assertRaisesRegex(RuntimeError, "available model client"):
+            CommanderPlanner(None, strict_model=True).plan("video approval")
+
+    def test_strict_mode_propagates_model_timeout_without_fallback(self):
+        def timeout(_goal):
+            raise TimeoutError("model timed out")
+        with self.assertRaisesRegex(RuntimeError, "model planning failed") as raised:
+            CommanderPlanner(timeout, strict_model=True).plan("video approval")
+        self.assertIsInstance(raised.exception.__cause__, TimeoutError)
+
+    def test_strict_mode_rejects_invalid_model_output_without_fallback(self):
+        invalid = CommanderPlanner(lambda _goal: {"steps": [{"id": "bad"}]}, strict_model=True)
+        with self.assertRaisesRegex(ValueError, "invalid plan step fields"):
+            invalid.plan("video approval")
+
+    def test_strict_mode_rejects_failed_dependency_repair_without_fallback(self):
+        invalid = {"steps": [
+            {"id": "research", "role": "researcher", "objective": "research", "depends_on": ["missing"], "required_capabilities": ["research"]},
+            {"id": "build", "role": "developer", "objective": "build", "depends_on": [], "required_capabilities": ["coding"]},
+        ]}
+        with self.assertRaisesRegex(ValueError, "invalid dependencies"):
+            CommanderPlanner(lambda _goal: invalid, strict_model=True).plan("video approval")
+
     def test_independent_critic_can_request_one_validated_revision(self):
         calls = []
         first = {"steps": [

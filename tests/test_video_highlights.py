@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 from muse.video_highlights import (
     analyze_video_audio,
     analyze_video_with_cantonese_asr,
@@ -312,6 +314,40 @@ class VerticalClipCommandTests(unittest.TestCase):
         self.assertEqual(result["framing"]["mode"], "face_aware_clip_center")
         self.assertIn("iw*0.750000-540", calls[1][calls[1].index("-vf") + 1])
         self.assertEqual([command[0] for command in calls], ["ffprobe", "ffmpeg", "ffprobe"])
+
+    def test_render_amf_requires_real_encoder_probe_and_shared_gpu_lease(self):
+        from muse.gpu_resources import GpuResourceCoordinator
+        database = self.root / "gpu-resources.sqlite3"
+        source_metadata = {
+            "format": {"duration": "60", "format_name": "mov,mp4"},
+            "streams": [{"codec_type": "video", "codec_name": "h264", "width": 1920, "height": 1080,
+                         "avg_frame_rate": "30/1", "r_frame_rate": "30/1"}],
+        }
+        output_metadata = {
+            "format": {"duration": "30", "format_name": "mov,mp4"},
+            "streams": [{"codec_type": "video", "codec_name": "h264", "width": 1080, "height": 1920,
+                         "avg_frame_rate": "30/1", "r_frame_rate": "30/1"}],
+        }
+        def runner(command, **kwargs):
+            if command[0] == "ffprobe":
+                metadata = source_metadata if Path(command[-1]) == self.source else output_metadata
+                return SimpleNamespace(returncode=0, stdout=json.dumps(metadata), stderr="")
+            lease = GpuResourceCoordinator(database).active_lease()
+            self.assertEqual(lease["owner_kind"], "video_encoding")
+            self.output.write_bytes(b"rendered")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        with patch("muse.video_capabilities.probe_ffmpeg_encoder", return_value={
+            "health": {"status": "healthy"}, "capability": {"status": "available", "encoder": "h264_amf"},
+            "ready": True,
+        }), patch("muse.gpu_resources.probe_gpu_workloads", return_value={"status": "unavailable"}):
+            result = render_vertical_clip(
+                self.source, self.output, 0, 30, available_encoders=("h264_amf",),
+                runner=runner, gpu_resource_db=database,
+            )
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["encoder"], "h264_amf")
+        self.assertEqual(result["encoder_capability"]["capability"]["status"], "available")
+        self.assertIsNone(GpuResourceCoordinator(database).active_lease())
 
     def test_render_refuses_clip_range_beyond_probed_source_without_running_ffmpeg(self):
         calls = []

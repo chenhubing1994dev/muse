@@ -60,7 +60,7 @@ The hierarchy is useful organization and metadata filtering; it is not a novel r
 - Unit-test allowlists, approval gates, payload bounds and fixed argv.
 
 ### MP-M2 — local package/runtime qualification (completed; CPU inference path)
-- Installed pinned `mempalace==3.12.0` into `D:\\AI AGENT\\MuseRuntime\\MemPalace-3.12.0\\venv`; Muse's existing `.venv` was not modified.
+- Installed pinned `mempalace==3.12.0` into `<MUSE_ROOT>Runtime\\MemPalace-3.12.0\\venv`; Muse's existing `.venv` was not modified.
 - Cached multilingual EmbeddingGemma on D: (about 330 MB); the live MCP search also passed with `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1`.
 - Live local stdio MCP smoke test found 47 upstream tools; every one of Muse's 21 allowlisted tools was present. Status, taxonomy and semantic search calls succeeded.
 - SQLite `PRAGMA integrity_check` returned `ok`. The read-only audit command ran; its 50/100 score belongs to the intentionally minimal synthetic evaluation palace (one generic room, no KG/tunnels), not the empty production palace.

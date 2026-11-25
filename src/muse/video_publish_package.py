@@ -304,11 +304,78 @@ def _review_record_status(
     return "verified_human_review_digest_scope_bound"
 
 
+def _visual_quality_summary(
+    visual_quality: dict[str, Any] | None, report_sha256: str | None,
+) -> dict[str, Any]:
+    signals = visual_quality.get("signals") if isinstance(visual_quality, dict) else []
+    if not isinstance(signals, list):
+        signals = []
+    return {
+        "status": visual_quality.get("status", "unavailable") if isinstance(visual_quality, dict) else "unavailable",
+        "report": "visual-quality-report.json" if report_sha256 else None,
+        "sha256": report_sha256,
+        "method": visual_quality.get("method") if isinstance(visual_quality, dict) else None,
+        "signal_count": len(signals),
+        "signal_codes": sorted({item["code"] for item in signals if isinstance(item, dict) and isinstance(item.get("code"), str)}),
+        "semantic_recognition": False,
+        "human_review_required": True,
+    }
+
+
+_AI_UPSCALER_ENGINES = {
+    "realesrgan-ncnn-vulkan", "comfyui-steppe-wan2.1", "video2x", "basicvsrpp",
+}
+
+
+def _ai_upscale_provenance(product_manifest: dict[str, Any], width: Any, height: Any) -> dict[str, Any]:
+    evidence = product_manifest.get("upscale")
+    files = product_manifest.get("files") if isinstance(product_manifest.get("files"), dict) else {}
+    if not isinstance(evidence, dict):
+        return {"status": "blocked", "reason": "missing_verified_ai_upscale_provenance"}
+    source_width, source_height = evidence.get("source_width"), evidence.get("source_height")
+    output_width, output_height = evidence.get("output_width"), evidence.get("output_height")
+    dimensions = (source_width, source_height, output_width, output_height, width, height)
+    if not all(isinstance(value, int) and not isinstance(value, bool) and value > 0 for value in dimensions):
+        return {"status": "blocked", "reason": "upscale_dimensions_missing_or_invalid"}
+    source_sha = evidence.get("source_video_sha256")
+    output_sha = evidence.get("output_video_sha256")
+    is_sha256 = lambda value: isinstance(value, str) and len(value) == 64 and all(char in "0123456789abcdef" for char in value)
+    engine = evidence.get("engine")
+    model = evidence.get("model")
+    scale_factor = evidence.get("scale_factor")
+    actual_scale = min(output_width / source_width, output_height / source_height)
+    valid = (
+        evidence.get("status") == "verified"
+        and evidence.get("method") == "ai_super_resolution"
+        and isinstance(engine, str) and engine in _AI_UPSCALER_ENGINES
+        and isinstance(model, str) and bool(model.strip())
+        and isinstance(scale_factor, (int, float)) and not isinstance(scale_factor, bool)
+        and scale_factor >= 1.5 and abs(float(scale_factor) - actual_scale) <= 0.03
+        and min(source_width, source_height) < 720
+        and min(output_width, output_height) >= 720
+        and output_width == width and output_height == height
+        and is_sha256(source_sha) and is_sha256(output_sha)
+        and output_sha == files.get("video.mp4")
+    )
+    if not valid:
+        return {"status": "blocked", "reason": "ai_upscale_provenance_failed_verification"}
+    return {
+        "status": "passed", "engine": engine, "model": model,
+        "scale_factor": round(actual_scale, 3),
+        "source_dimensions": [source_width, source_height],
+        "output_dimensions": [output_width, output_height],
+        "source_video_sha256": source_sha, "output_video_sha256": output_sha,
+        "evidence": "muse-product-manifest.json:upscale",
+    }
+
+
 def _release_quality_report(
     *, product_manifest: dict[str, Any], qa_warnings: list[dict[str, Any]],
     subtitles: Path, video: Path, initiative_id: str, version_id: str,
     contact_sheet: Path | None = None,
     visual_review_manifest_sha256: str | None = None,
+    visual_quality: dict[str, Any] | None = None,
+    visual_quality_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Summarize evidence without promoting missing human reviews to approvals."""
     video_hash, subtitle_hash = _sha256(video), _sha256(subtitles)
@@ -347,12 +414,33 @@ def _release_quality_report(
         for report_key, (record_key, artifacts) in review_specs.items()
     }
     subtitle_status = verified_reviews["subtitle_review"]
+    visual_quality_summary = _visual_quality_summary(visual_quality, visual_quality_sha256)
+    media = product_manifest.get("video_metadata") if isinstance(product_manifest.get("video_metadata"), dict) else {}
+    width, height = media.get("width"), media.get("height")
+    valid_dimensions = all(
+        isinstance(value, int) and not isinstance(value, bool) and value > 0
+        for value in (width, height)
+    )
+    short_edge = min(width, height) if valid_dimensions else None
+    resolution_passed = short_edge is not None and short_edge >= 720
+    upscale_provenance = _ai_upscale_provenance(product_manifest, width, height)
     checks = {
+        "delivery_resolution": {
+            "status": "passed" if resolution_passed else "blocked",
+            "minimum_short_edge_px": 720,
+            "actual_width_px": width if valid_dimensions else None,
+            "actual_height_px": height if valid_dimensions else None,
+            "actual_short_edge_px": short_edge,
+            "reason": None if resolution_passed else "output_short_edge_below_720p",
+            "requires_real_upscale_not_metadata_only": True,
+        },
+        "ai_upscale_provenance": upscale_provenance,
         "technical_quality": {"status": "passed", "evidence": "qa-report.json"},
         "visual_anomaly_review": {
             "status": "pending_human_review" if qa_warnings else "heuristics_only_review_required",
             "warning_count": len(qa_warnings),
             "warning_codes": sorted({item["code"] for item in qa_warnings if isinstance(item.get("code"), str)}),
+            "visual_quality_diagnostics": visual_quality_summary,
             "contact_sheet": {
                 "status": "available" if contact_sheet is not None else "not_provided",
                 "evidence": "contact-sheet.png" if contact_sheet is not None else None,
@@ -486,11 +574,26 @@ def build_publish_package(
         raise VideoPublishPackageError("QA report warnings must be a list")
     qa_warnings = [item for item in raw_warnings if isinstance(item, dict)]
     qa_warning_codes = sorted({item["code"] for item in qa_warnings if isinstance(item.get("code"), str)})
+    from muse.video_visual_quality import analyze_video_visual_quality
+    try:
+        visual_quality = analyze_video_visual_quality(video)
+    except Exception as exc:
+        visual_quality = {
+            "schema_version": 1, "status": "unavailable",
+            "method": "opencv_sampled_visual_diagnostics_v1",
+            "semantic_recognition": False, "reason": f"analysis_failed:{type(exc).__name__}",
+            "frames": [], "temporal": None, "signals": [],
+        }
+    visual_quality_bytes = _json_bytes(visual_quality)
+    visual_quality_sha256 = hashlib.sha256(visual_quality_bytes).hexdigest()
+    visual_quality_summary = _visual_quality_summary(visual_quality, visual_quality_sha256)
     release_quality_report = _release_quality_report(
         product_manifest=product_manifest_document, qa_warnings=qa_warnings,
         subtitles=subtitles, video=video, initiative_id=initiative_id, version_id=version_id,
         contact_sheet=contact_sheet_path,
         visual_review_manifest_sha256=visual_review_manifest_sha256,
+        visual_quality=visual_quality,
+        visual_quality_sha256=visual_quality_sha256,
     )
     profile = product_info.get("video_metadata", {})
     if isinstance(profile, dict) and profile.get("aspect_ratio") not in (None, master_aspect_ratio):
@@ -539,6 +642,7 @@ def build_publish_package(
             copies.append((contact_sheet_path, "contact-sheet.png"))
         for src, name in copies:
             shutil.copyfile(src, staging / name)
+        (staging / "visual-quality-report.json").write_bytes(visual_quality_bytes)
         for platform, draft in drafts.items():
             (staging / "platform-drafts" / f"{platform}.json").write_bytes(_json_bytes(draft))
 
@@ -553,6 +657,7 @@ def build_publish_package(
                 "warning_count": len(qa_warnings),
                 "warning_codes": qa_warning_codes,
                 "warnings": qa_warnings,
+                "visual_quality_diagnostics": visual_quality_summary,
                 "note": "Black, frozen-frame and silence detections are heuristic; review intentional dark cards, pauses and static shots.",
             },
             "editorial_and_fact_review": "pending",
@@ -626,6 +731,10 @@ def build_publish_package(
             "technical_qa": "passed",
             "review_warning_count": len(qa_warnings),
             "review_warning_codes": qa_warning_codes,
+            "delivery_resolution_status": release_quality_report["checks"]["delivery_resolution"]["status"],
+            "ai_upscale_provenance_status": release_quality_report["checks"]["ai_upscale_provenance"]["status"],
+            "visual_quality_status": visual_quality_summary["status"],
+            "visual_quality_signal_count": visual_quality_summary["signal_count"],
             "release_quality_status": release_quality_report["overall_status"],
             "release_blocker_count": len(release_quality_report["blocking_items"]),
             "official_publish_api_called": False,

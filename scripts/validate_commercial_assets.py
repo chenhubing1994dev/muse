@@ -84,9 +84,9 @@ def validate_site():
             local_target = href[2:].split("#", 1)[0]
             if local_target and not (products_path.parent / local_target).is_file():
                 raise AssertionError(f"missing product-page asset: {href}")
-    if "尚未开放购买" not in products_html or "暂未销售" not in products_html or "US$9 测试假设" not in products_html:        raise AssertionError("product page must disclose draft-only status and unvalidated test pricing")
-    if "NIST 未审阅、认证或背书本产品" not in products_html:
-        raise AssertionError("product page must disclose no NIST endorsement")
+    if "开放购买" not in products_html or "暂未销售" not in products_html or "US$9 测试假设" not in products_html:
+        raise AssertionError("product page must disclose draft-only status and unvalidated test pricing")
+    if "NIST 未审阅、认证或背书本产品" not in products_html:        raise AssertionError("product page must disclose no NIST endorsement")
     products_css = (html_path.parent / "products.css").read_text(encoding="utf-8")
     if "@media(max-width:800px)" not in products_css:
         raise AssertionError("product page responsive layout rule is missing")

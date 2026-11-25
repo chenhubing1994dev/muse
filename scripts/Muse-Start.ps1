@@ -3,6 +3,9 @@ $Root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 Set-Location -LiteralPath $Root
 $Python = Join-Path $Root '.venv\Scripts\python.exe'
 if (-not (Test-Path $Python)) { throw "Muse Python environment not found: $Python" }
+. (Join-Path $PSScriptRoot 'Resolve-MusePython.ps1')
+$PythonProbe = Test-MusePython -Exe $Python
+if (-not $PythonProbe.Ok) { throw "Muse .venv launcher is unusable ($($PythonProbe.Detail)). Repair offline: powershell -NoProfile -ExecutionPolicy Bypass -File `"$Root\scripts\Repair-MuseVenv.ps1`" -Apply" }
 $env:PYTHONPATH = Join-Path $Root 'src'
 $env:PYTHONUNBUFFERED = '1'
 $Logs = Join-Path $Root 'logs'

@@ -7,6 +7,6 @@
 Option Explicit
 Dim sh
 Set sh = CreateObject("WScript.Shell")
-sh.CurrentDirectory = "D:\AI AGENT\Muse"
-sh.Run "cmd.exe /c ""D:\AI AGENT\Muse\scripts\muse-watchdog.cmd""", 0, True
+sh.CurrentDirectory = CreateObject("Scripting.FileSystemObject").GetParentFolderName(CreateObject("Scripting.FileSystemObject").GetParentFolderName(WScript.ScriptFullName))
+sh.Run "cmd.exe /c """ & CreateObject("Scripting.FileSystemObject").GetParentFolderName(WScript.ScriptFullName) & "\muse-watchdog.cmd""", 0, True
 Set sh = Nothing

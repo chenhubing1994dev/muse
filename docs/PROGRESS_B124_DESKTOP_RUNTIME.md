@@ -1,7 +1,7 @@
 # B124 — Muse Windows 桌面运行链路修复与实机验收
 
 日期：2026-11-13
-项目：D:\AI AGENT\Muse
+项目：<MUSE_ROOT>
 
 ## 本轮修复
 

@@ -19,7 +19,7 @@
 
 | 项 | 实测 |
 |---|---|
-| C0-1 读写权限 | `D:\AI AGENT\Muse` 可读写（file 工具 + 设备端写入 Python） |
+| C0-1 读写权限 | `<MUSE_ROOT>` 可读写（file 工具 + 设备端写入 Python） |
 | OS / Python | Windows 11 10.0.26100；设备沙箱 Python 3.12.10；项目 `.venv` = 3.11.9（pyvenv.cfg），启动器损坏（QUICK_STATE ENV-VENV，未变） |
 | Node / Rust / FFmpeg / Git CLI | **无法探测**（禁子进程）。静态发现：`ui-prototype/`（vite.config.js）、`video-motion/`、`desktop/src-tauri/`（Cargo.toml + tauri.conf.json）、`server/rust/` |
 | `cryptography` | 已在 pyproject `[plugin-security]` 可选依赖中声明 → 使用它**不触发 G1**；无它时走纯 Python RFC 8032 兜底 |
@@ -52,7 +52,7 @@
 
 ### C1-3 生产 DB 只读取证（`data/initiatives/muse.sqlite3`，37,511,168 B）
 - 方法：`file:...?mode=ro&immutable=1` 只读打开（云端拷贝上传 37 MB 超时；设备沙箱禁止 `:memory:` 反序列化）；`PRAGMA quick_check` = `ok`。
-- 结论（与蓝图 3,954 完全一致）：4,073 行 `creator_initiatives` 中 **3,954 行**各有 1 条 inspiration ref 指向 `C:\Users\ADMINI~1\AppData\Local\Temp\tmp*\reports\autonomous-research-*.md`；
+- 结论（与蓝图 3,954 完全一致）：4,073 行 `creator_initiatives` 中 **3,954 行**各有 1 条 inspiration ref 指向 `%USERPROFILE%\AppData\Local\Temp\tmp*\reports\autonomous-research-*.md`；
   - 文件已全部不存在；`data/research/reports/`（139 个文件）中**无同名文件**可映射；
   - 3,950 行 `tool/proposed`，4 行 `tool/testing`；创建日期 2026-11-08 → 11-23（11-21 最多 970 行）；
   - 标题含 "Creator-inspired test hypothesis" / "Symbolic candidate: scenario branch"（395 行）；仅有 `created` 事件（`status_changed` 等 = 0）。

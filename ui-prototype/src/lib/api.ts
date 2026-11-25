@@ -309,6 +309,22 @@ export interface SubtitleReviewDocument {
   reference_script: string; raw_asr_transcript: string;
   segments: SubtitleReviewSegment[]; subtitle_cue_count: number;
 }
+export interface VideoVisualQualityFrame {
+  frame_index: number; time_seconds: number; width: number; height: number;
+  mean_luma: number; p05_luma: number; median_luma: number; p95_luma: number;
+  contrast_stddev: number; sharpness_laplacian_variance: number; mean_saturation: number;
+  shadow_fraction: number; highlight_fraction: number;
+}
+export interface VideoVisualQualitySignal {
+  code: string; time_seconds?: number; severity?: string; metric?: number; note?: string;
+}
+export interface VideoVisualQualityReport {
+  schema_version: number; status: "observed" | "unavailable"; method: string;
+  semantic_recognition: false; source_name?: string; reason?: string; note?: string;
+  duration_seconds?: number; source_fps?: number; source_frame_count?: number; sampled_frame_count?: number;
+  frames?: VideoVisualQualityFrame[]; signals?: VideoVisualQualitySignal[]; review_required?: boolean;
+  temporal?: { pair_count: number; max_mean_luma_delta: number; median_flow_pixels: number; p90_residual_flow_pixels: number; interpretation: string } | null;
+}
 export interface ProductRecord {
   id: string; initiative_id: string; creator_initiative_id?: string | null; creator_feedback_enabled?: boolean; version_id: string; name: string;
   kind: string; status: string; version: string; size_bytes: number;
@@ -1002,7 +1018,7 @@ export interface ApiClient {
   previewProduct(initiativeId: string, versionId: string): Promise<Blob>;
   downloadVideo(initiativeId: string, versionId: string): Promise<Blob>;
   videoContactSheet(initiativeId: string, versionId: string): Promise<Blob>;
-  visualReviews(initiativeId: string, versionId: string): Promise<{ api_version: number; identity_assurance: string; evidence: { video_sha256: string; artifact_sha256: Record<string, string>; release_manifest_sha256: string }; count: number; reviews: VisualReviewRecord[] }>;
+  visualReviews(initiativeId: string, versionId: string): Promise<{ api_version: number; identity_assurance: string; evidence: { video_sha256: string; artifact_sha256: Record<string, string>; release_manifest_sha256: string; visual_quality_report_sha256?: string | null }; visual_quality?: VideoVisualQualityReport | null; count: number; reviews: VisualReviewRecord[] }>;
   visualRevisionBrief(initiativeId: string, versionId: string): Promise<{ api_version: number; active: boolean; brief: VisualRevisionBrief | null; can_auto_modify_source: false; new_version_created: false }>;
   submitVisualReview(initiativeId: string, versionId: string, payload: VisualReviewPayload): Promise<{ api_version: number; identity_assurance: string; record: VisualReviewRecord; append_only: true; digital_signature: false }>;
   subtitleReview(initiativeId: string, versionId: string): Promise<{ api_version: number; review: SubtitleReviewDocument }>;

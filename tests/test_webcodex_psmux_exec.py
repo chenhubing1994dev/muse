@@ -33,9 +33,9 @@ class PsmuxExecAdapterTests(unittest.TestCase):
     def test_existing_powershell_file_is_invoked_by_path(self):
         wrapper = adapter._build_job_script(
             "", Path("C:/tmp/output.log"), Path("C:/tmp/result.txt"),
-            language="powershell", payload_path=Path("D:/AI AGENT/Muse/scripts/check.ps1"),
+            language="powershell", payload_path=Path("D:/Workspace/Muse/scripts/check.ps1"),
         )
-        self.assertIn("-NoProfile -File 'D:/AI AGENT/Muse/scripts/check.ps1'", wrapper)
+        self.assertIn("-NoProfile -File 'D:/Workspace/Muse/scripts/check.ps1'", wrapper)
 
     def test_existing_python_file_is_resolved_inside_project_root(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -64,7 +64,7 @@ class PsmuxExecAdapterTests(unittest.TestCase):
         )
         self.assertIn(adapter._ps_quote(adapter.sys.executable), wrapper)
         self.assertIn("$env:PYTHONPATH", wrapper)
-        self.assertIn("D:/AI AGENT/Muse/src", wrapper)
+        self.assertIn((Path(adapter.DEFAULT_PROJECT_ROOT) / "src").as_posix(), wrapper)
         self.assertIn(adapter._ps_quote(payload.as_posix()), wrapper)
         self.assertIn("*> 'C:/tmp/output.log'", wrapper)
 
@@ -88,14 +88,14 @@ class PsmuxExecAdapterTests(unittest.TestCase):
         ):
             wrapper = adapter._build_job_script(
                 "echo hello", output, result, language="bash", payload_path=payload,
-                working_directory=r"D:\AI AGENT\Muse",
+                working_directory=r"D:\Workspace\Muse",
             )
         self.assertIn("--exec bash -lc", wrapper)
-        self.assertIn("/mnt/d/AI AGENT/Muse", wrapper)
+        self.assertIn("/mnt/d/Workspace/Muse", wrapper)
         self.assertIn("/mnt/c/tmp/payload.sh", wrapper)
 
     def test_windows_to_wsl_path_preserves_drive_and_spaces(self):
-        self.assertEqual(adapter._windows_to_wsl_path(r"D:\AI AGENT\Muse"), "/mnt/d/AI AGENT/Muse")
+        self.assertEqual(adapter._windows_to_wsl_path(r"D:\Workspace\Muse"), "/mnt/d/Workspace/Muse")
 
     def test_build_batch_job_script_uses_cmd_without_autorun(self):
         output = Path("C:/tmp/output.log")
@@ -166,12 +166,12 @@ class PsmuxExecAdapterTests(unittest.TestCase):
             "psmux.exe",
             "muse-dev",
             "musejob_123",
-            r"D:\AI AGENT\Muse",
-            r"C:\Users\Administrator\AppData\Local\Muse\psmux-jobs\job.ps1",
+            r"D:\Workspace\Muse",
+            r"C:\Users\example\AppData\Local\Muse\psmux-jobs\job.ps1",
         )
         self.assertEqual(argv[1:9], [
             "new-window", "-d", "-t", "muse-dev", "-n", "musejob_123",
-            "-c", r"D:\AI AGENT\Muse",
+            "-c", r"D:\Workspace\Muse",
         ])
         self.assertIn("--", argv)
         self.assertIn("-File", argv)
@@ -241,7 +241,7 @@ class PsmuxExecAdapterTests(unittest.TestCase):
             job_dir.mkdir(parents=True)
             adapter._write_job_manifest(job_id, {
                 "job_id": job_id, "session": "muse-dev", "language": "python",
-                "working_directory": r"D:\\AI AGENT\\Muse", "status": "launching", "created_at": 123.0,
+                "working_directory": r"D:\\Workspace\\Muse", "status": "launching", "created_at": 123.0,
             })
             result = adapter.list_jobs({"session": "muse-dev", "limit": 10})
             item = next(row for row in result["jobs"] if row["job_id"] == job_id)

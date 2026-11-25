@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from muse.video_factory import assemble_video_from_folder, discover_video_assets
 
@@ -46,10 +47,12 @@ class VideoFactoryTests(unittest.TestCase):
             Path(command[-1]).write_bytes(b"rendered")
             return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-        result = assemble_video_from_folder(
-            self.assets, self.output, ffmpeg_path="ffmpeg.exe", available_encoders={"h264_amf"},
-            audio_path=self.assets / "voice.wav", audio_mode="narration", runner=runner,
-        )
+        with patch("muse.video_factory._probe_encoder_gpu_state", return_value={"status": "unavailable"}):
+            result = assemble_video_from_folder(
+                self.assets, self.output, ffmpeg_path="ffmpeg.exe", available_encoders={"h264_amf"},
+                audio_path=self.assets / "voice.wav", audio_mode="narration", runner=runner,
+                gpu_resource_db=self.root / "gpu-resources.sqlite3",
+            )
         self.assertEqual(result["status"], "completed")
         self.assertEqual(result["scene_count"], 2)
         self.assertEqual(result["duration_seconds"], 3.5)
@@ -121,6 +124,39 @@ class VideoFactoryTests(unittest.TestCase):
                 self.assets, self.output, ffmpeg_path="ffmpeg.exe",
                 encoder_preference="amf", available_encoders=(),
             )
+
+    def test_amf_assembly_holds_shared_gpu_lease_during_encoding(self):
+        from muse.gpu_resources import GpuResourceCoordinator
+        database = self.root / "gpu-resources.sqlite3"
+        def runner(command, **kwargs):
+            if "-show_entries" in command:
+                return SimpleNamespace(returncode=0, stdout=json.dumps({
+                    "format": {"duration": "3.5"},
+                    "streams": [{"codec_type": "video", "width": 1920, "height": 1080, "avg_frame_rate": "30/1"}],
+                }), stderr="")
+            active = GpuResourceCoordinator(database).active_lease()
+            self.assertEqual(active["owner_kind"], "video_encoding")
+            Path(command[-1]).write_bytes(b"rendered")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        with patch("muse.video_factory._probe_encoder_gpu_state", return_value={"status": "unavailable"}):
+            result = assemble_video_from_folder(
+                self.assets, self.output, ffmpeg_path="ffmpeg.exe", available_encoders={"h264_amf"},
+                runner=runner, gpu_resource_db=database,
+            )
+        self.assertEqual(result["status"], "completed")
+        self.assertIsNone(GpuResourceCoordinator(database).active_lease())
+
+    def test_encoder_selection_blocks_requested_missing_capability_and_reports_fallback(self):
+        from muse.video_factory import _select_verified_encoder
+        unavailable_amf = {"h264_amf": {"capability": {"status": "unavailable"}},
+                           "libx264": {"capability": {"status": "available"}}}
+        with self.assertRaisesRegex(RuntimeError, "requested AMD AMF"):
+            _select_verified_encoder("amf", unavailable_amf)
+        fallback = _select_verified_encoder("auto", unavailable_amf)
+        self.assertEqual(fallback["encoder"], "libx264")
+        self.assertTrue(fallback["fallback_reason"])
+        with self.assertRaisesRegex(RuntimeError, "requested CPU"):
+            _select_verified_encoder("software", {"libx264": {"capability": {"status": "unavailable"}}})
 
 if __name__ == "__main__":
     unittest.main()

@@ -110,6 +110,8 @@ class VideoPromptStudioAdapterTests(unittest.TestCase):
         candidate = handoff["creator_brief_video"]
         self.assertNotIn("scenes", candidate)
         self.assertEqual(candidate["duration_seconds"], 3.0)
+        self.assertEqual(candidate["steps"], 20)
+        self.assertEqual(candidate["resolution_tier"], "wan21_480p_master")
         self.assertEqual(candidate["negative_prompt"], "不要画面文字\n避免额外人物")
 
     def test_worker_handoff_blocks_tempo_grid_until_audio_pipeline_is_mapped(self):

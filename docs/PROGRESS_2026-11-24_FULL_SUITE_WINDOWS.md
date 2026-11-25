@@ -13,7 +13,7 @@ Phase 1 (approval → DAG → VideoTaskWorker, see `PROGRESS_2026-11-24_APPROVAL
 | 2 | `test_product_feedback_import` ×6 | `product_builder.py` BUILDER_VERSION 5 (uncommitted, 17:41) made every build a `draft` and removed the promotion to `testing`, but **no review workflow existed**, while `product_feedback_import` still requires `validated=True, status=testing`. The creator-feedback loop was unreachable for every new product. | real integration gap | Added `LocalProductBuilder.approve_for_testing(store, id, reviewed_by=…, note=…)` + CLI `product_builder approve <id> --reviewed-by NAME`. Writes `review.json` bound to `input_sha256` + `package_sha256`; requires complete `content_readiness`; `publishable` stays false; tampered/mismatched review fails closed; artifact modification invalidates it. Test setUp now builds a draft then approves explicitly. |
 | 3 | `test_autonomous_research` ×1 | Asserted autonomous auto-build is `validated=True` — contradicts the BUILDER_VERSION 5 policy | stale expectation | Now asserts `validated=False`, `status=draft`, `package_integrity=passed` |
 | 4 | `test_feedback_experiments` ×1 | Its allowlisted nested suite is `test_autonomous_research.py` (nested run: 69 tests, 1 failure = #3) | consequence of #3 | none needed |
-| 5 | `test_inspiration` ×5, `test_kinliuren/qimen/ziwei_provider` ×4 | Isolated PoC venvs' `pyvenv.cfg` `home` points at `C:\Users\Administrator\AppData\Local\Programs\Python\Python311`, which no longer exists → interpreter exits non-zero | Windows environment | `scripts/Repair-And-Verify.ps1` re-points `home`/`executable` at the current `py -3.11`; rebuilds the venv with the pinned package (`kinliuren==0.1.2.9`, `qimen-rs==0.2.1`, `ziwei==0.4.1`) only if import still fails. `pyvenv.cfg.bak-20261124` kept. |
+| 5 | `test_inspiration` ×5, `test_kinliuren/qimen/ziwei_provider` ×4 | Isolated PoC venvs' `pyvenv.cfg` `home` points at `%USERPROFILE%\AppData\Local\Programs\Python\Python311`, which no longer exists → interpreter exits non-zero | Windows environment | `scripts/Repair-And-Verify.ps1` re-points `home`/`executable` at the current `py -3.11`; rebuilds the venv with the pinned package (`kinliuren==0.1.2.9`, `qimen-rs==0.2.1`, `ziwei==0.4.1`) only if import still fails. `pyvenv.cfg.bak-20261124` kept. |
 
 No fail-closed, rights, approval or publication gate was weakened.
 
@@ -30,7 +30,7 @@ No fail-closed, rights, approval or publication gate was weakened.
 The cloud assistant can edit files but cannot execute processes on this workstation, and Kiro's plan quota ran out mid-triage. All edited Python files pass `compile()`. **No post-fix test result exists yet.** Run:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File "D:\AI AGENT\Muse\scripts\Repair-And-Verify.ps1"
+powershell -ExecutionPolicy Bypass -File "<MUSE_ROOT>\scripts\Repair-And-Verify.ps1"
 ```
 
 Outputs: `outputs/targeted-tests-20261124.log`, `outputs/full-suite-20261124-after.log`. Expected if the analysis is right: 0 failures / 0 errors (2628 tests incl. 7 new). Report anything else as observed.

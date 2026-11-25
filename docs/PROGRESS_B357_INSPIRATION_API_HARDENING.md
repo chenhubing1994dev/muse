@@ -132,7 +132,7 @@ Portal SQLite 恢复现在要求显式提供 64 位小写十六进制 SHA-256，
 ## B372｜Wasmtime 51.0.0 官方运行时预检
 
 - 核对 Bytecode Alliance 官方 GitHub Release：Wasmtime **51.0.0**（2026-11-20），Release immutable，tag commit 显示 GitHub Verified 签名；Windows x86-64 资产 `wasmtime-v51.0.0-x86_64-windows.zip` 官方 SHA-256 为 `d2f5853a1cded9b1256b45cd57686b6855e69049ef07fd4ad78feb78dfa3aada`。官方发布页还显示 50.0.3 修复了 Windows WASI drive-prefixed path 文件系统沙箱逃逸，因此不选 50.0.0。
-- 已通过 GitHub CLI 下载官方 zip 到 `D:\AI AGENT\Muse\.tools\wasmtime\staging\`；本地 `Get-FileHash SHA256` 与官方 digest 完全一致（12,560,257 bytes）。同步取回 GitHub Release attestation bundle；其 `https://in-toto.io/attestation/release/v0.2` subject 含同一 Windows zip SHA-256。
+- 已通过 GitHub CLI 下载官方 zip 到 `<MUSE_ROOT>\.tools\wasmtime\staging\`；本地 `Get-FileHash SHA256` 与官方 digest 完全一致（12,560,257 bytes）。同步取回 GitHub Release attestation bundle；其 `https://in-toto.io/attestation/release/v0.2` subject 含同一 Windows zip SHA-256。
 - 完整签名验证尚未完成：本机 `gh 2.105.0` 未登录。`gh attestation verify` 默认 SLSA provenance predicate，不适用于本 Release 的 `release/v0.2` predicate；正确验收命令是 `gh release verify-asset v51.0.0 <zip> --repo bytecodealliance/wasmtime`，但当前因 GitHub CLI 未认证而要求 `gh auth login`。未读取/导出任何 token。
 - **未解压、未安装、未执行**暂存二进制；不将“哈希匹配 + bundle 内容读取”冒充签名验证。等待用户在本机完成 GitHub CLI 交互式登录后，再执行 `gh release verify-asset`；通过后才可解压至版本固定目录并开展 Wasmtime host-import/fuel/memory/WASI capability tests。
 - 目前 `execution_enabled=false`、`runtime_adapter_registered=false` 保持；尚无 WASM Worker adapter、无网络/文件系统 host imports、资源配额强制与异常回滚验收。

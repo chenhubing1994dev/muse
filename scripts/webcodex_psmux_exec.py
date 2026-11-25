@@ -17,7 +17,7 @@ MAX_REQUEST_BYTES = 256 * 1024
 MAX_SCRIPT_CHARS = 128 * 1024
 MAX_OUTPUT_CHARS = 32 * 1024
 DEFAULT_SESSION = "muse-dev"
-DEFAULT_PROJECT_ROOT = r"D:\AI AGENT\Muse"
+DEFAULT_PROJECT_ROOT = str(Path(__file__).resolve().parents[1])
 
 
 class PsmuxError(RuntimeError):

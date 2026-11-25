@@ -541,6 +541,10 @@ def preflight_cantonese_tts_runtime(
         raise CantoneseTTSError("isolated Python 3.14 TTS runtime did not pass preflight")
     with _TEMP_DIR_LOCK:
         _PREFLIGHT_CACHE[cache_key] = dict(result)
+        # Keys include package mtime/size and manifest digest, so every reinstall adds
+        # a key; keep only the newest entries to bound long-running process memory.
+        while len(_PREFLIGHT_CACHE) > 16:
+            _PREFLIGHT_CACHE.pop(next(iter(_PREFLIGHT_CACHE)))
     return result
 
 

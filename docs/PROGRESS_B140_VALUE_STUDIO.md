@@ -1,7 +1,7 @@
 # B-140 价值创作台与桌面客户端交付
 
 日期：2026-11-17
-项目：D:\AI AGENT\Muse
+项目：<MUSE_ROOT>
 
 ## 本轮交付
 
@@ -25,7 +25,7 @@
 - Tauri Release：`cargo build --release --offline`（隔离 target `b140-value-studio`）成功，`Finished release profile in 14.70s`。
 - 新 EXE：`desktop/src-tauri/target/release/muse-desktop.exe`，8,693,248 bytes，SHA-256 `AB19E9FF9713E6C2C6DBC05245F79CEB4C990F71ECD5DA7BB7E6363CEBD4C6D5`。
 - 桌面进程 PID 31240，窗口标题 `MUSE · 灵枢调度中心`，Responding=True；后端命令行包含全部新数据路径参数。
-- 桌面快捷方式：`C:\Users\Administrator\Desktop\Muse.lnk` 与 `Muse-Desktop.lnk`，指向 `scripts\Muse-Desktop.ps1`，图标使用新 EXE。
+- 桌面快捷方式：`%USERPROFILE%\Desktop\Muse.lnk` 与 `Muse-Desktop.lnk`，指向 `scripts\Muse-Desktop.ps1`，图标使用新 EXE。
 
 ## 边界与说明
 

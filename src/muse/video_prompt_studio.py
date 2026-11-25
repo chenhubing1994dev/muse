@@ -61,7 +61,8 @@ def _build_worker_handoff_candidate(compiled: Mapping[str, Any]) -> dict[str, An
             "negative_prompt": single_scene_negative,
             "aspect_ratio": storyboard["aspect_ratio"],
             "duration_seconds": float(scenes[0]["duration_seconds"]),
-            "steps": 8,
+            "steps": 20,
+            "resolution_tier": "wan21_480p_master",
         }
     elif not blockers:
         candidate = {
@@ -70,7 +71,8 @@ def _build_worker_handoff_candidate(compiled: Mapping[str, Any]) -> dict[str, An
             "negative_prompt": storyboard["negative_prompt"],
             "aspect_ratio": storyboard["aspect_ratio"],
             "duration_seconds": round(total_duration, 3),
-            "steps": 8,
+            "steps": 20,
+            "resolution_tier": "wan21_480p_master",
             "scenes": [
                 {
                     "prompt": scene["prompt"],

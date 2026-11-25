@@ -1,7 +1,7 @@
 # Herdr / herdr-core capability fusion assessment
 
 Date: 2026-11-21  
-Target: `D:\AI AGENT\Muse`  
+Target: `<MUSE_ROOT>`  
 Decision: adapter-first; do not replace Muse Commander or psmux.
 
 ## Upstream identity and version boundary

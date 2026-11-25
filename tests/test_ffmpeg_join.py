@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from muse.ffmpeg_skill import build_join_command, join_media, plan_join
 
@@ -18,6 +19,12 @@ class FFmpegJoinTests(unittest.TestCase):
         for source in self.sources:
             source.write_bytes(b"source-fixture")
         self.output = self.root / "joined.mp4"
+        self._gpu_db_patch = patch.dict("os.environ", {"MUSE_GPU_RESOURCE_DB": str(self.root / "gpu-resources.sqlite3")})
+        self._gpu_db_patch.start()
+        self.addCleanup(self._gpu_db_patch.stop)
+        self._gpu_probe_patch = patch("muse.gpu_resources.probe_gpu_workloads", return_value={"status": "unavailable"})
+        self._gpu_probe_patch.start()
+        self.addCleanup(self._gpu_probe_patch.stop)
         self.metadata = {
             "format": {"duration": "2.0", "format_name": "mov,mp4"},
             "streams": [

@@ -1,7 +1,7 @@
 # B122 — 高价值短视频实机交付与闭环验收
 
 Date: 2026-11-13  
-Project: D:\AI AGENT\Muse  
+Project: <MUSE_ROOT>  
 Workflow session: wc_sess_TxgUPmUi2DLNxW9R
 
 ## 最终版本 v2

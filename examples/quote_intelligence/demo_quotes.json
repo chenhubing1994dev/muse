@@ -1,0 +1,150 @@
+{
+  "quotes": [
+    {
+      "quote_id": "demo-sgd-a",
+      "supplier": "Demo Supplier A (fictional)",
+      "currency": "SGD",
+      "tax_status": "included",
+      "total_complete": true,
+      "line_items": [
+        {
+          "item_key": "equipment",
+          "description": "Commercial air-conditioning unit",
+          "quantity": "1",
+          "unit": "unit",
+          "unit_price": "2800.00",
+          "source": {
+            "file": "DEMO-A.pdf",
+            "locator": "page 1, row 1",
+            "excerpt": "Commercial air-conditioning unit SGD 2,800.00"
+          }
+        },
+        {
+          "item_key": "installation",
+          "description": "Installation and commissioning",
+          "quantity": "1",
+          "unit": "job",
+          "unit_price": "500.00",
+          "source": {
+            "file": "DEMO-A.pdf",
+            "locator": "page 1, row 2",
+            "excerpt": "Installation and commissioning SGD 500.00"
+          }
+        }
+      ],
+      "adjustments": [
+        {
+          "kind": "fee",
+          "name": "Site visit",
+          "amount": "80.00",
+          "source": {
+            "file": "DEMO-A.pdf",
+            "locator": "page 2, row 1",
+            "excerpt": "Site visit fee SGD 80.00"
+          }
+        }
+      ],
+      "terms": {
+        "warranty_months": 24,
+        "delivery_days": 7,
+        "payment_terms": "30 days",
+        "exclusions": [
+          "Electrical upgrade"
+        ]
+      }
+    },
+    {
+      "quote_id": "demo-sgd-b",
+      "supplier": "Demo Supplier B (fictional)",
+      "currency": "SGD",
+      "tax_status": "included",
+      "total_complete": true,
+      "line_items": [
+        {
+          "item_key": "equipment",
+          "description": "Commercial air-conditioning unit",
+          "quantity": "1",
+          "unit": "unit",
+          "unit_price": "2950.00",
+          "source": {
+            "file": "DEMO-B.pdf",
+            "locator": "page 1, row 1",
+            "excerpt": "Commercial air-conditioning unit SGD 2,950.00"
+          }
+        },
+        {
+          "item_key": "installation",
+          "description": "Installation and commissioning",
+          "quantity": "1",
+          "unit": "job",
+          "unit_price": "420.00",
+          "source": {
+            "file": "DEMO-B.pdf",
+            "locator": "page 1, row 2",
+            "excerpt": "Installation and commissioning SGD 420.00"
+          }
+        }
+      ],
+      "adjustments": [
+        {
+          "kind": "discount",
+          "name": "Project discount",
+          "amount": "100.00",
+          "source": {
+            "file": "DEMO-B.pdf",
+            "locator": "page 2, row 1",
+            "excerpt": "Project discount SGD 100.00"
+          }
+        }
+      ],
+      "terms": {
+        "warranty_months": 12,
+        "delivery_days": 5,
+        "payment_terms": "50% deposit, balance on completion",
+        "exclusions": [
+          "After-hours work"
+        ]
+      }
+    },
+    {
+      "quote_id": "demo-usd-c",
+      "supplier": "Demo Supplier C (fictional)",
+      "currency": "USD",
+      "tax_status": "unknown",
+      "total_complete": true,
+      "line_items": [
+        {
+          "item_key": "equipment",
+          "description": "Commercial air-conditioning unit",
+          "quantity": "1",
+          "unit": "unit",
+          "unit_price": "2100.00",
+          "source": {
+            "file": "DEMO-C.pdf",
+            "locator": "page 1, row 1",
+            "excerpt": "Commercial air-conditioning unit USD 2,100.00"
+          }
+        },
+        {
+          "item_key": "installation",
+          "description": "Installation and commissioning",
+          "quantity": "1",
+          "unit": "job",
+          "unit_price": "350.00",
+          "source": {
+            "file": "DEMO-C.pdf",
+            "locator": "page 1, row 2",
+            "excerpt": "Installation and commissioning USD 350.00"
+          }
+        }
+      ],
+      "adjustments": [],
+      "terms": {
+        "warranty_months": null,
+        "delivery_days": 10,
+        "payment_terms": null,
+        "exclusions": []
+      }
+    }
+  ]
+}

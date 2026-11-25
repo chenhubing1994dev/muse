@@ -145,7 +145,7 @@ def _human_gate(task_database: Path, request: Any) -> dict[str, Any]:
                 or payload.get("_approved") is not True
                 or payload.get("commander_plan_id") != plan_id
                 or payload.get("commander_plan_source") != plan_source
-                or plan_source not in {"model", "safe_fallback"}
+                or plan_source != "model"
                 or not isinstance(approval, dict)
                 or approval.get("approved_by") != request.approved_by
             ):
@@ -356,7 +356,7 @@ class VideoAdmissionRuntime:
                 plan_source = payload.get("commander_plan_source")
                 if (
                     not isinstance(plan_id, str) or not plan_id.strip() or len(plan_id) > 128
-                    or plan_source not in {"model", "safe_fallback"}
+                    or plan_source != "model"
                 ):
                     return {
                         "status": "blocked",
@@ -384,7 +384,7 @@ class VideoAdmissionRuntime:
         plan_source = getattr(plan, "source", None)
         if (
             not isinstance(plan_id, str) or not plan_id.strip() or len(plan_id) > 128
-            or plan_source not in {"model", "safe_fallback"}
+            or plan_source != "model"
         ):
             raise VideoAdmissionBlocked("only a CommanderPlanner-issued plan may receive a video admission grant")
         readiness = self.readiness()
@@ -451,7 +451,7 @@ def build_video_admission_runtime(
             plan_source = getattr(plan, "source", None)
             if (
                 not isinstance(plan_id, str) or not plan_id.strip() or len(plan_id) > 128
-                or plan_source not in {"model", "safe_fallback"}
+                or plan_source != "model"
             ):
                 from muse.video_commander_admission import VideoAdmissionBlocked
                 raise VideoAdmissionBlocked(

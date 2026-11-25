@@ -179,6 +179,7 @@ def _run_optional_business_bridge(
     estimated_cost_minor: int | None,
     create_initiative: bool = False,
     request_video_approval: bool = False,
+    commander_planner: Any = None,
 ) -> dict[str, Any]:
     """Create a candidate, optional draft initiative, and optional Commander approval ticket."""
     if not isinstance(create_initiative, bool):
@@ -344,7 +345,7 @@ def _run_optional_business_bridge(
                 with BusinessOpportunityStore(database_path) as store:
                     approval_result = store.request_video_approval(
                         opportunity_id, initiative_database=paths["initiative_db"],
-                        task_database=paths["progress_db"],
+                        task_database=paths["progress_db"], commander_planner=commander_planner,
                     )
                 approval_ticket = approval_result["ticket"]
             with ResearchKnowledgeStore(paths["knowledge_db"]) as knowledge:
@@ -635,7 +636,7 @@ def _prepare_improvement_dossiers(
                         "src/muse/inspiration_evolution.py",
                         "src/muse/video_publish_package.py",
                     ],
-                    "test_command": "d:\\AI AGENT\\Muse\\.venv\\Scripts\\python.exe -m unittest tests.test_inspiration_evolution tests.test_autonomous_research",
+                    "test_command": "python -m unittest tests.test_inspiration_evolution tests.test_autonomous_research",
                     "human_gate": "1) 审核 improvement_sources 许可与安全性；2) 人工批准提案；3) 交由 ImprovementPatchPlanner 生成带 expected_sha256 的只读补丁 Ticket。",
                 },
                 "sources": [
@@ -953,6 +954,7 @@ def evolve_inspiration_closed_loop(
     estimated_cost_minor: int | None = None,
     create_business_initiative: bool = False,
     request_business_video_approval: bool = False,
+    commander_planner: Any = None,
     create_offline_product: bool = False,
 ) -> dict[str, Any]:
     """Run the inspiration loop; explicit offline productization keeps future research permission intact."""
@@ -964,6 +966,10 @@ def evolve_inspiration_closed_loop(
         raise TypeError("create_offline_product must be a boolean")
     if request_business_video_approval and not create_business_initiative:
         raise ValueError("request_business_video_approval requires create_business_initiative=True")
+    if request_business_video_approval:
+        from muse.commander_planner import CommanderPlanner
+        if not isinstance(commander_planner, CommanderPlanner) or commander_planner.strict_model is not True:
+            raise TypeError("video approval requires an explicitly injected strict CommanderPlanner")
     root = Path(workspace).resolve()
     paths = _store_paths(root)
     for key in ("knowledge_db", "evidence_db", "progress_db", "reminder_db", "improvement_db", "philosophy_db", "initiative_db"):
@@ -1047,6 +1053,7 @@ def evolve_inspiration_closed_loop(
             workspace=root,
             report_dir=paths["report_dir"],
             memory_db=paths["memory_db"],
+            commander_planner=commander_planner,
             conversation_db=paths["conversation_db"],
             search=search,
             reader=reader,
@@ -1242,6 +1249,7 @@ def evolve_inspiration_closed_loop(
         estimated_cost_minor=estimated_cost_minor,
         create_initiative=create_business_initiative,
         request_video_approval=request_business_video_approval,
+        commander_planner=commander_planner,
     )
     with ResearchKnowledgeStore(paths["knowledge_db"]) as knowledge:
         latest = knowledge.get_node(target_node["id"]) or target_node

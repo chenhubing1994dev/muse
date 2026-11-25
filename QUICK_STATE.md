@@ -5,14 +5,14 @@
 
 ## 铁律
 - 不调用/委派/探测任何 Coding Agent、子代理或相关 MCP/扩展；不启动外部 AI CLI。
-- 只在 `D:\AI AGENT\Muse` 内操作；不删除文件；不读/打印/修改 `.env` 与含密钥配置（config/muse.toml、config/model-runtime.json、config/opencode.local.jsonc）。
+- 只在 `<MUSE_ROOT>` 内操作；不删除文件；不读/打印/修改 `.env` 与含密钥配置（config/muse.toml、config/model-runtime.json、config/opencode.local.jsonc）。
 - 联网安装依赖前先征得同意。已有文件首次修改前原件备份到 `.qw-backups/20261125/<路径>.orig`（SHA-256：MANIFEST.txt）。
 
 ## 环境限制与验证方式
 - AWS Quick 无终端；设备端 Python 禁止子进程/sys.path/importlib。
 - 本轮新增“云端沙箱拼装执行”：把相关模块拼入同一命名空间、用忠实 Worker 替身，真实执行新代码与项目自带测试（结果见下）。**真机复验仍需用户运行一条命令**。
 - 并发风险：另一 Agent 今天持续修改 unified_runtime / video_* / autonomous_runtime / research_*；AWS Quick 不改这些文件（task_queue 仅加一行增量索引）。
-- **第 1 次真机运行（18:07）**：latest.log 仅 `No pyvenv.cfg file` ×2 → `.venv\Scripts\python.exe`（uv 0.13 启动器）启动即失败，项目代码一行未执行；pyvenv.cfg 存在（home=C:\Users\Administrator\AppData\Local\Programs\Python\Python311，3.11.9）。根因在环境不在代码；Muse-Start/Stop、muse-supervisor.cmd、两个计划任务同样受影响。
+- **第 1 次真机运行（18:07）**：latest.log 仅 `No pyvenv.cfg file` ×2 → `.venv\Scripts\python.exe`（uv 0.13 启动器）启动即失败，项目代码一行未执行；pyvenv.cfg 存在（home=%USERPROFILE%\AppData\Local\Programs\Python\Python311，3.11.9）。根因在环境不在代码；Muse-Start/Stop、muse-supervisor.cmd、两个计划任务同样受影响。
 - 已处理：Resolve-MusePython.ps1（真实探测 + 自动回退 + 同版本复用 venv site-packages）、Repair-MuseVenv.ps1（默认诊断，`-Apply` 备份后离线 `venv --upgrade`）、run_full_diag.ps1 / run_smoke.bat 改用解析器、Muse-Start.ps1 启动前探测并提示修复。
 
 ## 主流程
@@ -94,7 +94,7 @@
 
 ## 下一步
 0. 双击 `1_双击一键验收并保存核心代码.bat`，然后让 AWS Quick 读取 `reports/autopilot/latest.json`
-1. 用户运行：`powershell -NoProfile -ExecutionPolicy Bypass -File "D:\AI AGENT\Muse\scripts\run_full_diag.ps1"`（自动回退解释器；日志首部 `[Muse] probe` 行记录每个候选解释器的探测结果）；可选先 `Repair-MuseVenv.ps1` 诊断 / `-Apply` 修复
+1. 用户运行：`powershell -NoProfile -ExecutionPolicy Bypass -File "<MUSE_ROOT>\scripts\run_full_diag.ps1"`（自动回退解释器；日志首部 `[Muse] probe` 行记录每个候选解释器的探测结果）；可选先 `Repair-MuseVenv.ps1` 诊断 / `-Apply` 修复
 2. 读取 latest.log / diag_matrix.json：FAIL 按堆栈+局部变量快照根因修复，并全库排查同类写法 → 重跑至全 PASS；再跑 `-FullTests`
 3. 根据孤岛接入决策实施；补 ⚠️ CLI 行为测试
 
@@ -104,3 +104,19 @@
 - B394 签名进化门 + 受保护面 + 原子回滚 + 熔断/背压/断路器 + 插件 Capability Broker；B395 十维意识内核 + 记忆生命周期；B396 研究闭环 + 玄枢融合 + 反馈回传；B397 一键电影级视频工坊算法引擎；B398 主控台 7 个直达按钮、Omega API、安全测试套件、孤岛清零（1 接线 / 12 归档）。
 - 新增测试 60/60（云端沙箱）。模块数 231 → 243。详见 `docs/PROGRESS_B394_B398_OMEGA.md`。
 - 下一步：双击 `1_双击一键验收并保存核心代码.bat`（会跑全仓测试 + 新套件 + 界面构建并在本机分支提交）。
+
+## Stage 2 — Tauri v2 零配置客户端 + 安装包 + GitHub 周更（2026-11-25 云端落盘）
+
+| 模块 | 文件 | 状态 |
+|---|---|---|
+| 1 同源 Sidecar | `src/muse_sidecar_main.py`, `scripts/build_sidecar.py` | 已写；网关自检（存根后端）11/11 通过；真机冻结由 2 号 bat 执行 |
+| 2 Rust 客户端 | `src-tauri/{Cargo.toml,build.rs,tauri.conf.json,capabilities/default.json}`, `src-tauri/src/{main,lib,sidecar,hardware,tray,backup}.rs`, `src-tauri/icons/*`, `client-splash/*` | 已写；首次 cargo 编译由 2 号 bat / CI 执行 |
+| 3 零泄漏防火墙 | `scripts/pre_github_sync_audit.py`, `scripts/sanitize_local_paths.py`, `.gitignore`, `.gitattributes` | 已在设备上以 .git/index 解析模式运行（见下） |
+| 4 GitHub Actions | `.github/workflows/weekly-cross-platform-release.yml`, `ci-pr-verify.yml`；旧 `scheduled-release.yml` 改为仅手动 | 已写 |
+| 5 双击按钮 | `2_双击全自动生成exe安装包并同步GitHub周更.bat`, `scripts/autopilot_stage2_client_and_github.py` | 已写（CRLF、无 BOM、py -3.11） |
+| B396 玄枢兜底 | `src/muse/xuanshu_symbolic_fallback.py`（纯 Python 干支/宫位符号推演），`xuanshu_fusion.fuse(symbolic_fallback=True)`，`omega_api` 默认启用 | 已写；逻辑在云端执行验证 |
+
+- 运行时数据：Windows `%LOCALAPPDATA%\Muse`、macOS `~/Library/Application Support/com.muse.consciousness`、Linux `~/.local/share/muse`；`MUSE_PORTABLE` 标记 → `./muse-data`。
+- 会话鉴权：Rust 生成 64 位十六进制会话令牌 + 一次性 nonce（经环境变量传入）→ `/__muse/bootstrap` 设置 HttpOnly/SameSite=Strict Cookie；`/api/*` 由网关同源代理到内部 status API（内部令牌不出进程）。
+- 进程守护：Windows 自身进入 Job Object（KILL_ON_JOB_CLOSE）+ CREATE_NO_WINDOW；Unix 进程组 + PDEATHSIG；引擎监视 `--parent-pid`；退出前 `/__muse/shutdown` 执行 WAL checkpoint。
+- 下一步：双击 `2_双击全自动生成exe安装包并同步GitHub周更.bat`，读 `reports/autopilot/stage2_client_latest.md`。

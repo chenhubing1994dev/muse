@@ -11,6 +11,7 @@ import json
 import re
 import shutil
 import subprocess
+import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable, Sequence
@@ -229,6 +230,7 @@ def transcode_video(
     scale: str | None = None,
     execute: bool = False,
     runner: Callable = subprocess.run,
+    gpu_resource_db: str | Path | None = None,
 ) -> dict[str, object]:
     """Plan by default; execute only when explicitly requested."""
     command = build_transcode_command(
@@ -238,11 +240,29 @@ def transcode_video(
     if not execute:
         return {"status": "planned", "command": command, "hardware_encoder": _CODEC_ENCODERS[codec]}
     try:
-        result = runner(command, capture_output=True, text=True, timeout=3600, check=False)
+        from muse.gpu_resources import GpuLeaseSession, GpuResourceCoordinator, probe_gpu_workloads
+        workspace = Path(__file__).resolve().parents[2]
+        database = (
+            Path(gpu_resource_db).expanduser()
+            if gpu_resource_db is not None
+            else workspace / "data" / "gpu-resources.sqlite3"
+        )
+        coordinator = GpuResourceCoordinator(database)
+        with GpuLeaseSession(
+            coordinator, "media-transcode-" + uuid.uuid4().hex[:16],
+            owner_kind="video_encoding", model_probe=lambda: probe_gpu_workloads(workspace),
+        ):
+            result = runner(
+                command, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                timeout=3600, check=False,
+            )
     except subprocess.TimeoutExpired:
         return {"status": "timed_out", "timeout_seconds": 3600, "output": str(output_path)}
     except OSError as exc:
         return {"status": "failed", "error": str(exc), "output": str(output_path)}
+    except RuntimeError as exc:
+        return {"status": "blocked", "stage": "gpu_resource_lock", "reason": str(exc),
+                "output": str(output_path)}
     stderr = (result.stderr or "").splitlines()
     return {
         "status": "completed" if result.returncode == 0 else "failed",
@@ -280,11 +300,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not ffmpeg:
         print(json.dumps({"status": "missing", "error": "FFmpeg was not detected."}, indent=2))
         return 2
+    ffprobe = next((tool.executable for tool in inventory.tools if tool.tool_id == "ffprobe"), None)
+    if not ffprobe:
+        print(json.dumps({"status": "blocked", "reason": "FFprobe is required for real encoder capability verification"}, indent=2))
+        return 2
+    from muse.video_capabilities import probe_ffmpeg_encoder
+    required_encoder = _CODEC_ENCODERS[args.codec]
+    encoder_capability = probe_ffmpeg_encoder(ffmpeg, ffprobe, required_encoder)
+    if encoder_capability.get("capability", {}).get("status") != "available":
+        print(json.dumps({"status": "blocked", "reason": "requested AMD AMF encoder failed real MP4/FFprobe/full-decode validation",
+                          "encoder_capability": encoder_capability}, ensure_ascii=False, indent=2))
+        return 2
     result = transcode_video(
         args.input, args.output, ffmpeg_path=ffmpeg,
-        available_encoders=inventory.hardware_encoders,
+        available_encoders={required_encoder},
         codec=args.codec, bitrate=args.bitrate, scale=args.scale, execute=args.execute,
     )
+    result["encoder_capability"] = encoder_capability
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0 if result["status"] in {"planned", "completed"} else 1
 

@@ -59,7 +59,8 @@ def verify_visual_review_evidence(
     manifest_path = release / "manifest.json"
     report_path = release / "release-quality-report.json"
     sheet_path = release / "contact-sheet.png"
-    for path in (release, manifest_path, report_path, sheet_path):
+    visual_quality_path = release / "visual-quality-report.json"
+    for path in (release, manifest_path, report_path, sheet_path, visual_quality_path):
         if path.is_symlink():
             raise VisualReviewEvidenceError("visual review evidence path is unsafe")
     if not all(path.is_file() for path in (manifest_path, report_path, sheet_path)):
@@ -93,6 +94,30 @@ def verify_visual_review_evidence(
     sheet_hash = sha256_file(sheet_path)
     report_hash = sha256_file(report_path)
     sheet_bytes = sheet_path.read_bytes()
+    visual_quality = None
+    visual_quality_hash = None
+    if isinstance(files, dict) and "visual-quality-report.json" in files:
+        if (visual_quality_path.is_symlink() or not visual_quality_path.is_file()
+                or visual_quality_path.stat().st_size > 2 * 1024 * 1024):
+            raise VisualReviewEvidenceError("visual quality report is missing, unsafe or oversized")
+        try:
+            visual_quality = json.loads(visual_quality_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise VisualReviewEvidenceError("visual quality report is invalid") from exc
+        visual_quality_hash = sha256_file(visual_quality_path)
+        anomaly_check = checks.get("visual_anomaly_review")
+        diagnostic_summary = anomaly_check.get("visual_quality_diagnostics") if isinstance(anomaly_check, dict) else None
+        if (not isinstance(visual_quality, dict)
+                or visual_quality.get("schema_version") != 1
+                or visual_quality.get("semantic_recognition") is not False
+                or visual_quality.get("status") not in {"observed", "unavailable"}
+                or not isinstance(diagnostic_summary, dict)
+                or files.get("visual-quality-report.json") != visual_quality_hash
+                or diagnostic_summary.get("sha256") != visual_quality_hash
+                or diagnostic_summary.get("report") != "visual-quality-report.json"
+                or diagnostic_summary.get("status") != visual_quality.get("status")
+                or diagnostic_summary.get("semantic_recognition") is not False):
+            raise VisualReviewEvidenceError("visual quality report is not bound to release evidence")
     if (manifest.get("package_type") != "muse_manual_platform_publish_pack"
             or manifest.get("initiative_id") != initiative_id
             or manifest.get("version_id") != version_id
@@ -117,6 +142,8 @@ def verify_visual_review_evidence(
         "artifact_sha256": {"video.mp4": video_hash, "contact-sheet.png": sheet_hash},
         "contact_sheet_path": str(sheet_path),
         "release_manifest_sha256": sha256_file(manifest_path),
+        "visual_quality": visual_quality,
+        "visual_quality_report_sha256": visual_quality_hash,
     }
 
 

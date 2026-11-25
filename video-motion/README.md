@@ -15,7 +15,7 @@ Remotion is Muse's deterministic motion-graphics adapter. VideoProductBuilder in
 Use Node.js 24 (the Muse Runner currently uses Node 24.20.0).
 
 PowerShell commands:
-- cd "D:\AI AGENT\Muse\video-motion"
+- cd "<MUSE_ROOT>\video-motion"
 - npm install
 - npm run check
 - npm run studio

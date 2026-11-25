@@ -37,8 +37,8 @@ from muse.video_publish_package import (
     build_publish_package_with_optional_generated_contact_sheet,
 )
 
-LEMO_PYTHON = Path(r"C:\Users\Administrator\lemo-opuscar\.venv\Scripts\python.exe")
-PY314_EXEC = Path(r"C:\Users\Administrator\AppData\Local\Programs\Python\Python314\python.exe")
+LEMO_PYTHON = Path(os.environ.get("MUSE_LEMO_PYTHON") or (Path.home() / "lemo-opuscar" / ".venv" / "Scripts" / "python.exe"))
+PY314_EXEC = Path(os.environ.get("MUSE_PY314_EXEC") or (Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local")) / "Programs" / "Python" / "Python314" / "python.exe"))
 SAMPLE_RATE = 48_000
 
 

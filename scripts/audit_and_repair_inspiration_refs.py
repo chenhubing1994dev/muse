@@ -1,6 +1,6 @@
 """Audit (read-only, default) or repair temp-path inspiration_refs in the initiatives store.
 
-Examples (PowerShell, from D:\\AI AGENT\\Muse):
+Examples (PowerShell, from the Muse project root):
   .venv\\Scripts\\python.exe scripts\\audit_and_repair_inspiration_refs.py
   .venv\\Scripts\\python.exe scripts\\audit_and_repair_inspiration_refs.py --apply-on-db tmp\\clone.sqlite3 --dry-run
   .venv\\Scripts\\python.exe scripts\\audit_and_repair_inspiration_refs.py --apply-on-db data\\initiatives\\muse.sqlite3 ^

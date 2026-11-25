@@ -124,7 +124,10 @@ class VideoDashboardIntegrationTests(unittest.TestCase):
                 self.assertEqual(hashlib.sha256(archive_bytes).hexdigest(), built["package_sha256"])
                 with zipfile.ZipFile(io.BytesIO(archive_bytes)) as archive:
                     self.assertIsNone(archive.testzip())
-                    self.assertEqual(set(archive.namelist()), {"README.md", "storyboard.json", "qa-report.json", "video.mp4"})
+                    self.assertEqual(set(archive.namelist()), {
+                        "README.md", "storyboard.json", "qa-report.json",
+                        "visual-quality-report.json", "video.mp4",
+                    })
                 with urlopen(Request(base + product["video_path"], headers=headers), timeout=5) as response:
                     video_bytes = response.read()
                     self.assertEqual(response.headers.get_content_type(), "video/mp4")

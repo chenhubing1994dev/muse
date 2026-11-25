@@ -139,6 +139,24 @@ class VideoPromptComposerTests(unittest.TestCase):
             self.assertIn("HDR", scene["prompt"])
         self.assertEqual(result["model_guidance"]["capture_profile"], "phone_realism")
 
+    def test_cinematic_profile_applies_visual_quality_direction_and_default_negative_prompt(self):
+        result = compile_video_prompt(self.make_spec())
+        self.assertEqual(result["video_prompt_spec_version"], 2)
+        self.assertIn("电影摄影锁定", result["master_prompt"])
+        self.assertIn("时序稳定", result["master_prompt"])
+        for scene in result["storyboard"]["scenes"]:
+            self.assertIn("一个主要动作", scene["prompt"])
+            self.assertIn("光影", scene["prompt"])
+        negative = result["storyboard"]["negative_prompt"]
+        self.assertIn("inconsistent identity", negative)
+        self.assertIn("extra limbs or fingers", negative)
+        self.assertIn("temporal jitter", negative)
+
+    def test_explicit_negative_prompt_overrides_cinematic_default(self):
+        spec = replace(self.make_spec(), negative_prompt="avoid neon text and unwanted logos")
+        result = compile_video_prompt(spec)
+        self.assertEqual(result["storyboard"]["negative_prompt"], "avoid neon text and unwanted logos")
+
     def test_rejects_unknown_capture_profile(self) -> None:
         with self.assertRaisesRegex(ValueError, "capture_profile"):
             replace(self.make_spec(), capture_profile="unreal_camera")

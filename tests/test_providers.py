@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from muse.providers import (
     ChatRequest, ChatResponse, LMStudioAdapter, ProviderDescriptor, ProviderRegistry,
 )
-from muse.provider_policy import ProviderBudget
+from muse.provider_policy import PaidCloudExecutionDisabled, ProviderBudget
 
 
 def fresh_budget(provider_id: str, remaining: int = 3) -> ProviderBudget:
@@ -61,7 +61,7 @@ class ProviderAdapterTests(unittest.TestCase):
         registry = ProviderRegistry()
         registry.register(FakeCloudAdapter())
         request = ChatRequest(messages=[{"role": "user", "content": "hello"}])
-        with self.assertRaises(ValueError):
+        with self.assertRaises(PaidCloudExecutionDisabled):
             registry.chat("verified-cloud", request)
         unknown = ProviderBudget("verified-cloud", True, True, False, None)
         from muse.provider_policy import NoFreeProviderAvailable
@@ -163,6 +163,29 @@ class ProviderAdapterTests(unittest.TestCase):
             with self.assertRaises(LookupError):
                 restarted.select_for_task({"research"}, data_class="public", budgets={"persisted-broken": fresh_budget("persisted-broken")})
             restarted.close()
+
+    def test_paid_cloud_is_blocked_by_default_even_if_adapter_skips_quota_flag(self) -> None:
+        class PaidCloud:
+            descriptor = ProviderDescriptor("paid-cloud", "Paid Cloud", is_local=False,
+                requires_verified_free_quota=False, capabilities=frozenset({"chat"}), data_policy="no_training")
+            def chat(self, request: ChatRequest) -> ChatResponse:
+                return ChatResponse("paid-cloud", "paid-model", "should not run")
+        registry = ProviderRegistry()
+        registry.register(PaidCloud())
+        with self.assertRaises(PaidCloudExecutionDisabled):
+            registry.chat("paid-cloud", ChatRequest(messages=[{"role": "user", "content": "hello"}]))
+
+    def test_paid_cloud_requires_explicit_registry_opt_in(self) -> None:
+        class PaidCloud:
+            descriptor = ProviderDescriptor("paid-cloud", "Paid Cloud", is_local=False,
+                requires_verified_free_quota=False, capabilities=frozenset({"chat"}), data_policy="no_training")
+            def chat(self, request: ChatRequest) -> ChatResponse:
+                return ChatResponse("paid-cloud", "paid-model", "explicitly enabled")
+        registry = ProviderRegistry(allow_paid_cloud=True)
+        registry.register(PaidCloud())
+        response, remaining = registry.chat("paid-cloud", ChatRequest(messages=[{"role": "user", "content": "hello"}]))
+        self.assertEqual(response.content, "explicitly enabled")
+        self.assertIsNone(remaining)
 
 if __name__ == "__main__":
     unittest.main()

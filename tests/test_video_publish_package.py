@@ -92,6 +92,70 @@ class VideoPublishPackageTests(unittest.TestCase):
         (self.source_dir / "generation.json").write_text(json.dumps(generation), encoding="utf-8")
         return generation
 
+    def test_release_quality_report_blocks_preview_resolution_below_720p(self):
+        from muse.video_publish_package import _release_quality_report
+        video = self.root / "preview.mp4"
+        subtitles = self.root / "preview.srt"
+        video.write_bytes(self.video.read_bytes())
+        subtitles.write_text("1\\n00:00:00,000 --> 00:00:01,000\\npreview\\n", encoding="utf-8")
+        report = _release_quality_report(
+            product_manifest={"video_metadata": {"width": 512, "height": 288}, "human_reviews": {}, "files": {}},
+            qa_warnings=[], subtitles=subtitles, video=video,
+            initiative_id="a" * 32, version_id="b" * 20,
+        )
+        resolution = report["checks"]["delivery_resolution"]
+        self.assertEqual(resolution["status"], "blocked")
+        self.assertEqual(resolution["actual_short_edge_px"], 288)
+        self.assertTrue(resolution["requires_real_upscale_not_metadata_only"])
+        self.assertIn("delivery_resolution", report["blocking_items"])
+        self.assertEqual(report["checks"]["ai_upscale_provenance"]["status"], "blocked")
+        self.assertIn("ai_upscale_provenance", report["blocking_items"])
+
+    def test_metadata_only_720p_is_blocked_without_ai_upscale_provenance(self):
+        from muse.video_publish_package import _release_quality_report
+        video = self.root / "metadata-only.mp4"
+        subtitles = self.root / "metadata-only.srt"
+        video.write_bytes(self.video.read_bytes())
+        subtitles.write_text("1\\n00:00:00,000 --> 00:00:01,000\\npreview\\n", encoding="utf-8")
+        video_hash = hashlib.sha256(video.read_bytes()).hexdigest()
+        report = _release_quality_report(
+            product_manifest={
+                "video_metadata": {"width": 1280, "height": 720},
+                "human_reviews": {}, "files": {"video.mp4": video_hash},
+            },
+            qa_warnings=[], subtitles=subtitles, video=video,
+            initiative_id="c" * 32, version_id="d" * 20,
+        )
+        self.assertEqual(report["checks"]["delivery_resolution"]["status"], "passed")
+        self.assertEqual(report["checks"]["ai_upscale_provenance"]["status"], "blocked")
+        self.assertIn("ai_upscale_provenance", report["blocking_items"])
+
+    def test_verified_ai_upscale_provenance_is_hash_and_dimension_bound(self):
+        from muse.video_publish_package import _release_quality_report
+        video = self.root / "upscaled.mp4"
+        subtitles = self.root / "upscaled.srt"
+        video.write_bytes(self.video.read_bytes())
+        subtitles.write_text("1\\n00:00:00,000 --> 00:00:01,000\\nupscaled\\n", encoding="utf-8")
+        video_hash = hashlib.sha256(video.read_bytes()).hexdigest()
+        report = _release_quality_report(
+            product_manifest={
+                "video_metadata": {"width": 1664, "height": 960},
+                "human_reviews": {}, "files": {"video.mp4": video_hash},
+                "upscale": {
+                    "status": "verified", "method": "ai_super_resolution",
+                    "engine": "realesrgan-ncnn-vulkan", "model": "realesrgan-x4plus",
+                    "scale_factor": 2.0, "source_width": 832, "source_height": 480,
+                    "output_width": 1664, "output_height": 960,
+                    "source_video_sha256": "a" * 64, "output_video_sha256": video_hash,
+                },
+            },
+            qa_warnings=[], subtitles=subtitles, video=video,
+            initiative_id="e" * 32, version_id="f" * 20,
+        )
+        self.assertEqual(report["checks"]["delivery_resolution"]["status"], "passed")
+        self.assertEqual(report["checks"]["ai_upscale_provenance"]["status"], "passed")
+        self.assertNotIn("ai_upscale_provenance", report["blocking_items"])
+
     def test_builds_four_platform_drafts_and_verified_package(self):
         self._create_generation()
         result = build_publish_package(self.root, self.source_dir)
@@ -116,6 +180,7 @@ class VideoPublishPackageTests(unittest.TestCase):
             names = set(archive.namelist())
             self.assertIn("qa-report.json", names)
             self.assertIn("release-quality-report.json", names)
+            self.assertIn("visual-quality-report.json", names)
             self.assertIn("subtitles.srt", names)
             self.assertIn("platform-drafts/youtube_shorts.json", names)
         manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
@@ -126,6 +191,12 @@ class VideoPublishPackageTests(unittest.TestCase):
         self.assertFalse(quality_report["can_publish"])
         self.assertTrue(quality_report["technical_qa_is_not_release_approval"])
         self.assertEqual(quality_report["checks"]["technical_quality"]["status"], "passed")
+        visual_diagnostics = quality_report["checks"]["visual_anomaly_review"]["visual_quality_diagnostics"]
+        self.assertIn(visual_diagnostics["status"], {"observed", "unavailable"})
+        self.assertEqual(visual_diagnostics["report"], "visual-quality-report.json")
+        visual_report = json.loads((out / "visual-quality-report.json").read_text(encoding="utf-8"))
+        self.assertEqual(visual_diagnostics["status"], visual_report["status"])
+        self.assertEqual(visual_diagnostics["sha256"], hashlib.sha256((out / "visual-quality-report.json").read_bytes()).hexdigest())
         self.assertEqual(quality_report["checks"]["subtitle_review"]["status"], "not_recorded")
         self.assertIn("editorial_and_fact_review", quality_report["blocking_items"])
         self.assertIn("visual_and_model_rights_review", quality_report["blocking_items"])
@@ -145,10 +216,33 @@ class VideoPublishPackageTests(unittest.TestCase):
         self.assertEqual(visual["status"], "available")
         self.assertEqual(visual["sha256"], hashlib.sha256(contact.read_bytes()).hexdigest())
         self.assertTrue(visual["human_review_required"])
+        self.assertIn("visual_quality_diagnostics", report["checks"]["visual_anomaly_review"])
         self.assertEqual(report["checks"]["visual_content_review"]["status"], "not_recorded")
         self.assertFalse(report["can_publish"])
         with zipfile.ZipFile(out / "publish-package.zip") as archive:
             self.assertIn("contact-sheet.png", archive.namelist())
+
+    def test_visual_quality_report_is_hash_bound_to_human_review_evidence(self):
+        from muse.video_human_review import VisualReviewEvidenceError, verify_visual_review_evidence
+        generation = self._create_generation()
+        product = generation["product"]
+        product_dir = self.root / product["relative_path"]
+        contact = self.root / "data" / "prometheus" / "sample" / "contact.png"
+        contact.write_bytes(
+            b"\x89PNG\r\n\x1a\n" + (13).to_bytes(4, "big") + b"IHDR"
+            + (800).to_bytes(4, "big") + (600).to_bytes(4, "big") + b"fixture"
+        )
+        result = build_publish_package(
+            self.root, self.source_dir, output_dir=product_dir / "publish-package-v1",
+            contact_sheet="data/prometheus/sample/contact.png",
+        )
+        evidence = verify_visual_review_evidence(product_dir, product["initiative_id"], product["version_id"], self.video)
+        report_path = self.root / result["output_dir"] / "visual-quality-report.json"
+        self.assertEqual(evidence["visual_quality_report_sha256"], hashlib.sha256(report_path.read_bytes()).hexdigest())
+        self.assertIn(evidence["visual_quality"]["status"], {"observed", "unavailable"})
+        report_path.write_text(report_path.read_text(encoding="utf-8") + " ", encoding="utf-8")
+        with self.assertRaises(VisualReviewEvidenceError):
+            verify_visual_review_evidence(product_dir, product["initiative_id"], product["version_id"], self.video)
 
     def test_prior_package_visual_review_is_not_inherited_by_next_release_package(self):
         from muse.video_human_review import (

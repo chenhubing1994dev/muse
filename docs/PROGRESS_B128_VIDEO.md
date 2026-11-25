@@ -1,7 +1,7 @@
 # B-128 Muse 视频生产线：真实 Wan 生成与 AMD VAE 解码稳定性
 
 日期：2026-11-14  
-项目：`D:\AI AGENT\Muse`
+项目：`<MUSE_ROOT>`
 
 ## 本轮目标
 

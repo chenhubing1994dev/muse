@@ -12,5 +12,5 @@
 Option Explicit
 Dim sh
 Set sh = CreateObject("WScript.Shell")
-sh.Run "cmd.exe /c ""D:\AI AGENT\Muse\scripts\muse-supervisor.cmd""", 0, True
+sh.Run "cmd.exe /c """ & CreateObject("Scripting.FileSystemObject").GetParentFolderName(WScript.ScriptFullName) & "\muse-supervisor.cmd""", 0, True
 Set sh = Nothing

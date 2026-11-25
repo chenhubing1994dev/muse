@@ -39,7 +39,7 @@ Muse 是本机自主研究、知识积累、灵感创造与安全进化系统：
 ### P2 — Research Wiki、长期记忆与哲学经验库
 
 - 延续 B-017 / B-018 / B-028：ResearchKnowledgeStore 作为来源、Idea、Experiment、Claim、Decision、Failure 的关联图谱；支持/反驳/相关/矛盾/替代/测试/解决缺口关系。
-- Obsidian Vault (D:\AI AGENT\Muse\vault) 保持 SQLite 权威源与安全 Markdown 镜像。B-066 已完成显式节点选择的单向 create-only export；B-067 已完成只读哈希/来源更新时间审计；B-068 已完成来源正文哈希/citation ID 校验与双来源差异候选持久化；B-069 已完成反证候选、替代解释 Idea、alternative 边与失败经验展示。
+- Obsidian Vault (<MUSE_ROOT>\vault) 保持 SQLite 权威源与安全 Markdown 镜像。B-066 已完成显式节点选择的单向 create-only export；B-067 已完成只读哈希/来源更新时间审计；B-068 已完成来源正文哈希/citation ID 校验与双来源差异候选持久化；B-069 已完成反证候选、替代解释 Idea、alternative 边与失败经验展示。
 - 下一步 B-070：改进提案→人工批准→测试→Reviewer→回滚闭环，并为每个候选提供逐条审查记录。逐笔 diff、人工编辑批准回流、冲突解决和双向同步仍未实现。
 - 把成功、失败、偏差、用户反馈、旧哲学原则修订与新灵感写入长期经验；允许原则被细化、降级或替换，但保留来源、版本和审查轨迹。
 - 语义检索、低频 consolidation/Reflection、记忆过期与冲突治理按隐私与可审计性推进。

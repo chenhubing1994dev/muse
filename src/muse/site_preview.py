@@ -103,18 +103,21 @@ def build_preview(output: Path, workspace: Path) -> dict:
     shutil.copy2(kinetic / "social-copy.md", output / "social-copy.md")
 
     (output / "robots.txt").write_text("User-agent: *\nDisallow: /\n", encoding="utf-8")
+    launch_root = output.relative_to(workspace).as_posix()
     (output / "README.md").write_text(
         "# Muse Static Site Preview\n\n"
         "- Pages: home/showcase, products, portfolio sample.\n"
-        "- Local static assets only; no backend, analytics, payment processing or customer submission endpoint.\n"
-        "- Inquiry form only prepares a local text draft and copies it when browser permission allows.\n"
+        "- The inquiry form submits consented requests to the local POST /api/leads endpoint.\n"
+        "- Start the local loopback-only lead server from the Muse project root: `py -3.11 scripts/muse-lead-server.py --static-root "
+        + launch_root + " --port 8765`.\n"
+        "- Leads are stored in the configured local SQLite database (default: data/commerce/leads.sqlite3) with a 90-day retention period.\n"
+        "- No analytics, payment processing, public deployment or third-party transmission is enabled.\n"
         "- robots.txt disallows crawling; all pages remain a preview and must not be treated as a public launch.\n"
         "- Font: Noto Sans CJK HK under SIL OFL 1.1; the rendered MP4 is included. Font file/license are bundled in the video delivery package, not duplicated in this site ZIP.\n"
-        "- Before deployment: complete editorial/source review, review legal/privacy copy, configure an owner-controlled contact channel, confirm domain/HTTPS, and deliberately remove the crawl block only after approval.\n"
+        "- Before deployment: complete editorial/source and commercial-rights review, review legal/privacy copy, configure an owner-controlled contact channel, confirm domain/HTTPS, access controls and monitoring, and deliberately remove the crawl block only after approval.\n"
         "- Payments are not enabled; no price is represented as a live offer.\n",
         encoding="utf-8",
     )
-
     payload = sorted(path for path in output.rglob("*") if path.is_file())
     for page in (output / "index.html", output / "products.html", output / "portfolio.html"):
         for reference in local_html_references(page.read_text(encoding="utf-8")):

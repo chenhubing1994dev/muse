@@ -7,7 +7,7 @@ Muse 原创 45 秒竖屏短片工程。
 在 Windows PowerShell 中执行：
 
 ~~~powershell
-cd "D:\AI AGENT\Muse\ember-fire"
+cd "<MUSE_ROOT>\ember-fire"
 powershell -ExecutionPolicy Bypass -File .\build.ps1
 ~~~
 

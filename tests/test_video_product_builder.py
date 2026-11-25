@@ -306,8 +306,11 @@ class VideoProductBuilderTests(unittest.TestCase):
     def test_builds_ai_generated_video_product_from_local_wan_engine(self):
         def fake_generate(prompt, output, **kwargs):
             output.write_bytes(bytes.fromhex("000000186674797069736f6d66697874757265"))
-            return {"status": "completed", "prompt_id": "prompt-123", "model": "Wan 2.1 T2V 1.3B",                    "seed": kwargs["seed"], "aspect_ratio": kwargs["aspect_ratio"], "fps": 12,
-                    "duration_seconds": 2.0, "frames": 25, "width": 512, "height": 288,
+            self.assertEqual(kwargs["duration_seconds"], 5.0)
+            self.assertEqual(kwargs["steps"], 20)
+            return {"status": "completed", "prompt_id": "prompt-123", "model": "Wan 2.1 T2V 1.3B",
+                    "seed": kwargs["seed"], "aspect_ratio": kwargs["aspect_ratio"], "fps": 16,
+                    "duration_seconds": 5.0, "frames": 81, "width": 832, "height": 480,
                     "steps": kwargs["steps"], "bytes": output.stat().st_size, "output": str(output)}
         recipe_sha256 = "a" * 64
         with patch("muse.wan_video.generate_wan21_t2v", side_effect=fake_generate):
@@ -319,13 +322,16 @@ class VideoProductBuilderTests(unittest.TestCase):
         manifest = json.loads((product_dir / "manifest.json").read_text(encoding="utf-8"))
         storyboard = json.loads((product_dir / "storyboard.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["execution"]["ai_generation"], "completed")
+        self.assertEqual(storyboard["settings"]["fps"], 16)
+        self.assertEqual(storyboard["settings"]["resolution_tier"], "wan21_480p_master")
+        self.assertEqual(storyboard["settings"]["quality_profile"], "wan21_t2v_1.3b_480p_quality_first")
         self.assertEqual(storyboard["production_mode"], "local_ai_text_to_video")
         self.assertEqual(storyboard["prompt"], "一只狐狸穿过竹林")
         self.assertEqual(manifest["source_assets"], [])
         self.assertEqual(manifest["recipe_provenance"]["recipe_sha256"], recipe_sha256)
         self.assertEqual(result["recipe_sha256"], recipe_sha256)
         with zipfile.ZipFile(product_dir / "product.zip") as archive:
-            self.assertEqual(set(archive.namelist()), {"README.md", "storyboard.json", "qa-report.json", "video.mp4"})
+            self.assertEqual(set(archive.namelist()), {"README.md", "storyboard.json", "qa-report.json", "visual-quality-report.json", "video.mp4"})
 
 
     def test_recipe_sha256_resolves_from_creator_brief_without_loading_external_services(self):
@@ -380,7 +386,7 @@ class VideoProductBuilderTests(unittest.TestCase):
         self.assertEqual(len(storyboard["scenes"]), 2)
         self.assertEqual(storyboard["scenes"][1]["prompt_id"], "shot-2")
         with zipfile.ZipFile(product_dir / "product.zip") as archive:
-            self.assertEqual(set(archive.namelist()), {"README.md", "storyboard.json", "qa-report.json", "video.mp4"})
+            self.assertEqual(set(archive.namelist()), {"README.md", "storyboard.json", "qa-report.json", "visual-quality-report.json", "video.mp4"})
             self.assertIsNone(archive.testzip())
 
     def test_narration_duration_extends_wan_scenes_in_4n_plus_1_frame_steps(self):
@@ -394,7 +400,7 @@ class VideoProductBuilderTests(unittest.TestCase):
         self.assertGreater(sum(item["duration_seconds"] for item in allocated), 3.0 - 1e-9)
         self.assertTrue(all(1.0 <= item["duration_seconds"] <= 5.0 for item in allocated))
         self.assertEqual([item["seed"] for item in allocated], [1, 2])
-        self.assertEqual(sum(round(item["duration_seconds"] * 12) + 1 for item in allocated), 38)
+        self.assertEqual(sum(round(item["duration_seconds"] * 16) + 1 for item in allocated), 50)
 
     def test_build_from_scenes_synthesizes_once_and_plans_voiceover_before_wan(self):
         calls = {"tts": 0, "wan": [], "package": None}
@@ -412,10 +418,10 @@ class VideoProductBuilderTests(unittest.TestCase):
         def fake_generate(prompt, output_path, **kwargs):
             calls["wan"].append((prompt, kwargs["duration_seconds"]))
             output_path.write_bytes(bytes.fromhex("000000186674797069736f6d66697874757265"))
-            frames = round(kwargs["duration_seconds"] * 12) + 1
+            frames = round(kwargs["duration_seconds"] * 16) + 1
             return {
                 "status": "completed", "prompt_id": f"wan-{len(calls['wan'])}", "seed": kwargs["seed"],
-                "width": 512, "height": 288, "fps": 12, "frames": frames,
+                "width": 832, "height": 480, "fps": 16, "frames": frames,
             }
 
         def fake_concat(args, **kwargs):
@@ -1276,6 +1282,34 @@ class VideoProductBuilderTests(unittest.TestCase):
         self.assertEqual(recovered["ledger_event_id"], first["ledger_event_id"])
         self.assertTrue(staging.is_dir())
 
+    def test_visual_quality_report_is_hash_verified_in_ai_product_package(self):
+        source = self.root / "visual-report.mp4"
+        source.write_bytes(bytes.fromhex("000000186674797069736f6d66697874757265"))
+        qa = {
+            "status": "passed", "path": "video.mp4", "missing_tools": [],
+            "checks": {"full_decode": {"passed": True, "detail": "full decode completed"}},
+            "metadata": {"width": 512, "height": 288, "fps": 12},
+        }
+        with patch("muse.video_product_builder.inspect_video_file", return_value=qa, create=True):
+            result = self.builder.package_generated_clip(
+                "视觉诊断包", "一只纸鹤飞过星空", source,
+                generation_metadata={"status": "completed", "width": 512, "height": 288, "fps": 12},
+            )
+        product_dir = self.root / result["relative_path"]
+        manifest = json.loads((product_dir / "manifest.json").read_text(encoding="utf-8"))
+        report_path = product_dir / "visual-quality-report.json"
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertEqual(manifest["visual_quality"]["status"], "unavailable")
+        self.assertEqual(manifest["visual_quality"]["sha256"], hashlib.sha256(report_path.read_bytes()).hexdigest())
+        self.assertEqual(report["status"], "unavailable")
+        self.assertFalse(report["semantic_recognition"])
+        self.assertEqual(result["visual_quality"]["report"], "visual-quality-report.json")
+        with zipfile.ZipFile(product_dir / "product.zip") as archive:
+            self.assertEqual(archive.read("visual-quality-report.json"), report_path.read_bytes())
+        report_path.write_text(report_path.read_text(encoding="utf-8") + " ", encoding="utf-8")
+        with self.assertRaisesRegex(VideoProductError, "integrity"):
+            self.builder.verify_path(self.root / "data" / "products", result["initiative_id"], result["version_id"])
+
     def test_packaged_clip_contains_technical_qa_report_and_stays_in_testing(self):
         import hashlib
 
@@ -1300,8 +1334,11 @@ class VideoProductBuilderTests(unittest.TestCase):
         self.assertEqual(manifest["quality_gate"]["status"], "passed")
         self.assertFalse(manifest["quality_gate"]["ready_to_publish"])
         self.assertEqual(report["status"], "passed")
+        self.assertEqual(manifest["visual_quality"]["status"], "unavailable")
+        self.assertEqual(manifest["visual_quality"]["review_required"], True)
         with zipfile.ZipFile(product_dir / "product.zip") as archive:
             self.assertIn("qa-report.json", archive.namelist())
+            self.assertIn("visual-quality-report.json", archive.namelist())
             self.assertIsNone(archive.testzip())
         self.assertEqual(result["quality_gate"]["status"], "passed")
         report_path = product_dir / "qa-report.json"

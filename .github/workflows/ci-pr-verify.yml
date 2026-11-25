@@ -1,0 +1,95 @@
+name: 日常提交校验 (CI · PR verify)
+
+on:
+  push:
+    branches: ['**']
+    tags-ignore: ['v*.*.*']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-pr-verify-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUTF8: '1'
+
+jobs:
+  privacy-and-python:
+    name: 隐私审计 + Python 测试
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: 零泄漏隐私审计
+        run: python scripts/pre_github_sync_audit.py
+      - name: Python 语法检查（ast.parse 全部源码）
+        run: |
+          python - <<'PY'
+          import ast, pathlib, sys
+          bad = []
+          for root in ("src", "scripts", "tests"):
+              for path in pathlib.Path(root).rglob("*.py"):
+                  try:
+                      ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+                  except SyntaxError as exc:
+                      bad.append(f"{path}: {exc}")
+          print("\n".join(bad) or "ast.parse OK")
+          sys.exit(1 if bad else 0)
+          PY
+      - name: Python 核心单元测试
+        env:
+          PYTHONPATH: src
+        run: >
+          python -m unittest -v
+          tests.test_muse_sidecar
+          tests.test_xuanshu_symbolic_fallback
+          tests.test_research_xuanshu_feedback
+      - name: 冻结引擎源码自检（未打包）
+        env:
+          PYTHONPATH: src
+        run: python src/muse_sidecar_main.py --self-test
+
+  frontend:
+    name: 前端构建
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: ui-prototype/package-lock.json
+      - name: npm ci + vite build
+        working-directory: ui-prototype
+        run: |
+          npm ci
+          npm run build
+
+  rust:
+    name: cargo check (Tauri v2)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+      - name: Linux 系统依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libxdo-dev libssl-dev build-essential
+      - name: 占位 sidecar（cargo check 只需文件存在）
+        run: |
+          printf '#!/bin/sh\nexit 0\n' > src-tauri/binaries/muse-engine-x86_64-unknown-linux-gnu
+          chmod +x src-tauri/binaries/muse-engine-x86_64-unknown-linux-gnu
+      - name: cargo check + 单元测试
+        working-directory: src-tauri
+        run: |
+          cargo check --locked || cargo check
+          cargo test --no-fail-fast

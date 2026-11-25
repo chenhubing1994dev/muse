@@ -7,7 +7,7 @@ param(
 )
 
 $ErrorActionPreference = 'Continue'
-$RepoRoot = 'D:\AI AGENT\Muse'
+$RepoRoot = Split-Path -Parent $PSScriptRoot
 $TokenFile = Join-Path $env:TEMP 'muse_pat.txt'
 $LogDir = Join-Path $RepoRoot '.muse-sync'
 $LogFile = Join-Path $LogDir 'sync.log'

@@ -20,6 +20,96 @@ LEASE_TTL_MAX_SECONDS = 3600
 SUPERVISOR_STALE_SECONDS = 90
 
 
+def probe_gpu_workloads(workspace: str | Path) -> dict[str, Any]:
+    """Report active GPU workloads, not merely whether a local HTTP service is alive.
+
+    ComfyUI may remain healthy while idle after it has unloaded its models. In
+    that state AMF encoding can safely use the shared GPU lease, but an active
+    queue or resident model allocation blocks it. Service health is returned
+    separately so callers never mistake an idle server for a missing service.
+    """
+    from muse.model_service import probe_configured_model_service
+    from muse.video_engines import ComfyUIClient
+
+    try:
+        comfy_client = ComfyUIClient(timeout_seconds=1.0)
+        comfy = comfy_client.health()
+        if comfy.get("status") == "ready":
+            queue = comfy_client.queue_status()
+            running, pending = queue.get("running_jobs"), queue.get("pending_jobs")
+            if (
+                isinstance(running, bool) or not isinstance(running, int) or running < 0
+                or isinstance(pending, bool) or not isinstance(pending, int) or pending < 0
+            ):
+                return {
+                    "status": "unknown", "service_health": "healthy",
+                    "active_service": "comfyui", "gpu_workload": "unknown",
+                    "reason": "comfyui_queue_state_unknown",
+                }
+            if running or pending:
+                return {
+                    "status": "healthy", "service_health": "healthy",
+                    "active_service": "comfyui", "gpu_workload": "active",
+                    "queue_running": running, "queue_pending": pending,
+                }
+            memory = comfy_client.gpu_memory()
+            total, free, ratio = (
+                memory.get("vram_total_bytes"),
+                memory.get("vram_free_bytes"),
+                memory.get("vram_free_ratio"),
+            )
+            if (
+                isinstance(total, bool) or not isinstance(total, int) or total <= 0
+                or isinstance(free, bool) or not isinstance(free, int) or not 0 <= free <= total
+                or isinstance(ratio, bool) or not isinstance(ratio, (int, float))
+                or not 0 <= ratio <= 1
+            ):
+                return {
+                    "status": "unknown", "service_health": "healthy",
+                    "active_service": "comfyui", "gpu_workload": "unknown",
+                    "reason": "comfyui_gpu_memory_telemetry_unknown",
+                }
+            if ratio >= 0.70 and free >= int(total * 0.70):
+                return {
+                    "status": "unavailable", "service_health": "healthy",
+                    "active_service": "comfyui_idle", "gpu_workload": "idle",
+                    "queue_running": 0, "queue_pending": 0,
+                    "vram_total_bytes": total, "vram_free_bytes": free,
+                    "vram_free_ratio": ratio,
+                }
+            return {
+                "status": "healthy", "service_health": "healthy",
+                "active_service": "comfyui", "gpu_workload": "models_resident_or_memory_busy",
+                "queue_running": 0, "queue_pending": 0,
+                "vram_total_bytes": total, "vram_free_bytes": free,
+                "vram_free_ratio": ratio,
+            }
+        if comfy.get("status") != "unavailable":
+            return {
+                "status": "unknown", "service_health": str(comfy.get("status", "unknown")),
+                "active_service": "comfyui", "gpu_workload": "unknown",
+            }
+        model = probe_configured_model_service(str(Path(workspace).resolve()))
+    except Exception as exc:
+        return {"status": "unknown", "gpu_workload": "unknown", "reason": type(exc).__name__}
+
+    if model.get("status") == "healthy":
+        provider = str(model.get("provider", "local_model"))
+        return {
+            "status": "healthy", "service_health": "healthy",
+            "active_service": provider, "gpu_workload": "active",
+        }
+    if model.get("status") == "unavailable":
+        return {
+            "status": "unavailable", "service_health": "unavailable",
+            "active_service": "none", "gpu_workload": "idle",
+        }
+    return {
+        "status": "unknown", "service_health": str(model.get("status", "unknown")),
+        "active_service": "unknown", "gpu_workload": "unknown",
+    }
+
+
 class _ClosingConnection(sqlite3.Connection):
     """Make every connection context close its Windows file handle."""
 
@@ -92,7 +182,7 @@ class GpuResourceCoordinator:
             connection.execute("DELETE FROM gpu_lease WHERE singleton=1 AND lease_id=?", (row["lease_id"],))
 
     def acquire(self, owner_kind: str, owner_id: str, *, ttl_seconds: int = 120, now: float | None = None) -> str:
-        if owner_kind not in {"video_generation", "model_inference"}:
+        if owner_kind not in {"video_generation", "video_encoding", "comfyui_generation", "model_inference"}:
             raise ValueError("unsupported GPU lease owner_kind")
         if not isinstance(owner_id, str) or not owner_id.strip() or len(owner_id) > 128:
             raise ValueError("owner_id must contain 1-128 characters")
@@ -298,14 +388,18 @@ class GpuResourceCoordinator:
 
 
 class GpuLeaseSession:
-    """A renewable lease context that fails closed until model coordination is safe."""
+    """A renewable exclusive GPU lease context shared by inference and encoding."""
 
     def __init__(
         self, coordinator: GpuResourceCoordinator, owner_id: str, *, ttl_seconds: int = 120,
         model_probe: Callable[[], dict[str, Any]] | None = None, wait_timeout_seconds: float = 75,
+        owner_kind: str = "video_generation",
     ) -> None:
+        if owner_kind not in {"video_generation", "video_encoding", "comfyui_generation", "model_inference"}:
+            raise ValueError("unsupported GPU lease owner_kind")
         self.coordinator = coordinator
         self.owner_id = owner_id
+        self.owner_kind = owner_kind
         self.ttl_seconds = GpuResourceCoordinator._ttl(ttl_seconds)
         self.model_probe = model_probe
         self.wait_timeout_seconds = wait_timeout_seconds
@@ -316,7 +410,7 @@ class GpuLeaseSession:
         self._thread: threading.Thread | None = None
 
     def __enter__(self) -> "GpuLeaseSession":
-        self.lease_id = self.coordinator.acquire("video_generation", self.owner_id, ttl_seconds=self.ttl_seconds)
+        self.lease_id = self.coordinator.acquire(self.owner_kind, self.owner_id, ttl_seconds=self.ttl_seconds)
         self._thread = threading.Thread(target=self._renew_loop, daemon=True, name="MuseGpuLeaseHeartbeat")
         self._thread.start()
         try:
@@ -353,3 +447,22 @@ class GpuLeaseSession:
         if exc is None and self._lost.is_set():
             raise GpuResourceBusy("GPU resource lease heartbeat was lost during generation")
         return False
+
+
+def gpu_video_encoding_session(
+    workspace: str | Path, owner_id: str, *, database: str | Path | None = None,
+    wait_timeout_seconds: float = 75,
+) -> GpuLeaseSession:
+    """Create the shared, renewable GPU lease for any Muse AMF encode operation."""
+    root = Path(workspace).resolve()
+    configured_database = database or os.environ.get("MUSE_GPU_RESOURCE_DB")
+    resource_database = (
+        Path(configured_database).expanduser()
+        if configured_database else root / "data" / "gpu-resources.sqlite3"
+    )
+    coordinator = GpuResourceCoordinator(resource_database)
+    return GpuLeaseSession(
+        coordinator, owner_id, owner_kind="video_encoding",
+        model_probe=lambda: probe_gpu_workloads(root),
+        wait_timeout_seconds=wait_timeout_seconds,
+    )

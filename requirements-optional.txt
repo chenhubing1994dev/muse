@@ -1,0 +1,24 @@
+# Optional extras (mirrors [project.optional-dependencies] in pyproject.toml).
+# Install only what you need, e.g.:  py -3.11 -m pip install -e ".[imaging]"
+# Every module that uses these fails closed (reports "unavailable") when the package is missing.
+
+# plugin-security
+cryptography>=42.0
+# web-scraping
+scrapling>=0.5.1,<0.6
+# lightpanda
+playwright>=1.50,<2
+# video-diagnostics
+numpy>=1.26
+opencv-python-headless>=4.8
+# speech
+faster-whisper
+piper-tts
+# metaphysics (exact versions are checked by the code)
+celestial-calendar==0.8.0
+ziwei==0.4.1
+# imaging
+Pillow>=10
+# local-llm
+llama-cpp-python
+# NOTE: canto_tts (muse.cantonese_tts) lives only in the isolated Python 3.14 env .muse-canto-tts-py314.

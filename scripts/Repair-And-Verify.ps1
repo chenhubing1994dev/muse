@@ -1,9 +1,9 @@
 # Muse one-shot repair + verification (2026-11-24)
 # Usage (from anywhere):
-#   powershell -ExecutionPolicy Bypass -File "D:\AI AGENT\Muse\scripts\Repair-And-Verify.ps1"
+#   powershell -ExecutionPolicy Bypass -File ".\scripts\Repair-And-Verify.ps1"
 # What it does (no network unless a venv must be rebuilt, no production DB writes, no GPU):
 #   1. Re-points the isolated metaphysics venvs at the Python 3.11 that exists now
-#      (their pyvenv.cfg still points at a deleted C:\Users\Administrator\...\Python311).
+#      (their pyvenv.cfg still points at a deleted %LOCALAPPDATA%\...\Python311).
 #   2. If a venv still cannot import its pinned engine, rebuilds it with the pinned version.
 #   3. Runs the targeted regression tests, then the full unittest suite (UTF-8 log).
 # Native commands are checked via $LASTEXITCODE; "Stop" would abort on harmless

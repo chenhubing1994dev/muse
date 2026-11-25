@@ -1,0 +1,298 @@
+name: 每周全平台安装包自动编译 (Weekly cross-platform release)
+
+on:
+  schedule:
+    # 每周一 北京时间 02:00 (UTC 周日 18:00)
+    - cron: '0 18 * * 0'
+  workflow_dispatch:
+    inputs:
+      prerelease:
+        description: '作为预发布 (prerelease) 发布'
+        type: boolean
+        default: true
+  push:
+    tags:
+      - 'v*.*.*'
+
+concurrency:
+  group: weekly-release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: '3.11'
+  NODE_VERSION: '22'
+  PYTHONUTF8: '1'
+
+jobs:
+  gate:
+    name: 安全与质量门禁
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: ui-prototype/package-lock.json
+      - name: 零泄漏隐私审计
+        run: python scripts/pre_github_sync_audit.py --json-out audit/pre_github_sync_audit.json
+      - name: Python 核心单元测试
+        env:
+          PYTHONPATH: src
+        run: >
+          python -m unittest -v
+          tests.test_muse_sidecar
+          tests.test_xuanshu_symbolic_fallback
+          tests.test_research_xuanshu_feedback
+      - name: Python 全量测试（参考，不阻断）
+        continue-on-error: true
+        env:
+          PYTHONPATH: src
+        run: python -m unittest discover -s tests -p "test_*.py"
+      - name: 前端 vite build
+        working-directory: ui-prototype
+        run: |
+          npm ci
+          npm run build
+      - name: 计算版本号
+        id: version
+        shell: bash
+        run: |
+          base=$(python -c "import json;print(json.load(open('src-tauri/tauri.conf.json',encoding='utf-8'))['version'])")
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            tag="${GITHUB_REF_NAME}"
+          else
+            tag="v${base}-weekly.$(date -u +%Y%m%d).${GITHUB_RUN_NUMBER}"
+          fi
+          echo "version=${base}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ui-dist
+          path: ui-prototype/dist
+          retention-days: 3
+
+  build:
+    name: 编译 ${{ matrix.label }}
+    needs: gate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Windows x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bundles: nsis,msi
+          - label: macOS Apple Silicon
+            os: macos-latest
+            target: aarch64-apple-darwin
+            bundles: app,dmg
+          - label: macOS Intel
+            os: macos-15-intel
+            target: x86_64-apple-darwin
+            bundles: app,dmg
+          - label: Linux x64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            bundles: appimage,deb,rpm
+    runs-on: ${{ matrix.os }}
+    env:
+      MUSE_VERSION: ${{ needs.gate.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: ui-prototype/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          key: ${{ matrix.target }}
+      - name: Linux 系统依赖
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libfuse2 \
+            libxdo-dev libssl-dev build-essential file
+      - name: 构建前端 dist/
+        working-directory: ui-prototype
+        run: |
+          npm ci
+          npm run build
+      - name: 冻结 muse-engine 并隔离自检
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "pyinstaller>=6.10" -r requirements.txt
+          python scripts/build_sidecar.py --target ${{ matrix.target }}
+      - name: 编译 Tauri v2 客户端
+        shell: bash
+        working-directory: src-tauri
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY != '' && secrets.APPLE_SIGNING_IDENTITY || '-' }}
+        run: npx --yes @tauri-apps/cli@^2 build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} --ci
+      - name: 收集安装包（Windows）
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ver = $env:MUSE_VERSION
+          $rel = "src-tauri/target/${{ matrix.target }}/release"
+          New-Item -ItemType Directory -Force -Path release-assets | Out-Null
+          Get-ChildItem "$rel/bundle/nsis/*.exe" | ForEach-Object { Copy-Item $_.FullName "release-assets/Muse_${ver}_x64-setup.exe" }
+          Get-ChildItem "$rel/bundle/msi/*.msi" | ForEach-Object { Copy-Item $_.FullName "release-assets/Muse_${ver}_x64_zh-CN.msi" }
+          $portable = "portable/Muse"
+          New-Item -ItemType Directory -Force -Path $portable | Out-Null
+          Copy-Item "$rel/muse.exe" "$portable/Muse.exe"
+          if (Test-Path "$rel/muse-engine.exe") {
+            Copy-Item "$rel/muse-engine.exe" "$portable/muse-engine.exe"
+          } else {
+            Copy-Item "src-tauri/binaries/muse-engine-${{ matrix.target }}.exe" "$portable/muse-engine.exe"
+          }
+          Set-Content -Path "$portable/MUSE_PORTABLE" -Value "portable: user data is stored in ./muse-data" -Encoding utf8
+          Set-Content -Path "$portable/使用说明.txt" -Encoding utf8 -Value @"
+          Muse 星枢 绿色免安装版
+          1. 解压到任意文件夹（建议非系统盘），双击 Muse.exe 即可使用；
+          2. 数据保存在同目录 muse-data\ 中，整个文件夹可直接拷走；
+          3. 需要系统已安装 Microsoft Edge WebView2（Windows 10/11 默认自带）。
+          "@
+          Compress-Archive -Path portable/Muse -DestinationPath "release-assets/Muse_${ver}_Windows_x64_Portable.zip" -Force
+      - name: 收集安装包（macOS，自动 ad-hoc 签名防“已损坏”）
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ver="${MUSE_VERSION}"
+          arch=$([[ "${{ matrix.target }}" == aarch64* ]] && echo aarch64 || echo x64)
+          bundle="src-tauri/target/${{ matrix.target }}/release/bundle"
+          app=$(ls -d "$bundle"/macos/*.app | head -n1)
+          if [[ -z "${{ secrets.APPLE_SIGNING_IDENTITY }}" ]]; then
+            codesign --force --deep --sign - "$app"
+          fi
+          codesign --verify --deep --verbose=2 "$app" || true
+          mkdir -p release-assets dmg-root
+          tar -C "$(dirname "$app")" -czf "release-assets/Muse_${ver}_macOS_${arch}.app.tar.gz" "$(basename "$app")"
+          cp -R "$app" dmg-root/
+          ln -s /Applications dmg-root/Applications
+          hdiutil create -volname "Muse" -srcfolder dmg-root -ov -format UDZO "release-assets/Muse_${ver}_macOS_${arch}.dmg"
+      - name: 收集安装包（Linux）
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ver="${MUSE_VERSION}"
+          bundle="src-tauri/target/${{ matrix.target }}/release/bundle"
+          mkdir -p release-assets
+          for f in "$bundle"/appimage/*.AppImage; do cp "$f" "release-assets/Muse_${ver}_Linux_x86_64.AppImage"; done
+          for f in "$bundle"/deb/*.deb; do cp "$f" "release-assets/Muse_${ver}_Linux_amd64.deb"; done
+          for f in "$bundle"/rpm/*.rpm; do cp "$f" "release-assets/Muse_${ver}_Linux_x86_64.rpm"; done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: muse-${{ matrix.target }}
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: 发布 GitHub Release
+    needs: [gate, build]
+    if: ${{ !cancelled() && needs.gate.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      MUSE_VERSION: ${{ needs.gate.outputs.version }}
+      MUSE_TAG: ${{ needs.gate.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: muse-*
+          path: release-assets
+          merge-multiple: true
+      - name: 生成 SHA256SUMS.txt / latest.json / 中文安装说明
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release-assets
+          ls -la
+          if [ -z "$(ls -A)" ]; then echo "没有任何平台产物，终止发布"; exit 1; fi
+          sha256sum * | grep -v -E 'SHA256SUMS.txt|latest.json' > SHA256SUMS.txt
+          python3 - <<'PY'
+          import json, os, datetime
+          version = os.environ["MUSE_VERSION"]; tag = os.environ["MUSE_TAG"]
+          repo = os.environ["GITHUB_REPOSITORY"]
+          base = f"https://github.com/{repo}/releases/download/{tag}/"
+          files = sorted(f for f in os.listdir(".") if f not in {"SHA256SUMS.txt", "latest.json"})
+          sums = dict(line.split()[::-1] for line in open("SHA256SUMS.txt", encoding="utf-8"))
+          def pick(*needles):
+              for f in files:
+                  if all(n in f for n in needles):
+                      return {"url": base + f, "sha256": sums.get(f, ""), "file": f}
+              return None
+          platforms = {k: v for k, v in {
+              "windows-x86_64": pick("x64-setup.exe"),
+              "windows-x86_64-msi": pick(".msi"),
+              "windows-x86_64-portable": pick("Portable.zip"),
+              "darwin-aarch64": pick("aarch64.app.tar.gz"),
+              "darwin-x86_64": pick("x64.app.tar.gz"),
+              "darwin-aarch64-dmg": pick("aarch64.dmg"),
+              "darwin-x86_64-dmg": pick("x64.dmg"),
+              "linux-x86_64": pick(".AppImage"),
+              "linux-x86_64-deb": pick(".deb"),
+              "linux-x86_64-rpm": pick(".rpm"),
+          }.items() if v}
+          json.dump({"version": version, "tag": tag,
+                     "pub_date": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+                     "notes": "Muse 星枢 每周全平台自动构建", "platforms": platforms},
+                    open("latest.json", "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+          PY
+          cat > ../RELEASE_NOTES.md <<EOF
+          # Muse 星枢 ${MUSE_TAG}
+
+          本版本由 GitHub Actions 每周自动编译，内置独立引擎 **开箱即用，无需安装 Python**；用户数据只保存在本机用户目录，安装包内不含任何开发者数据库。
+
+          ## 一键安装说明（简体中文）
+
+          | 系统 | 下载哪个文件 | 怎么安装 |
+          |---|---|---|
+          | Windows 10/11 (x64) | \`Muse_${MUSE_VERSION}_x64-setup.exe\` | 双击运行 → 中文向导 → 默认为当前用户安装（无需管理员）→ 自动创建桌面与开始菜单快捷方式；缺少 WebView2 时会自动下载。 |
+          | Windows 企业部署 | \`Muse_${MUSE_VERSION}_x64_zh-CN.msi\` | 双击或 \`msiexec /i\` 静默安装。 |
+          | Windows 绿色版 | \`Muse_${MUSE_VERSION}_Windows_x64_Portable.zip\` | 解压后双击 \`Muse.exe\`，数据保存在同目录 \`muse-data\\\`。 |
+          | macOS Apple 芯片 (M1/M2/M3/M4) | \`Muse_${MUSE_VERSION}_macOS_aarch64.dmg\` | 打开 dmg，把 Muse 拖进“应用程序”。首次打开如提示无法验证开发者：右键 Muse →“打开”，或执行 \`xattr -dr com.apple.quarantine /Applications/Muse.app\`。 |
+          | macOS Intel | \`Muse_${MUSE_VERSION}_macOS_x64.dmg\` | 同上。 |
+          | Linux (x86_64) | \`.AppImage\` / \`.deb\` / \`.rpm\` | AppImage：\`chmod +x\` 后双击；Debian/Ubuntu：\`sudo apt install ./Muse_*.deb\`；Fedora/openSUSE：\`sudo dnf install ./Muse_*.rpm\`。 |
+
+          - 卸载默认 **保留** 用户数据（Windows：\`%LOCALAPPDATA%\\Muse\`；macOS：\`~/Library/Application Support/com.muse.consciousness\`；Linux：\`~/.local/share/muse\`）。
+          - 升级前客户端会自动把用户数据库备份到数据目录下的 \`backups/\`。
+          - 常驻自主守护默认 **关闭**（安全 stopped），可在主控台一键开启；托盘菜单提供“暂停自主任务”与“紧急熔断停止”。
+          - 校验：\`SHA256SUMS.txt\`；机器可读清单：\`latest.json\`。
+          EOF
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.MUSE_TAG }}
+          name: Muse 星枢 ${{ env.MUSE_TAG }}
+          body_path: RELEASE_NOTES.md
+          target_commitish: ${{ github.sha }}
+          prerelease: ${{ !startsWith(github.ref, 'refs/tags/v') && (github.event_name != 'workflow_dispatch' || inputs.prerelease) }}
+          files: release-assets/*
+          fail_on_unmatched_files: false

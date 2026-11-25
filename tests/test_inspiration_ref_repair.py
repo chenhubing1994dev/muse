@@ -25,10 +25,10 @@ CREATE TABLE creator_initiatives(
     outcome TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(title,kind)
 );
 """
-TEMP_A = r"C:\Users\ADMINI~1\AppData\Local\Temp\tmpz5l8lj2e\reports\autonomous-research-agent-orchestration-20261108T121509214717_0000.md"
-TEMP_B = r"C:\Users\ADMINI~1\AppData\Local\Temp\tmp0_q64wbb\reports\autonomous-research-symbolic-hypothesis-review-46-20261108T121729477889_0000.md"
+TEMP_A = r"C:\Users\example\AppData\Local\Temp\tmpz5l8lj2e\reports\autonomous-research-agent-orchestration-20261108T121509214717_0000.md"
+TEMP_B = r"C:\Users\example\AppData\Local\Temp\tmp0_q64wbb\reports\autonomous-research-symbolic-hypothesis-review-46-20261108T121729477889_0000.md"
 STABLE_NAME = "autonomous-research-stable-20261120.md"
-TEMP_C = r"C:\Users\ADMINI~1\AppData\Local\Temp\tmpabcdef12\reports" + "\\" + STABLE_NAME
+TEMP_C = r"C:\Users\example\AppData\Local\Temp\tmpabcdef12\reports" + "\\" + STABLE_NAME
 
 
 def _sha(path):

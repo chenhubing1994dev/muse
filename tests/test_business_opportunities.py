@@ -6,12 +6,14 @@ from muse.initiative_engine import InitiativeStore
 from muse.task_queue import TaskQueue
 from muse.video_task_worker import VideoTaskWorker
 from test_video_task_worker import FakeAdmissionProvider, fake_admission_request_factory
+from test_video_task_worker import strict_test_planner
 
 
 class BusinessOpportunityTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory(); self.db=Path(self.tmp.name)/"opportunities.sqlite3"
         self.store=BusinessOpportunityStore(self.db)
+        self.planner=strict_test_planner()
         self.ratings=dict(demand_signal=4,willingness_to_pay=3,delivery_fit=5,competition_gap=3,repeatability=4,risk=2)
         self.args=dict(idempotency_key="pilot-1",title="粤语短片服务",customer_segment="本地餐饮商户",
           customer_problem="缺乏持续制作短视频的时间",proposed_offer="每周五条粤语短片",
@@ -82,7 +84,7 @@ class BusinessOpportunityTests(unittest.TestCase):
         task_db=Path(self.tmp.name)/"tasks.sqlite3"
         promoted=self.store.promote_to_initiative(opportunity["id"],initiative_database=initiative_db)
         with patch.object(InitiativeStore,"list",return_value=[]):
-            requested=self.store.request_video_approval(opportunity["id"],initiative_database=initiative_db,task_database=task_db)
+            requested=self.store.request_video_approval(opportunity["id"],initiative_database=initiative_db,task_database=task_db,commander_planner=self.planner)
         self.assertEqual(requested["initiative_id"],promoted["initiative"]["id"])
         with TaskQueue(task_db) as queue:
             queue.approve(requested["ticket"]["id"],approved_by="test-operator")
@@ -90,12 +92,51 @@ class BusinessOpportunityTests(unittest.TestCase):
             queued=self.store.queue_video_after_approval(opportunity["id"],requested["ticket"]["id"],initiative_database=initiative_db,task_database=task_db)
         self.assertEqual(queued["attempt"]["initiative_id"],promoted["initiative"]["id"])
 
+    def test_strict_planner_model_unavailable_creates_no_approval_ticket(self):
+        from muse.commander_planner import CommanderPlanner
+        opportunity=self.store.create(**self.args)
+        initiative_db=Path(self.tmp.name)/"initiatives.sqlite3"
+        task_db=Path(self.tmp.name)/"tasks.sqlite3"
+        self.store.promote_to_initiative(opportunity["id"],initiative_database=initiative_db)
+        with self.assertRaisesRegex(RuntimeError,"requires an available model client"):
+            self.store.request_video_approval(opportunity["id"],initiative_database=initiative_db,task_database=task_db,commander_planner=CommanderPlanner(None,strict_model=True))
+        connection=sqlite3.connect(task_db)
+        try:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tasks'").fetchone()[0],0)
+        finally:
+            connection.close()
+
+    def test_strict_planner_invalid_output_creates_no_approval_ticket(self):
+        from muse.commander_planner import CommanderPlanner
+        opportunity=self.store.create(**self.args)
+        initiative_db=Path(self.tmp.name)/"initiatives.sqlite3"
+        task_db=Path(self.tmp.name)/"tasks.sqlite3"
+        self.store.promote_to_initiative(opportunity["id"],initiative_database=initiative_db)
+        invalid=CommanderPlanner(lambda _goal:{"steps":[{"id":"bad"}]},strict_model=True)
+        with self.assertRaises(ValueError):
+            self.store.request_video_approval(opportunity["id"],initiative_database=initiative_db,task_database=task_db,commander_planner=invalid)
+        connection=sqlite3.connect(task_db)
+        try:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tasks'").fetchone()[0],0)
+        finally:
+            connection.close()
+
+    def test_strict_planner_persists_model_source_from_official_plan(self):
+        opportunity=self.store.create(**self.args)
+        initiative_db=Path(self.tmp.name)/"initiatives.sqlite3"
+        task_db=Path(self.tmp.name)/"tasks.sqlite3"
+        self.store.promote_to_initiative(opportunity["id"],initiative_database=initiative_db)
+        result=self.store.request_video_approval(opportunity["id"],initiative_database=initiative_db,task_database=task_db,commander_planner=self.planner)
+        payload=result["ticket"]["payload"]
+        self.assertEqual(payload["commander_plan_source"],"model")
+        self.assertEqual(payload["commander_plan_snapshot"]["source"],"model")
+
     def test_commander_approval_gates_video_attempt(self):
         opportunity=self.store.create(**self.args)
         initiative_db=Path(self.tmp.name)/"data"/"initiatives"/"muse.sqlite3"
         task_db=Path(self.tmp.name)/"data"/"tasks"/"muse.sqlite3"
         self.store.promote_to_initiative(opportunity["id"],initiative_database=initiative_db)
-        requested=self.store.request_video_approval(opportunity["id"],initiative_database=initiative_db,task_database=task_db)
+        requested=self.store.request_video_approval(opportunity["id"],initiative_database=initiative_db,task_database=task_db,commander_planner=self.planner)
         ticket=requested["ticket"]
         self.assertEqual(ticket["status"],"waiting_approval")
         with InitiativeStore(initiative_db) as initiatives:
@@ -146,8 +187,8 @@ class BusinessOpportunityTests(unittest.TestCase):
             result=VideoTaskWorker(
                 Path(self.tmp.name), builder=builder, admission_provider=FakeAdmissionProvider(),
                 admission_request_factory=fake_admission_request_factory,
-            ).run_once()
-        self.assertEqual(result["status"],"succeeded")
+            )._run_approved_attempt()
+        self.assertEqual(result["status"],"succeeded",result)
         self.assertTrue(result["content_review_required"])
         self.assertFalse(result["auto_publish"])
         self.assertEqual(builder.received[2]["creator_initiative_id"],queued["attempt"]["initiative_id"])
@@ -178,7 +219,7 @@ class BusinessOpportunityTests(unittest.TestCase):
         with InitiativeStore(initiative_db) as initiatives:
             initiatives.update(promoted["initiative"]["id"],status="rejected",actor="test",source="test")
         with self.assertRaises(ValueError):
-            self.store.request_video_approval(opportunity["id"],initiative_database=initiative_db,task_database=task_db)
+            self.store.request_video_approval(opportunity["id"],initiative_database=initiative_db,task_database=task_db,commander_planner=self.planner)
 
     def test_status_audit_and_reopen(self):
         a=self.store.create(**self.args); self.store.set_status(a["id"],"researching")
@@ -196,7 +237,7 @@ class BusinessOpportunityTests(unittest.TestCase):
         initiative_db=Path(self.tmp.name)/"initiatives.sqlite3"
         task_db=Path(self.tmp.name)/"tasks.sqlite3"
         self.store.promote_to_initiative(opportunity["id"],initiative_database=initiative_db)
-        result=self.store.request_video_approval(opportunity["id"],initiative_database=initiative_db,task_database=task_db)
+        result=self.store.request_video_approval(opportunity["id"],initiative_database=initiative_db,task_database=task_db,commander_planner=self.planner)
         ticket=result["ticket"]
         payload=ticket["payload"]
         # Commander plan snapshot must be present and self-consistent.
@@ -222,7 +263,7 @@ class BusinessOpportunityTests(unittest.TestCase):
         initiative_db=Path(self.tmp.name)/"data"/"initiatives"/"muse.sqlite3"
         task_db=Path(self.tmp.name)/"data"/"tasks"/"muse.sqlite3"
         self.store.promote_to_initiative(opportunity["id"],initiative_database=initiative_db)
-        requested=self.store.request_video_approval(opportunity["id"],initiative_database=initiative_db,task_database=task_db)
+        requested=self.store.request_video_approval(opportunity["id"],initiative_database=initiative_db,task_database=task_db,commander_planner=self.planner)
         with TaskQueue(task_db) as queue:
             queue.approve(requested["ticket"]["id"],approved_by="test-operator")
         queued=self.store.queue_video_after_approval(opportunity["id"],requested["ticket"]["id"],initiative_database=initiative_db,task_database=task_db)
@@ -254,7 +295,7 @@ class BusinessOpportunityTests(unittest.TestCase):
         initiative_db=Path(self.tmp.name)/"data"/"initiatives"/"muse.sqlite3"
         task_db=Path(self.tmp.name)/"data"/"tasks"/"muse.sqlite3"
         self.store.promote_to_initiative(opportunity["id"],initiative_database=initiative_db)
-        requested=self.store.request_video_approval(opportunity["id"],initiative_database=initiative_db,task_database=task_db)
+        requested=self.store.request_video_approval(opportunity["id"],initiative_database=initiative_db,task_database=task_db,commander_planner=self.planner)
         with TaskQueue(task_db) as queue:
             queue.approve(requested["ticket"]["id"],approved_by="test-operator")
         queued=self.store.queue_video_after_approval(opportunity["id"],requested["ticket"]["id"],initiative_database=initiative_db,task_database=task_db)

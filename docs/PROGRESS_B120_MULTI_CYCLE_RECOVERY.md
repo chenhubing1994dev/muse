@@ -51,7 +51,7 @@ This validates one live local-model review/execution transaction. It is not evid
 
 A read-only inspection of the user's current Windows installation found:
 
-- Task Scheduler task `MuseAutonomousRuntime` is Running. Its action targets `D:\\AI AGENT\\Muse\\.venv\\Scripts\\pythonw.exe` and `scripts/muse_runtime_entry.py`.
+- Task Scheduler task `MuseAutonomousRuntime` is Running. Its action targets `<MUSE_ROOT>\\.venv\\Scripts\\pythonw.exe` and `scripts/muse_runtime_entry.py`.
 - The task process tree is one launcher (`.venv\\Scripts\\pythonw.exe`, PID 18048) with its Python base-interpreter child (PID 17612), not two independent supervisor instances. The runtime SQLite owner PID is 17612; its heartbeat was 13.7 seconds old at inspection time.
 - The five configured routines are enabled and had `last_status=succeeded`; no routine lease was held at inspection. The autonomous research routine last ran at 00:53 UTC and the latest report was written at 00:51 UTC on 2026-11-13.
 - Important deployment caveat: the running process tree started on 2026-11-11, while `autonomous_research.py`, `autonomous_runtime.py`, `status_api.py` and the Dashboard source were modified later (through 2026-11-13). The process therefore predates the latest source and cannot be assumed to have loaded B118/B119/B120 code. The existing service must be gracefully restarted to load current code, but this B120 turn did not restart or mutate the running task.

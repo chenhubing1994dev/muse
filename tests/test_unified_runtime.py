@@ -3,10 +3,13 @@ import hashlib
 import json
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 from unittest.mock import patch
+from tests.video_reviewer_test_support import make_test_reviewer_key, build_video_pipeline_success_result
 
 from muse.unified_runtime import MuseRuntime, RuntimeBlocked
+from muse.resource_governor import HostResourceSnapshot
 from muse.commander_planner import CommanderPlanner
 from muse.ruflo_adapter import RufloResult
 from muse.desktop_adapter import DesktopResult
@@ -84,8 +87,22 @@ class UnifiedRuntimeTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.db = Path(self.tmp.name) / "muse.sqlite3"
-        self.runtime = MuseRuntime(self.db, workspace=self.tmp.name, ruflo=FakeRuflo(), desktop=FakeDesktop())
-    def tearDown(self): self.tmp.cleanup()
+        self.video_reviewer_private_key, reviewer_public_key = make_test_reviewer_key()
+        self._resource_probe_patch = patch(
+            "muse.orchestration.probe_host_resources",
+            return_value=HostResourceSnapshot(
+                logical_cpu_count=8, available_memory_bytes=8 * 1024**3,
+                total_memory_bytes=16 * 1024**3,
+            ),
+        )
+        self._resource_probe_patch.start()
+        self.runtime = MuseRuntime(
+            self.db, workspace=self.tmp.name, ruflo=FakeRuflo(), desktop=FakeDesktop(),
+            video_reviewer_public_keys={"test-reviewer-key": {"reviewer_id": "independent-reviewer", "public_key": reviewer_public_key}},
+        )
+    def tearDown(self):
+        self._resource_probe_patch.stop()
+        self.tmp.cleanup()
 
     def test_agent_json_parser_accepts_plain_and_markdown_fenced_json(self):
         plain = self.runtime._parse_agent_json('{"approved": true}', label="test")
@@ -906,7 +923,7 @@ class UnifiedRuntimeTests(unittest.TestCase):
                     "dag_sha256": dag_sha256,
                 },
                 require_approval=True, workload_class="media",
-                idempotency_key="test-video-approval-ticket",
+                idempotency_key=f"test-video-approval-ticket-{uuid.uuid4().hex}",
             )
             queue.approve(approval["id"], approved_by="human-reviewer")
             approval_event = queue.events(approval["id"])[-1]
@@ -925,9 +942,18 @@ class UnifiedRuntimeTests(unittest.TestCase):
                     "commander_plan_snapshot": snapshot,
                     "dag_sha256": dag_sha256,
                 },
-                workload_class="media", idempotency_key="test-video-execution-ticket",
+                workload_class="media", idempotency_key=f"test-video-execution-ticket-{uuid.uuid4().hex}",
             )
         return execution
+
+    def _video_pipeline_success_result(
+        self, kwargs, *, reviewer_id="independent-reviewer", decision="approved",
+        nonce=None, expires_in_seconds=300,
+    ):
+        return build_video_pipeline_success_result(
+            self, kwargs, reviewer_id=reviewer_id, decision=decision, nonce=nonce,
+            expires_in_seconds=expires_in_seconds,
+        )
 
     def test_public_video_pipeline_preflight_is_read_only_and_reports_exact_bindings(self):
         execution = self._enqueue_video_pipeline_execution_ticket()
@@ -999,6 +1025,13 @@ class UnifiedRuntimeTests(unittest.TestCase):
         digest = self._commander_video_plan_digest(snapshot)
         with self.assertRaisesRegex(RuntimeBlocked, "parallel_waves"):
             self.runtime._restore_commander_plan_snapshot(snapshot, digest)
+        snapshot = self._commander_video_plan_snapshot()
+        snapshot["steps"][0]["role"] = "operator"
+        snapshot["steps"][0]["required_capabilities"] = ["coding"]
+        digest = self._commander_video_plan_digest(snapshot)
+        with self.assertRaisesRegex(RuntimeBlocked, "role capability"):
+            self.runtime._restore_commander_plan_snapshot(snapshot, digest)
+
 
     def test_task_scoped_desktop_snapshot_records_metadata_without_ui_contents(self):
         task = self.runtime.enqueue("inspect UI", {"goal": "observe"})
@@ -1160,9 +1193,11 @@ class UnifiedRuntimeTests(unittest.TestCase):
         execution = self._enqueue_video_pipeline_execution_ticket()
         calls = []
         class ApprovedTicketWorker:
-            def run_approved_ticket(self, **kwargs):
+            def run_approved_ticket(inner_self, **kwargs):
                 calls.append(kwargs)
-                return {"status": "succeeded", "execution_task_id": kwargs["execution_task_id"]}
+                return self._video_pipeline_success_result(kwargs)
+            def finalize_approved_ticket(inner_self, **kwargs):
+                return {"status": "succeeded"}
         result = self.runtime.dispatch_video_pipeline_once(
             task_id=execution["id"], approved=True, video_worker=ApprovedTicketWorker(),
         )
@@ -1180,8 +1215,10 @@ class UnifiedRuntimeTests(unittest.TestCase):
         execution = self._enqueue_video_pipeline_execution_ticket()
         snapshot = self._commander_video_plan_snapshot()
         class ApprovedTicketWorker:
-            def run_approved_ticket(self, **kwargs):
-                return {"status": "succeeded", "execution_task_id": kwargs["execution_task_id"]}
+            def run_approved_ticket(inner_self, **kwargs):
+                return self._video_pipeline_success_result(kwargs)
+            def finalize_approved_ticket(inner_self, **kwargs):
+                return {"status": "succeeded"}
         self.runtime.dispatch_video_pipeline_once(
             task_id=execution["id"], approved=True, video_worker=ApprovedTicketWorker(),
         )
@@ -1189,6 +1226,95 @@ class UnifiedRuntimeTests(unittest.TestCase):
             events = queue.workflow_events(execution["id"])
         bound = next(e for e in events if e["event_type"] == "workflow.bound")
         self.assertEqual(bound["payload"]["commander_plan_id"], snapshot["plan_id"])
+        with TaskQueue(self.db) as queue:
+            self.assertEqual(queue.get(execution["id"])["status"], "succeeded")
+            self.assertEqual(len([e for e in queue.events(execution["id"]) if e["event_type"] == "video_pipeline.completed"]), 1)
+
+    def test_dispatch_video_pipeline_once_rejects_worker_self_reported_success_without_evidence(self):
+        execution = self._enqueue_video_pipeline_execution_ticket()
+        class UntrustedWorker:
+            def run_approved_ticket(self, **kwargs):
+                return {"status": "succeeded", "execution_task_id": kwargs["execution_task_id"]}
+        result = self.runtime.dispatch_video_pipeline_once(
+            task_id=execution["id"], approved=True, video_worker=UntrustedWorker(),
+        )
+        self.assertEqual(result["status"], "completion_evidence_rejected")
+        with TaskQueue(self.db) as queue:
+            self.assertEqual(queue.get(execution["id"])["status"], "failed")
+            events = queue.events(execution["id"])
+            self.assertEqual(len([e for e in events if e["event_type"] == "video_pipeline.completion_rejected"]), 1)
+            self.assertEqual([e for e in events if e["event_type"] == "video_pipeline.completed"], [])
+            classified = [e for e in events if e["event_type"] == "failure.classified"]
+            self.assertEqual(len(classified), 1)
+            self.assertEqual(classified[0]["payload"]["failure_category"], "review")
+            self.assertTrue(classified[0]["payload"]["retryable"])
+
+
+    def test_dispatch_video_pipeline_once_rejects_approval_revoked_during_worker_run(self):
+        execution = self._enqueue_video_pipeline_execution_ticket()
+        class RevokingWorker:
+            def run_approved_ticket(inner_self, **kwargs):
+                result = self._video_pipeline_success_result(kwargs)
+                with TaskQueue(self.db) as queue:
+                    queue.record_event(
+                        kwargs["approval_task_id"], "human.decision", actor="second-human",
+                        payload={"decision": "rejected"},
+                    )
+                return result
+        result = self.runtime.dispatch_video_pipeline_once(
+            task_id=execution["id"], approved=True, video_worker=RevokingWorker(),
+        )
+        self.assertEqual(result["status"], "completion_evidence_rejected")
+        with TaskQueue(self.db) as queue:
+            self.assertEqual(queue.get(execution["id"])["status"], "failed")
+
+    def test_dispatch_video_pipeline_once_rejects_mismatched_review_event_id(self):
+        execution = self._enqueue_video_pipeline_execution_ticket()
+        class MismatchedReviewerWorker:
+            def run_approved_ticket(inner_self, **kwargs):
+                result = self._video_pipeline_success_result(kwargs)
+                result["completion_evidence"]["review_event_id"] = "wrong-review-event"
+                return result
+        result = self.runtime.dispatch_video_pipeline_once(
+            task_id=execution["id"], approved=True, video_worker=MismatchedReviewerWorker(),
+        )
+        self.assertEqual(result["status"], "completion_evidence_rejected")
+
+    def test_dispatch_video_pipeline_once_rejects_duplicate_artifact_events(self):
+        execution = self._enqueue_video_pipeline_execution_ticket()
+        class DuplicateArtifactWorker:
+            def run_approved_ticket(inner_self, **kwargs):
+                result = self._video_pipeline_success_result(kwargs)
+                with TaskQueue(self.db) as queue:
+                    artifact = next(e for e in queue.events(execution["id"]) if e["event_type"] == "video_pipeline.artifacts_verified")
+                    queue.record_event(execution["id"], "video_pipeline.artifacts_verified", actor=kwargs["worker_id"], payload=artifact["payload"])
+                return result
+        result = self.runtime.dispatch_video_pipeline_once(
+            task_id=execution["id"], approved=True, video_worker=DuplicateArtifactWorker(),
+        )
+        self.assertEqual(result["status"], "completion_evidence_rejected")
+
+    def test_dispatch_video_pipeline_once_rejects_same_worker_as_reviewer(self):
+        execution = self._enqueue_video_pipeline_execution_ticket()
+        class SelfReviewerWorker:
+            def run_approved_ticket(inner_self, **kwargs):
+                return self._video_pipeline_success_result(kwargs, reviewer_id=kwargs["worker_id"])
+        result = self.runtime.dispatch_video_pipeline_once(
+            task_id=execution["id"], approved=True, video_worker=SelfReviewerWorker(),
+        )
+        self.assertEqual(result["status"], "completion_evidence_rejected")
+
+    def test_dispatch_video_pipeline_once_rejects_manifest_changed_after_worker_verification(self):
+        execution = self._enqueue_video_pipeline_execution_ticket()
+        class TamperingWorker:
+            def run_approved_ticket(inner_self, **kwargs):
+                result = self._video_pipeline_success_result(kwargs)
+                (Path(self.tmp.name) / "video-artifacts" / "manifest.json").write_text("tampered", encoding="utf-8")
+                return result
+        result = self.runtime.dispatch_video_pipeline_once(
+            task_id=execution["id"], approved=True, video_worker=TamperingWorker(),
+        )
+        self.assertEqual(result["status"], "completion_evidence_rejected")
 
     def test_dispatch_video_pipeline_once_rejects_tampered_dag_digest(self):
         """Tampered snapshot must be rejected before the ticket is claimed."""
@@ -1258,4 +1384,3 @@ class UnifiedRuntimeTests(unittest.TestCase):
             self.assertEqual(queue.get(execution["id"])["status"], "queued")
 
 if __name__ == "__main__": unittest.main()
-

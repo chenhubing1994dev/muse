@@ -164,7 +164,10 @@ class VideoProductApiTests(unittest.TestCase):
                 self.assertTrue(response.read().startswith(b"\x89PNG"))
             review_path = f"/api/v1/products/{initiative_id}/{version_id}/visual-review"
             with urlopen(self._request(review_path)) as response:
-                self.assertEqual(json.loads(response.read())["count"], 0)
+                review_state = json.loads(response.read())
+                self.assertEqual(review_state["count"], 0)
+                self.assertEqual(review_state["visual_quality"]["status"], "unavailable")
+                self.assertIsNotNone(review_state["evidence"]["visual_quality_report_sha256"])
             payload = {
                 "decision": "approved", "reviewer": "Local Editor", "reviewer_role": "video_editor",
                 "rationale": "Reviewed the complete video and contact sheet carefully.",

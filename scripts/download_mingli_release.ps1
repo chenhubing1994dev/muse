@@ -1,5 +1,5 @@
 param(
-    [string]$Destination = "D:\AI AGENT\Muse\models\mingli-ai-v0.1.0-assets",
+    [string]$Destination = (Join-Path (Split-Path -Parent $PSScriptRoot) "models\mingli-ai-v0.1.0-assets"),
     [switch]$PreflightOnly
 )
 

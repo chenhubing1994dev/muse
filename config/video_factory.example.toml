@@ -1,0 +1,26 @@
+[providers]
+# Only local providers are selected by default. Cloud services are never enabled by this file.
+text_provider = "local"
+video_provider = "comfyui"
+tts_provider = "local_cantonese"
+asr_provider = "local_whisper_cantonese"
+allow_paid_cloud = false
+
+[gpu]
+# One shared SQLite lease serializes Muse GPU inference, ComfyUI generation and AMF encoding.
+resource_database = "data/gpu-resources.sqlite3"
+max_concurrent_gpu_jobs = 1
+block_when_model_service_state_unknown = true
+block_amf_while_comfyui_online = true
+
+[encoders]
+# Runtime probes encode a real MP4, inspect it with FFprobe and fully decode it.
+probe_on_make = true
+preferred = ["h264_amf", "libx264"]
+require_full_decode = true
+
+[services]
+comfyui_endpoint = "http://127.0.0.1:8188"
+wan_models_dir_env = "MUSE_COMFYUI_MODELS_DIR"
+tts_model_dir = "data/models/canto-tts-nano"
+asr_model_dir = "models/whisper-small-cantonese/cts"

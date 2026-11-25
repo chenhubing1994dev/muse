@@ -9,10 +9,14 @@ import argparse
 import hashlib
 import json
 import logging
+import os
 import re
+import sqlite3
 import sys
 import threading
+import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -57,6 +61,127 @@ def _video_generation_input_sha256(**fields: Any) -> str:
         payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _workspace_artifact_path(workspace: str | Path, relative_path: str, *, maximum_bytes: int) -> Path:
+    if not isinstance(relative_path, str) or not relative_path.strip():
+        raise ValueError("video package artifact path is missing")
+    relative = Path(relative_path)
+    if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
+        raise ValueError("video package artifact path must be workspace-relative")
+    root = Path(workspace).resolve()
+    cursor = root
+    for part in relative.parts:
+        cursor = cursor / part
+        if cursor.is_symlink():
+            raise ValueError("video package artifacts may not traverse symlinks")
+    target = cursor.resolve(strict=True)
+    if not target.is_relative_to(root) or not target.is_file() or target.stat().st_size > maximum_bytes:
+        raise ValueError("video package artifact is missing, outside workspace or oversized")
+    return target
+
+
+def _artifact_json(workspace: str | Path, relative_path: str, *, maximum_bytes: int) -> dict[str, Any]:
+    path = _workspace_artifact_path(workspace, relative_path, maximum_bytes=maximum_bytes)
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError("video package artifact root must be a JSON object")
+    return value
+
+
+def _json_artifact_digest(value: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, ensure_ascii=False, allow_nan=False).encode("utf-8")
+    ).hexdigest()
+
+
+def _load_video_brief_reference(workspace: str | Path, reference: Mapping[str, Any]) -> dict[str, Any]:
+    relative_path = reference.get("brief_path")
+    expected = reference.get("brief_sha256")
+    if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+        raise ValueError("video brief reference digest is invalid")
+    wrapper = _artifact_json(workspace, relative_path, maximum_bytes=262_144)
+    brief = wrapper.get("video_brief")
+    digest = _json_artifact_digest(brief)
+    if wrapper.get("schema_version") != 1 or wrapper.get("video_brief_sha256") != digest or digest != expected:
+        raise ValueError("video brief artifact digest does not match its immutable reference")
+    if not isinstance(brief, dict):
+        raise ValueError("video brief artifact does not contain an object")
+    return brief
+
+
+def load_prebuilt_narration_script(
+    workspace: str | Path, narration: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Load an approved narration script only when its workspace path and SHA-256 match."""
+    relative_path = narration.get("script_path")
+    expected = narration.get("script_sha256")
+    if relative_path is None and expected is None:
+        return None
+    if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+        raise ValueError("prebuilt narration script digest is invalid")
+    wrapper = _artifact_json(workspace, relative_path, maximum_bytes=131_072)
+    script = wrapper.get("script")
+    digest = _json_artifact_digest(script)
+    if (
+        wrapper.get("schema_version") != 1
+        or wrapper.get("script_sha256") != digest
+        or digest != expected
+        or not isinstance(script, dict)
+        or not isinstance(script.get("segments"), list)
+    ):
+        raise ValueError("prebuilt narration script is missing, malformed or has a SHA-256 mismatch")
+    return script
+
+
+def verify_video_package_artifacts(
+    workspace: str | Path, video_brief: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Verify the exact script/storyboard/story-bible files approved with a video brief."""
+    reference_fields = (
+        "script_path", "script_sha256", "storyboard_path", "storyboard_sha256",
+        "story_bible_path", "story_bible_sha256",
+    )
+    present = [video_brief.get(field) is not None for field in reference_fields]
+    if not any(present):
+        return None
+    if not all(present):
+        raise ValueError("video package contains an incomplete artifact reference set")
+    script = load_prebuilt_narration_script(workspace, video_brief.get("narration", {}))
+    storyboard_wrapper = _artifact_json(
+        workspace, video_brief["storyboard_path"], maximum_bytes=1_048_576,
+    )
+    story_bible_wrapper = _artifact_json(
+        workspace, video_brief["story_bible_path"], maximum_bytes=131_072,
+    )
+    storyboard = storyboard_wrapper.get("storyboard")
+    story_bible = story_bible_wrapper.get("story_bible")
+    if (
+        storyboard_wrapper.get("schema_version") != 1
+        or story_bible_wrapper.get("schema_version") != 1
+        or _json_artifact_digest(storyboard) != video_brief["storyboard_sha256"]
+        or storyboard_wrapper.get("storyboard_sha256") != video_brief["storyboard_sha256"]
+        or _json_artifact_digest(story_bible) != video_brief["story_bible_sha256"]
+        or story_bible_wrapper.get("story_bible_sha256") != video_brief["story_bible_sha256"]
+    ):
+        raise ValueError("storyboard or story-bible artifact SHA-256 validation failed")
+    from muse.story_bible import validate_story_continuity
+    from muse.video_workflow import validate_storyboard
+    normalized_storyboard = validate_storyboard(storyboard)
+    validate_story_continuity(story_bible, normalized_storyboard)
+    brief_scenes = video_brief.get("scenes")
+    storyboard_scenes = normalized_storyboard.get("scenes")
+    if not isinstance(brief_scenes, list) or not isinstance(storyboard_scenes, list) or len(brief_scenes) != len(storyboard_scenes):
+        raise ValueError("approved video brief scene count differs from its storyboard")
+    for index, (brief_scene, storyboard_scene) in enumerate(zip(brief_scenes, storyboard_scenes), start=1):
+        if (
+            not isinstance(brief_scene, dict)
+            or brief_scene.get("prompt") != storyboard_scene.get("prompt")
+            or float(brief_scene.get("duration_seconds", -1)) != float(storyboard_scene.get("duration_seconds", -2))
+        ):
+            raise ValueError(f"approved video brief scene {index} differs from its storyboard")
+    return script
+
 
 
 def _runtime_is_paused(workspace: Path) -> bool:
@@ -126,6 +251,53 @@ class _VideoAttemptLeaseHeartbeat:
                 self._lease_lost.set()
 
 
+class _TaskTicketLeaseHeartbeat:
+    """Renew a Runtime-owned TaskQueue lease while the video worker is busy."""
+
+    def __init__(self, database: Path, task_id: str, worker_id: str, *, lease_seconds: int = 60, interval_seconds: float = 15.0):
+        if not 0.1 <= interval_seconds < lease_seconds:
+            raise ValueError("TaskQueue heartbeat interval must be shorter than its lease")
+        self.database, self.task_id, self.worker_id = database, task_id, worker_id
+        self.lease_seconds, self.interval_seconds = lease_seconds, interval_seconds
+        self._stop = threading.Event()
+        self._lost = threading.Event()
+        self.error_type: str | None = None
+        self._thread: threading.Thread | None = None
+
+    @property
+    def lease_lost(self) -> bool:
+        return self._lost.is_set()
+
+    def start(self) -> None:
+        if self._thread is not None:
+            raise RuntimeError("TaskQueue heartbeat already started")
+        self._thread = threading.Thread(target=self._run, name=f"ticket-lease-{self.task_id[:8]}", daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        from muse.task_queue import TaskQueue
+        while not self._stop.wait(self.interval_seconds):
+            try:
+                if self.database.is_symlink():
+                    raise ValueError("TaskQueue database must not be a symlink")
+                with TaskQueue(self.database) as queue:
+                    renewed = queue.heartbeat(self.task_id, worker_id=self.worker_id, lease_seconds=self.lease_seconds)
+                if renewed is None:
+                    raise RuntimeError("TaskQueue execution lease was lost or expired")
+            except Exception as exc:
+                self.error_type = type(exc).__name__
+                self._lost.set()
+                return
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None and self._thread.ident is not None and self._thread is not threading.current_thread():
+            self._thread.join(timeout=max(5.0, self.interval_seconds * 2))
+            if self._thread.is_alive():
+                self.error_type = self.error_type or "HeartbeatStopTimeout"
+                self._lost.set()
+
+
 class VideoTaskWorker:
     def __init__(
         self, workspace: str | Path, *, builder=None, worker_id: str | None = None,
@@ -155,7 +327,7 @@ class VideoTaskWorker:
         self.lease_renew_interval_seconds = 60.0
 
     @staticmethod
-    def _commander_approval_evidence(store, queue, attempt) -> dict[str, str] | None:
+    def _commander_approval_evidence(store, queue, attempt, workspace: str | Path | None = None) -> dict[str, str] | None:
         """Return the exact live human-decision evidence bound to this video attempt."""
         task_id = attempt.get("approval_task_id")
         initiative_id = attempt.get("initiative_id")
@@ -174,6 +346,13 @@ class VideoTaskWorker:
         brief = creator_brief.get("video") if isinstance(creator_brief, dict) else None
         if not isinstance(brief, dict):
             return None
+        if "brief_path" in brief or "brief_sha256" in brief:
+            if workspace is None:
+                return None
+            try:
+                brief = _load_video_brief_reference(workspace, brief)
+            except (OSError, ValueError, KeyError, json.JSONDecodeError):
+                return None
 
         digest = hashlib.sha256(json.dumps(brief, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
         ticket = queue.get(task_id)
@@ -228,9 +407,9 @@ class VideoTaskWorker:
         }
 
     @staticmethod
-    def _commander_approval_is_valid(store, queue, attempt) -> bool:
+    def _commander_approval_is_valid(store, queue, attempt, workspace: str | Path | None = None) -> bool:
         """Compatibility predicate for a live approval bound to this exact attempt."""
-        return VideoTaskWorker._commander_approval_evidence(store, queue, attempt) is not None
+        return VideoTaskWorker._commander_approval_evidence(store, queue, attempt, workspace) is not None
 
     def _consume_commander_admission_grant(
         self, store, attempt, video_brief, *, step_id: str, input_sha256: str,
@@ -388,7 +567,7 @@ class VideoTaskWorker:
             raise VideoAdmissionBlocked("persisted grant capabilities differ from the one-step request")
 
         with TaskQueue(self.task_database) as live_approvals:
-            latest_approval = self._commander_approval_evidence(store, live_approvals, attempt)
+            latest_approval = self._commander_approval_evidence(store, live_approvals, attempt, self.workspace)
         if (lease_lost() or latest_approval is None
                 or latest_approval.get("approval_task_id") != request.approval_task_id
                 or latest_approval.get("approval_event_id") != request.approval_event_id
@@ -420,7 +599,367 @@ class VideoTaskWorker:
         return self.builder
 
     def run_once(self) -> dict[str, Any]:
-        """Run one queued prompt-to-video task; never loops or auto-publishes."""
+        """Deprecated entrypoint: production video dispatch must be Runtime-owned."""
+        return {
+            "status": "blocked_entrypoint", "claimed": False,
+            "reason": "use MuseRuntime.dispatch_video_pipeline_once and run_approved_ticket",
+        }
+
+    def run_approved_ticket(
+        self, *, execution_task_id: str, commander_plan: Any, dag_sha256: str,
+        approval_task_id: str, approval_event_id: str, approved_by: str, worker_id: str,
+    ) -> dict[str, Any]:
+        """Execute one exact Runtime-claimed Ticket and return independently signed completion evidence."""
+        from muse.commander_planner import CommanderPlan
+        from muse.artifact_evidence import LocalArtifactEvidenceVerifier
+        from muse.unified_runtime import MuseRuntime
+        from muse.task_queue import TaskQueue
+
+        if (not isinstance(execution_task_id, str) or not execution_task_id.strip()
+                or not isinstance(commander_plan, CommanderPlan)
+                or not isinstance(dag_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", dag_sha256) is None
+                or not all(isinstance(value, str) and value.strip() for value in
+                           (approval_task_id, approval_event_id, approved_by, worker_id))
+                or worker_id != self.worker_id):
+            raise VideoAdmissionBlocked("run_approved_ticket requires the exact validated Runtime dispatch identity")
+        if self.pause_check():
+            return {"status": "paused", "claimed": False}
+        if self.admission_provider is None or self.admission_request_factory is None:
+            raise VideoAdmissionBlocked("Commander one-shot admission provider is not configured")
+
+        with TaskQueue(self.task_database) as queue:
+            ticket = queue.get(execution_task_id)
+            if (not isinstance(ticket, dict) or ticket.get("status") != "running"
+                    or ticket.get("lease_owner") != worker_id):
+                raise VideoAdmissionBlocked("execution Ticket is not held by this exact live Worker lease")
+            try:
+                expires = datetime.fromisoformat(str(ticket.get("lease_expires_at", "")).replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise VideoAdmissionBlocked("execution Ticket lease expiry is malformed") from exc
+            if expires.tzinfo is None or expires <= datetime.now(timezone.utc):
+                raise VideoAdmissionBlocked("execution Ticket lease has expired")
+            payload = ticket.get("payload")
+            if not isinstance(payload, dict) or payload.get("kind") != "video_pipeline":
+                raise VideoAdmissionBlocked("run_approved_ticket accepts video_pipeline Tickets only")
+            context = MuseRuntime._validate_video_pipeline_execution_ticket(queue, {**ticket, "status": "queued"})
+            plan = context["commander_plan"]
+            if (plan.source != "model" or plan.to_snapshot() != commander_plan.to_snapshot()
+                    or payload.get("commander_plan_id") != plan.plan_id or payload.get("dag_sha256") != dag_sha256
+                    or payload.get("approval_task_id") != approval_task_id
+                    or payload.get("approval_event_id") != approval_event_id
+                    or payload.get("approved_by") != approved_by):
+                raise VideoAdmissionBlocked("Commander DAG or approval identity differs from the persisted Ticket")
+            workflow = [e for e in queue.workflow_events(execution_task_id) if e.get("event_type") == "workflow.bound"]
+            commander = [e for e in queue.events(execution_task_id, limit=500)
+                         if e.get("event_type") == "commander.video_pipeline_bound"]
+            step_ids = [step.step_id for step in plan.steps]
+            steps = [{"step_id": step.step_id, "role": step.role, "depends_on": list(step.depends_on)}
+                     for step in plan.steps]
+            if (len(workflow) != 1 or len(commander) != 1
+                    or workflow[0].get("actor") != "commander"
+                    or workflow[0].get("payload", {}).get("workflow_id") != plan.plan_id
+                    or workflow[0].get("payload", {}).get("commander_plan_id") != plan.plan_id
+                    or workflow[0].get("payload", {}).get("plan_source") != "model"
+                    or workflow[0].get("payload", {}).get("step_ids") != step_ids
+                    or workflow[0].get("payload", {}).get("steps") != steps
+                    or workflow[0].get("payload", {}).get("parallel_waves") != [list(w) for w in plan.parallel_waves]
+                    or commander[0].get("actor") != "commander"
+                    or commander[0].get("payload") != {
+                        "plan_id": plan.plan_id, "plan_source": "model", "step_ids": step_ids,
+                        "approval_task_id": approval_task_id, "approval_event_id": approval_event_id,
+                        "attempt_id": payload["attempt_id"], "initiative_id": payload["initiative_id"],
+                    }):
+                raise VideoAdmissionBlocked("execution Ticket lacks its exact durable Commander workflow binding")
+
+        with InitiativeStore(self.database) as store:
+            attempt = store.get_video_attempt(payload["attempt_id"])
+            if (not isinstance(attempt, dict) or attempt.get("status") != "queued"
+                    or attempt.get("initiative_id") != payload.get("initiative_id")
+                    or attempt.get("approval_task_id") != approval_task_id):
+                raise VideoAdmissionBlocked("persisted video Attempt does not match the approved execution Ticket")
+
+        ticket_heartbeat = _TaskTicketLeaseHeartbeat(self.task_database, execution_task_id, worker_id)
+        attempt_heartbeat: _VideoAttemptLeaseHeartbeat | None = None
+        pending: dict[str, Any] | None = None
+        try:
+            ticket_heartbeat.start()
+            pending = self._run_approved_attempt(execution_task_id=execution_task_id, defer_completion=True)
+            if pending.get("status") != "awaiting_independent_review":
+                return pending
+            attempt_id, lease_epoch = pending["attempt_id"], pending["lease_epoch"]
+            attempt_heartbeat = _VideoAttemptLeaseHeartbeat(
+                self.database, attempt_id, worker_id, lease_epoch,
+                lease_seconds=self.lease_seconds, interval_seconds=self.lease_renew_interval_seconds,
+            )
+            attempt_heartbeat.start()
+            product_dir = Path(pending["relative_path"])
+            if product_dir.is_absolute() or any(part in {"", ".", ".."} for part in product_dir.parts):
+                raise VideoAdmissionBlocked("Worker product directory is not workspace-relative")
+            manifest_relative = (product_dir / "manifest.json").as_posix()
+            manifest = LocalArtifactEvidenceVerifier(self.workspace).verify(
+                manifest_relative, pending["manifest_sha256"],
+            )
+            artifact = {
+                "execution_task_id": execution_task_id, "attempt_id": attempt_id,
+                "initiative_id": pending["initiative_id"], "version_id": pending["version_id"],
+                "commander_plan_id": plan.plan_id, "dag_sha256": dag_sha256,
+                "approval_task_id": approval_task_id, "approval_event_id": approval_event_id,
+                "approved_by": approved_by, "worker_id": worker_id,
+                "manifest_sha256": pending["manifest_sha256"],
+                "manifest_relative_path": manifest_relative, "manifest_bytes": manifest["bytes"],
+                "mp4_sha256": pending["mp4_sha256"], "package_sha256": pending["package_sha256"],
+            }
+            with TaskQueue(self.task_database) as queue:
+                existing = [e for e in queue.events(execution_task_id, limit=500)
+                            if e.get("event_type") == "video_pipeline.artifacts_verified"]
+                if existing:
+                    if len(existing) != 1 or existing[0].get("actor") != worker_id or existing[0].get("payload") != artifact:
+                        raise VideoAdmissionBlocked("conflicting artifact evidence already exists")
+                else:
+                    queue.record_event(execution_task_id, "video_pipeline.artifacts_verified", actor=worker_id, payload=artifact)
+
+            wait_seconds = int(os.environ.get("MUSE_VIDEO_REVIEWER_WAIT_SECONDS", "300"))
+            if not 0 <= wait_seconds <= 1800:
+                raise VideoAdmissionBlocked("Reviewer wait timeout must be between 0 and 1800 seconds")
+            deadline = time.monotonic() + wait_seconds
+            review_event = None
+            while True:
+                if ticket_heartbeat.lease_lost or attempt_heartbeat.lease_lost:
+                    raise VideoAdmissionBlocked("execution or Attempt lease was lost while awaiting review")
+                with TaskQueue(self.task_database) as queue:
+                    current = queue.get(execution_task_id)
+                    if not isinstance(current, dict) or current.get("status") != "running" or current.get("lease_owner") != worker_id:
+                        raise VideoAdmissionBlocked("execution Ticket lease changed while awaiting Reviewer")
+                    decisions = [e for e in queue.events(approval_task_id, limit=500) if e.get("event_type") == "human.decision"]
+                    if not decisions or decisions[-1].get("event_id") != approval_event_id or decisions[-1].get("actor") != approved_by or decisions[-1].get("payload", {}).get("decision") != "approved":
+                        raise VideoAdmissionBlocked("approval was revoked or changed while awaiting Reviewer")
+                    reviews = [e for e in queue.events(execution_task_id, limit=500)
+                               if e.get("event_type") == "video_pipeline.review_approved"]
+                    if len(reviews) > 1:
+                        raise VideoAdmissionBlocked("multiple Reviewer approvals exist for one execution Ticket")
+                    if reviews:
+                        review_event = reviews[0]
+                        break
+                if time.monotonic() >= deadline:
+                    raise VideoAdmissionBlocked("independent Reviewer signer did not approve the artifact before timeout")
+                time.sleep(0.5)
+
+            review = review_event.get("payload")
+            reviewer_id = review.get("reviewer_id") if isinstance(review, dict) else None
+            attestation = review.get("reviewer_attestation") if isinstance(review, dict) else None
+            if (not isinstance(reviewer_id, str) or not reviewer_id.strip() or reviewer_id == worker_id
+                    or review_event.get("actor") != reviewer_id or not isinstance(review, dict)
+                    or review.get("decision") != "approved"
+                    or any(review.get(key) != value for key, value in artifact.items())
+                    or not isinstance(attestation, dict) or attestation.get("reviewer_id") != reviewer_id
+                    or attestation.get("review_record_sha256") != review.get("review_record_sha256")):
+                raise VideoAdmissionBlocked("Reviewer event is not bound to this exact artifact")
+            expected_binding = {
+                "execution_task_id": execution_task_id, "attempt_id": attempt_id,
+                "initiative_id": pending["initiative_id"], "commander_plan_id": plan.plan_id,
+                "dag_sha256": dag_sha256, "approval_task_id": approval_task_id,
+                "approval_event_id": approval_event_id, "approved_by": approved_by,
+                "worker_id": worker_id, "manifest_sha256": pending["manifest_sha256"],
+                "reviewer_id": reviewer_id, "decision": "approved",
+                "manifest_relative_path": manifest_relative, "manifest_bytes": manifest["bytes"],
+            }
+            if attestation.get("binding") != expected_binding:
+                raise VideoAdmissionBlocked("Reviewer signature binding differs from the approved artifact")
+            try:
+                from muse.video_reviewer_attestation import (
+                    load_video_reviewer_public_keys_from_environment,
+                    verify_video_reviewer_attestation_signature,
+                )
+                verify_video_reviewer_attestation_signature(
+                    attestation, load_video_reviewer_public_keys_from_environment(), expected_binding,
+                )
+            except (OSError, TypeError, ValueError, RuntimeError) as exc:
+                raise VideoAdmissionBlocked("independent Reviewer signature could not be verified before Attempt completion") from exc
+            if ticket_heartbeat.lease_lost or attempt_heartbeat.lease_lost:
+                raise VideoAdmissionBlocked("execution or Attempt lease was lost before completion")
+            with InitiativeStore(self.database) as store, TaskQueue(self.task_database) as queue:
+                current = queue.get(execution_task_id)
+                current_attempt = store.get_video_attempt(attempt_id)
+                decisions = [e for e in queue.events(approval_task_id, limit=500) if e.get("event_type") == "human.decision"]
+                if (not isinstance(current, dict) or current.get("status") != "running" or current.get("lease_owner") != worker_id
+                        or not decisions or decisions[-1].get("event_id") != approval_event_id
+                        or decisions[-1].get("actor") != approved_by or decisions[-1].get("payload", {}).get("decision") != "approved"):
+                    raise VideoAdmissionBlocked("approval or execution lease changed before Runtime validation")
+                if (not isinstance(current_attempt, dict) or current_attempt.get("status") != "running"
+                        or current_attempt.get("worker_id") != worker_id
+                        or int(current_attempt.get("attempt_count") or 0) != lease_epoch):
+                    raise VideoAdmissionBlocked("video Attempt lease changed before Runtime validation")
+            completion_evidence = {
+                "execution_task_id": execution_task_id, "attempt_id": attempt_id,
+                "initiative_id": pending["initiative_id"], "commander_plan_id": plan.plan_id,
+                "dag_sha256": dag_sha256, "approval_task_id": approval_task_id,
+                "approval_event_id": approval_event_id, "approved_by": approved_by,
+                "worker_id": worker_id, "manifest_sha256": pending["manifest_sha256"],
+                "reviewer_id": reviewer_id, "review_event_id": review_event["event_id"],
+                "reviewer_attestation": attestation,
+            }
+            attempt_commit = {
+                "attempt_id": attempt_id, "lease_epoch": lease_epoch,
+                "initiative_id": pending["initiative_id"], "version_id": pending["version_id"],
+                "mp4_sha256": pending["mp4_sha256"], "package_sha256": pending["package_sha256"],
+                "manifest_sha256": pending["manifest_sha256"],
+            }
+            return {
+                "status": "succeeded", "attempt_id": attempt_id, "product_id": pending["initiative_id"],
+                "version_id": pending["version_id"], "attempt_commit": attempt_commit,
+                "quality_gate": pending.get("quality_gate", {"status": "not_reported"}),
+                "content_review_required": False, "auto_publish": False,
+                "narration_status": pending.get("narration_status", "not_requested"),
+                "admission_grants_consumed": pending.get("admission_grants_consumed", []),
+                "completion_evidence": completion_evidence,
+            }
+        except Exception:
+            if pending is not None and attempt_heartbeat is not None and not attempt_heartbeat.lease_lost:
+                try:
+                    with InitiativeStore(self.database) as store:
+                        store.release_video_attempt(attempt_id, worker_id=worker_id, lease_epoch=lease_epoch,
+                                                    reason="independent_reviewer_not_completed")
+                except (ValueError, KeyError):
+                    pass
+            raise
+        finally:
+            if attempt_heartbeat is not None:
+                attempt_heartbeat.stop()
+            ticket_heartbeat.stop()
+
+    def finalize_approved_ticket(
+        self, *, execution_task_id: str, worker_id: str,
+        attempt_commit: dict[str, Any], completion_evidence: dict[str, Any],
+        completion: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Commit the video Attempt only after Runtime verified and consumed the Reviewer nonce."""
+        if worker_id != self.worker_id or not isinstance(attempt_commit, dict) or set(attempt_commit) != {
+            "attempt_id", "lease_epoch", "initiative_id", "version_id",
+            "mp4_sha256", "package_sha256", "manifest_sha256",
+        }:
+            raise VideoAdmissionBlocked("Runtime finalization requires the exact Worker lease and commit receipt")
+        if (not isinstance(completion_evidence, dict)
+                or completion_evidence.get("execution_task_id") != execution_task_id
+                or completion_evidence.get("worker_id") != worker_id
+                or completion_evidence.get("attempt_id") != attempt_commit.get("attempt_id")
+                or completion_evidence.get("initiative_id") != attempt_commit.get("initiative_id")
+                or completion_evidence.get("manifest_sha256") != attempt_commit.get("manifest_sha256")
+                or not isinstance(completion, dict)
+                or completion.get("attempt_id") != attempt_commit.get("attempt_id")
+                or completion.get("review_event_id") != completion_evidence.get("review_event_id")
+                or completion.get("reviewer_id") != completion_evidence.get("reviewer_id")
+                or completion.get("reviewer_attestation_sha256") is None):
+            raise VideoAdmissionBlocked("Runtime-verified completion receipt does not match the pending Attempt")
+        attestation = completion_evidence.get("reviewer_attestation")
+        if not isinstance(attestation, dict) or not isinstance(attestation.get("nonce"), str):
+            raise VideoAdmissionBlocked("Runtime finalization is missing the signed Reviewer nonce")
+        attestation_sha256 = hashlib.sha256(json.dumps(
+            attestation, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
+        ).encode("utf-8")).hexdigest()
+        if attestation_sha256 != completion.get("reviewer_attestation_sha256"):
+            raise VideoAdmissionBlocked("Runtime finalization Reviewer attestation digest mismatch")
+        nonce_sha256 = hashlib.sha256(attestation["nonce"].encode("utf-8")).hexdigest()
+        connection = sqlite3.connect(self.task_database, timeout=10)
+        try:
+            row = connection.execute(
+                "SELECT task_id, attestation_sha256 FROM muse_video_reviewer_attestation_nonces WHERE nonce_sha256=?",
+                (nonce_sha256,),
+            ).fetchone()
+        except sqlite3.Error as exc:
+            raise VideoAdmissionBlocked("Runtime has not consumed the Reviewer nonce") from exc
+        finally:
+            connection.close()
+        if row is None or row[0] != execution_task_id or row[1] != attestation_sha256:
+            raise VideoAdmissionBlocked("Reviewer nonce was not consumed for this exact execution Ticket")
+
+        with TaskQueue(self.task_database) as queue:
+            ticket = queue.get(execution_task_id)
+            if not isinstance(ticket, dict) or ticket.get("status") != "running" or ticket.get("lease_owner") != worker_id:
+                raise VideoAdmissionBlocked("execution Ticket lease changed before final Attempt commit")
+            try:
+                ticket_expiry = datetime.fromisoformat(str(ticket.get("lease_expires_at", "")).replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise VideoAdmissionBlocked("execution Ticket lease expiry is malformed at final commit") from exc
+            if ticket_expiry.tzinfo is None or ticket_expiry <= datetime.now(timezone.utc):
+                raise VideoAdmissionBlocked("execution Ticket lease expired before final Attempt commit")
+            ticket_payload = ticket.get("payload")
+            if (not isinstance(ticket_payload, dict)
+                    or ticket_payload.get("attempt_id") != attempt_commit["attempt_id"]
+                    or ticket_payload.get("initiative_id") != attempt_commit["initiative_id"]
+                    or ticket_payload.get("approval_task_id") != completion_evidence.get("approval_task_id")
+                    or ticket_payload.get("approval_event_id") != completion_evidence.get("approval_event_id")
+                    or ticket_payload.get("approved_by") != completion_evidence.get("approved_by")):
+                raise VideoAdmissionBlocked("final Attempt commit does not match the persisted execution Ticket")
+            approval_ticket = queue.get(ticket_payload["approval_task_id"])
+            decisions = [e for e in queue.events(ticket_payload["approval_task_id"], limit=500)
+                         if e.get("event_type") == "human.decision"]
+            if (approval_ticket is None or approval_ticket.get("status") != "queued"
+                    or not decisions or decisions[-1].get("event_id") != ticket_payload.get("approval_event_id")
+                    or decisions[-1].get("actor") != ticket_payload.get("approved_by")
+                    or decisions[-1].get("payload", {}).get("decision") != "approved"):
+                raise VideoAdmissionBlocked("human approval changed after Runtime signature verification")
+            review_events = [e for e in queue.events(execution_task_id, limit=500)
+                             if e.get("event_type") == "video_pipeline.review_approved"]
+            if (len(review_events) != 1 or review_events[0].get("event_id") != completion_evidence.get("review_event_id")
+                    or review_events[0].get("payload", {}).get("reviewer_attestation") != attestation
+                    or review_events[0].get("payload", {}).get("review_record_sha256") != attestation.get("review_record_sha256")):
+                raise VideoAdmissionBlocked("persisted Reviewer event changed before final Attempt commit")
+            artifact_events = [e for e in queue.events(execution_task_id, limit=500)
+                               if e.get("event_type") == "video_pipeline.artifacts_verified"]
+            if (len(artifact_events) != 1
+                    or artifact_events[0].get("event_id") != completion.get("artifact_event_id")
+                    or artifact_events[0].get("payload", {}).get("execution_task_id") != execution_task_id
+                    or artifact_events[0].get("payload", {}).get("attempt_id") != attempt_commit["attempt_id"]
+                    or artifact_events[0].get("payload", {}).get("initiative_id") != attempt_commit["initiative_id"]
+                    or artifact_events[0].get("payload", {}).get("version_id") != attempt_commit["version_id"]
+                    or artifact_events[0].get("payload", {}).get("manifest_sha256") != attempt_commit["manifest_sha256"]
+                    or artifact_events[0].get("payload", {}).get("mp4_sha256") != attempt_commit["mp4_sha256"]
+                    or artifact_events[0].get("payload", {}).get("package_sha256") != attempt_commit["package_sha256"]):
+                raise VideoAdmissionBlocked("exact artifact evidence is unavailable or changed at final Attempt commit")
+        with InitiativeStore(self.database) as store:
+            attempt = store.get_video_attempt(attempt_commit["attempt_id"])
+            if (not isinstance(attempt, dict) or attempt.get("status") != "running"
+                    or attempt.get("worker_id") != worker_id
+                    or int(attempt.get("attempt_count") or 0) != attempt_commit["lease_epoch"]):
+                raise VideoAdmissionBlocked("InitiativeStore Attempt lease changed before final commit")
+            completed = store.complete_video_attempt(
+                attempt_commit["attempt_id"], product_id=attempt_commit["initiative_id"],
+                version_id=attempt_commit["version_id"], mp4_sha256=attempt_commit["mp4_sha256"],
+                package_sha256=attempt_commit["package_sha256"], manifest_sha256=attempt_commit["manifest_sha256"],
+                worker_id=worker_id, lease_epoch=attempt_commit["lease_epoch"],
+            )
+            if completed.get("status") != "succeeded":
+                raise VideoAdmissionBlocked("InitiativeStore rejected the Runtime-verified Attempt commit")
+            try:
+                cleanup_video_attempt_staging_directory(self.workspace, attempt_commit["attempt_id"], store)
+            except Exception:
+                logging.getLogger(__name__).warning(
+                    "Could not clean committed video Attempt staging %s",
+                    attempt_commit["attempt_id"], exc_info=True,
+                )
+        return {"status": "succeeded", "attempt_id": completed["attempt_id"],
+                "product_id": completed["product_id"], "version_id": completed["version_id"]}
+
+    def abort_approved_ticket(
+        self, *, attempt_commit: dict[str, Any], worker_id: str, reason: str = "runtime_validation_failed",
+    ) -> dict[str, Any]:
+        """Release, never complete, an Attempt rejected by the Runtime's independent verification."""
+        if (worker_id != self.worker_id or not isinstance(attempt_commit, dict)
+                or not isinstance(attempt_commit.get("attempt_id"), str)
+                or isinstance(attempt_commit.get("lease_epoch"), bool)
+                or not isinstance(attempt_commit.get("lease_epoch"), int)):
+            raise VideoAdmissionBlocked("Attempt abort requires the exact Worker lease receipt")
+        with InitiativeStore(self.database) as store:
+            released = store.release_video_attempt(
+                attempt_commit["attempt_id"], worker_id=worker_id,
+                lease_epoch=attempt_commit["lease_epoch"], reason=reason,
+            )
+        return {"status": "released" if released else "not_released", "attempt_id": attempt_commit["attempt_id"]}
+
+    def _run_approved_attempt(
+        self, *, execution_task_id: str | None = None, defer_completion: bool = False,
+    ) -> dict[str, Any]:
+        """Internal bounded generator; production dispatch enters through run_approved_ticket."""
         if self.pause_check():
             return {"status": "paused", "claimed": False}
         if self.admission_provider is None or self.admission_request_factory is None:
@@ -430,6 +969,15 @@ class VideoTaskWorker:
             }
         with InitiativeStore(self.database) as store:
             candidates = store.list_queued_approval_video_attempts(limit=200)
+            if execution_task_id is not None:
+                with TaskQueue(self.task_database) as execution_queue:
+                    execution_ticket = execution_queue.get(execution_task_id)
+                if (not isinstance(execution_ticket, dict) or execution_ticket.get("status") != "running"
+                        or execution_ticket.get("lease_owner") != self.worker_id
+                        or not isinstance(execution_ticket.get("payload"), dict)):
+                    raise VideoAdmissionBlocked("exact execution Ticket is not held by this Worker")
+                expected_attempt_id = execution_ticket["payload"].get("attempt_id")
+                candidates = [item for item in candidates if item.get("attempt_id") == expected_attempt_id]
             if not candidates or self.task_database.is_symlink() or not self.task_database.is_file():
                 return {"status": "idle", "claimed": False, "approval_required": True}
 
@@ -439,7 +987,7 @@ class VideoTaskWorker:
             with TaskQueue(self.task_database) as approvals:
                 for candidate in candidates:
                     try:
-                        valid = self._commander_approval_is_valid(store, approvals, candidate)
+                        valid = self._commander_approval_is_valid(store, approvals, candidate, self.workspace)
                     except (OSError, ValueError, RuntimeError, KeyError, json.JSONDecodeError):
                         valid = False
                     if not valid:
@@ -472,7 +1020,7 @@ class VideoTaskWorker:
             try:
                 heartbeat.start()
                 with TaskQueue(self.task_database) as approvals:
-                    if not self._commander_approval_is_valid(store, approvals, attempt):
+                    if not self._commander_approval_is_valid(store, approvals, attempt, self.workspace):
                         heartbeat.stop()
                         if heartbeat.lease_lost:
                             return {"status": "lease_lost", "attempt_id": attempt_id, "release_recorded": False}
@@ -495,13 +1043,15 @@ class VideoTaskWorker:
                 video = brief.get("video") if isinstance(brief, dict) else None
                 if not isinstance(video, dict):
                     raise ValueError("initiative has no valid creator_brief.video")
+                if "brief_path" in video or "brief_sha256" in video:
+                    video = _load_video_brief_reference(self.workspace, video)
                 title = video.get("title")
                 prompt = video.get("prompt")
                 if not isinstance(title, str) or not title.strip() or not isinstance(prompt, str) or not prompt.strip():
                     raise ValueError("video brief requires a non-empty title and prompt")
                 aspect_ratio = video.get("aspect_ratio", "9:16")
-                duration = video.get("duration_seconds", 2.0)
-                steps = video.get("steps", 8)
+                duration = video.get("duration_seconds", 5.0)
+                steps = video.get("steps", 20)
                 scenes = video.get("scenes")
                 if aspect_ratio not in {"16:9", "9:16", "1:1"}:
                     raise ValueError("unsupported video aspect ratio in creator brief")
@@ -553,6 +1103,7 @@ class VideoTaskWorker:
                         })
                     if total_scene_duration > 60:
                         raise ValueError("creator brief scene duration must not exceed 60 seconds")
+                prebuilt_narration_script = verify_video_package_artifacts(self.workspace, video)
                 narration_script = None
                 narration_model_dir = None
                 narration_asr_model_dir = None
@@ -589,10 +1140,14 @@ class VideoTaskWorker:
                             "claim_ids_by_segment": claim_mapping,
                             "factual_by_segment": factual_mapping,
                         }
-                    generated_script = NarrationGenerator().generate(
-                        title.strip(), research_text, inspiration, style, segments=segments,
-                        **generator_options,
-                    )
+                    generated_script = prebuilt_narration_script
+                    if generated_script is None:
+                        generated_script = NarrationGenerator().generate(
+                            title.strip(), research_text, inspiration, style, segments=segments,
+                            **generator_options,
+                        )
+                    elif len(generated_script.get("segments", [])) != segments:
+                        raise ValueError("approved prebuilt narration script segment count differs from the video brief")
                     from muse.narration_prosody_bridge import build_cantonese_narration_prosody_plan
                     narration_prosody_plan = build_cantonese_narration_prosody_plan(generated_script)
                     narration_script = "\n".join(segment["text"].strip() for segment in generated_script["segments"])
@@ -662,11 +1217,12 @@ class VideoTaskWorker:
                 admission_input_sha_by_step: dict[str, str] = {}
                 admission_plan_context: dict[str, Any] = {"plan": None, "batches": None, "workflow_ticket_id": None}
 
-                # Load workflow-level Commander binding from the persisted execution ticket.
-                # This is the high-level plan (research/build/review) that proved Commander
-                # authorisation was obtained. It is distinct from the scene-level admission plan.
+                # Restore the exact persisted Commander DAG from the execution Ticket.
+                # A locally synthesized one-step plan is never an authorization source.
                 _workflow_commander_plan_id: str = ""
                 _workflow_commander_plan_source: str = ""
+                _workflow_commander_plan_snapshot: dict[str, Any] | None = None
+                _workflow_dag_sha256: str = ""
                 _workflow_ticket_id: str = ""
                 _approval_id = attempt.get("approval_task_id")
                 if isinstance(_approval_id, str) and _approval_id:
@@ -675,40 +1231,48 @@ class VideoTaskWorker:
                             _wp = _wt.get("payload") or {}
                             if (isinstance(_wp, dict)
                                     and _wp.get("approval_task_id") == _approval_id
-                                    and _wp.get("attempt_id") == attempt_id):
+                                    and _wp.get("attempt_id") == attempt_id
+                                    and (execution_task_id is None or _wt.get("id") == execution_task_id)
+                                    and (execution_task_id is None or (
+                                        _wt.get("status") == "running" and _wt.get("lease_owner") == self.worker_id
+                                    ))):
                                 _workflow_commander_plan_id = _wp.get("commander_plan_id") or ""
                                 _workflow_commander_plan_source = _wp.get("commander_plan_source") or ""
+                                _workflow_commander_plan_snapshot = _wp.get("commander_plan_snapshot")
+                                _workflow_dag_sha256 = _wp.get("dag_sha256") or ""
                                 _workflow_ticket_id = _wt.get("id") or ""
                                 break
-                # Fail closed: a video_pipeline execution ticket with plan bindings is required.
-                if not _workflow_commander_plan_id or not _workflow_commander_plan_source:
+                if not _workflow_ticket_id:
+                    raise VideoAdmissionBlocked("video_pipeline execution ticket is missing for the approved attempt")
+                if (not _workflow_commander_plan_id or _workflow_commander_plan_source != "model"
+                        or not isinstance(_workflow_commander_plan_snapshot, dict)
+                        or not _workflow_dag_sha256):
                     raise VideoAdmissionBlocked(
-                        "no persisted video_pipeline execution ticket found for this video attempt; "
-                        "Commander approval and DAG binding are required before GPU dispatch"
+                        "video generation requires a persisted model-authored Commander DAG; "
+                        "synthetic or safe_fallback plans cannot authorize GPU dispatch"
                     )
+                try:
+                    from muse.unified_runtime import MuseRuntime
+                    persisted_plan = MuseRuntime._restore_commander_plan_snapshot(
+                        _workflow_commander_plan_snapshot, _workflow_dag_sha256,
+                    )
+                except Exception as exc:
+                    raise VideoAdmissionBlocked(
+                        "persisted Commander DAG failed digest/schema verification"
+                    ) from exc
+                if (persisted_plan.plan_id != _workflow_commander_plan_id
+                        or persisted_plan.source != _workflow_commander_plan_source):
+                    raise VideoAdmissionBlocked(
+                        "persisted Commander DAG identity differs from its execution Ticket binding"
+                    )
+                admission_plan_context["plan"] = persisted_plan
+                admission_plan_context["workflow_ticket_id"] = _workflow_ticket_id
 
                 def admission_context_for_step(step_id: str):
-                    """Return the scene-level (video generation) plan for this step."""
+                    """Return only a step that exists in the persisted Commander DAG."""
                     plan = admission_plan_context["plan"]
                     if plan is None:
-                        # Single-shot path: build a deterministic one-step scene plan from the
-                        # brief. Source is safe_fallback because no model planning is performed.
-                        from muse.commander_planner import CommanderPlan, PlannedStep
-                        plan_seed = json.dumps(
-                            [attempt_id, attempt.get("recipe_sha256"), "single-video-step-v2"],
-                            ensure_ascii=False, separators=(",", ":"),
-                        )
-                        plan = CommanderPlan(
-                            plan_id=hashlib.sha256(plan_seed.encode("utf-8")).hexdigest()[:32],
-                            goal=f"{title.strip()}｜单镜头生成授权",
-                            steps=(PlannedStep(
-                                step_id, "developer", f"生成并验证镜头 {step_id}", (),
-                                ("comfyui_generation",),
-                            ),),
-                            source="safe_fallback",
-                            parallel_waves=((step_id,),),
-                        )
-                        admission_plan_context["plan"] = plan
+                        raise VideoAdmissionBlocked("persisted Commander DAG is unavailable")
                     batches = admission_plan_context["batches"]
                     if batches is None:
                         from muse.video_studio import build_video_studio_batches
@@ -717,7 +1281,7 @@ class VideoTaskWorker:
                     matches = [batch for batch in batches if tuple(batch.step_ids) == (step_id,)]
                     if len(matches) != 1:
                         raise VideoAdmissionBlocked(
-                            f"Commander DAG must yield exactly one stable one-step batch for {step_id}"
+                            f"persisted Commander DAG has no unique standalone batch for video step {step_id}"
                         )
                     batch = matches[0]
                     if tuple(batch.required_completed_steps):
@@ -730,7 +1294,7 @@ class VideoTaskWorker:
                     if heartbeat.lease_lost:
                         raise VideoAdmissionBlocked(f"video attempt lease lost before {step_id} generation")
                     with TaskQueue(self.task_database) as live_approvals:
-                        if not self._commander_approval_is_valid(store, live_approvals, attempt):
+                        if not self._commander_approval_is_valid(store, live_approvals, attempt, self.workspace):
                             raise VideoAdmissionBlocked(f"Commander approval was revoked before {step_id} generation")
                     if heartbeat.lease_lost:
                         raise VideoAdmissionBlocked(f"video attempt lease lost during {step_id} approval check")
@@ -745,7 +1309,7 @@ class VideoTaskWorker:
                     if step_id in consumed_admission_steps:
                         raise VideoAdmissionBlocked(f"one-shot grant for {step_id} was already consumed")
                     with TaskQueue(self.task_database) as live_approvals:
-                        approval_evidence = self._commander_approval_evidence(store, live_approvals, attempt)
+                        approval_evidence = self._commander_approval_evidence(store, live_approvals, attempt, self.workspace)
                     if approval_evidence is None:
                         raise VideoAdmissionBlocked(f"Commander approval is no longer valid for {step_id}")
                     if input_sha256_override is not None:
@@ -922,7 +1486,7 @@ class VideoTaskWorker:
                         return {"status": "lease_lost", "attempt_id": attempt_id, "release_recorded": False}
                     return {"status": "paused", "attempt_id": attempt_id, "product_created": True}
                 with TaskQueue(self.task_database) as final_approvals:
-                    if not self._commander_approval_is_valid(store, final_approvals, attempt):
+                    if not self._commander_approval_is_valid(store, final_approvals, attempt, self.workspace):
                         try:
                             store.release_video_attempt(
                                 attempt_id, worker_id=lease_worker_id, lease_epoch=lease_epoch,
@@ -934,6 +1498,20 @@ class VideoTaskWorker:
                             "status": "blocked_approval", "attempt_id": attempt_id,
                             "product_created": True, "completion_recorded": False,
                         }
+                if defer_completion:
+                    return {
+                        "status": "awaiting_independent_review", "attempt_id": attempt_id,
+                        "initiative_id": result["initiative_id"], "version_id": result["version_id"],
+                        "relative_path": result["relative_path"], "manifest_sha256": result["manifest_sha256"],
+                        "mp4_sha256": result["mp4_sha256"], "package_sha256": result["package_sha256"],
+                        "lease_worker_id": lease_worker_id, "lease_epoch": lease_epoch,
+                        "quality_gate": result.get("quality_gate", {"status": "not_reported"}),
+                        "narration_status": (
+                            result.get("narration_synthesis", {}).get("status", "not_requested")
+                            if isinstance(result.get("narration_synthesis"), dict) else "not_requested"
+                        ),
+                        "admission_grants_consumed": list(consumed_admission_grants),
+                    }
                 completed = store.complete_video_attempt(
                     attempt_id, product_id=result["initiative_id"], version_id=result["version_id"],
                     mp4_sha256=result["mp4_sha256"], package_sha256=result["package_sha256"],
