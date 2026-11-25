@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#050711">
+<title>MUSE · 待签名审查台</title>
+<link rel="stylesheet" href="./review-desk.css">
+</head>
+<body>
+<header class="desk-top">
+  <div class="desk-brand"><span class="mark">✦</span> MUSE · 北极星审查台 <small>Ed25519 独立签名</small></div>
+  <a class="desk-home" href="./">返回主控台</a>
+</header>
+<main class="desk-main">
+  <section id="key-panel" class="card" aria-live="polite">
+    <h2>① 审查密钥</h2>
+    <p id="key-status" class="muted">正在读取密钥状态…</p>
+    <form id="init-form" class="hidden" autocomplete="off">
+      <p class="muted">第一次使用：设置一个只有你知道的审查口令（至少 10 个字符）。密钥保存在你电脑的用户目录里（不在 Muse 项目里），Muse 自己永远拿不到口令，所以它不能替你“自批自审”。</p>
+      <label>审查口令<input id="init-pass" type="password" minlength="10" maxlength="256" required></label>
+      <label>再输一次<input id="init-pass2" type="password" minlength="10" maxlength="256" required></label>
+      <button type="submit" class="primary">一键生成审查密钥</button>
+    </form>
+  </section>
+
+  <section class="card">
+    <h2>② 待签名票据 <button id="refresh" class="ghost" type="button">刷新</button></h2>
+    <p class="muted">这些结果已经做完，但必须由你看过并签名后才算“完成”。</p>
+    <ul id="queue" class="queue"></ul>
+    <p id="queue-empty" class="muted hidden">现在没有等你签名的票据。</p>
+  </section>
+
+  <section id="detail" class="card hidden">
+    <h2>③ 审查材料</h2>
+    <dl class="facts">
+      <dt>标题</dt><dd id="d-title"></dd>
+      <dt>类型</dt><dd id="d-kind"></dd>
+      <dt>结果指纹</dt><dd id="d-artifact" class="mono"></dd>
+      <dt>测试日志指纹</dt><dd id="d-evidence" class="mono"></dd>
+      <dt>完整性</dt><dd id="d-integrity"></dd>
+    </dl>
+    <h3>产出内容</h3>
+    <pre id="d-artifact-preview" class="preview"></pre>
+    <h3>测试日志</h3>
+    <pre id="d-evidence-preview" class="preview"></pre>
+    <form id="decide-form" autocomplete="off">
+      <label>备注（可选）<input id="note" maxlength="500"></label>
+      <label>审查口令<input id="pass" type="password" maxlength="256" required></label>
+      <div class="actions">
+        <button type="submit" data-verdict="approve" class="primary">✔ 签名通过</button>
+        <button type="submit" data-verdict="reject" class="danger">✖ 签名拒绝</button>
+      </div>
+    </form>
+  </section>
+  <p id="toast" class="toast hidden" role="status"></p>
+</main>
+<script type="module" src="./review-desk.js"></script>
+</body>
+</html>

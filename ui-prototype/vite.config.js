@@ -16,6 +16,7 @@ export default defineConfig({
       input: {
         main: "index.html",
         showcase: "showcase.html",
+        reviewDesk: "review-desk.html",
       },
     },
   },

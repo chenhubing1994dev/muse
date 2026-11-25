@@ -1396,6 +1396,13 @@ class BoundedStatusServer(ThreadingHTTPServer):
         request.settimeout(5.0)
         return request, client_address
 
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        """Treat normal client disconnects/timeouts as quiet, not as server failures."""
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (BrokenPipeError, ConnectionAbortedError, ConnectionResetError, TimeoutError)):
+            return
+        super().handle_error(request, client_address)
+
 
 def create_status_server(
     *, task_db: str | Path, progress_db: str | Path, capability_db: str | Path,
@@ -1533,6 +1540,15 @@ def create_status_server(
         with video_jobs_lock:
             video_jobs[job_id].update(outcome, updated_at=datetime.now(timezone.utc).isoformat())
 
+    review_receipts_path = workspace_root / "data" / "reviews" / "attestation-receipts.sqlite3"
+    review_vault_holder: dict[str, Any] = {}
+
+    def _review_vault():
+        from muse.review_desk import ReviewerVault
+        if "vault" not in review_vault_holder:
+            review_vault_holder["vault"] = ReviewerVault(workspace=workspace_root)
+        return review_vault_holder["vault"]
+
     class StatusHandler(BaseHTTPRequestHandler):
         server_version = "MuseStatus/1"
         sys_version = ""
@@ -1595,6 +1611,10 @@ def create_status_server(
                     limit = int(parse_qs(parsed.query).get("limit", ["100"])[0])
                     with PluginRegistry(plugin_path) as plugins:
                         self._send(200, {"api_version": 1, "events": plugins.list_audit_events(limit=limit)})
+                elif parsed.path == "/api/v1/mind/state":
+                    # Read-only: inner state, recent mind cycles and pending mind_step approvals.
+                    from muse.consciousness_loop import read_mind_status
+                    self._send(200, {"api_version": 1, **read_mind_status(workspace_root)})
                 elif parsed.path == "/api/v1/system-dashboard":
                     self._send(200, build_system_dashboard(workspace_root, capability_path))
                 elif parsed.path == "/api/v1/mempalace/status":
@@ -1613,6 +1633,16 @@ def create_status_server(
                     with CreativeStudioStore(studio_db) as studio:
                         job = studio.get_job(job_id)
                     self._send(200 if job else 404, {"api_version": 1, "job": job} if job else {"error": "render job not found"})
+                elif parsed.path == "/api/v1/signed-reviews":
+                    from muse.review_desk import list_pending
+                    self._send(200, {"api_version": 1, "reviews": list_pending(task_path),
+                                     "key": _review_vault().status()})
+                elif re.fullmatch(r"/api/v1/signed-reviews/[0-9a-f]{32}", parsed.path):
+                    from muse.review_desk import detail
+                    item = detail(task_path, parsed.path.rsplit("/", 1)[-1])
+                    self._send(200 if item else 404, {"api_version": 1, "review": item} if item else {"error": "review not found"})
+                elif parsed.path == "/api/v1/reviewer-key/status":
+                    self._send(200, {"api_version": 1, "key": _review_vault().status()})
                 elif parsed.path == "/api/v1/gpu-resources":
                     self._send(200, {"api_version": 1, **build_gpu_resource_status(gpu_resource_path)})
                 elif parsed.path == "/api/v1/overview":
@@ -2066,7 +2096,9 @@ def create_status_server(
                                     "video_sha256": evidence["video_sha256"],
                                     "artifact_sha256": evidence["artifact_sha256"],
                                     "release_manifest_sha256": evidence["release_manifest_sha256"],
+                                    "visual_quality_report_sha256": evidence.get("visual_quality_report_sha256"),
                                 },
+                                "visual_quality": evidence.get("visual_quality"),
                                 "count": len(records), "reviews": records,
                             })
                         except FileNotFoundError:
@@ -2236,6 +2268,45 @@ def create_status_server(
                 self._send(401, {"error": "unauthorized"})
                 return
             parsed = urlsplit(self.path)
+            decide_match = re.fullmatch(r"/api/v1/signed-reviews/([0-9a-f]{32})/decide", parsed.path)
+            if decide_match or parsed.path == "/api/v1/reviewer-key/initialize":
+                from muse.review_desk import ReviewDeskError, decide
+                from muse.reviewer_attestation import ReviewAttestationError
+                if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json":
+                    self._send(415, {"error": "application/json required"})
+                    return
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                    if not 1 <= length <= 8 * 1024:
+                        raise ValueError("request body must contain 1-8192 bytes")
+                    raw = self.rfile.read(length)
+                    if len(raw) != length:
+                        raise ValueError("incomplete request body")
+                    payload = json.loads(raw.decode("utf-8"))
+                    if not isinstance(payload, dict):
+                        raise ValueError("request body must be a JSON object")
+                    if decide_match:
+                        if set(payload) - {"verdict", "passphrase", "note", "confirmation"} \
+                                or payload.get("confirmation") != "SIGN-REVIEW":
+                            raise ValueError("explicit SIGN-REVIEW confirmation required")
+                        result = decide(task_path, decide_match.group(1), verdict=payload.get("verdict"),
+                                        passphrase=payload.get("passphrase"), vault=_review_vault(),
+                                        receipts_db=review_receipts_path, note=payload.get("note") or "")
+                        self._send(200, {"api_version": 1, "result": result})
+                    else:
+                        if set(payload) != {"passphrase", "confirm_passphrase", "confirmation"} \
+                                or payload.get("confirmation") != "INIT-REVIEWER-KEY":
+                            raise ValueError("explicit INIT-REVIEWER-KEY confirmation required")
+                        key = _review_vault().initialize(payload["passphrase"],
+                                                         confirm_passphrase=payload["confirm_passphrase"])
+                        self._send(201, {"api_version": 1, "key": key})
+                except (ReviewDeskError, ReviewAttestationError, PermissionError) as exc:
+                    self._send(409, {"error": str(exc)[:300]})
+                except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+                    self._send(400, {"error": str(exc)[:300]})
+                except Exception:
+                    self._send(503, {"error": "signed review operation unavailable"})
+                return
             if parsed.path == "/api/v1/plugins/discover" or parsed.path.startswith("/api/v1/plugins/"):
                 from muse.plugin_platform import PluginError, PluginRegistry, commander_task_queue_adapter
                 if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json":
@@ -2874,8 +2945,8 @@ def create_status_server(
                             raise ValueError("AI video body requires title and prompt with only documented generation settings")
                         prompt = payload["prompt"]
                         negative_prompt = payload.get("negative_prompt", "")
-                        duration_seconds = payload.get("duration_seconds", 2.0)
-                        steps = payload.get("steps", 8)
+                        duration_seconds = payload.get("duration_seconds", 5.0)
+                        steps = payload.get("steps", 20)
                         seed = payload.get("seed")
                         if not isinstance(prompt, str) or not prompt.strip() or len(prompt.strip()) > 2000:
                             raise ValueError("prompt must contain 1-2000 characters")

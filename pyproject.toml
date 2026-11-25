@@ -74,6 +74,19 @@ muse-open-design = "muse.open_design:main"
 muse-prompt = "muse.prompt_engine:main"
 muse-business = "muse.business_opportunities:main"
 muse-value = "muse.value_forge:main"
+# Added 2026-11-25: mind loop + previously unregistered module CLIs (each already had main()).
+muse-mind = "muse.consciousness_loop:main"
+muse-candidate-enqueue = "muse.candidate_enqueuer:main"
+muse-chimera-voice = "muse.chimera_vocal:main"
+muse-quotes = "muse.quote_intelligence:main"
+muse-video-editable-export = "muse.video_editable_export:main"
+muse-video-reviewer-signer = "muse.video_reviewer_signer:main"
+muse-portal-admin = "muse.web_portal_admin:main"
+# Added 2026-11-25 (Omega B391): cryptographic Reviewer gate, ref repair, settled-revenue ledger.
+muse-reviewer-attest = "muse.reviewer_attestation:main"
+muse-ref-repair = "muse.inspiration_ref_repair:main"
+muse-revenue-ledger = "muse.revenue_ledger:main"
+muse-signed-review = "muse.signed_review:main"
 
 [project.optional-dependencies]
 plugin-security = [
@@ -89,6 +102,25 @@ video-diagnostics = [
     "numpy>=1.26",
     "opencv-python-headless>=4.8",
 ]
+# Optional groups below were added 2026-11-25 to declare imports that the code
+# already uses lazily (each module fails closed when the package is missing).
+# Versions pinned only where the code itself checks an exact version.
+speech = [
+    "faster-whisper",  # muse.cantonese_asr
+    "piper-tts",       # muse.piper_tts
+]
+metaphysics = [
+    "celestial-calendar==0.8.0",  # muse.celestial_calendar_provider
+    "ziwei==0.4.1",               # muse.ziwei_adapter
+]
+imaging = [
+    "Pillow>=10",  # muse.kinetic_explainer, muse.smart_crop
+]
+local-llm = [
+    "llama-cpp-python",  # muse.gemma_intent
+]
+# canto_tts (muse.cantonese_tts) runs only in the isolated Python 3.14 env
+# .muse-canto-tts-py314 and is intentionally not declared here.
 
 [tool.setuptools.package-data]
 muse = ["video_pipelines.yaml", "video_stages.yaml"]

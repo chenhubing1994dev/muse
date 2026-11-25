@@ -386,6 +386,8 @@ def run_once(
     task_id: str | None = None,
     agent_id: str | None = None,
     agent_registry_database: str | Path | None = None,
+    signed_review_required_kinds: set[str] | frozenset[str] = frozenset(),
+    signed_review_proposer_id: str | None = None,
 ) -> dict[str, Any] | None:
     registry = dict(DEFAULT_HANDLERS if handlers is None else handlers)
     worker_id = uuid.uuid4().hex
@@ -423,6 +425,9 @@ def run_once(
             from muse.open_design import OpenDesignTaskHandler
             handler = OpenDesignTaskHandler(workspace=Path.cwd(), database=database)
             registry[kind] = handler
+        if handler is None and handlers is None and kind in {"evidence_search", "counter_evidence_search", "research_parent"}:
+            from muse.research_task_handler import ResearchTaskHandler
+            handler = ResearchTaskHandler(task_db=database)
         if handler is None:
             failure = FailureDescriptor(
                 "handler.missing", "configuration", False,
@@ -454,6 +459,7 @@ def run_once(
 
         heartbeat_thread = threading.Thread(target=keep_lease_alive, daemon=True)
         heartbeat_thread.start()
+        signed_binding: dict[str, str] | None = None
         try:
             with model_call_scope(
                 database, task_id=task["id"], agent_id=agent_id, project_id="muse"
@@ -532,6 +538,22 @@ def run_once(
                         "retryable": False,
                         "recovery_guidance": "Address the independent reviewer findings and submit a new candidate for review.",
                     })
+            if kind in signed_review_required_kinds and status == "succeeded":
+                # Cryptographic independent review: the ticket cannot reach "succeeded" from the Worker.
+                # It is parked until an Ed25519 Reviewer attestation over ticket + artifact + test evidence
+                # is verified by TaskQueue.complete_signed_review.
+                from muse.reviewer_attestation import build_review_binding, canonical_json, sha256_hex
+                evidence = task["payload"].get("_test_evidence")
+                if not isinstance(evidence, str) or not evidence.strip():
+                    raise MuseTaskError(
+                        "review.test_evidence_missing", category="review", retryable=False,
+                        guidance="Attach the exact test log as _test_evidence before requesting a signed review.",
+                    )
+                signed_binding = build_review_binding(
+                    ticket_id=task["id"], artifact_sha256=sha256_hex(canonical_json(result)),
+                    test_evidence_sha256=sha256_hex(evidence.encode("utf-8")),
+                    proposer_id=signed_review_proposer_id or agent_id or "muse-worker",
+                )
         except Exception as exc:
             failure = classify_failure(exc)
             result = failure.as_result()
@@ -545,6 +567,22 @@ def run_once(
         finally:
             heartbeat_stop.set()
             heartbeat_thread.join(timeout=max(1.0, lease_seconds))
+        if signed_binding is not None and status == "succeeded":
+            parked = queue.finish_pending_signed_review(
+                task["id"], worker_id=worker_id, result=result, binding=signed_binding,
+            )
+            if parked is None:
+                _record_progress(
+                    database, task["id"], "failed",
+                    "Worker lost lease ownership; handler result was discarded.",
+                    error_code="worker.lease_lost",
+                )
+                return None
+            _record_progress(
+                database, task["id"], "waiting_approval",
+                "Task result is waiting for a signed independent Reviewer attestation.",
+            )
+            return parked
         finished = queue.finish(
             task["id"], status=status, result=result, worker_id=worker_id
         )
@@ -570,6 +608,8 @@ def run_parallel_once(
     approval_required_kinds: set[str] | frozenset[str] = DEFAULT_APPROVAL_REQUIRED_KINDS,
     review_required_kinds: set[str] | frozenset[str] = frozenset(),
     review_gate: Any | None = None,
+    signed_review_required_kinds: set[str] | frozenset[str] = frozenset(),
+    signed_review_proposer_id: str | None = None,
 ) -> list[dict[str, Any] | None]:
     """Run one queue-drain wave with up to 32 independently leased workers."""
     if isinstance(max_workers, bool) or not isinstance(max_workers, int) or not 1 <= max_workers <= 32:
@@ -587,6 +627,8 @@ def run_parallel_once(
             approval_required_kinds=approval_required_kinds,
             review_required_kinds=review_required_kinds,
             review_gate=review_gate,
+            signed_review_required_kinds=signed_review_required_kinds,
+            signed_review_proposer_id=signed_review_proposer_id,
         ) for _ in range(worker_count)]
         return [future.result() for future in futures]
 
@@ -602,6 +644,8 @@ def run_parallel_forever(
     review_required_kinds: set[str] | frozenset[str] = frozenset(),
     review_gate: Any | None = None,
     max_error_backoff_seconds: float = 30.0,
+    signed_review_required_kinds: set[str] | frozenset[str] = frozenset(),
+    signed_review_proposer_id: str | None = None,
 ) -> dict[str, int]:
     """Run independent lease-owning worker loops concurrently, up to 32."""
     if isinstance(max_workers, bool) or not isinstance(max_workers, int) or not 1 <= max_workers <= 32:
@@ -615,6 +659,8 @@ def run_parallel_forever(
             poll_interval=poll_interval, approval_required_kinds=approval_required_kinds,
             review_required_kinds=review_required_kinds, review_gate=review_gate,
             max_error_backoff_seconds=max_error_backoff_seconds,
+            signed_review_required_kinds=signed_review_required_kinds,
+            signed_review_proposer_id=signed_review_proposer_id,
         ) for _ in range(max_workers)]
         try:
             while not stop.wait(0.25):
@@ -638,6 +684,8 @@ def run_forever(
     review_required_kinds: set[str] | frozenset[str] = frozenset(),
     review_gate: Any | None = None,
     max_error_backoff_seconds: float = 30.0,
+    signed_review_required_kinds: set[str] | frozenset[str] = frozenset(),
+    signed_review_proposer_id: str | None = None,
 ) -> dict[str, int]:
     """Continuously drain queued tasks with bounded recovery from loop errors."""
     if poll_interval <= 0:
@@ -673,6 +721,8 @@ def run_forever(
                     approval_required_kinds=approval_required_kinds,
                     review_required_kinds=review_required_kinds,
                     review_gate=review_gate,
+                    signed_review_required_kinds=signed_review_required_kinds,
+                    signed_review_proposer_id=signed_review_proposer_id,
                 )
                 consecutive_errors = 0
             except Exception as exc:
@@ -725,6 +775,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--journal-db", default="data/evolution/journal.sqlite3", help="durable source-edit crash recovery journal")
     parser.add_argument("--capability-db", default="data/capabilities/muse.sqlite3")
     parser.add_argument("--initiative-db", default="data/initiatives/muse.sqlite3")
+    parser.add_argument("--signed-review-kind", action="append", default=[], metavar="KIND",
+                        help="task kind whose result must be parked for an Ed25519 Reviewer attestation (repeatable)")
+    parser.add_argument("--signed-review-proposer-id", default=None,
+                        help="stable proposer identity bound into signed-review requests (default: muse-worker)")
     args = parser.parse_args(argv)
     if args.status:
         with TaskQueue(args.db) as queue:
@@ -838,10 +892,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             worker_count = args.workers
             if not 1 <= worker_count <= 32:
                 parser.error("--workers must be between 1 and 32")
+        signed_options = {
+            "signed_review_required_kinds": frozenset(item.strip() for item in args.signed_review_kind if item.strip()),
+            "signed_review_proposer_id": args.signed_review_proposer_id,
+        }
         if args.loop:
             try:
                 runner = run_parallel_forever if worker_count > 1 else run_forever
-                options = {"max_workers": worker_count} if worker_count > 1 else {}
+                options = {"max_workers": worker_count, **signed_options} if worker_count > 1 else dict(signed_options)
                 stats = runner(
                     args.db, handlers, poll_interval=args.poll_interval,
                     approval_required_kinds=approval_required_kinds, **options,
@@ -854,12 +912,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         if worker_count > 1:
             results = run_parallel_once(
                 args.db, handlers, max_workers=worker_count,
-                approval_required_kinds=approval_required_kinds,
+                approval_required_kinds=approval_required_kinds, **signed_options,
             )
             completed = [item for item in results if item is not None]
             print(f"Processed {len(completed)} task(s) with {worker_count} worker slots.")
             return 0 if all(item["status"] in {"succeeded", "waiting_approval"} for item in completed) else 1
-        result = run_once(args.db, handlers, approval_required_kinds=approval_required_kinds)
+        result = run_once(args.db, handlers, approval_required_kinds=approval_required_kinds, **signed_options)
         if result is None:
             print("No queued task.")
             return 0

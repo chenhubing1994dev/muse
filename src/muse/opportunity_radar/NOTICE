@@ -1,0 +1,22 @@
+Muse Global Opportunity Radar — Third-party design attribution
+
+This directory contains an independent Python implementation that references selected
+architectural ideas from ZiChuanLan/freebie-radar:
+https://github.com/ZiChuanLan/freebie-radar
+
+Upstream project license: MIT. The upstream repository README identifies the MIT license.
+Upstream commit SHA used for the design review: 【待确认】 (not independently verified
+at the time this NOTICE was written).
+
+Referenced design modules (design concepts only; no upstream TypeScript runtime or source
+files are imported into Muse):
+- src/server/collectors/github.ts — GitHub source collection and bounded item extraction
+- src/server/enrich/normalize.ts — URL and source normalization
+- src/server/enrich/obtain.ts — acquisition metadata and evidence handling
+- src/server/enrich/noise.ts — noise filtering and duplicate reduction
+- src/server/enrich/classify.ts — opportunity classification concepts
+- src/server/enrich/score.ts — explainable scoring concepts
+
+The Muse implementation is independently authored in Python and retains Muse-specific
+security, provenance, admission, and review boundaries. This notice is attribution; it does
+not claim that the upstream project supplied Muse's security controls or review workflow.

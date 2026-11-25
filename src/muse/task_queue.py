@@ -92,6 +92,9 @@ class TaskQueue:
             FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
         )""")
         self._connection.execute("CREATE INDEX IF NOT EXISTS idx_task_events_task_time ON task_events(task_id, created_at, event_id)")
+        # Additive index for runtime_estimate_seconds(), which runs on every enqueue without an explicit
+        # estimate: filter by event_type and read newest-first without a full scan + sort.
+        self._connection.execute("CREATE INDEX IF NOT EXISTS idx_task_events_type_time ON task_events(event_type, created_at)")
         self._connection.commit()
 
     def _enable_wal_mode(self) -> None:
@@ -232,6 +235,7 @@ class TaskQueue:
                 raise ValueError(f"unknown dependency task IDs: {', '.join(missing)}")
         now = self._now()
         task_id = uuid.uuid4().hex
+        self._connection.execute("BEGIN IMMEDIATE")
         try:
             self._connection.execute(
                 "INSERT INTO tasks (id, idempotency_key, title, payload_json, status, created_at, updated_at, priority, estimated_seconds, workload_class, recovery_policy, depends_on_json) "
@@ -1452,6 +1456,12 @@ class TaskQueue:
             if row is None:
                 raise ValueError("task is not waiting for approval")
             payload = json.loads(row["payload_json"])
+            pending_review = payload.get("_signed_review")
+            if isinstance(pending_review, dict) and pending_review.get("status") == "pending":
+                raise PermissionError(
+                    "ticket is waiting for a signed independent Reviewer attestation; submit it with "
+                    "muse-signed-review instead of re-approving (re-approval would re-run the handler)"
+                )
             if payload.get("kind") == "contextual_inquiry_review":
                 if (
                     payload.get("case_context_attached") is not True
@@ -1496,6 +1506,154 @@ class TaskQueue:
                 task_id, "human.decision", approved_by.strip(), {"decision": "approved"},
                 created_at=approved_at,
             )
+            self._connection.commit()
+        except Exception:
+            self._connection.rollback()
+            raise
+        task = self.get(task_id)
+        assert task is not None
+        return task
+
+    # ------------------------------------------------------------------
+    # Cryptographic independent review (Ed25519) - Omega B392
+    # ------------------------------------------------------------------
+    def finish_pending_signed_review(
+        self, task_id: str, *, worker_id: str, result: Any, binding: dict[str, str],
+    ) -> dict[str, Any] | None:
+        """Park a handler result for a signed Reviewer attestation: running -> waiting_approval.
+
+        Lease-fenced: only the current, unexpired lease owner can park the result. The
+        binding must name this ticket and the exact canonical SHA-256 of ``result``.
+        Returns ``None`` when the lease was lost (the result is discarded).
+        """
+        from muse.reviewer_attestation import build_review_binding, canonical_json, sha256_hex
+
+        if not isinstance(worker_id, str) or not worker_id.strip() or len(worker_id) > 120:
+            raise ValueError("worker_id must be non-empty text of at most 120 characters")
+        if not isinstance(binding, dict):
+            raise ValueError("binding must be a review binding mapping")
+        normalized = build_review_binding(**binding)
+        if normalized["ticket_id"] != task_id:
+            raise ValueError("review binding ticket_id must equal the task id")
+        if sha256_hex(canonical_json(result)) != normalized["artifact_sha256"]:
+            raise ValueError("review binding artifact_sha256 does not match the handler result")
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            now = self._now()
+            row = self._connection.execute(
+                "SELECT payload_json FROM tasks WHERE id = ? AND status = 'running' AND lease_owner = ? "
+                "AND lease_expires_at IS NOT NULL AND lease_expires_at > ?",
+                (task_id, worker_id.strip(), now),
+            ).fetchone()
+            if row is None:
+                self._connection.rollback()
+                return None
+            payload = json.loads(row["payload_json"])
+            payload["_result"] = result
+            payload["_signed_review"] = {
+                "status": "pending", "binding": normalized,
+                "requested_at": now, "requested_by": worker_id.strip(),
+            }
+            cursor = self._connection.execute(
+                "UPDATE tasks SET status = 'waiting_approval', payload_json = ?, updated_at = ?, "
+                "lease_owner = NULL, lease_expires_at = NULL, heartbeat_at = NULL "
+                "WHERE id = ? AND status = 'running' AND lease_owner = ?",
+                (json.dumps(payload, ensure_ascii=False), now, task_id, worker_id.strip()),
+            )
+            if cursor.rowcount != 1:
+                self._connection.rollback()
+                return None
+            self._record_event(task_id, "ticket.status_changed", worker_id.strip(), {"status": "waiting_approval"})
+            self._record_event(task_id, "report.submitted", worker_id.strip(), {"has_result": True})
+            self._record_event(task_id, "review.signature_requested", worker_id.strip(), {
+                "artifact_sha256": normalized["artifact_sha256"],
+                "test_evidence_sha256": normalized["test_evidence_sha256"],
+                "proposer_id": normalized["proposer_id"],
+            })
+            self._connection.commit()
+        except Exception:
+            self._connection.rollback()
+            raise
+        return self.get(task_id)
+
+    def pending_signed_reviews(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        """Tickets parked for a signed Reviewer attestation, oldest first."""
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
+            raise ValueError("limit must be an integer from 1 to 1000")
+        rows = self._connection.execute(
+            "SELECT * FROM tasks WHERE status = 'waiting_approval' AND instr(payload_json, '\"_signed_review\"') > 0 "
+            "ORDER BY updated_at, id"
+        ).fetchall()
+        pending = []
+        for row in rows:
+            task = self._decode(row)
+            review = task["payload"].get("_signed_review") if task else None
+            if isinstance(review, dict) and review.get("status") == "pending":
+                pending.append(task)
+            if len(pending) >= limit:
+                break
+        return pending
+
+    def complete_signed_review(
+        self, task_id: str, *, attestation: Any, verifier: Any, actor: str,
+    ) -> dict[str, Any]:
+        """Resolve a parked ticket with a verified Ed25519 Reviewer attestation.
+
+        ``approve`` -> ``succeeded``; ``reject`` -> ``failed`` (``review.rejected``).
+        Any verification failure raises ``ReviewAttestationError`` and leaves the ticket
+        untouched in ``waiting_approval``. The one-time nonce is consumed only after every
+        check passed; if the ticket update then fails the attestation is burned (fail-closed).
+        """
+        from muse.reviewer_attestation import ReviewAttestationVerifier
+
+        if not isinstance(verifier, ReviewAttestationVerifier):
+            raise PermissionError("signed review completion requires a ReviewAttestationVerifier")
+        if Path(verifier.path).resolve() == self.database.resolve():
+            raise ValueError("Reviewer receipts must live in a database separate from the task queue")
+        if not isinstance(actor, str) or not actor.strip() or len(actor) > 120:
+            raise ValueError("actor must be non-empty text of at most 120 characters")
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = self._connection.execute(
+                "SELECT payload_json FROM tasks WHERE id = ? AND status = 'waiting_approval'", (task_id,)
+            ).fetchone()
+            if row is None:
+                raise ValueError("task is not waiting for a signed review")
+            payload = json.loads(row["payload_json"])
+            review = payload.get("_signed_review")
+            if (not isinstance(review, dict) or review.get("status") != "pending"
+                    or not isinstance(review.get("binding"), dict)):
+                raise ValueError("task has no pending signed review")
+            binding = dict(review["binding"])
+            verifier.check(attestation, binding)
+            facts = verifier.verify_and_consume(attestation, binding, require_approval=False)
+            now = self._now()
+            approved = facts["verdict"] == "approve"
+            review.update({
+                "status": "attested" if approved else "rejected",
+                "verdict": facts["verdict"], "key_id": facts["key_id"], "reviewer_id": facts["reviewer_id"],
+                "key_purpose": facts["key_purpose"], "attestation_sha256": facts["attestation_sha256"],
+                "verified_at": now, "submitted_by": actor.strip(),
+            })
+            payload["_signed_review"] = review
+            new_status = "succeeded" if approved else "failed"
+            cursor = self._connection.execute(
+                "UPDATE tasks SET status = ?, payload_json = ?, updated_at = ? "
+                "WHERE id = ? AND status = 'waiting_approval'",
+                (new_status, json.dumps(payload, ensure_ascii=False), now, task_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("task is no longer waiting for a signed review")
+            self._record_event(task_id, "review.attested" if approved else "review.rejected", facts["reviewer_id"][:120], {
+                "key_id": facts["key_id"], "verdict": facts["verdict"],
+                "key_purpose": facts["key_purpose"], "attestation_sha256": facts["attestation_sha256"],
+            })
+            self._record_event(task_id, "ticket.status_changed", actor.strip(), {"status": new_status})
+            if not approved:
+                self._record_event(task_id, "failure.classified", actor.strip(), {
+                    "error_code": "review.rejected", "failure_category": "review", "retryable": False,
+                    "recovery_guidance": "Address the signed Reviewer verdict and submit a new candidate for review.",
+                })
             self._connection.commit()
         except Exception:
             self._connection.rollback()
