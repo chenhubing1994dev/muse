@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#050711">
+<title>MUSE · 玄枢灵感工坊</title>
+<link rel="stylesheet" href="./omega.css">
+</head>
+<body>
+<header class="omega-top">
+  <div class="omega-brand">✦ MUSE · 玄枢灵感工坊 <small>仅作灵感</small></div>
+  <nav class="omega-nav" aria-label="Omega 直达">
+    <a href="./">返回主控台</a>
+    <a href="./review-desk.html">待签名审查台</a>
+    <a href="./unit-economics.html">单位经济 · 报价识别</a>
+    <a href="./consciousness-map.html">十维意识星图</a>
+    <a href="./xuanshu-lab.html" aria-current="page">玄枢灵感工坊</a>
+    <a href="./evolution-lab.html">自我进化实验室</a>
+    <a href="./research-bridge.html">深度研究 · 反馈回传</a>
+    <a href="./video-factory.html">一键电影级视频工坊</a>
+  </nav>
+</header>
+<main>
+<section class="card">
+  <h2>玄枢超融合 <span class="badge">symbolic_inspiration</span><span class="badge">unverified_hypothesis</span></h2>
+  <p class="muted">易经 · 紫微斗数 · 奇门遁甲 · 大六壬只用于创作灵感，不是建议、预测或证据。未配置的引擎会如实显示“不可用”。</p>
+  <label>创作问题<input id="xs-question" maxlength="500" value="下一支粤语短片的视觉主题"></label>
+  <label>种子（同一种子结果可复现）<input id="xs-seed" maxlength="200" value="2026-11-25"></label>
+  <button id="xs-run" type="button">生成灵感</button>
+</section>
+<section class="grid2">
+  <div class="card"><h2>透镜</h2><table id="xs-lenses"></table></div>
+  <div class="card"><h2>灵感提示</h2><ol id="xs-prompts"></ol><p id="xs-policy" class="muted"></p></div>
+</section>
+</main>
+<div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+<script type="module" src="./xuanshu-lab.js"></script>
+</body>
+</html>

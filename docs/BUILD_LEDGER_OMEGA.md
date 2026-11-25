@@ -179,3 +179,11 @@
 
 ### 未完成（下一轮按顺序做）
 B394（自我进化：补丁写入前签名 + 受保护面拦截 + 原子回滚 + 假时钟熔断测试；插件 Capability Broker）→ B395（十维意识内核、记忆生命周期）→ B396（研究子任务编排、来源独立性去重、玄枢引擎、反馈回传接口）→ B397（视频算法引擎）→ B398 其余部分（孤岛清零、14 个中心界面、SSRF/zip-slip/CSRF 安全测试套件、主控台首页审查台入口）。
+
+
+## Cycle 5 — 批次 B394–B398（2026-11-25 19:54–）
+- 读取真机报告 20261125-195223：omega_new 80 例中 3 个 ERROR（WinError 32，测试里 `with sqlite3.connect` 未关闭）→ `contextlib.closing` 修复；full 套件 0 运行（`-t .` 需 tests 包）→ 改 `-p test_*.py`。inspiration_refs 已真机修复 3,954 行；Git 已提交 5a43e07（未 push）。
+- `.git/config`：已备份到 `.qw-backups/20261125-b394/`，remote URL 去除内嵌凭据，现为 `https://github.com/<owner>/muse.git` 形式；`.gitignore` 增加 `.qw-backups/`。**旧令牌仍需在 GitHub 吊销**（备份文件内仍含旧值，勿外传）。
+- 新增 12 个模块、5 个测试文件（60 例全绿）、6 个页面 + 2 个共享资源；改动 evolution_executor / worker / autonomous_runtime / status_api / App.svelte / vite.config.js / pyproject / autopilot / .bat，全部先备份到 `.qw-backups/20261125-b394/`。设备端 AST 校验：语法错误 0。
+- 等级：BL-WS4-EVO → `LOCAL_SANDBOX_RAN`（签名门在任何写入/测试之前执行；worker `--enable-evolution` 无信任库即拒绝启动）。
+- 诚实边界：未连 ComfyUI/GPU（只生成并校验工作流 JSON，预检不通过就不提交）；VLM 只是建议，发布永远需人工；紫微/奇门/六壬需真机已装引擎，否则显示 unavailable；Status API 与 Svelte 构建由 `.bat` 真机验证。

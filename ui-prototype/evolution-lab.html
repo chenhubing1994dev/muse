@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#050711">
+<title>MUSE · 自我进化实验室</title>
+<link rel="stylesheet" href="./omega.css">
+</head>
+<body>
+<header class="omega-top">
+  <div class="omega-brand">✦ MUSE · 自我进化实验室 <small>签名门 · 受保护面 · 熔断</small></div>
+  <nav class="omega-nav" aria-label="Omega 直达">
+    <a href="./">返回主控台</a>
+    <a href="./review-desk.html">待签名审查台</a>
+    <a href="./unit-economics.html">单位经济 · 报价识别</a>
+    <a href="./consciousness-map.html">十维意识星图</a>
+    <a href="./xuanshu-lab.html">玄枢灵感工坊</a>
+    <a href="./evolution-lab.html" aria-current="page">自我进化实验室</a>
+    <a href="./research-bridge.html">深度研究 · 反馈回传</a>
+    <a href="./video-factory.html">一键电影级视频工坊</a>
+  </nav>
+</header>
+<main>
+<section class="card">
+  <h2>① 自治安全控制（暂停 / 恢复 / 紧急熔断）</h2>
+  <p>状态：<strong id="ev-mode">—</strong> <span id="ev-detail" class="muted"></span></p>
+  <button id="ev-pause" type="button">暂停</button>
+  <button id="ev-resume" type="button">恢复</button>
+  <label>确认短语（熔断输入 KILL-SWITCH；解除输入 RESET-KILL-SWITCH）<input id="ev-confirm" autocomplete="off"></label>
+  <button id="ev-kill" type="button" class="danger">紧急熔断</button>
+  <button id="ev-reset" type="button">解除熔断</button>
+  <table id="ev-events"></table>
+</section>
+<section class="card">
+  <h2>② 自我进化版本（Ed25519 签名补丁 · 一键原子回滚）</h2>
+  <p class="muted">受保护面（宪章、红线、审批门、可信公钥库、审计日志、熔断器、资源上限）永远不能被自动修改。</p>
+  <p id="ev-protected" class="muted"></p>
+  <table id="ev-versions"></table>
+  <label>回滚版本号<input id="ev-version" type="number" min="1"></label>
+  <label>确认短语（输入 ROLLBACK-版本号）<input id="ev-rollback-confirm" autocomplete="off"></label>
+  <button id="ev-rollback" type="button" class="danger">一键回滚</button>
+  <pre id="ev-result"></pre>
+</section>
+</main>
+<div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+<script type="module" src="./evolution-lab.js"></script>
+</body>
+</html>

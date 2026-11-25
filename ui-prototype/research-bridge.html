@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#050711">
+<title>MUSE · 深度研究 · 反馈回传</title>
+<link rel="stylesheet" href="./omega.css">
+</head>
+<body>
+<header class="omega-top">
+  <div class="omega-brand">✦ MUSE · 深度研究 · 反馈回传 <small>反证必做</small></div>
+  <nav class="omega-nav" aria-label="Omega 直达">
+    <a href="./">返回主控台</a>
+    <a href="./review-desk.html">待签名审查台</a>
+    <a href="./unit-economics.html">单位经济 · 报价识别</a>
+    <a href="./consciousness-map.html">十维意识星图</a>
+    <a href="./xuanshu-lab.html">玄枢灵感工坊</a>
+    <a href="./evolution-lab.html">自我进化实验室</a>
+    <a href="./research-bridge.html" aria-current="page">深度研究 · 反馈回传</a>
+    <a href="./video-factory.html">一键电影级视频工坊</a>
+  </nav>
+</header>
+<main>
+<section class="card">
+  <h2>① 深度研究闭环（支持检索 + 反证检索 + 来源独立性 + 引用锚点）</h2>
+  <label>Claim ID（小写字母/数字/-）<input id="rb-claim-id" value="hook-3s"></label>
+  <label>待检验的说法<input id="rb-claim" value="前三秒视觉打断能提高留存"></label>
+  <label>支持来源（JSON 数组：url/title/text/publisher）<textarea id="rb-support" spellcheck="false">[]</textarea></label>
+  <label>反证来源（JSON 数组）<textarea id="rb-counter" spellcheck="false">[]</textarea></label>
+  <label>引用（JSON 数组：url/quote）<textarea id="rb-citations" spellcheck="false">[]</textarea></label>
+  <button id="rb-run" type="button">生成 Claim 档案袋</button>
+  <pre id="rb-dossier"></pre>
+</section>
+<section class="card">
+  <h2>② 创作反馈一键回传（离线工作表 → 本机）</h2>
+  <p class="muted">支持 .json 清单、.html 离线工作表、.zip 包；上传前在浏览器计算 SHA-256，服务器复核并幂等追加，以 tested_by 连回原始 Claim。</p>
+  <label>选择反馈文件<input id="rb-file" type="file" accept=".json,.html,.htm,.zip"></label>
+  <button id="rb-upload" type="button">一键上传校验</button>
+  <pre id="rb-upload-result"></pre>
+  <label>查询 Claim<input id="rb-lookup-id" value="hook-3s"></label>
+  <button id="rb-lookup" type="button">查看档案与反馈</button>
+  <pre id="rb-lookup-result"></pre>
+</section>
+</main>
+<div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+<script type="module" src="./research-bridge.js"></script>
+</body>
+</html>

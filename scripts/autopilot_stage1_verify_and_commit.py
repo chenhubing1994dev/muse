@@ -52,11 +52,30 @@ BATCH_FILES = [
     "tests/test_opportunity_radar_repair.py", "tests/test_unit_economics_quote_ingest.py",
     "ui-prototype/review-desk.html", "ui-prototype/review-desk.js", "ui-prototype/review-desk.css",
     "ui-prototype/vite.config.js",
+    # ---- B394-B398 (Omega cycle 5) ----
+    ".gitignore", "src/muse/evolution_executor.py", "src/muse/autonomous_runtime.py",
+    "src/muse/evolution_guard.py", "src/muse/autonomy_safety.py", "src/muse/plugin_capability_broker.py",
+    "src/muse/consciousness_core.py", "src/muse/memory_lifecycle.py", "src/muse/research_closed_loop.py",
+    "src/muse/xuanshu_fusion.py", "src/muse/feedback_bridge.py", "src/muse/cinematic_factory.py",
+    "src/muse/omega_api.py", "src/muse/security_guards.py", "src/muse/island_registry.py",
+    "tests/test_evolution_guard.py", "tests/test_consciousness_memory_lifecycle.py",
+    "tests/test_research_xuanshu_feedback.py", "tests/test_cinematic_factory.py",
+    "tests/test_omega_security_contract.py",
+    "ui-prototype/src/App.svelte", "ui-prototype/omega-common.js", "ui-prototype/omega.css",
+    "ui-prototype/unit-economics.html", "ui-prototype/unit-economics.js",
+    "ui-prototype/consciousness-map.html", "ui-prototype/consciousness-map.js",
+    "ui-prototype/xuanshu-lab.html", "ui-prototype/xuanshu-lab.js",
+    "ui-prototype/evolution-lab.html", "ui-prototype/evolution-lab.js",
+    "ui-prototype/research-bridge.html", "ui-prototype/research-bridge.js",
+    "ui-prototype/video-factory.html", "ui-prototype/video-factory.js",
+    "docs/PROGRESS_B394_B398_OMEGA.md",
 ]
 NEW_SUITES = [
     "tests.test_reviewer_attestation", "tests.test_signed_review_gate", "tests.test_review_desk",
     "tests.test_inspiration_ref_repair", "tests.test_revenue_ledger", "tests.test_opportunity_radar_repair",
     "tests.test_unit_economics_quote_ingest",
+    "tests.test_evolution_guard", "tests.test_consciousness_memory_lifecycle", "tests.test_research_xuanshu_feedback",
+    "tests.test_cinematic_factory", "tests.test_omega_security_contract", "tests.test_evolution_executor",
 ]
 SANDBOX_LIMITED_SUITES = ["tests.test_task_queue", "tests.test_worker", "tests.test_review_gate"]
 
@@ -188,7 +207,7 @@ def step_tests() -> bool:
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     env = python_env()
     say("[4/7] 正在真机运行全仓单元测试（可能需要几分钟）…", CYAN)
-    full = run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-t", "."], timeout=3600, env=env)
+    full = run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py"], timeout=3600, env=env)
     (REPORT_DIR / "unittest-full.log").write_text(full["stdout"] + "\n" + full["stderr"], encoding="utf-8")
     parsed_full = _parse_unittest(full["stderr"] + "\n" + full["stdout"])
     targeted = {}
@@ -268,7 +287,8 @@ def step_git(tests_ok: bool) -> None:
         say("[7/7] Git：没有需要保存的新改动", GREEN if add["returncode"] == 0 else RED)
         return
     full = report["steps"].get("tests", {}).get("full", {})
-    message = (f"Omega B391-B398: signed review gate+desk, radar repair, ledger, unit economics, quote ingest\n\n"
+    message = (f"Omega B391-B398: signed review/evolution gates, safety controller, consciousness core, "
+               f"memory lifecycle, research loop, xuanshu, feedback bridge, film factory, omega pages\n\n"
                f"autopilot {STAMP}: unittest ran={full.get('ran')} result={full.get('summary')}; "
                f"files={len(staged)}; verified={'yes' if tests_ok else 'NO - see reports/autopilot'}")
     commit = run(["git", "commit", "-q", "-m", message])

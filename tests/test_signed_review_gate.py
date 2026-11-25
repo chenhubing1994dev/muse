@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextlib import closing
 import sqlite3
 import tempfile
 import unittest
@@ -157,7 +158,7 @@ class SignedReviewGateTests(unittest.TestCase):
             self._complete(first, self._attest(forged))
         self.assertEqual((self._status(first), self._status(second)), ("waiting_approval", "waiting_approval"))
         # tampering with the stored result after parking is detected at export time
-        with sqlite3.connect(self.db) as connection:
+        with closing(sqlite3.connect(self.db)) as connection, connection:
             row = connection.execute("SELECT payload_json FROM tasks WHERE id=?", (first,)).fetchone()
             payload = json.loads(row[0])
             payload["_result"]["words"] = 9000

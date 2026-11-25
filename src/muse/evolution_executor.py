@@ -599,8 +599,15 @@ class ApprovedCodeChangeExecutor:
         experiment_bridge: Any, review_gate: Any, run_tests: TestRunner,
         implementer_id: str, journal_database: str | Path | None = None,
         progress_database: str | Path | None = None, capability_registry: Any | None = None,
-        initiative_store: Any | None = None,
+        initiative_store: Any | None = None, patch_guard: Any | None = None,
+        version_ledger: Any | None = None, require_signed_patches: bool = False,
     ) -> None:
+        if require_signed_patches and patch_guard is None:
+            raise ValueError("signed self-evolution requires a PatchSignatureGate (fail closed)")
+        if patch_guard is not None and not callable(getattr(patch_guard, "verify", None)):
+            raise TypeError("patch_guard must expose verify(payload, task_id=..., implementer_id=...)")
+        self.patch_guard = patch_guard
+        self.version_ledger = version_ledger
         self.workspace = Path(workspace).resolve(strict=True)
         if not self.workspace.is_dir():
             raise ValueError("workspace must be an existing directory")
@@ -802,6 +809,13 @@ class ApprovedCodeChangeExecutor:
         patches = payload.get("patches")
         if not isinstance(patches, list) or not 1 <= len(patches) <= 8:
             raise ValueError("patches must contain between 1 and 8 source edits")
+        # B394: protected governance surfaces are refused unconditionally, and the
+        # independent Ed25519 patch signature is verified before any test or write.
+        from muse.evolution_guard import enforce_protected_surfaces
+        enforce_protected_surfaces(patches)
+        signature_receipt: dict[str, Any] | None = None
+        if self.patch_guard is not None:
+            signature_receipt = self.patch_guard.verify(payload, task_id=task_id, implementer_id=self.implementer_id)
         resolved = [self._resolve_patch(item) for item in patches]
         paths = [item[0] for item in resolved]
         if len(set(paths)) != len(paths):
@@ -881,9 +895,18 @@ class ApprovedCodeChangeExecutor:
                     return {"status": "source_changed_after_review", "task_id": task_id,
                             "promotion_status": "rolled_back"}
                 self.journal.update_status(transaction_id, "committed")
+                version = None
+                if self.version_ledger is not None:
+                    version = self.version_ledger.record(
+                        task_id=task_id, proposal_id=proposal_id,
+                        files=[(path.relative_to(self.workspace).as_posix(), original, candidate_hash)
+                               for path, original, candidate_hash in snapshots],
+                        signature_manifest_sha256=(signature_receipt or {}).get("manifest_sha256", ""),
+                    )
                 return {"status": "implemented", "task_id": task_id,
                         "baseline_run_ref": baseline["run_ref"],
-                        "candidate_run_ref": candidate["run_ref"], "promotion": promotion}
+                        "candidate_run_ref": candidate["run_ref"], "promotion": promotion,
+                        "version": version, "patch_signature": signature_receipt}
             restored = self._rollback(snapshots)
             self.journal.update_status(transaction_id, "rolled_back" if restored else "blocked")
             return {"status": "review_rejected_rolled_back" if restored else "rollback_blocked",

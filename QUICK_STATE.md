@@ -97,3 +97,10 @@
 1. 用户运行：`powershell -NoProfile -ExecutionPolicy Bypass -File "D:\AI AGENT\Muse\scripts\run_full_diag.ps1"`（自动回退解释器；日志首部 `[Muse] probe` 行记录每个候选解释器的探测结果）；可选先 `Repair-MuseVenv.ps1` 诊断 / `-Apply` 修复
 2. 读取 latest.log / diag_matrix.json：FAIL 按堆栈+局部变量快照根因修复，并全库排查同类写法 → 重跑至全 PASS；再跑 `-FullTests`
 3. 根据孤岛接入决策实施；补 ⚠️ CLI 行为测试
+
+
+## Omega B394–B398（2026-11-25 Cycle 5）
+- 真机报告的 3 个失败（Windows 文件锁）与“全仓 0 测试”均已修复；`.git/config` 已脱敏（旧令牌请到 GitHub 吊销）。
+- B394 签名进化门 + 受保护面 + 原子回滚 + 熔断/背压/断路器 + 插件 Capability Broker；B395 十维意识内核 + 记忆生命周期；B396 研究闭环 + 玄枢融合 + 反馈回传；B397 一键电影级视频工坊算法引擎；B398 主控台 7 个直达按钮、Omega API、安全测试套件、孤岛清零（1 接线 / 12 归档）。
+- 新增测试 60/60（云端沙箱）。模块数 231 → 243。详见 `docs/PROGRESS_B394_B398_OMEGA.md`。
+- 下一步：双击 `1_双击一键验收并保存核心代码.bat`（会跑全仓测试 + 新套件 + 界面构建并在本机分支提交）。

@@ -37,6 +37,8 @@ from muse.routines import (
 from muse.task_queue import TaskQueue
 from muse.model_call_context import current_model_call_context, model_call_scope
 
+from muse.lease_manager import LeaseManager
+from muse.lease_recovery import _backup_database, _process_identity
 from muse.watchdog import run_check
 from muse.worker import DEFAULT_HANDLERS, run_once
 
@@ -151,13 +153,57 @@ class RuntimeStateStore:
             "heartbeat_status": heartbeat_status,
         })
         return value
+    def _snapshot(self) -> Path:
+        stamp = _now().strftime("%Y%m%dT%H%M%S%fZ")
+        handoff = self.path.parent.parent / "handoff" if self.path.parent.name == "autonomy" else self.path.parent / "handoff"
+        target = handoff / f"runtime-state-{stamp}-{uuid.uuid4().hex[:10]}.sqlite3"
+        if target.exists():
+            raise RuntimeError(f"runtime backup already exists; refusing overwrite: {target}")
+        _backup_database(self.path, target)
+
+        return target
 
     def acquire(self, owner_id: str, *, stale_after_seconds: int = 30) -> dict[str, Any]:
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(autonomous_runtime)")}
+        fenced = {"desired_state", "fencing_epoch", "ttl_seconds", "process_identity"}.issubset(columns)
+        if fenced:
+            current = self.db.execute("SELECT * FROM autonomous_runtime WHERE singleton=1").fetchone()
+            if current is None:
+                raise RuntimeError("runtime singleton row must exist before fenced acquisition")
+            state = dict(current)
+            if state.get("desired_state") != "running":
+                raise RuntimeError("desired_state=stopped; explicit user resume is required")
+            if state.get("owner_id") is not None or state.get("pid") is not None:
+                raise RuntimeError("runtime lease is occupied; LeaseManager takeover is required")
+            identity = _process_identity(os.getpid())
+            if not identity:
+                raise RuntimeError("runtime process identity cannot be verified")
+            old_epoch = int(state.get("fencing_epoch") or 0)
+            stamp = _stamp()
+            self._snapshot()
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = self.db.execute(
+                    "UPDATE autonomous_runtime SET state='running',owner_id=?,pid=?,heartbeat_at=?,"
+                    "started_at=COALESCE(started_at,?),updated_at=?,last_error=NULL,ttl_seconds=?,"
+                    "process_identity=?,fencing_epoch=? "
+                    "WHERE singleton=1 AND owner_id IS NULL AND pid IS NULL AND fencing_epoch=? AND desired_state='running'",
+                    (owner_id, os.getpid(), stamp, stamp, stamp, stale_after_seconds,
+                     identity, old_epoch + 1, old_epoch),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError("runtime lease compare-and-swap failed")
+                self.db.commit()
+            except Exception:
+                self.db.rollback()
+                raise
+            return self.status()
+
+        self._snapshot()
+        # Legacy compatibility is retained only until the explicit lease migration.
         self.db.execute("BEGIN IMMEDIATE")
         try:
-            current = self.db.execute(
-                "SELECT * FROM autonomous_runtime WHERE singleton=1"
-            ).fetchone()
+            current = self.db.execute("SELECT * FROM autonomous_runtime WHERE singleton=1").fetchone()
             if current is not None:
                 state = dict(current)
                 heartbeat = None
@@ -192,31 +238,64 @@ class RuntimeStateStore:
             raise
         return self.status()
 
-    def heartbeat(self, owner_id: str) -> bool:
-        cursor = self.db.execute(
-            "UPDATE autonomous_runtime SET heartbeat_at=?,updated_at=? "
-            "WHERE singleton=1 AND owner_id=? AND state IN ('running','paused','stopping')",
-            (_stamp(), _stamp(), owner_id),
-        )
+    def heartbeat(self, owner_id: str, fencing_epoch: int | None = None) -> bool:
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(autonomous_runtime)")}
+        stamp = _stamp()
+        if "fencing_epoch" in columns:
+            if isinstance(fencing_epoch, bool) or not isinstance(fencing_epoch, int):
+                raise ValueError("fencing_epoch is required for runtime heartbeat")
+            self._snapshot()
+            cursor = self.db.execute(
+                "UPDATE autonomous_runtime SET heartbeat_at=?,updated_at=? "
+                "WHERE singleton=1 AND owner_id=? AND fencing_epoch=? AND desired_state='running' "
+                "AND state IN ('running','paused','stopping')",
+                (stamp, stamp, owner_id, fencing_epoch),
+            )
+        else:
+            self._snapshot()
+            cursor = self.db.execute(
+                "UPDATE autonomous_runtime SET heartbeat_at=?,updated_at=? "
+                "WHERE singleton=1 AND owner_id=? AND state IN ('running','paused','stopping')",
+                (stamp, stamp, owner_id),
+            )
         self.db.commit()
         return cursor.rowcount == 1
-
     def set_control(self, state: str) -> dict[str, Any]:
         if state not in {"paused", "running", "stopping"}:
             raise ValueError("unsupported runtime control state")
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(autonomous_runtime)")}
+        self._snapshot()
         self.db.execute("BEGIN IMMEDIATE")
         try:
             row = self.db.execute("SELECT owner_id,state FROM autonomous_runtime WHERE singleton=1").fetchone()
+            desired = "stopped" if state == "stopping" else "running"
             if row is None:
                 initial = "stopped" if state == "stopping" else state
-                self.db.execute(
-                    "INSERT INTO autonomous_runtime(singleton,state,updated_at) VALUES(1,?,?)",
-                    (initial, _stamp()),
-                )
+                if "desired_state" in columns:
+                    self.db.execute(
+                        "INSERT INTO autonomous_runtime(singleton,state,updated_at,desired_state) VALUES(1,?,?,?)",
+                        (initial, _stamp(), desired),
+                    )
+                else:
+                    self.db.execute(
+                        "INSERT INTO autonomous_runtime(singleton,state,updated_at) VALUES(1,?,?)",
+                        (initial, _stamp()),
+                    )
             elif row["owner_id"] is None and state == "stopping":
+                if "desired_state" in columns:
+                    self.db.execute(
+                        "UPDATE autonomous_runtime SET state='stopped',desired_state='stopped',updated_at=? WHERE singleton=1",
+                        (_stamp(),),
+                    )
+                else:
+                    self.db.execute(
+                        "UPDATE autonomous_runtime SET state='stopped',updated_at=? WHERE singleton=1",
+                        (_stamp(),),
+                    )
+            elif "desired_state" in columns:
                 self.db.execute(
-                    "UPDATE autonomous_runtime SET state='stopped',updated_at=? WHERE singleton=1",
-                    (_stamp(),),
+                    "UPDATE autonomous_runtime SET state=?,desired_state=?,updated_at=? WHERE singleton=1",
+                    (state, desired, _stamp()),
                 )
             else:
                 self.db.execute(
@@ -229,85 +308,119 @@ class RuntimeStateStore:
             raise
         return self.status()
 
-    def release(self, owner_id: str) -> None:
-        return self.status()
-
     def reset_unowned(self) -> bool:
         """Reset a pre-spawn state only if no supervisor has acquired the lease."""
-        cursor = self.db.execute(
-            "UPDATE autonomous_runtime SET state='stopped',updated_at=? "
-            "WHERE singleton=1 AND owner_id IS NULL",
-            (_stamp(),),
-        )
+        self._snapshot()
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(autonomous_runtime)")}
+        if "desired_state" in columns:
+            cursor = self.db.execute(
+                "UPDATE autonomous_runtime SET state='stopped',desired_state='stopped',updated_at=? "
+                "WHERE singleton=1 AND owner_id IS NULL AND pid IS NULL",
+                (_stamp(),),
+            )
+        else:
+            cursor = self.db.execute(
+                "UPDATE autonomous_runtime SET state='stopped',updated_at=? WHERE singleton=1 AND owner_id IS NULL",
+                (_stamp(),),
+            )
         self.db.commit()
         return cursor.rowcount == 1
 
-    def release(self, owner_id: str) -> None:
-        self.db.execute(
-            "UPDATE autonomous_runtime SET state='stopped',owner_id=NULL,pid=NULL,"
-            "heartbeat_at=?,updated_at=? WHERE singleton=1 AND owner_id=?",
-            (_stamp(), _stamp(), owner_id),
-        )
+    def release(self, owner_id: str, fencing_epoch: int | None = None) -> None:
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(autonomous_runtime)")}
+        if "fencing_epoch" in columns:
+            if isinstance(fencing_epoch, bool) or not isinstance(fencing_epoch, int):
+                raise ValueError("fencing_epoch is required to release runtime lease")
+            current = self.db.execute(
+                "SELECT 1 FROM autonomous_runtime WHERE singleton=1 AND owner_id=? AND fencing_epoch=?",
+                (owner_id, fencing_epoch),
+            ).fetchone()
+            if current is None:
+                return
+            self._snapshot()
+            cursor = self.db.execute(
+                "UPDATE autonomous_runtime SET state='stopped',owner_id=NULL,pid=NULL,heartbeat_at=NULL,"
+                "process_identity=NULL,updated_at=? WHERE singleton=1 AND owner_id=? AND fencing_epoch=?",
+                (_stamp(), owner_id, fencing_epoch),
+            )
+        else:
+            self._snapshot()
+            cursor = self.db.execute(
+                "UPDATE autonomous_runtime SET state='stopped',owner_id=NULL,pid=NULL,heartbeat_at=?,updated_at=? WHERE singleton=1 AND owner_id=?",
+                (_stamp(), _stamp(), owner_id),
+            )
         self.db.commit()
-
-    def record_error(self, owner_id: str, error: Exception) -> None:
-        self.db.execute(
-            "UPDATE autonomous_runtime SET last_error=?,updated_at=? "
-            "WHERE singleton=1 AND owner_id=?",
-            (type(error).__name__, _stamp(), owner_id),
-        )
+    def record_error(self, owner_id: str, error: Exception, fencing_epoch: int | None = None) -> None:
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(autonomous_runtime)")}
+        if "fencing_epoch" in columns:
+            if isinstance(fencing_epoch, bool) or not isinstance(fencing_epoch, int):
+                raise ValueError("fencing_epoch is required to record runtime error")
+            self._snapshot()
+            cursor = self.db.execute(
+                "UPDATE autonomous_runtime SET last_error=?,updated_at=? "
+                "WHERE singleton=1 AND owner_id=? AND fencing_epoch=?",
+                (type(error).__name__, _stamp(), owner_id, fencing_epoch),
+            )
+        else:
+            self._snapshot()
+            cursor = self.db.execute(
+                "UPDATE autonomous_runtime SET last_error=?,updated_at=? WHERE singleton=1 AND owner_id=?",
+                (type(error).__name__, _stamp(), owner_id),
+            )
         self.db.commit()
-
-
+        if cursor.rowcount != 1:
+            raise RuntimeError("stale runtime owner cannot record an error")
 class _ControlWatcher:
-    """Poll cross-process stop/pause control so a blocking tick cannot delay shutdown.
-
-    The supervisor loop must observe a stop request even while a routine is inside a
-    long network fetch. A dedicated thread reads the control row at a fixed cadence and
-    trips the shared stop event; every blocking wait in the tick path watches that event.
-    """
+    """Poll cross-process control and maintain the fenced runtime heartbeat."""
 
     def __init__(
         self, state_db: str | Path, owner_id: str, stop_event: threading.Event,
-        *, interval_seconds: float = 0.1, heartbeat_interval_seconds: float = 5.0,
+        *, fencing_epoch: int | None = None, interval_seconds: float = 0.1,
+        heartbeat_interval_seconds: float = 5.0,
     ) -> None:
         self.state_db = Path(state_db)
         self.owner_id = owner_id
+        self.fencing_epoch = fencing_epoch
         self.stop_event = stop_event
         self.interval_seconds = interval_seconds
         self.heartbeat_interval_seconds = heartbeat_interval_seconds
         self._done = threading.Event()
-        self._thread = threading.Thread(target=self._poll, daemon=True,
-                                        name="muse-runtime-control-watcher")
+        self._thread = threading.Thread(
+            target=self._poll, daemon=True, name="muse-runtime-control-watcher",
+        )
 
     def start(self) -> None:
+        with RuntimeStateStore(self.state_db) as state:
+            if not state.heartbeat(self.owner_id, self.fencing_epoch):
+                self.stop_event.set()
         self._thread.start()
 
     def stop(self) -> None:
         self._done.set()
-        self._thread.join(timeout=2.0)
+        if self._thread.ident is not None:
+            self._thread.join(timeout=2.0)
 
     def _poll(self) -> None:
-        last_heartbeat = 0.0
-        while not self._done.is_set():
+        last_heartbeat = time.monotonic()
+        while not self._done.is_set() and not self.stop_event.is_set():
             try:
                 with RuntimeStateStore(self.state_db) as state:
                     now = time.monotonic()
                     if now - last_heartbeat >= self.heartbeat_interval_seconds:
-                        if not state.heartbeat(self.owner_id):
+                        if not state.heartbeat(self.owner_id, self.fencing_epoch):
                             self.stop_event.set()
                             return
                         last_heartbeat = now
                     current = state.status()
             except Exception:
-                if self._done.wait(self.interval_seconds):
-                    return
-                continue
+                self.stop_event.set()
+                return
             if current.get("state") in {"stopping", "stopped"}:
                 self.stop_event.set()
                 return
             if self._done.wait(self.interval_seconds):
                 return
+
 
 class AutonomousSupervisor:
     """One foreground supervisor loop over the existing Commander-owned stores."""
@@ -361,6 +474,8 @@ class AutonomousSupervisor:
         self.workspace = Path(workspace or Path.cwd()).resolve()
         self.contextual_review_handler = contextual_review_handler
         self._stop_event: threading.Event | None = None
+        # B394: optional SafetyController (pause/resume/backpressure/circuit breaker/kill switch)
+        self.safety_controller: Any | None = None
         self.task_db.parent.mkdir(parents=True, exist_ok=True)
         with TaskQueue(self.task_db):
             pass
@@ -943,6 +1058,23 @@ class AutonomousSupervisor:
         return None
 
     def run_tick(self, *, stop_event: threading.Event | None = None) -> dict[str, Any]:
+        """Run one tick, gated by the optional SafetyController (B394)."""
+        controller = self.safety_controller
+        if controller is None:
+            return self._run_tick_unguarded(stop_event=stop_event)
+        decision = controller.check()
+        if not decision["allowed"]:
+            return {"routines": {"processed": 0, "outcomes": []}, "task": None, "safety": decision}
+        try:
+            result = self._run_tick_unguarded(stop_event=stop_event)
+        except Exception as exc:
+            controller.record_result(False, error=f"{type(exc).__name__}: {exc}")
+            raise
+        controller.record_result(True)
+        result["safety"] = decision
+        return result
+
+    def _run_tick_unguarded(self, *, stop_event: threading.Event | None = None) -> dict[str, Any]:
         event = stop_event if stop_event is not None else self._stop_event
         if event is not None and event.is_set():
             return {"routines": {"processed": 0, "outcomes": []}, "task": None}
@@ -1060,32 +1192,54 @@ class AutonomousSupervisor:
                              "offline_mode": "bounded deterministic routines and allowlisted tasks",
             "autonomous_research": "public-topic research with support/counter queries; bounded local User Track memory and conversation context are inspiration-only and never sent to web search; no paid API"},
         }
-
-    def run_forever(self, *, poll_seconds: int = 5) -> dict[str, int]:
+    def run_forever(
+        self, *, poll_seconds: int = 5, force_takeover: bool = False,
+    ) -> dict[str, int]:
         if isinstance(poll_seconds, bool) or not isinstance(poll_seconds, int) or poll_seconds < 1:
             raise ValueError("poll_seconds must be an integer of at least 1")
+        if not isinstance(force_takeover, bool):
+            raise ValueError("force_takeover must be boolean")
         owner_id = uuid.uuid4().hex
         processed = ticks = errors = 0
         stop_event = threading.Event()
         self._stop_event = stop_event
-        watcher = _ControlWatcher(self.state_db, owner_id, stop_event)
         with RuntimeStateStore(self.state_db) as state:
-            state.acquire(owner_id)
+            columns = {row[1] for row in state.db.execute("PRAGMA table_info(autonomous_runtime)")}
+            if "fencing_epoch" in columns:
+                manager = LeaseManager(
+                    self.state_db, resource_table="autonomous_runtime",
+                    handoff_dir=self.state_db.parent.parent / "handoff",
+                )
+                current = state.status()
+                if current.get("owner_id") is None and current.get("pid") is None:
+                    lease = manager.acquire(owner_id, pid=os.getpid(), ttl_seconds=30)
+                else:
+                    lease = manager.takeover_if_stale(
+                        owner_id, pid=os.getpid(), ttl_seconds=30,
+                        force_takeover=force_takeover,
+                    )
+                if lease.status not in {"acquired", "taken_over"}:
+                    raise RuntimeError(f"runtime lease not acquired: {lease.status}: {lease.reason or ''}")
+                acquired = state.status()
+                runtime_epoch = lease.epoch
+            else:
+                acquired = state.acquire(owner_id)
+                runtime_epoch = acquired.get("fencing_epoch")
+        watcher = _ControlWatcher(
+            self.state_db, owner_id, stop_event, fencing_epoch=runtime_epoch,
+        )
         try:
             self.ensure_default_routines()
             watcher.start()
             while not stop_event.is_set():
                 with RuntimeStateStore(self.state_db) as state:
                     current = state.status()
-                    lease_renewed = state.heartbeat(owner_id)
-                if not lease_renewed:
-                    # A stale supervisor must stop before claiming or executing more work.
+                if stop_event.is_set():
                     break
                 if current.get("state") == "stopping":
                     break
                 if current.get("state") == "paused":
-                    if stop_event.wait(poll_seconds):
-                        break
+                    if stop_event.wait(poll_seconds):                        break
                     continue
                 if current.get("state") != "running":
                     break
@@ -1097,7 +1251,7 @@ class AutonomousSupervisor:
                 except Exception as exc:
                     errors += 1
                     with RuntimeStateStore(self.state_db) as state:
-                        state.record_error(owner_id, exc)
+                        state.record_error(owner_id, exc, runtime_epoch)
                 if stop_event.wait(poll_seconds):
                     break
         except KeyboardInterrupt:
@@ -1106,11 +1260,9 @@ class AutonomousSupervisor:
             watcher.stop()
             stop_event.set()
             with RuntimeStateStore(self.state_db) as state:
-                state.release(owner_id)
+                state.release(owner_id, runtime_epoch)
             self._stop_event = None
         return {"ticks": ticks, "tasks_processed": processed, "errors": errors}
-
-
 def enqueue_local_workflow(database: str | Path, title: str, steps: list[dict[str, Any]]) -> dict[str, Any]:
     if not isinstance(title, str) or not title.strip() or len(title) > 160:
         raise ValueError("title must be 1-160 characters")

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import closing
 import re
 import sqlite3
 import tempfile
@@ -122,7 +123,7 @@ class ReviewDeskTests(unittest.TestCase):
         with self.assertRaisesRegex(ReviewDeskError, "初始化"):
             decide(self.db, task_id, verdict="approve", passphrase=PASS, vault=self.vault, receipts_db=self.receipts)
         self.vault.initialize(PASS, confirm_passphrase=PASS)
-        with sqlite3.connect(self.db) as connection:
+        with closing(sqlite3.connect(self.db)) as connection, connection:
             payload = json.loads(connection.execute("SELECT payload_json FROM tasks WHERE id=?", (task_id,)).fetchone()[0])
             payload["_result"]["files"] = 999
             connection.execute("UPDATE tasks SET payload_json=? WHERE id=?", (json.dumps(payload), task_id))

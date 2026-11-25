@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import closing
 import sqlite3
 import tempfile
 import unittest
@@ -140,7 +141,7 @@ class CorroborationStoreTests(unittest.TestCase):
         with CorroborationStore(self.db) as store:
             version = store.connection.execute("SELECT value FROM radar_meta WHERE key='schema_version'").fetchone()[0]
             self.assertEqual(version, "2")
-        with sqlite3.connect(self.db) as connection:
+        with closing(sqlite3.connect(self.db)) as connection, connection:
             connection.execute("UPDATE radar_meta SET value='9' WHERE key='schema_version'")
         with self.assertRaises(UnsupportedRadarSchemaVersion):
             CorroborationStore(self.db)

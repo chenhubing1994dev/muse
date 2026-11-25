@@ -94,3 +94,6 @@ Thumbs.db
 # Python virtual environments (any name containing -venv)
 **/*-venv/
 pyvenv.cfg
+
+# Agent pre-edit backups (may contain sensitive snapshots)
+.qw-backups/

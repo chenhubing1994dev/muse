@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#050711">
+<title>MUSE · 一键电影级视频工坊</title>
+<link rel="stylesheet" href="./omega.css">
+</head>
+<body>
+<header class="omega-top">
+  <div class="omega-brand">✦ MUSE · 一键电影级视频工坊 <small>Wan 2.1 · 真 AI 超分</small></div>
+  <nav class="omega-nav" aria-label="Omega 直达">
+    <a href="./">返回主控台</a>
+    <a href="./review-desk.html">待签名审查台</a>
+    <a href="./unit-economics.html">单位经济 · 报价识别</a>
+    <a href="./consciousness-map.html">十维意识星图</a>
+    <a href="./xuanshu-lab.html">玄枢灵感工坊</a>
+    <a href="./evolution-lab.html">自我进化实验室</a>
+    <a href="./research-bridge.html">深度研究 · 反馈回传</a>
+    <a href="./video-factory.html" aria-current="page">一键电影级视频工坊</a>
+  </nav>
+</header>
+<main>
+<section class="card">
+  <h2>① 一键出片规划（DAG）</h2>
+  <p class="muted">钩子矩阵 → 节奏密度 → Story Bible 锁 → 镜头导演 → GPU 7.7 GiB 预检 → Wan 2.1 工作流 → 480P→1080P 真 AI 超分 → 粤语优先配音字幕 → LUFS 质检 → VLM/人工审片 → 留存回流。</p>
+  <label>主题<input id="vf-topic" maxlength="60" value="港式夜景"></label>
+  <button id="vf-run" type="button">一键生成出片计划</button>
+  <div id="vf-dag" class="dag"></div>
+</section>
+<section class="grid2">
+  <div class="card"><h2>黄金前 3 秒钩子</h2><table id="vf-hooks"></table></div>
+  <div class="card"><h2>镜头导演</h2><table id="vf-shots"></table></div>
+</section>
+<section class="card">
+  <h2>② 官方留存 / 完播率曲线回流</h2>
+  <label>平台导出的留存 CSV<input id="vf-retention-file" type="file" accept=".csv"></label>
+  <label>钩子编号<input id="vf-hook-id" value="hook-contradiction-1"></label>
+  <label>视频编号<input id="vf-video-id" value="v1"></label>
+  <button id="vf-retention" type="button">导入并生成 Agent-Track 候选</button>
+  <pre id="vf-retention-result"></pre>
+</section>
+</main>
+<div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+<script type="module" src="./video-factory.js"></script>
+</body>
+</html>

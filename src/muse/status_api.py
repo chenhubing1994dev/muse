@@ -1581,7 +1581,11 @@ def create_status_server(
                 return
             parsed = urlsplit(self.path)
             try:
-                if parsed.path == "/api/v1/health":
+                if parsed.path.startswith("/api/v1/omega/"):
+                    from muse.omega_api import handle_omega  # B394-B398 Omega routes
+                    omega_status, omega_body = handle_omega("GET", parsed.path, parsed.query, b"", workspace_root)
+                    self._send(omega_status, omega_body)
+                elif parsed.path == "/api/v1/health":
                     self._send(200, {
                         "service": "muse-status-api", "status": "ok", "api_version": 1,
                         "agent_registry_configured": agent_path is not None,
@@ -2268,6 +2272,25 @@ def create_status_server(
                 self._send(401, {"error": "unauthorized"})
                 return
             parsed = urlsplit(self.path)
+            if parsed.path.startswith("/api/v1/omega/"):
+                from muse.omega_api import handle_omega, max_body_bytes
+                if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json":
+                    self._send(415, {"error": "application/json required"})
+                    return
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                except ValueError:
+                    length = -1
+                if not 1 <= length <= max_body_bytes(parsed.path):
+                    self._send(413 if length > 0 else 400, {"error": "request body size not allowed"})
+                    return
+                raw = self.rfile.read(length)
+                if len(raw) != length:
+                    self._send(400, {"error": "incomplete request body"})
+                    return
+                omega_status, omega_body = handle_omega("POST", parsed.path, parsed.query, raw, workspace_root)
+                self._send(omega_status, omega_body)
+                return
             decide_match = re.fullmatch(r"/api/v1/signed-reviews/([0-9a-f]{32})/decide", parsed.path)
             if decide_match or parsed.path == "/api/v1/reviewer-key/initialize":
                 from muse.review_desk import ReviewDeskError, decide

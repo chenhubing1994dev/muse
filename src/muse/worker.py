@@ -862,11 +862,25 @@ def main(argv: Sequence[str] | None = None) -> int:
             test_adapter = build_isolated_unittest_adapter(
                 workspace, experiment_bridge=experiment_bridge, progress_database=args.db,
             )
+            # B394: every source patch needs an independent Ed25519 signature from the pinned
+            # reviewer trust store (fail closed) and is recorded as a rollback-able version.
+            from muse.evolution_guard import EvolutionVersionLedger, PatchSignatureError, gate_from_environment
+            try:
+                patch_guard = gate_from_environment(
+                    workspace / "data" / "evolution" / "patch-receipts.sqlite3",
+                    implementer_id="muse-approved-code-change-executor",
+                )
+            except PatchSignatureError as exc:
+                parser.error(f"--enable-evolution requires the pinned reviewer trust store for signed patches: {exc}")
+            stack.callback(patch_guard.close)
+            version_ledger = EvolutionVersionLedger(workspace / "data" / "evolution" / "versions.sqlite3", workspace)
+            stack.callback(version_ledger.close)
             executor = ApprovedCodeChangeExecutor(
                 workspace, improvement_store=improvements, experiment_bridge=experiment_bridge,
                 review_gate=review_gate, run_tests=test_adapter,
                 implementer_id="muse-approved-code-change-executor", journal_database=args.journal_db,
                 capability_registry=capability_registry, initiative_store=initiatives,
+                patch_guard=patch_guard, version_ledger=version_ledger, require_signed_patches=True,
             )
             recovery = executor.recover_incomplete_transactions()
             if any(item["status"] == "blocked" for item in recovery):

@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#050711">
+<title>MUSE · 单位经济 · 报价识别</title>
+<link rel="stylesheet" href="./omega.css">
+</head>
+<body>
+<header class="omega-top">
+  <div class="omega-brand">✦ MUSE · 单位经济 · 报价识别 <small>Decimal 精确计算 · 本机解析</small></div>
+  <nav class="omega-nav" aria-label="Omega 直达">
+    <a href="./">返回主控台</a>
+    <a href="./review-desk.html">待签名审查台</a>
+    <a href="./unit-economics.html" aria-current="page">单位经济 · 报价识别</a>
+    <a href="./consciousness-map.html">十维意识星图</a>
+    <a href="./xuanshu-lab.html">玄枢灵感工坊</a>
+    <a href="./evolution-lab.html">自我进化实验室</a>
+    <a href="./research-bridge.html">深度研究 · 反馈回传</a>
+    <a href="./video-factory.html">一键电影级视频工坊</a>
+  </nav>
+</header>
+<main>
+<section class="card">
+  <h2>① 单位经济模拟器 <span class="badge">simulation_not_forecast</span></h2>
+  <p class="muted">四条反证与止损线必须事先写好；结果只是价格假设的模拟，不代表收入。</p>
+  <label>价格假设（JSON）<textarea id="ue-input" spellcheck="false">{
+  "title": "粤语字幕模板包",
+  "price_hypothesis": "39",
+  "currency": "HKD",
+  "payment_fee_rate": "0.034",
+  "payment_fee_fixed": "2.35",
+  "platform_fee_rate": "0.05",
+  "refund_rate": "0.05",
+  "compute_cost_per_unit": "0.5",
+  "build_hours": "12",
+  "hourly_cost": "80",
+  "fixed_costs": "200",
+  "scenario_units": [
+    10,
+    50,
+    200
+  ],
+  "counter_evidence": {
+    "free_alternatives": "剪映自带免费字幕模板",
+    "switching_friction": "用户已有自己的工作流",
+    "distribution_difficulty": "没有现成的分发渠道",
+    "compliance_risk": "字体授权需要逐个核实"
+  },
+  "kill_criteria": [
+    {
+      "metric": "settled_orders",
+      "operator": "&lt;",
+      "threshold": "3",
+      "by_day": 30
+    }
+  ]
+}</textarea></label>
+  <button id="ue-run" type="button">一键模拟</button>
+  <table id="ue-table"></table>
+  <pre id="ue-raw" class="hidden"></pre>
+</section>
+<section class="card">
+  <h2>② 报价单识别（CSV / Excel / PDF）</h2>
+  <p class="muted">只在本机解析；扫描版 PDF 会提示需要 OCR；每一行都带出处。</p>
+  <label>选择报价文件<input id="quote-file" type="file" accept=".csv,.xlsx,.pdf"></label>
+  <button id="quote-run" type="button">识别报价</button>
+  <table id="quote-table"></table>
+  <pre id="quote-raw"></pre>
+</section>
+</main>
+<div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+<script type="module" src="./unit-economics.js"></script>
+</body>
+</html>

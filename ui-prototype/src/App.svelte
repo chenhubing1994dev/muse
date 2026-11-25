@@ -154,6 +154,7 @@
   let visualReviewSubmitting = false;
   let visualReviewRecords: import("./lib/api").VisualReviewRecord[] = [];
   let visualRevisionBrief: import("./lib/api").VisualRevisionBrief | null = null;
+  let visualQualityReport: import("./lib/api").VideoVisualQualityReport | null = null;
   onDestroy(() => {
     if (visualReviewSheetUrl) URL.revokeObjectURL(visualReviewSheetUrl);
     contextualReviewResult = null;
@@ -1135,6 +1136,7 @@
       visualReviewMessage = "";
       visualReviewRecords = [];
       visualRevisionBrief = null;
+      visualQualityReport = null;
       return;
     }
     selectedVisualReviewProductId = product.id;
@@ -1143,6 +1145,7 @@
     visualReviewMessage = "";
     visualReviewRecords = [];
     visualRevisionBrief = null;
+    visualQualityReport = null;
     visualReviewBusy = true;
     try {
       const blob = await client.videoContactSheet(product.initiative_id, product.version_id);
@@ -1155,6 +1158,7 @@
       if (selectedVisualReviewProductId !== product.id) return;
       visualReviewRecords = history.reviews;
       visualRevisionBrief = revision.brief;
+      visualQualityReport = history.visual_quality ?? null;
     } catch (error) {
       visualReviewMessage = error instanceof Error
         ? error.message
@@ -1182,6 +1186,7 @@
         if (selectedVisualReviewProductId !== product.id) return;
         visualReviewRecords = history.reviews;
         visualRevisionBrief = revision.brief;
+        visualQualityReport = history.visual_quality ?? null;
         visualReviewMessage = "审核记录已追加并绑定当前视频及联系表哈希；身份为本机自报，发布权限没有改变。";
       } catch {
         visualReviewRecords = [...visualReviewRecords, saved.record];
@@ -1634,6 +1639,14 @@
     </button>
   {/each}
   <div class="rail-sep" aria-hidden="true"></div>
+  <!-- B398 Omega direct entries (static pages, external JS/CSS, CSP-safe) -->
+  <a class="rail-item" href="./review-desk.html" title="待签名审查台"><Icon name="shield" size={19} /><span>审查台</span></a>
+  <a class="rail-item" href="./unit-economics.html" title="单位经济模拟器 · CSV/Excel/PDF 报价识别"><Icon name="tasks" size={19} /><span>经济</span></a>
+  <a class="rail-item" href="./consciousness-map.html" title="十维意识星图"><Icon name="core" size={19} /><span>星图</span></a>
+  <a class="rail-item" href="./xuanshu-lab.html" title="玄枢灵感工坊（仅作灵感）"><Icon name="knowledge" size={19} /><span>玄枢</span></a>
+  <a class="rail-item" href="./evolution-lab.html" title="自我进化实验室 · 熔断与回滚"><Icon name="flame" size={19} /><span>进化</span></a>
+  <a class="rail-item" href="./research-bridge.html" title="深度研究 · 创作反馈回传"><Icon name="search" size={19} /><span>研究</span></a>
+  <a class="rail-item" href="./video-factory.html" title="一键电影级视频工坊"><Icon name="studio" size={19} /><span>出片</span></a>
   <div class="rail-foot">
     <b>璇</b>
     <small>v0.3<br />LOCAL</small>
@@ -2604,7 +2617,7 @@
                 </div>
               </div>
               {#if product.kind === "video_creator" && selectedVisualReviewProductId === product.id}
-                <VideoVisualReview imageUrl={visualReviewSheetUrl} message={visualReviewMessage || (visualReviewBusy ? "正在读取联系表…" : "")} busy={visualReviewSubmitting} reviews={visualReviewRecords} revisionBrief={visualRevisionBrief} on:submit={(event) => submitProductVisualReview(product, event.detail)} />
+                <VideoVisualReview imageUrl={visualReviewSheetUrl} message={visualReviewMessage || (visualReviewBusy ? "正在读取联系表…" : "")} busy={visualReviewSubmitting} reviews={visualReviewRecords} revisionBrief={visualRevisionBrief} visualQuality={visualQualityReport} on:submit={(event) => submitProductVisualReview(product, event.detail)} />
                 <div class="product-actions">
                   <button type="button" class="radar-scan" onclick={() => previewProduct(product)}>打开完整原片复核</button>
                   <button type="button" class="radar-scan" onclick={() => { if (selectedTimelineId !== timelineInitiativeId(product)) toggleInitiativeTimeline(product); }}>打开审片反馈</button>
