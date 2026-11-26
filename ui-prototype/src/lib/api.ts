@@ -633,9 +633,15 @@ export interface YijingInquiryResponse {
   notice: string;
 }
 export interface VideoJobRecord {
-  id: string; status: "queued" | "running" | "succeeded" | "failed" | "cancelled";
-  worker_available?: boolean;
+  id: string; status: string;
+  worker_available?: boolean; worker_mode?: string; execution_ticket_id?: string | null;
   error?: string; product?: { initiative_id: string; version_id: string; title?: string; kind: string };
+}
+export interface VideoApprovalRequest {
+  id: string; title: string; status: string; created_at?: string; updated_at?: string;
+  opportunity_id?: string | null; initiative_id?: string | null; attempt_id?: string | null;
+  approval_scope?: string | null; approved_by?: string | null;
+  execution_ticket_id?: string | null; execution_status?: string | null; can_approve: boolean;
 }
 export interface VideoAttemptMetrics {
   total: number; succeeded: number; failed: number;
@@ -662,6 +668,7 @@ export interface VideoEngineStatus {
   hardware_encoders: string[];
   comfyui: { status: string; reason?: string };
   velorn: { status: string; reason?: string };
+  commander_planner?: { status: string; reason?: string; model_count?: number; model?: string };
 }
 
 export interface GpuResourceStatus {
@@ -998,6 +1005,7 @@ export interface ApiClient {
   celestialCatalog(): Promise<CelestialCatalogResponse>;
   castYijing(payload: { mode?: "seeded_cast" | "manual_lines" | "trigram_pair"; seed?: string; line_values?: number[]; lower_bits?: string; upper_bits?: string; goal?: string; frameworks?: string[] }): Promise<YijingInquiryResponse>;
   videoAttempts(): Promise<VideoAttemptSummary>;
+  videoApprovalRequests(limit?: number): Promise<{ api_version: number; count: number; approval_requests: VideoApprovalRequest[] }>;
   videoRecipeTrace(attemptId: string): Promise<{ api_version: number; trace: VideoRecipeTrace }>;
   videoEngines(): Promise<{ api_version: number } & VideoEngineStatus>;
   gpuResources(): Promise<GpuResourceStatus>;
@@ -1022,7 +1030,10 @@ export interface ApiClient {
   visualRevisionBrief(initiativeId: string, versionId: string): Promise<{ api_version: number; active: boolean; brief: VisualRevisionBrief | null; can_auto_modify_source: false; new_version_created: false }>;
   submitVisualReview(initiativeId: string, versionId: string, payload: VisualReviewPayload): Promise<{ api_version: number; identity_assurance: string; record: VisualReviewRecord; append_only: true; digital_signature: false }>;
   subtitleReview(initiativeId: string, versionId: string): Promise<{ api_version: number; review: SubtitleReviewDocument }>;
-  approveSubtitleReview(initiativeId: string, versionId: string, payload: { reviewed_segment_indexes: number[]; corrections: Array<{ segment_index: number; corrected_text: string }>; reviewer: string; reviewer_id: string; reviewer_role: string; rationale: string; evidence_refs: string[]; confirmation: string }): Promise<{ api_version: number; product: { initiative_id: string; version_id: string; validated: boolean; status: string; quality_gate?: ProductQualityGate } }>;  createVideoProduct(payload: { mode?: "local_assets" | "prompt_to_video"; source?: string; title: string; prompt?: string; negative_prompt?: string; duration_seconds?: number; steps?: number; seed?: number; creator_initiative_id?: string; evolution_cycle_id?: string; audio?: string; audio_mode?: "music" | "narration"; aspect_ratio?: "16:9" | "9:16" | "1:1"; fps?: number; image_seconds?: number; encoder?: "auto" | "amf" | "software"; motion_profile?: "none" | "brand_intro_outro" | "brand_scene_transitions" }): Promise<{ api_version: number; job: { id: string; status: string } }>;  videoJob(id: string): Promise<{ api_version: number; job: VideoJobRecord }>;
+  approveSubtitleReview(initiativeId: string, versionId: string, payload: { reviewed_segment_indexes: number[]; corrections: Array<{ segment_index: number; corrected_text: string }>; reviewer: string; reviewer_id: string; reviewer_role: string; rationale: string; evidence_refs: string[]; confirmation: string }): Promise<{ api_version: number; product: { initiative_id: string; version_id: string; validated: boolean; status: string; quality_gate?: ProductQualityGate } }>;  createVideoProduct(payload: { mode?: "local_assets" | "prompt_to_video"; source?: string; title: string; prompt?: string; negative_prompt?: string; duration_seconds?: number; steps?: number; seed?: number; creator_initiative_id?: string; evolution_cycle_id?: string; audio?: string; audio_mode?: "music" | "narration"; narration_script?: string; aspect_ratio?: "16:9" | "9:16" | "1:1"; fps?: number; image_seconds?: number; encoder?: "auto" | "amf" | "software"; motion_profile?: "none" | "brand_intro_outro" | "brand_scene_transitions" }): Promise<{ api_version: number; job: { id: string; status: string } }>;
+  createVideoApprovalRequest(payload: { request_id: string; title: string; prompt: string; negative_prompt?: string; aspect_ratio?: "9:16" | "16:9"; duration_seconds?: number; steps?: number; narration_script?: string; customer_segment?: string; customer_problem?: string; proposed_offer?: string; validation_test?: string; success_signal?: string }): Promise<{ api_version: number; approval_required: boolean; request_id: string; opportunity_id: string; initiative_id: string; evidence_state: string; approval: { task_id: string; status: string; scope: string }; attempt_id?: string }>;
+  approveVideoApprovalRequest(taskId: string): Promise<{ api_version: number; approval_persisted: boolean; execution_queued: boolean; attempt_id: string; execution_ticket_id: string; gpu_execution: string }>;
+  videoJob(id: string): Promise<{ api_version: number; job: VideoJobRecord }>;
   submitInspiration(value: { content: string; allow_external_research: boolean; title?: string; tags?: string[]; research_domains?: string[]; source?: "chatgpt_daily_inspiration" | "muse_local_dashboard" | "user_manual" }): Promise<{ api_version: number; inspiration: InspirationRecord }>;
   evolveInspiration(payload?: { inspiration_id?: string; enqueue_video?: boolean; aspect_ratios?: Array<"9:16" | "16:9"> }): Promise<{ api_version: number; evolution: InspirationEvolutionResult }>; 
   downloadArtifact(name: string): Promise<Blob>;

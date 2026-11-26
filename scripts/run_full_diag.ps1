@@ -1,7 +1,7 @@
 # Muse one-click diagnostics: original smoke test + full-depth diagnostic, merged into
 # reports\qw_smoke\latest.log, latest.json and diag_matrix.json.
 #
-#   powershell -NoProfile -ExecutionPolicy Bypass -File "D:\AI AGENT\Muse\scripts\run_full_diag.ps1"
+#   powershell -NoProfile -ExecutionPolicy Bypass -File "<MuseRoot>\scripts\run_full_diag.ps1"
 #   ... -FullTests      complete unittest suite instead of the targeted set
 #   ... -SmokeOnly      only scripts\muse_smoke.py (used by run_smoke.bat)
 #   ... -LlmUrl http://127.0.0.1:1234/v1   optional real local-model turn

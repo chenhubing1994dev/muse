@@ -162,17 +162,30 @@
   let videoEngineStatus: VideoEngineStatus | null = null;
   let gpuResourceStatus: GpuResourceStatus | null = null;
   let pairingCode = "";
-  let videoMode: "local_assets" | "prompt_to_video" = "prompt_to_video";  let videoSourceKey = "demo";
+  let videoMode: "auto" | "local_assets" | "prompt_to_video" = "auto";
+  let resolvedVideoMode: "local_assets" | "prompt_to_video" = "local_assets";
+  let videoSourceKey = "muse-prometheus-teaser-v1";
   let videoTitle = "";
   let videoPrompt = "";
   let videoNegativePrompt = "";
+  let videoNarrationScript = "";
   let videoDuration = "2";
   let videoMotionProfile: "none" | "brand_intro_outro" | "brand_scene_transitions" = "brand_intro_outro";
-  let videoAspectRatio: "16:9" | "9:16" | "1:1" = "16:9";
+  let videoAspectRatio: "16:9" | "9:16" = "16:9";
   let videoAudioName = "";
   let videoAudioMode: "music" | "narration" = "music";
+  let videoApprovalRequests: Array<{
+    id: string; title: string; status: string; can_approve: boolean;
+    attempt_id?: string | null; execution_ticket_id?: string | null; execution_status?: string | null;
+    approved_by?: string | null;
+  }> = [];
   let videoBusy = false;
   let videoMessage = "";
+  $: resolvedVideoMode = videoMode === "auto"
+    ? (videoEngineStatus?.comfyui.status === "ready"
+      && videoEngineStatus?.commander_planner?.status === "ready"
+      && gpuResourceStatus?.status === "idle" ? "prompt_to_video" : "local_assets")
+    : videoMode;
   let downloadMessage = "";
   let lanUrls: string[] = [];
 
@@ -658,7 +671,7 @@
   $: connectionBadge = mobileCompanion ? (mobileCompanionConnected ? "SECURE" : "UNPAIRED") : connected ? "LIVE" : stale ? "STALE" : "OFFLINE";
   $: updatedLabel = updatedAt ? `更新于 ${new Date(updatedAt).toLocaleTimeString()}` : "尚无实时数据";
   $: videoEngineSummary = videoEngineStatus
-    ? `FFmpeg ${videoEngineStatus.ffmpeg_available ? "就绪" : "缺失"} · ${videoEngineStatus.hardware_encoders.includes("h264_amf") ? "AMD AMF 可用" : "硬件编码器未检测到"} · ComfyUI ${videoEngineStatus.comfyui.status === "ready" ? "已连接" : "未连接"} · Velorn ${videoEngineStatus.velorn.status === "ready" ? "已连接" : "未连接"}`
+    ? `FFmpeg ${videoEngineStatus.ffmpeg_available ? "就绪" : "缺失"} · ${videoEngineStatus.hardware_encoders.includes("h264_amf") ? "AMD AMF 可用" : "硬件编码器未检测到"} · Commander 模型 ${videoEngineStatus.commander_planner?.status === "ready" ? "就绪" : "未就绪"} · ComfyUI ${videoEngineStatus.comfyui.status === "ready" ? "已连接" : "未连接"} · GPU ${gpuResourceStatus?.status ?? "unknown"} · Velorn ${videoEngineStatus.velorn.status === "ready" ? "已连接" : "未连接"}`
     : "正在检测本地视频引擎…";
 
   function percent(value: number | null | undefined): string {
@@ -744,7 +757,7 @@
           if (!client) {
             client = createApiClient(await resolveDesktopConnection());
           }
-          const [health, agentResponse, overview, feedbackResponse, improvementResponse, selfImprovementResponse, inspirationResponse, artifactResponse, productResponse, engineResponse, videoAttemptResponse, gpuResourceResponse, daemonResponse, recipesResponse, jobsResponse, celestialResponse, prometheusResponse, graphResponse, galaxyResponse, mempalaceResponse, contextualReviewResponse, systemDashboardResponse] = await Promise.all([
+          const [health, agentResponse, overview, feedbackResponse, improvementResponse, selfImprovementResponse, inspirationResponse, artifactResponse, productResponse, engineResponse, videoAttemptResponse, videoApprovalResponse, gpuResourceResponse, daemonResponse, recipesResponse, jobsResponse, celestialResponse, prometheusResponse, graphResponse, galaxyResponse, mempalaceResponse, contextualReviewResponse, systemDashboardResponse] = await Promise.all([
             client.health(),
             client.agents(),
             client.overview(),
@@ -756,6 +769,7 @@
             client.products(50).catch(() => null),
             client.videoEngines(),
             client.videoAttempts().catch(() => null),
+            client.videoApprovalRequests(30).catch(() => null),
             client.gpuResources().catch(() => null),
             client.daemonStatus().catch(() => null),
             client.pipelineRecipes().catch(() => null),
@@ -794,6 +808,7 @@
           artifacts = Array.isArray(artifactResponse.artifacts) ? artifactResponse.artifacts : [];
           products = Array.isArray(productResponse?.products) ? productResponse.products : [];
           videoAttemptSummary = videoAttemptResponse;
+          videoApprovalRequests = Array.isArray(videoApprovalResponse?.approval_requests) ? videoApprovalResponse.approval_requests : [];
           videoEngineStatus = engineResponse;
           gpuResourceStatus = gpuResourceResponse;
           daemonStatus = daemonResponse;
@@ -1290,58 +1305,101 @@
     }
   }
 
+  async function waitForVideoJob(jobId: string, aiMode: boolean): Promise<void> {
+    if (!client) throw new Error("Muse API 尚未连接");
+    for (let attempt = 0; attempt < 1800; attempt += 1) {
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 2000));
+      const response = await client.videoJob(jobId);
+      if (response.job.worker_available === false && (response.job.status === "queued" || response.job.status === "running")) {
+        videoMessage = response.job.worker_mode === "commander_background"
+          ? "Commander 执行票已持久化，但后台 Worker 当前不可用；任务记录保留，未伪报生成中。"
+          : "任务账本中没有可恢复的执行 Worker；记录已保留，请检查运行时状态。";
+        await refresh();
+        return;
+      }
+      if (response.job.status === "succeeded") {
+        videoMessage = aiMode
+          ? "Wan 镜头、粤语配音、Remotion 动效包装及 MP4 技术 QA 已完成；成品已保存到产品库，仍需人工审片后发布。"
+          : "本地 CantoTTS 粤语配音、Whisper ASR 字幕校验、Remotion 动效与 FFmpeg MP4 QA 已完成；成品已保存到产品库。";
+        videoTitle = "";
+        if (aiMode) {
+          videoPrompt = "";
+          videoNarrationScript = "";
+        }
+        await refresh();
+        return;
+      }
+      if (response.job.status === "failed" || response.job.status === "cancelled") {
+        throw new Error(response.job.error || (response.job.status === "cancelled" ? "视频任务已取消" : "视频制作失败"));
+      }
+      videoMessage = response.job.status === "queued"
+        ? "执行 Ticket 已排队，等待 Commander 视频 Worker 与 GPU 租约…"
+        : response.job.status.includes("review")
+          ? "视频生成已进入独立审查阶段；等待签署与复核，不会自动标记为可发布。"
+          : aiMode
+            ? "Wan 2.1 正在本机生成镜头，随后执行粤语 TTS、Remotion 动效包装与 QA…"
+            : "FFmpeg 正在剪辑，随后自动进行 Remotion 动效合成与 QA…";
+    }
+    throw new Error("视频任务超过 60 分钟仍未完成；请检查 Commander、GPU 租约和本地运行日志。");
+  }
+
   async function createVideoProduct(): Promise<void> {
-    const aiMode = videoMode === "prompt_to_video";
+    const aiMode = resolvedVideoMode === "prompt_to_video";
     if (!client || videoBusy || !videoTitle.trim()) return;
     if (aiMode ? !videoPrompt.trim() : !videoSourceKey.trim()) return;
     videoBusy = true;
-    videoMessage = aiMode ? "正在向本地 ComfyUI 提交 Wan 2.1 生成任务…" : "正在提交本地素材剪辑 + Remotion 动效合成任务…";
+    videoMessage = aiMode
+      ? "正在生成严格 Commander 规划并创建一次性审批票；批准前不会启动 Wan 或占用 GPU…"
+      : "正在提交本地素材剪辑 + Remotion 动效合成任务…";
     try {
-      const payload = aiMode
-        ? {
-            mode: "prompt_to_video" as const,
-            title: videoTitle.trim(),
-            prompt: videoPrompt.trim(),
-            negative_prompt: videoNegativePrompt.trim(),
-            aspect_ratio: videoAspectRatio,
-            duration_seconds: Number(videoDuration),
-            steps: 8,
-            motion_profile: videoMotionProfile === "brand_scene_transitions" ? "brand_intro_outro" : videoMotionProfile,
-          }
-        : {
-            mode: "local_assets" as const,
-            source: videoSourceKey.trim(),
-            title: videoTitle.trim(),
-            audio_mode: videoAudioMode,
-            motion_profile: videoMotionProfile,
-            ...(videoAudioName.trim() ? { audio: videoAudioName.trim() } : {}),
-          };
-      const created = await client.createVideoProduct(payload);
-      for (let attempt = 0; attempt < 1800; attempt += 1) {
-        await new Promise<void>((resolve) => window.setTimeout(resolve, 2000));
-        const response = await client.videoJob(created.job.id);
-        if (response.job.worker_available === false && (response.job.status === "queued" || response.job.status === "running")) {
-          videoMessage = "已找回任务账本，但本地渲染进程已不可用（可能在 Muse 重启后中断）。任务记录已保留；请检查视频任务历史并重新提交，不会假装仍在生成。";
-          await refresh();
-          return;
-        }
-        if (response.job.status === "succeeded") {
-          videoMessage = aiMode ? "AI 镜头已生成，Remotion 动效合成与 MP4 技术校验已完成，成品已保存到产品库。" : "Remotion 动效合成与 MP4 技术校验已完成，成品已保存到产品库。";
-          videoTitle = "";
-          if (aiMode) videoPrompt = "";
-          await refresh();
-          return;
-        }
-        if (response.job.status === "failed" || response.job.status === "cancelled") {
-          throw new Error(response.job.error || (response.job.status === "cancelled" ? "视频任务已取消" : "视频制作失败"));
-        }
-        videoMessage = response.job.status === "queued"
-          ? "任务已排队，等待本地视频引擎…"
-          : aiMode ? "Wan 2.1 正在本机生成镜头，随后自动进行 Remotion 动效合成与 QA…" : "FFmpeg 正在剪辑，随后自动进行 Remotion 动效合成与 QA…";
+      if (aiMode) {
+        const created = await client.createVideoApprovalRequest({
+          request_id: crypto.randomUUID().replace(/-/g, ""),
+          title: videoTitle.trim(),
+          prompt: videoPrompt.trim(),
+          negative_prompt: videoNegativePrompt.trim(),
+          aspect_ratio: videoAspectRatio,
+          duration_seconds: Number(videoDuration),
+          steps: 20,
+          narration_script: videoNarrationScript.trim(),
+        });
+        videoMessage = `Commander 一次性审批票已创建：${created.approval.task_id.slice(0, 8)}。当前状态：${created.approval.status}。批准前不会启动 Wan / GPU。`;
+        await refresh();
+        return;
       }
-      throw new Error("视频任务超过 60 分钟仍未完成；可检查本地运行日志和素材文件。");
+      const created = await client.createVideoProduct({
+        mode: "local_assets" as const,
+        source: videoSourceKey.trim(),
+        title: videoTitle.trim(),
+        audio_mode: videoAudioMode,
+        narration_script: videoNarrationScript.trim(),
+        motion_profile: videoMotionProfile,
+        ...(videoAudioName.trim() ? { audio: videoAudioName.trim() } : {}),
+      });
+      await waitForVideoJob(created.job.id, false);
     } catch (error) {
       videoMessage = error instanceof Error ? error.message : "视频制作失败";
+    } finally {
+      videoBusy = false;
+    }
+  }
+
+  async function approveVideoApprovalRequest(taskId: string): Promise<void> {
+    if (!client || videoBusy || !/^[0-9a-f]{32}$/.test(taskId)) return;
+    const confirmed = window.confirm(
+      "你正在批准这一个指定视频尝试。批准后 Commander 可在 GPU 租约与 Admission 通过时启动 Wan 镜头生成。继续？",
+    );
+    if (!confirmed) return;
+    videoBusy = true;
+    videoMessage = "正在持久化这一次人工审批，并创建唯一 video_pipeline 执行 Ticket…";
+    try {
+      const approved = await client.approveVideoApprovalRequest(taskId);
+      videoMessage = `人工审批已持久化；执行 Ticket ${approved.execution_ticket_id.slice(0, 8)} 已排队。GPU 尚未启动，需等待 Commander Admission 与租约。`;
+      await refresh();
+      if (approved.attempt_id) await waitForVideoJob(approved.attempt_id, true);
+    } catch (error) {
+      videoMessage = error instanceof Error ? error.message : "视频审批或派发失败";
+      await refresh();
     } finally {
       videoBusy = false;
     }
@@ -2411,25 +2469,28 @@
             <span class="chip is-quiet">{products.length} 件</span>
           </div>
           <p class="artifact-note">{videoEngineSummary}</p>
-          <p class="panel-intro">可以直接输入灵感生成 AI 短片，也可以导入自己的图片/视频素材剪辑。AI 模式使用本机 ComfyUI + Wan 2.1 1.3B，不调用云端视频 API；当前为 1–5 秒预览级生成，成片仍需人工验收。</p>
+          <p class="panel-intro">智能自动模式仅在本地 Commander 模型、ComfyUI / Wan 与 GPU 资源都就绪时选择 AI 镜头路径；否则切换到不依赖 llama.cpp / Wan 的本地素材动效路径（CantoTTS 粤语配音 + Whisper ASR + Remotion + FFmpeg）。本地路径需要素材文件夹和旁白稿；AI 镜头当前为 480p 预览级，所有成片仍需人工审片。</p>
           <div class="inspiration-form">
             <label for="video-mode">制作方式</label>
             <select id="video-mode" bind:value={videoMode}>
-              <option value="prompt_to_video">AI 灵感生成短片（Wan 2.1）</option>
-              <option value="local_assets">本地素材剪辑合成（FFmpeg）</option>
+              <option value="auto">智能自动（AI / GPU 全就绪走 Commander；否则走本地动效）</option>
+              <option value="prompt_to_video">AI 镜头生成（Wan 2.1 · Commander 审批）</option>
+              <option value="local_assets">纯本地素材动效 + 粤语配音（Remotion / FFmpeg）</option>
             </select>
             <label for="video-title">影片名称</label>
             <input id="video-title" bind:value={videoTitle} maxlength="160" placeholder="给这部影片起个名字" />
-            {#if videoMode === "prompt_to_video"}
+            <small>自动模式当前选择：{resolvedVideoMode === "prompt_to_video" ? "AI 镜头路径（Commander 模型 + ComfyUI + GPU 空闲）" : "本地素材动效路径（CantoTTS + Whisper ASR + Remotion + FFmpeg）"}</small>
+            {#if resolvedVideoMode === "prompt_to_video"}
               <label for="video-prompt">影片灵感 / 画面描述</label>
               <textarea id="video-prompt" bind:value={videoPrompt} rows="4" maxlength="2000" placeholder="例如：一只红狐狸穿过晨雾中的竹林，镜头缓慢推进，电影级自然光…"></textarea>
               <label for="video-negative-prompt">不希望出现的内容（可选）</label>
               <textarea id="video-negative-prompt" bind:value={videoNegativePrompt} rows="2" maxlength="1000" placeholder="例如：模糊、闪烁、畸形、字幕、水印"></textarea>
+              <label for="video-narration-script">粤语旁白稿（可选，留空由本地生成）</label>
+              <textarea id="video-narration-script" bind:value={videoNarrationScript} rows="3" maxlength="12000" placeholder="可粘贴旁白稿；系统会按粤语配音并进行 ASR 字幕校验。"></textarea>
               <label for="video-aspect-ratio">视频画幅</label>
               <select id="video-aspect-ratio" bind:value={videoAspectRatio}>
                 <option value="16:9">横屏 16:9</option>
                 <option value="9:16">竖屏 9:16</option>
-                <option value="1:1">正方形 1:1</option>
               </select>
               <label for="video-duration">预览时长（秒）</label>
               <select id="video-duration" bind:value={videoDuration}>
@@ -2439,33 +2500,56 @@
                 <option value="4">约 4 秒</option>
                 <option value="5">约 5 秒</option>
               </select>
-              <small>当前使用 512 级预览分辨率、12 FPS、8 步采样；较长或高分辨率影片后续再逐级开放。</small>
+              <small>Wan 1.3B 当前为 480p / 12 FPS 预览镜头；严格 Commander 审批后才会申请 GPU，完成后还要经过 Remotion、真实粤语 TTS / ASR 与技术 QA。</small>
             {:else}
               <label for="video-source-key">素材文件夹名</label>
               <input id="video-source-key" bind:value={videoSourceKey} maxlength="64" placeholder="例如 demo" />
-              <label for="video-audio-name">音乐 / 旁白文件名（可选）</label>
+              <label for="video-narration-script-local">粤语旁白稿（必填）</label>
+              <textarea id="video-narration-script-local" bind:value={videoNarrationScript} rows="4" maxlength="12000" placeholder="写下这条视频的粤语旁白内容；Muse 会用本地 CantoTTS 合成，并用粤语 ASR 校验字幕。"></textarea>
+              <label for="video-audio-name">背景音乐文件名（可选）</label>
               <input id="video-audio-name" bind:value={videoAudioName} maxlength="180" placeholder="例如 music.mp3" />
               <label for="video-audio-mode">音轨用途</label>
               <select id="video-audio-mode" bind:value={videoAudioMode}>
                 <option value="music">背景音乐（循环铺底）</option>
                 <option value="narration">旁白 / 人声（按原时长）</option>
               </select>
-              <small>支持 PNG/JPG/WebP 与 MP4/MOV/MKV/WebM；最多 100 个镜头素材。素材放在 data/video_sources/素材文件夹名。</small>
+              <small>支持 PNG/JPG/WebP 与 MP4/MOV/MKV/WebM；最多 100 个镜头素材。素材放在 data/video_sources/素材文件夹名。留空旁白稿不会启动本地配音路径；同时添加音频文件时请将用途设为背景音乐。</small>
             {/if}
             <label for="video-motion-profile">Remotion 动效包装</label>
             <select id="video-motion-profile" bind:value={videoMotionProfile}>
               <option value="brand_intro_outro">动态片头 + 正片 + 动态片尾</option>
-              {#if videoMode !== "prompt_to_video"}
+              {#if resolvedVideoMode !== "prompt_to_video"}
                 <option value="brand_scene_transitions">逐镜头交叉淡化 / 擦除 + 动态片头片尾（推荐）</option>
               {/if}
               <option value="none">不添加动效</option>
             </select>
             <small>逐镜头模式会先按统一画幅/FPS规范化每段素材，再由 Remotion TransitionSeries 交替渲染淡化与擦除转场；原音轨按新时间轴保留。AI 单镜头模式使用片头片尾包装。</small>
             <div class="inspiration-actions">
-              <small>{videoMode === "prompt_to_video" ? "AI 生成需要本机 ComfyUI 和 Wan 模型已启动。" : "先把素材复制到 Muse 项目 data/video_sources 目录。"}</small>
-              <button type="button" class="feedback-submit" onclick={createVideoProduct} disabled={!connected || videoBusy || !videoTitle.trim() || (videoMode === "prompt_to_video" ? (!videoPrompt.trim() || videoEngineStatus?.comfyui.status !== "ready") : !videoSourceKey.trim())}>{videoBusy ? "正在制作…" : videoMode === "prompt_to_video" ? "一键 AI 生成 MP4" : "一键制作 MP4"}</button>
+              <small>{resolvedVideoMode === "prompt_to_video" ? "AI 路径先生成严格 Commander 审批票；批准前不会启动 Wan / GPU。手动选择 AI 时，服务未就绪会明确报错或保持执行票排队。" : "本地路径使用 CantoTTS 粤语配音、Whisper 粤语 ASR 字幕校验、Remotion 动效与 FFmpeg；不调用 ComfyUI / Wan。需要本地素材文件夹与旁白稿。"}</small>
+              <button type="button" class="feedback-submit" onclick={createVideoProduct} disabled={!connected || videoBusy || !videoTitle.trim() || (resolvedVideoMode === "prompt_to_video" ? !videoPrompt.trim() : (!videoSourceKey.trim() || !videoNarrationScript.trim()))}>{videoBusy ? "正在处理…" : resolvedVideoMode === "prompt_to_video" ? "提交 Commander 审批" : "制作本地粤语配音 MP4"}</button>
             </div>          </div>
           {#if videoMessage}<p class="feedback-message" role="status">{videoMessage}</p>{/if}
+          {#if videoApprovalRequests.length}
+            <section class="video-attempt-summary" aria-label="Commander 视频审批">
+              <b>Commander 视频审批 · 一次性授权</b>
+              <small>只有你明确批准指定 Ticket 后，系统才会创建 video_pipeline 执行任务；GPU 仍需通过 Admission 与租约检查。</small>
+              <div class="video-attempt-list">
+                {#each videoApprovalRequests.slice(0, 8) as approval (approval.id)}
+                  <div class="video-attempt-row">
+                    <span>{approval.title || "AI 视频创作"} · {approval.status === "waiting_approval" ? "待人工批准" : approval.status === "queued" ? "已批准" : approval.status}</span>
+                    <small>审批票 {approval.id.slice(0, 8)}{#if approval.approved_by} · 批准者 {approval.approved_by}{/if}{#if approval.attempt_id} · Attempt {approval.attempt_id.slice(0, 8)}{/if}</small>
+                    {#if approval.can_approve}
+                      <button type="button" class="feedback-submit" onclick={() => approveVideoApprovalRequest(approval.id)} disabled={!connected || videoBusy}>批准这一次 AI 镜头生成</button>
+                    {:else if approval.execution_ticket_id}
+                      <small>执行 Ticket {approval.execution_ticket_id.slice(0, 8)} · {approval.execution_status || "等待 Commander 调度"} · GPU 尚未启动</small>
+                    {:else}
+                      <small>审批状态已保存；尚未创建执行 Ticket。</small>
+                    {/if}
+                  </div>
+                {/each}
+              </div>
+            </section>
+          {/if}
           {#if videoAttemptSummary}
             <section class="video-attempt-summary" aria-label="视频创作产能">
               <b>视频创作产能 · 持久化任务账本</b>

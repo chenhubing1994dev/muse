@@ -2,7 +2,7 @@
 
 Run via the one-click wrapper (recommended, PowerShell, from anywhere):
 
-    & "D:\\AI AGENT\\Muse\\scripts\\run_full_diag.ps1"
+    & "<MuseRoot>\\scripts\\run_full_diag.ps1"
 
 or directly:
 

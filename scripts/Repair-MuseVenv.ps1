@@ -1,7 +1,7 @@
 # Diagnose and (only with -Apply) repair the Muse .venv launcher. Offline: no download, no pip.
 #
-#   powershell -NoProfile -ExecutionPolicy Bypass -File "D:\AI AGENT\Muse\scripts\Repair-MuseVenv.ps1"          # diagnose only
-#   powershell -NoProfile -ExecutionPolicy Bypass -File "D:\AI AGENT\Muse\scripts\Repair-MuseVenv.ps1" -Apply   # repair
+#   powershell -NoProfile -ExecutionPolicy Bypass -File "<MuseRoot>\scripts\Repair-MuseVenv.ps1"          # diagnose only
+#   powershell -NoProfile -ExecutionPolicy Bypass -File "<MuseRoot>\scripts\Repair-MuseVenv.ps1" -Apply   # repair
 #
 # Repair = "<base python> -m venv --upgrade --prompt muse-personal-agent .venv": rewrites the
 # launcher (python.exe / pythonw.exe) and pyvenv.cfg from the venv's own base interpreter and

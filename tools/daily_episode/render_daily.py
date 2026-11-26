@@ -1,9 +1,12 @@
 """Muse daily episode renderer — standalone, no subprocess/network.
 
 Usage (inside an unattended run, on-device Python with write access):
-    ns = {}
-    exec(open(r"D:\\AI AGENT\\Muse\\tools\\daily_episode\\render_daily.py", encoding="utf-8").read(), ns)
-    result = ns["render_episode"](r"D:\\AI AGENT\\Muse\\outputs\\daily\\ep-007\\spec.json")
+    script = r"<MuseRoot>\\tools\\daily_episode\\render_daily.py"
+    ns = {"__file__": script}
+    exec(open(script, encoding="utf-8").read(), ns)
+    result = ns["render_episode"](r"<MuseRoot>\\outputs\\daily\\ep-007\\spec.json")
+
+The Muse root is taken from MUSE_ROOT, else derived from __file__ (tools/daily_episode/ -> root).
 
 spec.json:
 {
@@ -14,10 +17,24 @@ Writes scene-01..05.png (1080x1920) + preview.png next to spec.json. Never overw
 existing PNGs. Visual style matches episodes 1-6 (original typography, Noto Sans CJK, SIL OFL).
 """
 import json
+import os
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
-MUSE_ROOT = Path(r"D:\AI AGENT\Muse")
+def _muse_root() -> Path:
+    override = os.environ.get("MUSE_ROOT", "").strip()
+    if override:
+        return Path(override)
+    here = globals().get("__file__")
+    if here:
+        return Path(here).resolve().parents[2]
+    for candidate in (Path.cwd(), *Path.cwd().parents):
+        if (candidate / "tools" / "daily_episode" / "render_daily.py").is_file():
+            return candidate
+    return Path.cwd()
+
+
+MUSE_ROOT = _muse_root()
 FONT = MUSE_ROOT / "assets" / "fonts" / "NotoSansCJKhk-VF.ttf"
 LICENSE = MUSE_ROOT / "assets" / "fonts" / "NotoCJK-OFL.txt"
 WIDTH, HEIGHT = 1080, 1920

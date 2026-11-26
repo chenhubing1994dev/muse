@@ -654,6 +654,48 @@ test("video product jobs and MP4 downloads use authenticated local endpoints", a
   assert.throws(() => client.videoJob("../bad"), /任务编号无效/);
 });
 
+test("Commander video approval API requires an exact one-time ticket and supports persisted attempt IDs", async () => {
+  const calls = [];
+  const requestId = "b".repeat(32);
+  const taskId = "a".repeat(32);
+  const attemptId = "biz-" + "c".repeat(32);
+  const client = createApiClient({
+    baseUrl: "http://127.0.0.1:8765", token,
+    fetchImpl: async (url, options) => {
+      calls.push({ url: String(url), options });
+      if (String(url).endsWith("/video-approval-requests?limit=12")) {
+        return { ok: true, json: async () => ({ api_version: 1, approval_requests: [{ id: taskId, status: "waiting_approval", can_approve: true }] }) };
+      }
+      if (String(url).endsWith("/video-approval-requests")) {
+        return { ok: true, status: 202, json: async () => ({ api_version: 1, approval: { task_id: taskId, status: "waiting_approval" } }) };
+      }
+      if (String(url).endsWith("/approve")) {
+        return { ok: true, status: 202, json: async () => ({ api_version: 1, attempt_id: attemptId, execution_ticket_id: "d".repeat(32) }) };
+      }
+      return { ok: true, json: async () => ({ api_version: 1, job: { id: attemptId, status: "queued", worker_available: true } }) };
+    },
+  });
+  const payload = { request_id: requestId, title: "AI 自动化", prompt: "真实展示自动化流程" };
+  const created = await client.createVideoApprovalRequest(payload);
+  const listed = await client.videoApprovalRequests(12);
+  const approved = await client.approveVideoApprovalRequest(taskId);
+  const job = await client.videoJob(approved.attempt_id);
+  assert.equal(created.approval.task_id, taskId);
+  assert.equal(listed.approval_requests[0].can_approve, true);
+  assert.equal(job.job.id, attemptId);
+  assert.equal(calls[0].url, "http://127.0.0.1:8765/api/v1/video-approval-requests");
+  assert.deepEqual(JSON.parse(calls[0].options.body), payload);
+  assert.equal(calls[1].url, "http://127.0.0.1:8765/api/v1/video-approval-requests?limit=12");
+  assert.equal(calls[2].url, "http://127.0.0.1:8765/api/v1/video-approval-requests/" + taskId + "/approve");
+  assert.deepEqual(JSON.parse(calls[2].options.body), { confirmation: "APPROVE-VIDEO-ONCE" });
+  assert.equal(calls[3].url, "http://127.0.0.1:8765/api/v1/video-jobs/" + attemptId);
+  for (const call of calls) assert.equal(call.options.headers.Authorization, "Bearer " + token);
+  assert.throws(() => client.createVideoApprovalRequest({ request_id: "../bad" }), /编号无效/);
+  assert.throws(() => client.approveVideoApprovalRequest("../bad"), /审批编号无效/);
+  assert.throws(() => client.videoJob("biz-../bad"), /任务编号无效/);
+  assert.throws(() => client.videoApprovalRequests(101), RangeError);
+});
+
 test("visual review API reads append-only history and submits an explicitly confirmed decision", async () => {
   const calls = [];
   const identity = "a".repeat(32);
@@ -939,5 +981,66 @@ test("skill fusion client validates source and exposes submit, history and appro
   assert.throws(() => client.fusionJobs(0), RangeError);
   assert.throws(() => client.submitFusion({ source_url: "https://github.com/example/project", archive_base64: "abc" }), /只提供一个/);
   assert.throws(() => client.approveFusion("invalid"), /编号无效/);
+});
+
+test("desktop resolves the same-origin loopback cookie session when Tauri IPC is unavailable", async () => {
+  const previousWindow = globalThis.window;
+  const origin = "http://127.0.0.1:43212";
+  globalThis.window = {
+    location: { origin },
+    __TAURI__: { core: { invoke: async () => { throw new Error("IPC bridge unavailable on loopback origin"); } } },
+  };
+  try {
+    assert.deepEqual(await resolveDesktopConnection(), { baseUrl: origin, token: "" });
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  }
+});
+
+test("cookie-backed desktop API uses same-origin credentials without exposing a bearer token", async () => {
+  const previousWindow = globalThis.window;
+  const origin = "http://127.0.0.1:43213";
+  const calls = [];
+  globalThis.window = { location: { origin } };
+  try {
+    const client = createApiClient({
+      baseUrl: origin,
+      token: "",
+      fetchImpl: async (url, options) => {
+        calls.push({ url: String(url), options });
+        if (String(url).endsWith("/events/stream")) {
+          return { ok: true, headers: { get: () => "text/event-stream" }, text: async () => "" };
+        }
+        return { ok: true, json: async () => ({ api_version: 1, service: "muse-status-api" }) };
+      },
+    });
+    await client.health();
+    await client.streamEvents({ signal: new AbortController().signal, onEvent: () => {} });
+    assert.equal(calls.length, 2);
+    for (const call of calls) {
+      assert.equal(call.options.credentials, "same-origin");
+      assert.equal(call.options.headers.Authorization, undefined);
+      assert.equal(call.options.cache, "no-store");
+    }
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  }
+});
+
+test("cookie-only desktop API sessions are rejected outside loopback origins", () => {
+  const previousWindow = globalThis.window;
+  globalThis.window = { location: { origin: "http://192.168.68.173:8766" } };
+  try {
+    assert.throws(() => createApiClient({
+      baseUrl: "http://192.168.68.173:8766",
+      token: "",
+      fetchImpl: async () => { throw new Error("must not fetch"); },
+    }), /本地 API 会话信息无效/);
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  }
 });
 

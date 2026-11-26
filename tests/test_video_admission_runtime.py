@@ -371,11 +371,19 @@ class VideoAdmissionRuntimeTests(unittest.TestCase):
             video_admission_provider=NotReadyProvider(),
             video_admission_request_factory=lambda **_kwargs: None,
         )
+        from muse.task_queue import TaskQueue
+        with TaskQueue(self.task_db) as queue:
+            execution = queue.enqueue(
+                "approved video execution", {"kind": "video_pipeline"},
+                recovery_policy="manual",
+            )
         with patch.dict(os.environ, {"MUSE_ENABLE_VIDEO_WORKER": "1"}):
             blocked = guarded._video_worker({})
         self.assertEqual(blocked["status"], "blocked")
         self.assertFalse(blocked["claimed"])
         self.assertEqual(blocked["reason"], "capability missing")
+        with TaskQueue(self.task_db) as queue:
+            self.assertEqual(queue.get(execution["id"])["status"], "queued")
 
     def test_daemon_run_once_injects_and_closes_the_admission_runtime(self) -> None:
         class FakeRuntime:

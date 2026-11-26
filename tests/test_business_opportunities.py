@@ -78,6 +78,65 @@ class BusinessOpportunityTests(unittest.TestCase):
         count=self.store.connection.execute("SELECT COUNT(*) FROM business_opportunity_events WHERE event_type='initiative_linked'").fetchone()[0]
         self.assertEqual(count,1)
 
+    def test_custom_video_brief_is_frozen_into_initiative_and_approval_ticket(self):
+        opportunity=self.store.create(**self.args)
+        initiative_db=Path(self.tmp.name)/"custom-initiatives.sqlite3"
+        task_db=Path(self.tmp.name)/"custom-tasks.sqlite3"
+        brief={
+            "title":"AI 自动化赚钱",
+            "prompt":"以可信、电影感镜头展示 AI 自动化工作流；不得编造收入或客户案例。",
+            "negative_prompt":"fabricated earnings, fake testimonials, watermarks",
+            "aspect_ratio":"9:16",
+            "duration_seconds":5.0,
+            "steps":20,
+            "resolution_tier":"wan21_480p_master",
+            "scenes":[
+                {"prompt":"展示真实可验证的自动化工作流，不展示虚构收益。","duration_seconds":2.5},
+                {"prompt":"从第二机位展示同一工作流的关键步骤与可复核结果。","duration_seconds":2.5},
+            ],
+            "narration":{
+                "enabled":True,"language":"zh-HK","style":"yujie_canto","segments":3,
+                "research_text":"介绍自动化工作流的实际步骤，并明确区分可验证事实与待验证收益。",
+                "inspiration":"沉稳、知性、自然的香港粤语讲解。",
+                "asr_enabled":True,
+            },
+        }
+        promoted=self.store.promote_to_initiative(
+            opportunity["id"],initiative_database=initiative_db,video_brief=brief,
+        )
+        concept=json.loads(promoted["initiative"]["concept"])
+        self.assertEqual(concept["creator_brief"]["video"],brief)
+        replay=self.store.promote_to_initiative(
+            opportunity["id"],initiative_database=initiative_db,video_brief=brief,
+        )
+        self.assertEqual(replay["initiative"]["id"],promoted["initiative"]["id"])
+        requested=self.store.request_video_approval(
+            opportunity["id"],initiative_database=initiative_db,
+            task_database=task_db,commander_planner=self.planner,
+        )
+        self.assertEqual(requested["ticket"]["payload"]["video_brief"],brief)
+        changed=dict(brief,prompt="不同的创作提示词")
+        with self.assertRaisesRegex(ValueError,"different video brief"):
+            self.store.promote_to_initiative(
+                opportunity["id"],initiative_database=initiative_db,video_brief=changed,
+            )
+
+    def test_custom_video_brief_rejects_unsafe_or_unbounded_fields(self):
+        opportunity=self.store.create(**self.args)
+        initiative_db=Path(self.tmp.name)/"invalid-brief-initiatives.sqlite3"
+        invalid=[
+            {"title":"x","prompt":"p","unexpected":"field"},
+            {"title":"x","prompt":"p","aspect_ratio":"4:3"},
+            {"title":"x","prompt":"p","duration_seconds":6},
+            {"title":"x","prompt":"p","scenes":[{"shot_id":"shot_001","prompt":"x","duration_seconds":5.0}],"narration":{"enabled":True,"language":"zh-CN"}},
+        ]
+        for brief in invalid:
+            with self.subTest(brief=brief):
+                with self.assertRaises(ValueError):
+                    self.store.promote_to_initiative(
+                        opportunity["id"],initiative_database=initiative_db,video_brief=brief,
+                    )
+
     def test_video_approval_resolves_initiative_by_durable_link_not_recent_list_window(self):
         opportunity=self.store.create(**self.args)
         initiative_db=Path(self.tmp.name)/"initiatives.sqlite3"

@@ -1,0 +1,89 @@
+{
+  "checked_at": "2026-11-26",
+  "production_baseline": {
+    "resolution": "1080x1920",
+    "aspect_ratio": "9:16",
+    "container": "MP4",
+    "video_codec": "H.264",
+    "audio_codec": "AAC",
+    "frame_rate_fps": 30,
+    "target_video_bitrate": "~5 Mbps (maxrate 6 Mbps)",
+    "target_audio_bitrate": "192 kbps",
+    "note": "These are export choices, not claimed platform mandates."
+  },
+  "platforms": {
+    "douyin": {
+      "source": "https://open.douyin.com/platform/resource/docs/ability/content-management/douyin-publish-solution/ ; https://open.douyin.com/platform/resource/docs/openapi/video-management/douyin/create/upload/",
+      "source_type": "official Douyin Open Platform",
+      "checked_at": "2026-11-26",
+      "duration_max": "15 minutes (official publishing solution and upload API)",
+      "file_size_max": "4 GB total; videos over 128 MB require chunked upload (upload API)",
+      "recommended_resolution": "720p or higher vertical (official wording)",
+      "aspect_ratio": "unknown (official wording ambiguous)",
+      "container": "MP4/WebM recommended",
+      "bitrate": "unknown",
+      "cover_ratio": "unknown",
+      "title_limit": "unknown",
+      "description_limit": "unknown",
+      "upload_note": "Single upload endpoint says <=128 MB; >128 MB must use chunked upload; total upload <=4 GB. No brand logo/watermark is used in this package."
+    },
+    "xiaohongshu": {
+      "source": "https://creator.xiaohongshu.com/",
+      "source_type": "official portal; no public spec page retrieved",
+      "checked_at": "2026-11-26",
+      "duration_max": "unknown",
+      "file_size_max": "unknown",
+      "resolution": "unknown",
+      "aspect_ratio": "unknown",
+      "container": "unknown",
+      "bitrate": "unknown",
+      "cover_ratio": "unknown",
+      "title_limit": "unknown",
+      "description_limit": "unknown",
+      "tags_limit": "unknown"
+    },
+    "wechat_channels": {
+      "source": "https://channels.weixin.qq.com/",
+      "source_type": "official portal; detailed help not directly retrievable; secondary sources excluded from hard gate",
+      "checked_at": "2026-11-26",
+      "duration_max": "unknown",
+      "file_size_max": "unknown",
+      "resolution": "unknown",
+      "aspect_ratio": "unknown",
+      "container": "unknown",
+      "bitrate": "unknown",
+      "cover_ratio": "unknown",
+      "title_limit": "unknown",
+      "description_limit": "unknown"
+    },
+    "bilibili": {
+      "source": "https://member.bilibili.com/creator/",
+      "source_type": "official Creator Center; current technical limits not surfaced",
+      "checked_at": "2026-11-26",
+      "duration_max": "unknown",
+      "file_size_max": "unknown",
+      "resolution": "unknown",
+      "aspect_ratio": "unknown",
+      "container": "unknown",
+      "bitrate": "unknown",
+      "cover_ratio": "unknown",
+      "title_limit": "unknown",
+      "description_limit": "unknown",
+      "tags_limit": "unknown"
+    },
+    "youtube_shorts": {
+      "source": "https://support.google.com/youtube/answer/15424877 ; https://support.google.com/youtube/answer/10059070",
+      "source_type": "official YouTube Help",
+      "checked_at": "2026-11-26",
+      "duration_max": "3 minutes for square or vertical Shorts",
+      "aspect_ratio": "square or vertical",
+      "resolution_max": "1080p",
+      "file_size_max": "unknown",
+      "container": "unknown",
+      "bitrate": "unknown",
+      "cover_ratio": "unknown",
+      "title_limit": "100 characters (official Shorts upload details)",
+      "description_limit": "unknown"
+    }
+  }
+}

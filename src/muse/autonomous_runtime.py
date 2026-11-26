@@ -497,16 +497,33 @@ class AutonomousSupervisor:
         return {"status": "checked", "counts": snapshot["counts"]}
 
     def _video_worker(self, _payload: dict[str, Any]) -> dict[str, Any]:
-        """Commander-owned one-shot video dispatch; GPU work is explicitly opt-in."""
+        """Dispatch one persisted, already-approved video_pipeline Ticket through Commander."""
         if os.environ.get("MUSE_ENABLE_VIDEO_WORKER", "").strip() != "1":
             return {"status": "disabled", "reason": "set MUSE_ENABLE_VIDEO_WORKER=1 to allow queued GPU generation"}
         if self._stop_event is not None and self._stop_event.is_set():
             return {"status": "stopping", "claimed": False}
+
         if self.video_admission_provider is None or self.video_admission_request_factory is None:
             return {
                 "status": "blocked", "claimed": False,
                 "reason": "Commander video admission runtime is not configured; no task was claimed",
             }
+
+        # Do not probe GPU/ComfyUI or construct a Worker when there is no approved
+        # execution Ticket. The Runtime remains the only component allowed to claim it.
+        with TaskQueue(self.task_db) as queue:
+            candidates = [
+                item for item in queue.list_tasks(kind="video_pipeline", limit=200)
+                if item.get("status") == "queued"
+            ]
+        if not candidates:
+            return {"status": "idle", "claimed": False, "pending": 0}
+        execution_task_id = candidates[0].get("id")
+        if not isinstance(execution_task_id, str) or not execution_task_id.strip():
+            return {"status": "blocked", "claimed": False, "reason": "queued video_pipeline Ticket has no valid ID"}
+
+        if self._stop_event is not None and self._stop_event.is_set():
+            return {"status": "stopping", "claimed": False}
         readiness = getattr(self.video_admission_provider, "readiness", None)
         if callable(readiness):
             try:
@@ -517,21 +534,39 @@ class AutonomousSupervisor:
                     "reason": f"Commander video admission readiness failed closed ({type(exc).__name__})",
                 }
             if not isinstance(readiness_result, dict) or readiness_result.get("status") != "ready":
-                reason = (
-                    readiness_result.get("reason")
-                    if isinstance(readiness_result, dict) else None
-                )
+                reason = readiness_result.get("reason") if isinstance(readiness_result, dict) else None
                 return {
                     "status": "blocked", "claimed": False,
                     "reason": str(reason or "Commander video admission preflight is not ready")[:300],
                     "admission_readiness": readiness_result if isinstance(readiness_result, dict) else {},
                 }
+
         from muse.video_task_worker import VideoTaskWorker
-        return VideoTaskWorker(
-            self.workspace, worker_id="commander-video-worker",
+        from muse.unified_runtime import MuseRuntime
+
+        worker_id = "commander-video-worker"
+        try:
+            runtime = MuseRuntime(self.task_db.resolve(), workspace=self.workspace)
+        except (OSError, ValueError, RuntimeError) as exc:
+            return {
+                "status": "blocked", "claimed": False, "task_id": execution_task_id,
+                "reason": f"Commander Runtime is unavailable ({type(exc).__name__}): {str(exc)[:240]}",
+            }
+        worker = VideoTaskWorker(
+            self.workspace,
+            worker_id=worker_id,
+            pause_check=lambda: bool(self._stop_event is not None and self._stop_event.is_set()),
             admission_provider=self.video_admission_provider,
             admission_request_factory=self.video_admission_request_factory,
-        ).run_once()
+        )
+        # The approval flag is only a dispatch switch; Runtime revalidates the
+        # exact persisted approval Ticket, human.decision event, DAG and digest.
+        return runtime.dispatch_video_pipeline_once(
+            task_id=execution_task_id,
+            approved=True,
+            worker_id=worker_id,
+            video_worker=worker,
+        )
 
     def _knowledge_lint(self, _payload: dict[str, Any]) -> dict[str, Any]:
         if not self.knowledge_db.is_file():

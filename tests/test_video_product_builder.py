@@ -128,6 +128,43 @@ class VideoProductBuilderTests(unittest.TestCase):
         again = self.builder.verify_path(self.root / "data" / "products", result["initiative_id"], result["version_id"])
         self.assertTrue(again["validated"])
 
+    def test_local_asset_narration_routes_through_canto_tts_asr_and_remotion_package(self):
+        motion = {
+            "status": "completed", "profile": "brand_intro_outro",
+            "transition": "fade", "duration_seconds": 9.8, "width": 1920, "height": 1080,
+            "fps": 30.0, "frames": 294, "bytes": 4096,
+        }
+        def apply_motion(_base, output, **_kwargs):
+            output.write_bytes(b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00motion")
+            return motion
+        with (
+            patch("muse.video_product_builder.discover_media_tools", return_value=self._inventory()),
+            patch("muse.video_product_builder.assemble_video_from_folder", side_effect=self._render) as assemble,
+            patch("muse.video_product_builder._probe_media_duration_seconds", return_value=9.8),
+            patch.object(self.builder, "_apply_motion_profile", side_effect=apply_motion),
+            patch.object(
+                self.builder, "package_generated_clip_with_cantonese_narration",
+                return_value={"validated": True, "kind": "video_creator", "production_mode": "local_asset_assembly"},
+            ) as package,
+        ):
+            result = self.builder.build_from_source(
+                "demo", "本地粤语旁白测试", narration_script="你好，欢迎使用 Muse 本地粤语配音流程。",
+                audio_mode="music", motion_profile="brand_intro_outro",
+            )
+        self.assertTrue(result["validated"])
+        self.assertEqual(assemble.call_args.kwargs["audio_path"], None)
+        self.assertEqual(package.call_count, 1)
+        args, kwargs = package.call_args
+        self.assertEqual(args[1], "Local asset assembly from data/video_sources/demo; source SHA-256 recorded.")
+        self.assertEqual(kwargs["production_mode"], "local_asset_assembly")
+        self.assertEqual(kwargs["ai_generation"], "not_requested")
+        self.assertEqual(kwargs["motion_profile"], "none")
+        self.assertEqual(kwargs["pre_rendered_motion"]["profile"], "brand_intro_outro")
+        self.assertEqual(len(kwargs["source_assets"]), 2)
+        self.assertEqual(kwargs["generation_metadata"]["width"], 1920)
+        self.assertEqual(kwargs["generation_metadata"]["height"], 1080)
+        self.assertTrue(str(kwargs["asr_model_dir"]).casefold().endswith(r"\models\whisper-small-cantonese\cts"))
+        self.assertTrue(str(kwargs["model_dir"]).casefold().endswith(r"\data\models\canto-tts-nano"))
     def test_scene_timeline_metadata_is_persisted_and_drives_qa_mapping(self):
         qa_report = {
             "status": "passed",

@@ -68,6 +68,5 @@ class SelfTestIntegration(unittest.TestCase):
         self.assertEqual(sidecar.run_self_test(require_ui=False, emit=lines.append), 0, lines)
         self.assertIn('"self_test": "passed"', lines[-1])
 
-
 if __name__ == "__main__":
     unittest.main()

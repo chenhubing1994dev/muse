@@ -173,11 +173,137 @@ class BusinessOpportunityStore:
           ORDER BY score DESC,created_at ASC LIMIT ?""",(limit,)).fetchall()
         return [self.get(r["id"]) for r in rows]
 
-    def promote_to_initiative(self,opportunity_id,*,initiative_database):
+    @staticmethod
+    def _validate_creator_video_brief(value):
+        if not isinstance(value, dict):
+            raise ValueError("video_brief must be an object")
+        allowed = {
+            "title", "prompt", "negative_prompt", "aspect_ratio",
+            "duration_seconds", "steps", "resolution_tier", "scenes", "narration",
+        }
+        if set(value) - allowed:
+            raise ValueError("video_brief contains unsupported fields")
+        title = _bounded(value.get("title"), "video_brief.title", 120)
+        prompt = _bounded(value.get("prompt"), "video_brief.prompt", 1800)
+        negative_prompt = value.get("negative_prompt", "")
+        if not isinstance(negative_prompt, str) or len(negative_prompt) > 1000:
+            raise ValueError("video_brief.negative_prompt must be at most 1000 characters")
+        aspect_ratio = value.get("aspect_ratio", "9:16")
+        if aspect_ratio not in {"9:16", "16:9"}:
+            raise ValueError("video_brief.aspect_ratio must be 9:16 or 16:9")
+        duration = value.get("duration_seconds", 5.0)
+        if isinstance(duration, bool) or not isinstance(duration, (int, float)) or not 2 <= duration <= 5:
+            raise ValueError("video_brief.duration_seconds must be between 2 and 5")
+        steps = value.get("steps", 20)
+        if isinstance(steps, bool) or not isinstance(steps, int) or not 8 <= steps <= 30:
+            raise ValueError("video_brief.steps must be between 8 and 30")
+        if value.get("resolution_tier", "wan21_480p_master") != "wan21_480p_master":
+            raise ValueError("video_brief.resolution_tier must be wan21_480p_master")
+        scenes = value.get("scenes")
+        if not isinstance(scenes, list) or not 2 <= len(scenes) <= 20:
+            raise ValueError("video_brief.scenes must contain 2-20 approved shots")
+        normalized_scenes = []
+        total_duration = 0.0
+        for index, scene in enumerate(scenes, start=1):
+            if not isinstance(scene, dict) or set(scene) - {"prompt", "duration_seconds", "seed", "negative_prompt"}:
+                raise ValueError("video_brief scene contains unsupported fields")
+            scene_prompt = _bounded(scene.get("prompt"), f"video_brief.scenes[{index}].prompt", 1800)
+            scene_duration = scene.get("duration_seconds", duration)
+            if isinstance(scene_duration, bool) or not isinstance(scene_duration, (int, float)) or not 1 <= scene_duration <= 5:
+                raise ValueError("video_brief scene duration_seconds must be between 1 and 5")
+            normalized_scene = {"prompt": scene_prompt, "duration_seconds": float(scene_duration)}
+            scene_negative_prompt = scene.get("negative_prompt", "")
+            if not isinstance(scene_negative_prompt, str) or len(scene_negative_prompt) > 1000:
+                raise ValueError("video_brief scene negative_prompt must be at most 1000 characters")
+            if scene_negative_prompt:
+                normalized_scene["negative_prompt"] = scene_negative_prompt
+            scene_seed = scene.get("seed")
+            if scene_seed is not None:
+                if isinstance(scene_seed, bool) or not isinstance(scene_seed, int) or not 0 <= scene_seed <= 4294967295:
+                    raise ValueError("video_brief scene seed must be a uint32")
+                normalized_scene["seed"] = scene_seed
+            total_duration += float(scene_duration)
+            normalized_scenes.append(normalized_scene)
+        if total_duration > 60:
+            raise ValueError("video_brief total scene duration must not exceed 60 seconds")
+        narration = value.get("narration")
+        normalized_narration = None
+        if narration is not None:
+            if not isinstance(narration, dict) or set(narration) - {
+                "enabled", "language", "style", "segments", "research_text", "inspiration", "asr_enabled",
+            }:
+                raise ValueError("video_brief.narration contains unsupported fields")
+            enabled = narration.get("enabled", False)
+            if not isinstance(enabled, bool):
+                raise ValueError("video_brief.narration.enabled must be boolean")
+            normalized_narration = {"enabled": enabled}
+            if enabled:
+                language = narration.get("language", "zh-HK")
+                style = narration.get("style", "yujie_canto")
+                segments = narration.get("segments", 3)
+                research_text = _bounded(narration.get("research_text", prompt), "video_brief.narration.research_text", 12000)
+                inspiration = _bounded(
+                    narration.get("inspiration", "以沉稳、清晰的香港粤语讲解；不把假设说成已验证事实。"),
+                    "video_brief.narration.inspiration", 500,
+                )
+                asr_enabled = narration.get("asr_enabled", True)
+                if language != "zh-HK" or style != "yujie_canto":
+                    raise ValueError("video_brief.narration currently requires zh-HK / yujie_canto")
+                if isinstance(segments, bool) or not isinstance(segments, int) or not 3 <= segments <= 16:
+                    raise ValueError("video_brief.narration.segments must be between 3 and 16")
+                if not isinstance(asr_enabled, bool):
+                    raise ValueError("video_brief.narration.asr_enabled must be boolean")
+                normalized_narration.update({
+                    "language": language, "style": style, "segments": segments,
+                    "research_text": research_text, "inspiration": inspiration,
+                    "asr_enabled": asr_enabled,
+                })
+        normalized = {
+            "title": title, "prompt": prompt, "negative_prompt": negative_prompt,
+            "aspect_ratio": aspect_ratio, "duration_seconds": float(duration),
+            "steps": steps, "resolution_tier": "wan21_480p_master",
+            "scenes": normalized_scenes,
+        }
+        if normalized_narration is not None:
+            normalized["narration"] = normalized_narration
+        # Ensure the frozen Creator Brief is JSON-safe before it enters the Initiative ledger.
+        return json.loads(json.dumps(normalized, ensure_ascii=False, sort_keys=True, allow_nan=False))
+
+    def promote_to_initiative(self,opportunity_id,*,initiative_database,video_brief=None):
         """Create an idempotent draft in Muse's existing Creator Initiative ledger."""
         opportunity=self.get(opportunity_id)
         if opportunity["status"] in {"rejected","parked"}:
             raise ValueError("rejected or parked opportunities cannot be promoted")
+        if video_brief is None:
+            video = {
+                "title":opportunity["title"][:120],
+                "prompt":(
+                    "Create a polished vertical 9:16 short-form promotional video concept. "
+                    f"Show the customer problem: {opportunity['customer_problem']}. "
+                    f"Visually demonstrate this offer: {opportunity['proposed_offer']}. "
+                    "Use clear cinematic product storytelling, realistic scenes, readable visual hierarchy, "
+                    "and a concise call-to-action. Do not invent customer testimonials, prices, or results."
+                )[:1800],
+                "negative_prompt":"fake testimonials, fabricated metrics, unreadable text, watermarks, logos not supplied",
+                "aspect_ratio":"9:16",
+                "duration_seconds":5.0,
+                "steps":20,
+                "resolution_tier":"wan21_480p_master",
+                "narration":{
+                    "enabled":True,"language":"zh-HK","style":"yujie_canto","segments":3,
+                    "research_text":(
+                        f"客户问题：{opportunity['customer_problem']}。"
+                        f"拟提供方案：{opportunity['proposed_offer']}。"
+                        f"验证方式：{opportunity['validation_test']}。"
+                        f"成功信号：{opportunity['success_signal']}。"
+                        "以上属于待验证试点，不代表已实现结果或客户见证。"
+                    )[:12000],
+                    "inspiration":"以沉稳、知性、清晰的香港粤语讲解；区分试点构想、估算与已验证事实。",
+                    "asr_enabled":False,
+                },
+            }
+        else:
+            video = self._validate_creator_video_brief(video_brief)
         from muse.initiative_engine import InitiativeStore
         reference=f"business-opportunity:{opportunity_id}"
         title=f"商业试点：{opportunity['title'][:140]} [{opportunity_id[:8]}]"
@@ -197,40 +323,7 @@ class BusinessOpportunityStore:
                 "evidence_summary":opportunity["evidence_summary"],
                 "evidence_refs":[e["id"] for e in opportunity["evidence"]],
             },
-            "creator_brief":{
-                "schema_version":1,
-                "title":opportunity["title"],
-                "video":{
-                    "title":opportunity["title"][:120],
-                    "prompt":(
-                        "Create a polished vertical 9:16 short-form promotional video concept. "
-                        f"Show the customer problem: {opportunity['customer_problem']}. "
-                        f"Visually demonstrate this offer: {opportunity['proposed_offer']}. "
-                        "Use clear cinematic product storytelling, realistic scenes, readable visual hierarchy, "
-                        "and a concise call-to-action. Do not invent customer testimonials, prices, or results."
-                    )[:1800],
-                    "negative_prompt":"fake testimonials, fabricated metrics, unreadable text, watermarks, logos not supplied",
-                    "aspect_ratio":"9:16",
-                    "duration_seconds":5.0,
-                    "steps":20,
-                    "resolution_tier":"wan21_480p_master",
-                    "narration":{
-                        "enabled":True,
-                        "language":"zh-HK",
-                        "style":"yujie_canto",
-                        "segments":3,
-                        "research_text":(
-                            f"客户问题：{opportunity['customer_problem']}。"
-                            f"拟提供方案：{opportunity['proposed_offer']}。"
-                            f"验证方式：{opportunity['validation_test']}。"
-                            f"成功信号：{opportunity['success_signal']}。"
-                            "以上属于待验证试点，不代表已实现结果或客户见证。"
-                        )[:12000],
-                        "inspiration":"以沉稳、知性、清晰的香港粤语讲解；区分试点构想、估算与已验证事实。",
-                        "asr_enabled":False,
-                    },
-                }
-            },
+            "creator_brief":{"schema_version":1,"title":opportunity["title"],"video":video},
         },ensure_ascii=False,sort_keys=True)
         with InitiativeStore(initiative_database) as initiatives:
             initiative=initiatives.propose(
@@ -251,6 +344,13 @@ class BusinessOpportunityStore:
             )
         if reference not in initiative.get("inspiration_refs",[]):
             raise ValueError("an initiative with the same title exists but is linked to another source")
+        try:
+            stored_concept = json.loads(initiative["concept"])
+            stored_video = stored_concept.get("creator_brief", {}).get("video")
+        except (TypeError, json.JSONDecodeError):
+            stored_video = None
+        if stored_video != video:
+            raise ValueError("existing Creator Initiative is already bound to a different video brief")
         linked=any(
             json.loads(row["details_json"]).get("initiative_id")==initiative["id"]
             for row in self.connection.execute(

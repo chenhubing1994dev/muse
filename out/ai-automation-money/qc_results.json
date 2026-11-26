@@ -1,0 +1,153 @@
+{
+  "videos": [
+    {
+      "platform": "douyin",
+      "duration_s": 51.7,
+      "size_bytes": 2743155,
+      "format_bitrate_bps": 424472,
+      "full_decode": "PASS",
+      "video": {
+        "codec_name": "h264",
+        "codec_type": "video",
+        "width": 1080,
+        "height": 1920,
+        "r_frame_rate": "30/1",
+        "avg_frame_rate": "30/1"
+      },
+      "audio": {
+        "codec_name": "aac",
+        "codec_type": "audio",
+        "sample_rate": "48000",
+        "channels": 2,
+        "r_frame_rate": "0/0",
+        "avg_frame_rate": "0/0"
+      }
+    },
+    {
+      "platform": "xiaohongshu",
+      "duration_s": 51.7,
+      "size_bytes": 2723635,
+      "format_bitrate_bps": 421452,
+      "full_decode": "PASS",
+      "video": {
+        "codec_name": "h264",
+        "codec_type": "video",
+        "width": 1080,
+        "height": 1920,
+        "r_frame_rate": "30/1",
+        "avg_frame_rate": "30/1"
+      },
+      "audio": {
+        "codec_name": "aac",
+        "codec_type": "audio",
+        "sample_rate": "48000",
+        "channels": 2,
+        "r_frame_rate": "0/0",
+        "avg_frame_rate": "0/0"
+      }
+    },
+    {
+      "platform": "wechat_channels",
+      "duration_s": 51.7,
+      "size_bytes": 2702049,
+      "format_bitrate_bps": 418112,
+      "full_decode": "PASS",
+      "video": {
+        "codec_name": "h264",
+        "codec_type": "video",
+        "width": 1080,
+        "height": 1920,
+        "r_frame_rate": "30/1",
+        "avg_frame_rate": "30/1"
+      },
+      "audio": {
+        "codec_name": "aac",
+        "codec_type": "audio",
+        "sample_rate": "48000",
+        "channels": 2,
+        "r_frame_rate": "0/0",
+        "avg_frame_rate": "0/0"
+      }
+    },
+    {
+      "platform": "bilibili",
+      "duration_s": 51.7,
+      "size_bytes": 2742743,
+      "format_bitrate_bps": 424408,
+      "full_decode": "PASS",
+      "video": {
+        "codec_name": "h264",
+        "codec_type": "video",
+        "width": 1080,
+        "height": 1920,
+        "r_frame_rate": "30/1",
+        "avg_frame_rate": "30/1"
+      },
+      "audio": {
+        "codec_name": "aac",
+        "codec_type": "audio",
+        "sample_rate": "48000",
+        "channels": 2,
+        "r_frame_rate": "0/0",
+        "avg_frame_rate": "0/0"
+      }
+    },
+    {
+      "platform": "youtube_shorts",
+      "duration_s": 51.7,
+      "size_bytes": 2739326,
+      "format_bitrate_bps": 423880,
+      "full_decode": "PASS",
+      "video": {
+        "codec_name": "h264",
+        "codec_type": "video",
+        "width": 1080,
+        "height": 1920,
+        "r_frame_rate": "30/1",
+        "avg_frame_rate": "30/1"
+      },
+      "audio": {
+        "codec_name": "aac",
+        "codec_type": "audio",
+        "sample_rate": "48000",
+        "channels": 2,
+        "r_frame_rate": "0/0",
+        "avg_frame_rate": "0/0"
+      }
+    }
+  ],
+  "audio_ebur128_lines": [
+    "Integrated loudness:",
+    "Loudness range:",
+    "True peak:",
+    "[Parsed_astats_2 @ 0000020ce91a3c40] Peak level dB: -1.907172",
+    "[Parsed_astats_2 @ 0000020ce91a3c40] RMS level dB: -16.580282",
+    "[Parsed_astats_2 @ 0000020ce91a3c40] Peak level dB: -1.783352",
+    "[Parsed_astats_2 @ 0000020ce91a3c40] RMS level dB: -16.576895",
+    "[Parsed_astats_2 @ 0000020ce91a3c40] Peak level dB: -1.783352",
+    "[Parsed_astats_2 @ 0000020ce91a3c40] RMS level dB: -16.578588"
+  ],
+  "audio_volume_lines": [
+    "[Parsed_volumedetect_0 @ 000001bac2a62640] mean_volume: -16.6 dB",
+    "[Parsed_volumedetect_0 @ 000001bac2a62640] max_volume: -1.8 dB"
+  ],
+  "audio_silence_events": [],
+  "hook_first_segment_s": 2.56,
+  "contact_sheet": "out\\ai-automation-money\\qc_contact_sheet.jpg",
+  "audio_remaster": {
+    "voice_source_lufs": -26.85,
+    "voice_source_true_peak_dbtp": -7.33,
+    "voice_normalized_lufs": -16.12,
+    "music_source_lufs": -25.5,
+    "music_source_true_peak_dbtp": -15.92,
+    "music_gain_db": -10.46,
+    "music_design": "92 BPM warm cinematic electronic ambient, sustained chord pads, soft arpeggio plucks and rounded bass; no random noise samples or sharp percussion",
+    "mix_integrated_lufs": -14.49,
+    "mix_true_peak_dbtp": -1.62,
+    "target_lufs": -16,
+    "target_true_peak_dbtp": -1.5,
+    "voice_processing": "75 Hz high-pass; 12.5 kHz low-pass; light FFT denoise; 3:1 compression; loudness normalization",
+    "music_processing": "voice-keyed sidechain compression, 6:1, 35 ms attack, 450 ms release",
+    "limiter": "ceiling 0.84"
+  }
+}

@@ -1,0 +1,149 @@
+{
+  "duration_seconds": 51.6,
+  "segments": [
+    {
+      "index": 0,
+      "text": "想靠 AI 賺錢？先唔好買模型。",
+      "start": 0.0,
+      "speech_end": 2.56,
+      "end": 2.72,
+      "duration": 2.56,
+      "pause_after_ms": 160
+    },
+    {
+      "index": 1,
+      "text": "亦唔係砌一個無人睇嘅 Agent。",
+      "start": 2.72,
+      "speech_end": 5.68,
+      "end": 5.94,
+      "duration": 2.96,
+      "pause_after_ms": 260
+    },
+    {
+      "index": 2,
+      "text": "你要先搵一件有人願意付錢，",
+      "start": 5.94,
+      "speech_end": 9.06,
+      "end": 9.18,
+      "duration": 3.12,
+      "pause_after_ms": 120
+    },
+    {
+      "index": 3,
+      "text": "而且每星期重複發生嘅麻煩事。",
+      "start": 9.18,
+      "speech_end": 12.86,
+      "end": 13.12,
+      "duration": 3.68,
+      "pause_after_ms": 260
+    },
+    {
+      "index": 4,
+      "text": "譬如幫小店整理客戶查詢、報價同跟進。",
+      "start": 13.12,
+      "speech_end": 16.8,
+      "end": 17.06,
+      "duration": 3.68,
+      "pause_after_ms": 260
+    },
+    {
+      "index": 5,
+      "text": "先用 AI 做一個細小示範，",
+      "start": 17.06,
+      "speech_end": 19.46,
+      "end": 19.58,
+      "duration": 2.4,
+      "pause_after_ms": 120
+    },
+    {
+      "index": 6,
+      "text": "俾客戶睇到前後分別；",
+      "start": 19.58,
+      "speech_end": 22.06,
+      "end": 22.22,
+      "duration": 2.48,
+      "pause_after_ms": 160
+    },
+    {
+      "index": 7,
+      "text": "再收一個範圍清楚嘅試點費。",
+      "start": 22.22,
+      "speech_end": 25.34,
+      "end": 25.6,
+      "duration": 3.12,
+      "pause_after_ms": 260
+    },
+    {
+      "index": 8,
+      "text": "當流程真係交付到結果，",
+      "start": 25.6,
+      "speech_end": 28.48,
+      "end": 28.6,
+      "duration": 2.88,
+      "pause_after_ms": 120
+    },
+    {
+      "index": 9,
+      "text": "先將重複步驟自動化。",
+      "start": 28.6,
+      "speech_end": 31.24,
+      "end": 31.5,
+      "duration": 2.64,
+      "pause_after_ms": 260
+    },
+    {
+      "index": 10,
+      "text": "記住：客戶唔會為你用咗幾多個模型付錢，",
+      "start": 31.5,
+      "speech_end": 36.62,
+      "end": 36.78,
+      "duration": 5.12,
+      "pause_after_ms": 160
+    },
+    {
+      "index": 11,
+      "text": "佢只會為省下嘅時間、減少嘅錯漏，",
+      "start": 36.78,
+      "speech_end": 40.62,
+      "end": 40.78,
+      "duration": 3.84,
+      "pause_after_ms": 160
+    },
+    {
+      "index": 12,
+      "text": "同多出嘅成交機會付錢。",
+      "start": 40.78,
+      "speech_end": 43.26,
+      "end": 43.52,
+      "duration": 2.48,
+      "pause_after_ms": 260
+    },
+    {
+      "index": 13,
+      "text": "先賣結果，再自動化。",
+      "start": 43.52,
+      "speech_end": 45.76,
+      "end": 46.08,
+      "duration": 2.24,
+      "pause_after_ms": 320
+    },
+    {
+      "index": 14,
+      "text": "你最想自動化邊一件工作？",
+      "start": 46.08,
+      "speech_end": 48.8,
+      "end": 48.96,
+      "duration": 2.72,
+      "pause_after_ms": 160
+    },
+    {
+      "index": 15,
+      "text": "留言講我知。",
+      "start": 48.96,
+      "speech_end": 51.6,
+      "end": 51.6,
+      "duration": 2.64,
+      "pause_after_ms": 0
+    }
+  ]
+}

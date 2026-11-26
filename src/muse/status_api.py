@@ -249,6 +249,59 @@ def build_overview(task_db: str | Path, progress_db: str | Path) -> dict[str, An
         events = progress.list_events(limit=20)
     return {"queue": queue_snapshot, "workers": workers, "recent_events": events, "workflow_runs": workflows}
 
+def _build_video_commander_planner(memory_database: Path):
+    """Build a strict, loopback-only Commander planner for one-time video approval."""
+    from muse.commander_planner import CommanderPlanner
+    from muse.local_planner import LocalModelCommanderPlanner
+
+    base_url = (
+        os.environ.get("MUSE_COMMANDER_LLM_BASE_URL")
+        or os.environ.get("MUSE_LOCAL_LLM_BASE_URL")
+        or "http://127.0.0.1:1235/v1"
+    )
+    model = os.environ.get("MUSE_COMMANDER_LLM_MODEL") or None
+    local_planner = LocalModelCommanderPlanner(
+        base_url=base_url,
+        model=model,
+        memory_database=memory_database,
+        project="muse",
+    )
+    return CommanderPlanner(local_planner, strict_model=True)
+def _commander_planner_readiness() -> dict[str, Any]:
+    """Probe only the configured loopback model-list endpoint; never run a prompt here."""
+    base_url = (
+        os.environ.get("MUSE_COMMANDER_LLM_BASE_URL")
+        or os.environ.get("MUSE_LOCAL_LLM_BASE_URL")
+        or "http://127.0.0.1:1235/v1"
+    )
+    model = os.environ.get("MUSE_COMMANDER_LLM_MODEL") or None
+    try:
+        from muse.local_planner import _require_loopback
+        from muse.model_client import LMStudioClient
+
+        safe_base_url = _require_loopback(base_url)
+        client = LMStudioClient(
+            base_url=safe_base_url, model=model, timeout=0.5, bypass_proxies=True,
+        )
+        models = client.list_models()
+        model_ids = [
+            item.get("id") for item in models
+            if isinstance(item, dict) and isinstance(item.get("id"), str) and item.get("id")
+        ]
+        if not model_ids:
+            return {"status": "no_model", "model_count": 0}
+        if model and model not in model_ids:
+            return {"status": "model_not_loaded", "model_count": len(model_ids)}
+        return {
+            "status": "ready", "model_count": len(model_ids),
+            "model": model or model_ids[0],
+        }
+    except Exception as exc:
+        return {"status": "unavailable", "reason": type(exc).__name__}
+
+
+
+
 _DASHBOARD_FILE_CACHE: dict[tuple[str, int], tuple[float, dict[str, Any]]] = {}
 _DASHBOARD_FILE_CACHE_LOCK = Lock()
 
@@ -1411,6 +1464,7 @@ def create_status_server(
     knowledge_db: str | Path | None = None, report_dir: str | Path | None = None,
     products_dir: str | Path | None = None, gpu_resource_db: str | Path | None = None,
     memory_db: str | Path | None = None, plugin_db: str | Path | None = None,
+    store_health: dict[str, dict[str, str]] | None = None,
 ) -> tuple[BoundedStatusServer, str]:
     """Create a loopback API with bounded reads and narrow, authenticated feedback writes."""
     if isinstance(port, bool) or not isinstance(port, int) or not 0 <= port <= 65535:
@@ -1479,6 +1533,7 @@ def create_status_server(
             result = builder.build_from_source(
                 payload["source"], payload["title"], audio_name=payload.get("audio"),
                 audio_mode=payload.get("audio_mode", "music"),
+                narration_script=payload.get("narration_script"),
                 aspect_ratio=payload.get("aspect_ratio", "16:9"), fps=payload.get("fps", 30),
                 image_seconds=payload.get("image_seconds", 4.0), encoder=payload.get("encoder", "auto"),
                 creator_initiative_id=payload.get("creator_initiative_id"),
@@ -1585,11 +1640,20 @@ def create_status_server(
                     from muse.omega_api import handle_omega  # B394-B398 Omega routes
                     omega_status, omega_body = handle_omega("GET", parsed.path, parsed.query, b"", workspace_root)
                     self._send(omega_status, omega_body)
-                elif parsed.path == "/api/v1/health":
-                    self._send(200, {
-                        "service": "muse-status-api", "status": "ok", "api_version": 1,
-                        "agent_registry_configured": agent_path is not None,
-                    })
+                elif parsed.path in {"/api/v1/health", "/api/v1/store-health"}:
+                    store_snapshot = {key: dict(value) for key, value in (store_health or {}).items()}
+                    stores_healthy = bool(store_snapshot) and all(
+                        value.get("status") == "healthy" for value in store_snapshot.values()
+                    )
+                    payload = {
+                        "service": "muse-status-api", "status": "ok" if stores_healthy else "degraded",
+                        "api_version": 1, "agent_registry_configured": agent_path is not None,
+                        "stores": store_snapshot, "stores_healthy": stores_healthy,
+                    }
+                    if parsed.path == "/api/v1/store-health":
+                        self._send(200 if stores_healthy else 503, payload)
+                    else:
+                        self._send(200 if stores_healthy else 503, payload)
                 elif parsed.path == "/api/v1/companion/pairings":
                     from muse.companion_security import CompanionDeviceStore
                     limit = int(parse_qs(parsed.query).get("limit", ["20"])[0])
@@ -1831,6 +1895,7 @@ def create_status_server(
                         "hardware_encoders": list(inventory.hardware_encoders),
                         "comfyui": engines["comfyui"],
                         "velorn": engines["velorn"],
+                        "commander_planner": _commander_planner_readiness(),
                     })
                 elif parsed.path == "/api/v1/fusion/jobs":
                     from muse.skill_fusion import SkillFusionService
@@ -1957,7 +2022,65 @@ def create_status_server(
                     limit = int(parse_qs(parsed.query).get("limit", ["50"])[0])
                     inspirations = build_inspirations(knowledge_path, limit=limit)
                     self._send(200, {"api_version": 1, "count": len(inspirations), "inspirations": inspirations})
-                elif re.fullmatch(r"/api/v1/video-jobs/[0-9a-f]{32}", parsed.path):
+                elif parsed.path == "/api/v1/video-approval-requests":
+                    try:
+                        limit = int(parse_qs(parsed.query).get("limit", ["30"])[0])
+                        if not 1 <= limit <= 100:
+                            raise ValueError("limit must be between 1 and 100")
+                        from muse.task_queue import TaskQueue
+                        with TaskQueue(task_path) as queue:
+                            tickets = queue.list_tasks(kind="business_opportunity_video_approval", limit=limit)
+                            ticket_by_id = {item["id"]: item for item in tickets if isinstance(item, dict) and isinstance(item.get("id"), str)}
+                            execution_by_approval = {}
+                            business_path = workspace_root / "data" / "business" / "opportunities.sqlite3"
+                            if business_path.is_file():
+                                from muse.business_opportunities import BusinessOpportunityStore
+                                with BusinessOpportunityStore(business_path) as business:
+                                    rows = business.connection.execute(
+                                        "SELECT details_json FROM business_opportunity_events "
+                                        "WHERE event_type='video_attempt_queued' ORDER BY sequence DESC LIMIT 500"
+                                    ).fetchall()
+                                for row in rows:
+                                    try:
+                                        details = json.loads(row["details_json"])
+                                    except (TypeError, json.JSONDecodeError):
+                                        continue
+                                    approval_id = details.get("approval_task_id") if isinstance(details, dict) else None
+                                    if isinstance(approval_id, str) and approval_id not in execution_by_approval:
+                                        execution_by_approval[approval_id] = details
+                            approval_requests = []
+                            for ticket in ticket_by_id.values():
+                                payload = ticket.get("payload") if isinstance(ticket.get("payload"), dict) else {}
+                                if payload.get("kind") != "business_opportunity_video_approval":
+                                    continue
+                                approval = payload.get("_approval") if isinstance(payload.get("_approval"), dict) else {}
+                                queued = execution_by_approval.get(ticket["id"], {})
+                                execution_ticket_id = queued.get("execution_ticket_id")
+                                execution_ticket = queue.get(execution_ticket_id) if isinstance(execution_ticket_id, str) else None
+                                approval_requests.append({
+                                    "id": ticket["id"],
+                                    "title": str(ticket.get("title") or "")[:160],
+                                    "status": ticket.get("status"),
+                                    "created_at": ticket.get("created_at"),
+                                    "updated_at": ticket.get("updated_at"),
+                                    "opportunity_id": payload.get("opportunity_id"),
+                                    "initiative_id": payload.get("initiative_id"),
+                                    "attempt_id": payload.get("attempt_id"),
+                                    "approval_scope": payload.get("approval_scope"),
+                                    "approved_by": approval.get("approved_by"),
+                                    "execution_ticket_id": execution_ticket_id,
+                                    "execution_status": execution_ticket.get("status") if isinstance(execution_ticket, dict) else None,
+                                    "can_approve": ticket.get("status") == "waiting_approval",
+                                })
+                        self._send(200, {
+                            "api_version": 1, "count": len(approval_requests),
+                            "approval_requests": approval_requests,
+                        })
+                    except (ValueError, OSError, sqlite3.Error) as exc:
+                        self._send(400, {"error": str(exc)[:300]})
+                    except Exception:
+                        self._send(503, {"error": "video approval request list unavailable"})
+                elif re.fullmatch(r"/api/v1/video-jobs/(?:[0-9a-f]{32}|biz-[0-9a-f]{32})", parsed.path):
                     job_id = parsed.path.rsplit("/", 1)[-1]
                     with video_jobs_lock:
                         job = video_jobs.get(job_id)
@@ -1973,10 +2096,26 @@ def create_status_server(
                     if attempt is None:
                         self._send(404, {"error": "video job not found"})
                         return
+                    worker_available = False
+                    execution_ticket_id = None
+                    if attempt["status"] in {"queued", "running"}:
+                        try:
+                            from muse.task_queue import TaskQueue
+                            with TaskQueue(task_path) as queue:
+                                for execution in queue.list_tasks(kind="video_pipeline", limit=200):
+                                    execution_payload = execution.get("payload") if isinstance(execution.get("payload"), dict) else {}
+                                    if execution_payload.get("attempt_id") == job_id:
+                                        execution_ticket_id = execution.get("id")
+                                        worker_available = execution.get("status") in {"queued", "running"}
+                                        break
+                        except Exception:
+                            worker_available = False
                     recovered = {
                         "id": job_id,
                         "status": attempt["status"],
-                        "worker_available": False,
+                        "worker_available": worker_available,
+                        "worker_mode": "commander_background" if execution_ticket_id else "none",
+                        "execution_ticket_id": execution_ticket_id,
                     }
                     if attempt["status"] == "failed":
                         recovered["error"] = (
@@ -2922,6 +3061,273 @@ def create_status_server(
                 except (OSError, sqlite3.Error):
                     self._send(503, {"error": "initiative feedback store unavailable"})
                 return
+            if parsed.path == "/api/v1/video-approval-requests":
+                if initiatives_path is None:
+                    self._send(503, {"error": "Creator Initiative store is not configured"})
+                    return
+                if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json":
+                    self._send(415, {"error": "application/json required"})
+                    return
+                opportunity_id = None
+                initiative_id = None
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                    if length < 1 or length > 16384:
+                        raise ValueError("request body must contain 1-16384 bytes")
+                    raw = self.rfile.read(length)
+                    if len(raw) != length:
+                        raise ValueError("incomplete request body")
+                    payload = json.loads(raw.decode("utf-8"))
+                    if not isinstance(payload, dict):
+                        raise ValueError("body must be a JSON object")
+                    allowed = {
+                        "request_id", "title", "prompt", "negative_prompt", "aspect_ratio",
+                        "duration_seconds", "steps", "narration_script", "customer_segment",
+                        "customer_problem", "proposed_offer", "validation_test", "success_signal",
+                    }
+                    if set(payload) - allowed:
+                        raise ValueError("video approval request contains unsupported fields")
+                    request_id = payload.get("request_id")
+                    if not isinstance(request_id, str) or not re.fullmatch(r"[0-9a-f]{32}", request_id):
+                        raise ValueError("request_id must be a 32-character lowercase UUID hex string")
+                    title = payload.get("title")
+                    if not isinstance(title, str) or not title.strip() or len(title.strip()) > 120:
+                        raise ValueError("title must contain 1-120 characters")
+                    prompt = payload.get("prompt")
+                    if not isinstance(prompt, str) or not prompt.strip() or len(prompt.strip()) > 1800:
+                        raise ValueError("prompt must contain 1-1800 characters")
+                    negative_prompt = payload.get("negative_prompt", "")
+                    if not isinstance(negative_prompt, str) or len(negative_prompt) > 1000:
+                        raise ValueError("negative_prompt must be at most 1000 characters")
+                    aspect_ratio = payload.get("aspect_ratio", "9:16")
+                    if aspect_ratio not in {"9:16", "16:9"}:
+                        raise ValueError("aspect_ratio must be 9:16 or 16:9")
+                    duration_seconds = payload.get("duration_seconds", 5.0)
+                    if isinstance(duration_seconds, bool) or not isinstance(duration_seconds, (int, float)) or not 2 <= duration_seconds <= 5:
+                        raise ValueError("duration_seconds must be between 2 and 5")
+                    steps = payload.get("steps", 20)
+                    if isinstance(steps, bool) or not isinstance(steps, int) or not 8 <= steps <= 30:
+                        raise ValueError("steps must be between 8 and 30")
+                    narration_script = payload.get("narration_script", "")
+                    if not isinstance(narration_script, str) or len(narration_script) > 12000:
+                        raise ValueError("narration_script must be at most 12000 characters")
+                    def business_text(name, default, maximum=4000):
+                        value = payload.get(name, default)
+                        if not isinstance(value, str) or not value.strip() or len(value.strip()) > maximum:
+                            raise ValueError(f"{name} must contain 1-{maximum} characters")
+                        return value.strip()
+                    customer_segment = business_text(
+                        "customer_segment", "待研究的短视频受众（尚无独立客户访谈）", 500,
+                    )
+                    customer_problem = business_text(
+                        "customer_problem",
+                        f"待验证：围绕主题“{title.strip()}”的受众需求尚无独立证据。",
+                    )
+                    proposed_offer = business_text(
+                        "proposed_offer",
+                        f"围绕“{title.strip()}”的内容/服务概念；具体交付与定价待验证。",
+                    )
+                    validation_test = business_text(
+                        "validation_test",
+                        "先制作一条样片，再向真实目标受众展示并收集观看、点击、咨询或访谈反馈；当前尚未执行。",
+                    )
+                    success_signal = business_text(
+                        "success_signal",
+                        "获得至少一项可追溯的真实用户需求信号；阈值待预先设定。",
+                        1000,
+                    )
+                    video_brief = {
+                        "title": title.strip(),
+                        "prompt": prompt.strip(),
+                        "negative_prompt": negative_prompt,
+                        "aspect_ratio": aspect_ratio,
+                        "duration_seconds": float(duration_seconds),
+                        "steps": steps,
+                        "resolution_tier": "wan21_480p_master",
+                        "scenes": [
+                            {
+                                "prompt": prompt.strip(),
+                                "duration_seconds": float(duration_seconds) / 2,
+                            },
+                            {
+                                "prompt": (
+                                    prompt.strip()[:1400]
+                                    + "；第二镜头从另一机位展示同一主题的关键细节与完成状态，保持主体与视觉风格一致。"
+                                )[:1800],
+                                "duration_seconds": float(duration_seconds) / 2,
+                            },
+                        ],
+                        "narration": {
+                            "enabled": True,
+                            "language": "zh-HK",
+                            "style": "yujie_canto",
+                            "segments": 3,
+                            "research_text": narration_script.strip() or prompt.strip(),
+                            "inspiration": "以沉稳、知性、自然的香港粤语讲解；不把假设说成已验证事实。",
+                            "asr_enabled": True,
+                        },
+                    }
+                    business_path = workspace_root / "data" / "business" / "opportunities.sqlite3"
+                    from muse.business_opportunities import BusinessOpportunityStore
+                    with BusinessOpportunityStore(business_path) as business:
+                        opportunity = business.create(
+                            idempotency_key=f"video-creation:{request_id}",
+                            title=title.strip(),
+                            customer_segment=customer_segment,
+                            customer_problem=customer_problem,
+                            proposed_offer=proposed_offer,
+                            validation_test=validation_test,
+                            success_signal=success_signal,
+                            ratings={
+                                "demand_signal": 1, "willingness_to_pay": 1,
+                                "delivery_fit": 1, "competition_gap": 1,
+                                "repeatability": 1, "risk": 5,
+                            },
+                            currency="USD",
+                            estimated_price_minor=0,
+                            estimated_cost_minor=0,
+                        )
+                        opportunity_id = opportunity["id"]
+                        business.add_evidence(
+                            opportunity_id,
+                            idempotency_key="creator-video-request",
+                            evidence_type="creator_observation",
+                            epistemic_status="assumption",
+                            summary="用户提交了视频主题与创作要求；这不是市场需求、付费意愿、客户见证或收入的证据。",
+                        )
+                        promoted = business.promote_to_initiative(
+                            opportunity_id,
+                            initiative_database=initiatives_path,
+                            video_brief=video_brief,
+                        )
+                        initiative_id = promoted["initiative"]["id"]
+                        existing_event = business.connection.execute(
+                            "SELECT details_json FROM business_opportunity_events "
+                            "WHERE opportunity_id=? AND event_type='video_approval_requested' "
+                            "ORDER BY sequence DESC LIMIT 1",
+                            (opportunity_id,),
+                        ).fetchone()
+                        requested = None
+                        if existing_event is not None:
+                            details = json.loads(existing_event["details_json"])
+                            existing_ticket_id = details.get("ticket_id") if isinstance(details, dict) else None
+                            if isinstance(existing_ticket_id, str):
+                                from muse.task_queue import TaskQueue
+                                with TaskQueue(task_path) as queue:
+                                    existing_ticket = queue.get(existing_ticket_id)
+                                if (isinstance(existing_ticket, dict)
+                                        and existing_ticket.get("payload", {}).get("video_brief") == video_brief):
+                                    requested = {"ticket": existing_ticket, "initiative_id": initiative_id}
+                        if requested is None:
+                            planner = _build_video_commander_planner(memory_path)
+                            requested = business.request_video_approval(
+                                opportunity_id,
+                                initiative_database=initiatives_path,
+                                task_database=task_path,
+                                commander_planner=planner,
+                            )
+                    ticket = requested["ticket"]
+                    self._send(202, {
+                        "api_version": 1,
+                        "approval_required": True,
+                        "request_id": request_id,
+                        "opportunity_id": opportunity_id,
+                        "initiative_id": initiative_id,
+                        "evidence_state": opportunity.get("evidence_summary", {}).get("validation_state", "needs_more_evidence"),
+                        "approval": {
+                            "task_id": ticket["id"],
+                            "status": ticket["status"],
+                            "scope": "one_video_attempt_only",
+                        },
+                        "attempt_id": ticket.get("payload", {}).get("attempt_id"),
+                    })
+                except (UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError) as exc:
+                    self._send(400, {"error": str(exc)[:300]})
+                except Exception:
+                    self._send(503, {
+                        "error": "strict Commander video approval request could not be created",
+                        "opportunity_id": opportunity_id,
+                        "initiative_id": initiative_id,
+                        "approval_ticket_created": False,
+                        "retry_with_same_request_id": True,
+                    })
+                return
+
+            approval_match = re.fullmatch(r"/api/v1/video-approval-requests/([0-9a-f]{32})/approve", parsed.path)
+            if approval_match:
+                task_id = approval_match.group(1)
+                if initiatives_path is None:
+                    self._send(503, {"error": "Creator Initiative store is not configured"})
+                    return
+                if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json":
+                    self._send(415, {"error": "application/json required"})
+                    return
+                approval_persisted = False
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                    if length < 1 or length > 256:
+                        raise ValueError("approval confirmation body must contain 1-256 bytes")
+                    raw = self.rfile.read(length)
+                    if len(raw) != length:
+                        raise ValueError("incomplete request body")
+                    confirmation = json.loads(raw.decode("utf-8"))
+                    if not isinstance(confirmation, dict) or confirmation != {"confirmation": "APPROVE-VIDEO-ONCE"}:
+                        raise ValueError("explicit APPROVE-VIDEO-ONCE confirmation is required")
+                    from muse.task_queue import TaskQueue
+                    with TaskQueue(task_path) as queue:
+                        ticket = queue.get(task_id)
+                        if ticket is None:
+                            self._send(404, {"error": "video approval ticket not found"})
+                            return
+                        ticket_payload = ticket.get("payload") if isinstance(ticket.get("payload"), dict) else {}
+                        if (ticket_payload.get("kind") != "business_opportunity_video_approval"
+                                or ticket_payload.get("approval_scope") != "one_video_attempt_only"):
+                            self._send(404, {"error": "one-time video approval ticket not found"})
+                            return
+                        if ticket.get("status") == "waiting_approval":
+                            ticket = queue.approve(task_id, approved_by="local-dashboard-user")
+                            approval_persisted = True
+                        elif ticket.get("status") == "queued":
+                            approval = ticket_payload.get("_approval")
+                            if not isinstance(approval, dict) or not approval.get("approved_by"):
+                                self._send(409, {"error": "queued ticket has no persisted human approval"})
+                                return
+                            approval_persisted = True
+                        else:
+                            self._send(409, {"error": "video approval ticket is no longer approvable"})
+                            return
+                        opportunity_id = ticket_payload.get("opportunity_id")
+                    business_path = workspace_root / "data" / "business" / "opportunities.sqlite3"
+                    from muse.business_opportunities import BusinessOpportunityStore
+                    with BusinessOpportunityStore(business_path) as business:
+                        queued = business.queue_video_after_approval(
+                            opportunity_id,
+                            task_id,
+                            initiative_database=initiatives_path,
+                            task_database=task_path,
+                        )
+                    self._send(202, {
+                        "api_version": 1,
+                        "approval_persisted": True,
+                        "execution_queued": True,
+                        "attempt_id": queued["attempt"]["attempt_id"],
+                        "execution_ticket_id": queued["execution_ticket_id"],
+                        "gpu_execution": "not_started",
+                    })
+                except (UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError, PermissionError, KeyError) as exc:
+                    self._send(409, {
+                        "error": str(exc)[:300],
+                        "approval_persisted": approval_persisted,
+                        "execution_queued": False,
+                    })
+                except Exception:
+                    self._send(503, {
+                        "error": "video approval could not be queued; retry only if approval_persisted is true",
+                        "approval_persisted": approval_persisted,
+                        "execution_queued": False,
+                    })
+                return
+
             if parsed.path == "/api/v1/video-products":
                 if products_path is None:
                     self._send(503, {"error": "product store is not configured"})
@@ -3007,7 +3413,7 @@ def create_status_server(
                         })
                         return
                     else:
-                        allowed = {"mode", "source", "title", "audio", "audio_mode", "aspect_ratio", "fps", "image_seconds", "encoder", "creator_initiative_id", "evolution_cycle_id", "motion_profile"}
+                        allowed = {"mode", "source", "title", "audio", "audio_mode", "narration_script", "aspect_ratio", "fps", "image_seconds", "encoder", "creator_initiative_id", "evolution_cycle_id", "motion_profile"}
                         if set(payload) - allowed or "source" not in payload:
                             raise ValueError("local asset mode requires source and title with only documented optional settings")
                         workspace = products_path.parent.parent
@@ -3022,6 +3428,13 @@ def create_status_server(
                             raise ValueError("encoder must be auto, amf or software")
                         if payload.get("audio_mode", "music") not in {"music", "narration"}:
                             raise ValueError("audio_mode must be music or narration")
+                        narration_script = payload.get("narration_script")
+                        if narration_script is not None and (
+                            not isinstance(narration_script, str) or not narration_script.strip() or len(narration_script) > 20000
+                        ):
+                            raise ValueError("narration_script must contain 1-20000 characters")
+                        if narration_script is not None and payload.get("audio") is not None and payload.get("audio_mode", "music") == "narration":
+                            raise ValueError("when narration_script is supplied, an audio file can only be background music")
                     if not video_job_slot.acquire(blocking=False):
                         self._send(409, {"error": "another video render is already running"})
                         return

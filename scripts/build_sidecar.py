@@ -712,6 +712,10 @@ def build(target: str | None, *, skip_self_test: bool, allow_missing_ui: bool, p
         raise SystemExit("[build_sidecar] ui-prototype/dist/index.html missing: run `npm run build` in ui-prototype first")
     triple = target or host_triple()
     exe_suffix = ".exe" if "windows" in triple else ""
+    prebuild = ROOT / "scripts" / "prebuild_store_check.py"
+    precheck = subprocess.run([sys.executable, str(prebuild)], cwd=str(ROOT))
+    if precheck.returncode != 0:
+        raise SystemExit("[build_sidecar] pre-build Store contract check failed; build aborted")
     clean_previous_outputs()
     WORK.mkdir(parents=True, exist_ok=True)
     final = BINARIES / f"muse-engine-{triple}{exe_suffix}"
@@ -737,6 +741,13 @@ def build(target: str | None, *, skip_self_test: bool, allow_missing_ui: bool, p
         write_runtime_placeholder()
         result = build_native_launcher(triple, exe_suffix, final, skip_self_test=skip_self_test)
         result["plan_a"] = plan_a
+    postverify = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "postbuild_sidecar_verify.py"),
+         "--runtime", str(SIDECAR_RUNTIME)],
+        cwd=str(ROOT),
+    )
+    if postverify.returncode != 0:
+        raise SystemExit("[build_sidecar] post-build Sidecar consistency check failed; release blocked")
     result.update({"binary": str(final.relative_to(ROOT)), "bytes": final.stat().st_size,
                    "sha256": sha256(final), "target": triple})
     (WORK / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2, default=str), encoding="utf-8")

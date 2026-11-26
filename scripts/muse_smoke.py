@@ -2,7 +2,7 @@
 
 Usage (project root; quotes are required because the path contains a space):
 
-    "D:\\AI AGENT\\Muse\\run_smoke.bat"                     one-click (activates .venv, UTF-8)
+    "<MuseRoot>\\run_smoke.bat"                              one-click (activates .venv, UTF-8)
     py -3.11 scripts\\muse_smoke.py                          all layers + targeted regression tests
     py -3.11 scripts\\muse_smoke.py --full                   + the complete unittest suite
     py -3.11 scripts\\muse_smoke.py --quick                  skip unittest stages

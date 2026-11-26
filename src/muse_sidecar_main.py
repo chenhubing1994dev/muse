@@ -43,7 +43,7 @@ from typing import Any, Callable, Mapping
 from urllib.parse import parse_qs, unquote, urlsplit
 
 APP_ID = "com.muse.consciousness"
-SIDECAR_VERSION = "1.0.0"
+SIDECAR_VERSION = "1.0.3"
 SRC_DIR = Path(__file__).resolve().parent
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
@@ -60,9 +60,8 @@ FORWARD_REQUEST_HEADERS = frozenset({"content-type", "accept", "accept-language"
 HOP_BY_HOP = frozenset({"connection", "keep-alive", "transfer-encoding", "content-length", "server", "date",
                         "proxy-authenticate", "proxy-authorization", "te", "trailer", "upgrade"})
 DATA_LAYOUT = ("data/tasks", "data/progress", "data/capabilities", "data/memory", "data/autonomy",
-               "data/evolution", "data/research", "data/studio", "data/plugins", "data/companion",
+               "data/evolution", "data/agents", "data/research", "data/studio", "data/plugins", "data/companion",
                "logs", "inbox", "backups")
-
 mimetypes.add_type("text/javascript", ".js")
 mimetypes.add_type("text/javascript", ".mjs")
 mimetypes.add_type("text/css", ".css")
@@ -120,13 +119,18 @@ def prepare_data_root(root: Path) -> dict[str, Path]:
     for rel in DATA_LAYOUT:
         (root / rel).mkdir(parents=True, exist_ok=True)
     data = root / "data"
+    reports_dir = data / "research" / "reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
     return {
         "task_db": data / "tasks" / "muse.sqlite3",
         "progress_db": data / "progress" / "muse.sqlite3",
         "capability_db": data / "capabilities" / "muse.sqlite3",
         "memory_db": data / "memory" / "muse.sqlite3",
+        "agent_db": data / "agents" / "registry.sqlite3",
+        "improvement_db": data / "evolution" / "improvements.sqlite3",
+        "knowledge_db": data / "research" / "knowledge.sqlite3",
+        "reports_dir": reports_dir,
     }
-
 
 def safe_static_path(ui_dist: Path, request_path: str) -> Path | None:
     """Map a URL path to a file inside ``ui_dist``; ``None`` on traversal or absence."""
@@ -323,7 +327,13 @@ def _make_gateway_handler(engine: "MuseEngine") -> type[BaseHTTPRequestHandler]:
                 return
             path = urlsplit(self.path).path
             if path == "/__muse/health" and method in {"GET", "HEAD"}:
-                self._json(200, {"service": "muse-engine", "status": "ok", "version": SIDECAR_VERSION})
+                stores = {key: dict(value) for key, value in engine.store_health.items()}
+                healthy = bool(stores) and all(value.get("status") == "healthy" for value in stores.values())
+                self._json(200 if healthy else 503, {
+                    "service": "muse-engine", "status": "ok" if healthy else "degraded",
+                    "version": SIDECAR_VERSION, "agent_registry_configured": stores.get("agents", {}).get("status") == "healthy",
+                    "stores_healthy": healthy, "stores": stores,
+                })
                 return
             if path == "/__muse/bootstrap" and method == "GET":
                 self._bootstrap()
@@ -509,6 +519,7 @@ class MuseEngine:
         self.port = 0
         self.allowed_hosts: frozenset[str] = frozenset()
         self.allowed_origins: frozenset[str] = frozenset()
+        self.store_health: dict[str, dict[str, str]] = {}
 
     def consume_nonce(self, nonce: str) -> bool:
         if not nonce:
@@ -522,9 +533,21 @@ class MuseEngine:
     def start(self) -> "MuseEngine":
         from muse.status_api import create_status_server
         paths = prepare_data_root(self.data_root)
+        from muse.store_health import validate_store_registry
+        store_health = validate_store_registry({
+            "feedback": paths["improvement_db"],
+            "inspiration": paths["knowledge_db"],
+            "artifacts": paths["reports_dir"],
+            "agents": paths["agent_db"],
+        })
+        self.store_health = store_health
         inner, _ = create_status_server(
             task_db=paths["task_db"], progress_db=paths["progress_db"], capability_db=paths["capability_db"],
-            memory_db=paths["memory_db"], port=0, token=self.inner_token,
+            memory_db=paths["memory_db"], improvement_db=paths["improvement_db"],
+            agent_db=paths["agent_db"],
+            knowledge_db=paths["knowledge_db"], report_dir=paths["reports_dir"],
+            store_health=store_health,
+            port=0, token=self.inner_token,
         )
         self._inner = inner
         self.inner_port = int(inner.server_address[1])
@@ -537,8 +560,51 @@ class MuseEngine:
             thread = threading.Thread(target=server.serve_forever, name=name, daemon=True)
             thread.start()
             self._threads.append(thread)
+        self._run_authenticated_startup_api_check()
         return self
 
+    def _run_authenticated_startup_api_check(self) -> None:
+        """Exercise the actual authenticated gateway routes before declaring the engine started."""
+        results: dict[str, Any] = {}
+        for endpoint in ("/api/v1/agents", "/api/v1/health", "/api/v1/store-health"):
+            connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=15)
+            try:
+                connection.request(
+                    "GET", endpoint,
+                    headers={
+                        "Host": f"127.0.0.1:{self.port}",
+                        "Authorization": "Bearer " + self.session_token,
+                        "Accept": "application/json",
+                    },
+                )
+                response = connection.getresponse()
+                raw = response.read()
+                try:
+                    payload: Any = json.loads(raw.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    payload = {"unparsed_response": raw.decode("utf-8", errors="replace")[:2000]}
+                results[endpoint] = {"http_status": response.status, "body": payload}
+                if response.status != 200:
+                    raise RuntimeError(
+                        f"startup API self-check failed for {endpoint}: HTTP {response.status}; "
+                        f"response={json.dumps(payload, ensure_ascii=False)[:1000]}"
+                    )
+            finally:
+                connection.close()
+        agents = results["/api/v1/agents"]["body"]
+        if not isinstance(agents, dict) or agents.get("registry_configured") is not True:
+            raise RuntimeError("startup API self-check failed: /api/v1/agents reports registry_configured != true")
+        for endpoint in ("/api/v1/health", "/api/v1/store-health"):
+            body = results[endpoint]["body"]
+            if not isinstance(body, dict) or body.get("stores_healthy") is not True:
+                raise RuntimeError(f"startup API self-check failed: {endpoint} does not report stores_healthy=true")
+        report_path = self.data_root / "logs" / "startup-api-acceptance.json"
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(
+            json.dumps({"status": "passed", "version": SIDECAR_VERSION, "checks": results},
+                       ensure_ascii=False, indent=2) + chr(10),
+            encoding="utf-8",
+        )
     @property
     def base_url(self) -> str:
         return f"http://127.0.0.1:{self.port}/"

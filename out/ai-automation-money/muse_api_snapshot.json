@@ -1,0 +1,104 @@
+{
+  "captured_at": "2026-11-26T17:53:43+08:00",
+  "live_public_health": {
+    "port": 54882,
+    "service": "muse-engine",
+    "status": "ok",
+    "version": "1.0.3",
+    "agent_registry_configured": true,
+    "stores_healthy": true,
+    "stores": {
+      "feedback": "healthy",
+      "inspiration": "healthy",
+      "artifacts": "healthy",
+      "agents": "healthy"
+    }
+  },
+  "authenticated_startup_self_check": {
+    "status": "passed",
+    "version": "1.0.3",
+    "endpoints": {
+      "/api/v1/agents": {
+        "http_status": 200,
+        "body": {
+          "api_version": 1,
+          "registry_configured": true,
+          "count": 0,
+          "agents": [],
+          "org_chart": {
+            "nodes": [],
+            "edges": [],
+            "total": 0,
+            "truncated": false,
+            "unresolved_parent_count": 0
+          }
+        }
+      },
+      "/api/v1/health": {
+        "http_status": 200,
+        "body": {
+          "service": "muse-status-api",
+          "status": "ok",
+          "api_version": 1,
+          "agent_registry_configured": true,
+          "stores": {
+            "feedback": {
+              "name": "Feedback Store",
+              "status": "healthy",
+              "path": "C:\\Users\\Administrator\\Desktop\\museapp\\Muse\\muse-data\\data\\evolution\\improvements.sqlite3"
+            },
+            "inspiration": {
+              "name": "Inspiration / Knowledge Store",
+              "status": "healthy",
+              "path": "C:\\Users\\Administrator\\Desktop\\museapp\\Muse\\muse-data\\data\\research\\knowledge.sqlite3"
+            },
+            "artifacts": {
+              "name": "Artifact Store",
+              "status": "healthy",
+              "path": "C:\\Users\\Administrator\\Desktop\\museapp\\Muse\\muse-data\\data\\research\\reports"
+            },
+            "agents": {
+              "name": "Agent Registry",
+              "status": "healthy",
+              "path": "C:\\Users\\Administrator\\Desktop\\museapp\\Muse\\muse-data\\data\\agents\\registry.sqlite3"
+            }
+          },
+          "stores_healthy": true
+        }
+      },
+      "/api/v1/store-health": {
+        "http_status": 200,
+        "body": {
+          "service": "muse-status-api",
+          "status": "ok",
+          "api_version": 1,
+          "agent_registry_configured": true,
+          "stores": {
+            "feedback": {
+              "name": "Feedback Store",
+              "status": "healthy",
+              "path": "C:\\Users\\Administrator\\Desktop\\museapp\\Muse\\muse-data\\data\\evolution\\improvements.sqlite3"
+            },
+            "inspiration": {
+              "name": "Inspiration / Knowledge Store",
+              "status": "healthy",
+              "path": "C:\\Users\\Administrator\\Desktop\\museapp\\Muse\\muse-data\\data\\research\\knowledge.sqlite3"
+            },
+            "artifacts": {
+              "name": "Artifact Store",
+              "status": "healthy",
+              "path": "C:\\Users\\Administrator\\Desktop\\museapp\\Muse\\muse-data\\data\\research\\reports"
+            },
+            "agents": {
+              "name": "Agent Registry",
+              "status": "healthy",
+              "path": "C:\\Users\\Administrator\\Desktop\\museapp\\Muse\\muse-data\\data\\agents\\registry.sqlite3"
+            }
+          },
+          "stores_healthy": true
+        }
+      }
+    }
+  },
+  "note": "The public health endpoint was queried live during this production run. Authenticated API 200 responses are the Sidecar startup self-check record from the same running v1.0.3 desktop instance; unauthenticated direct probes return 401 because the bearer credential is not exposed to this runner."
+}

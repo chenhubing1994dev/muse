@@ -924,7 +924,7 @@ def read_mind_status(workspace_root: str | Path) -> dict[str, Any]:
     journal = mind / "journal.sqlite3"
     if journal.is_file():
         try:
-            # as_uri() percent-encodes spaces/CJK in Windows paths such as "D:\\AI AGENT\\Muse".
+            # as_uri() percent-encodes spaces/CJK in Windows paths such as "D:\\My Projects\\Muse".
             with closing(sqlite3.connect(journal.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)) as db:
                 db.row_factory = sqlite3.Row
                 rows = db.execute("SELECT cycle_id, started_at, finished_at, source, status FROM mind_cycles "

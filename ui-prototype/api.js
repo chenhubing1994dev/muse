@@ -271,7 +271,7 @@ export function createCompanionRemoteClient({
 }
 
 export function createApiClient({ baseUrl, token, fetchImpl = globalThis.fetch, timeoutMs = 4000 }) {
-  if (typeof baseUrl !== "string" || typeof token !== "string" || token.length < 32) {
+  if (typeof baseUrl !== "string" || typeof token !== "string") {
     throw new Error("本地 API 会话信息无效");
   }
   if (!Number.isInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 30000) {
@@ -283,21 +283,26 @@ export function createApiClient({ baseUrl, token, fetchImpl = globalThis.fetch, 
       || origin.username || origin.password || origin.pathname !== "/" || origin.search || origin.hash) {
     throw new Error("Muse API 只允许连接本机或已配对的同源控制台");
   }
-  if (typeof fetchImpl !== "function") throw new Error("当前环境不支持 Fetch API");
-  async function request(path, { method = "GET", body, requestTimeoutMs } = {}) {
+  const hasBearerToken = token.length >= 32;
+  // The packaged desktop shell bootstraps an HttpOnly, SameSite=Strict cookie on its
+  // loopback origin. Use that session if Tauri IPC is unavailable after navigation.
+  const cookieSession = token === "" && sameOriginDashboard && LOOPBACK_HOSTS.has(origin.hostname);
+  if (!hasBearerToken && !cookieSession) throw new Error("本地 API 会话信息无效");
+  const fetchCredentials = sameOriginDashboard ? "same-origin" : "omit";
+  const authorizationHeader = hasBearerToken ? { Authorization: "Bearer " + token } : {};
+  if (typeof fetchImpl !== "function") throw new Error("当前环境不支持 Fetch API");  async function request(path, { method = "GET", body, requestTimeoutMs } = {}) {
     const controller = new AbortController();
     const effectiveTimeout = (Number.isInteger(requestTimeoutMs) && requestTimeoutMs >= 100 && requestTimeoutMs <= 120000)
       ? requestTimeoutMs
       : timeoutMs;
     const timeout = setTimeout(() => controller.abort(), effectiveTimeout);
-    const headers = { Authorization: "Bearer " + token, Accept: "application/json" };
+    const headers = { ...authorizationHeader, Accept: "application/json" };
     if (body !== undefined) headers["Content-Type"] = "application/json";
     try {
       const response = await fetchImpl(new URL(path, origin), {
         method, headers, body: body === undefined ? undefined : JSON.stringify(body),
-        cache: "no-store", redirect: "error", signal: controller.signal,
-      });
-      if (!response.ok) {
+        cache: "no-store", credentials: fetchCredentials, redirect: "error", signal: controller.signal,
+      });      if (!response.ok) {
         let detail = "";
         try { detail = (await response.json())?.error || ""; } catch {}
         throw new Error(detail || "本地 API 返回 HTTP " + response.status);
@@ -315,15 +320,14 @@ export function createApiClient({ baseUrl, token, fetchImpl = globalThis.fetch, 
   const get = (path) => request(path);
   async function streamEvents({ lastEventId = "", signal, onEvent }) {
     if (typeof onEvent !== "function") throw new TypeError("事件回调必须是函数");
-    const headers = { Authorization: "Bearer " + token, Accept: "text/event-stream" };
+    const headers = { ...authorizationHeader, Accept: "text/event-stream" };
     if (lastEventId) {
       if (typeof lastEventId !== "string" || !/^[a-f0-9-]{16,64}$/.test(lastEventId)) throw new Error("事件游标无效");
       headers["Last-Event-ID"] = lastEventId;
     }
     const response = await fetchImpl(new URL("/api/v1/events/stream", origin), {
-      method: "GET", headers, cache: "no-store", redirect: "error", signal,
-    });
-    if (!response.ok) throw new Error("事件流返回 HTTP " + response.status);
+      method: "GET", headers, cache: "no-store", credentials: fetchCredentials, redirect: "error", signal,
+    });    if (!response.ok) throw new Error("事件流返回 HTTP " + response.status);
     if (!(response.headers?.get?.("content-type") || "").toLowerCase().startsWith("text/event-stream")) throw new Error("事件流响应类型不兼容");
     const body = await response.text();
     let cursor = lastEventId;
@@ -358,10 +362,9 @@ export function createApiClient({ baseUrl, token, fetchImpl = globalThis.fetch, 
     const response = await fetchImpl(new URL(
       "/api/v1/products/" + initiativeId + "/" + versionId + "/" + action, origin
     ), {
-      headers: { Authorization: "Bearer " + token },
-      cache: "no-store", redirect: "error",
-    });
-    if (!response.ok) throw new Error("产品读取失败，HTTP " + response.status);
+      headers: { ...authorizationHeader },
+      cache: "no-store", credentials: fetchCredentials, redirect: "error",
+    });    if (!response.ok) throw new Error("产品读取失败，HTTP " + response.status);
     return response.blob();
   }
   return {
@@ -571,8 +574,25 @@ export function createApiClient({ baseUrl, token, fetchImpl = globalThis.fetch, 
       });
     },
     createVideoProduct: (payload) => request("/api/v1/video-products", { method: "POST", body: payload }),
+    createVideoApprovalRequest: (payload) => {
+      if (!payload || typeof payload !== "object" || Array.isArray(payload)
+          || typeof payload.request_id !== "string" || !/^[0-9a-f]{32}$/.test(payload.request_id)) {
+        throw new Error("视频审批请求编号无效");
+      }
+      return request("/api/v1/video-approval-requests", { method: "POST", body: payload, requestTimeoutMs: 90000 });
+    },
+    videoApprovalRequests: (limit = 30) => {
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new RangeError("视频审批列表数量无效");
+      return get(`/api/v1/video-approval-requests?limit=${limit}`);
+    },
+    approveVideoApprovalRequest: (taskId) => {
+      if (typeof taskId !== "string" || !/^[0-9a-f]{32}$/.test(taskId)) throw new Error("视频审批编号无效");
+      return request(`/api/v1/video-approval-requests/${taskId}/approve`, {
+        method: "POST", body: { confirmation: "APPROVE-VIDEO-ONCE" },
+      });
+    },
     videoJob: (id) => {
-      if (typeof id !== "string" || !/^[0-9a-f]{32}$/.test(id)) throw new Error("视频任务编号无效");
+      if (typeof id !== "string" || !/^(?:[0-9a-f]{32}|biz-[0-9a-f]{32})$/.test(id)) throw new Error("视频任务编号无效");
       return get(`/api/v1/video-jobs/${id}`);
     },
     submitInspiration: (inspiration) => request("/api/v1/inspirations", { method: "POST", body: inspiration }),
@@ -694,9 +714,37 @@ export function createApiClient({ baseUrl, token, fetchImpl = globalThis.fetch, 
 }
 
 export async function resolveDesktopConnection() {
-  const invoke = globalThis.window?.__TAURI__?.core?.invoke;
-  if (typeof invoke === "function") return invoke("get_status_connection");
-  const localConnection = globalThis.window?.__MUSE_LOCAL_CONNECTION__;
+  const windowObject = globalThis.window;
+  const invoke = windowObject?.__TAURI__?.core?.invoke;
+  if (typeof invoke === "function") {
+    try {
+      return await invoke("get_status_connection");
+    } catch (error) {
+      const localConnection = windowObject?.__MUSE_LOCAL_CONNECTION__;
+      if (localConnection && typeof localConnection === "object") return localConnection;
+      const cookieConnection = resolveLoopbackCookieConnection(windowObject);
+      if (cookieConnection) return cookieConnection;
+      throw error;
+    }
+  }
+  const localConnection = windowObject?.__MUSE_LOCAL_CONNECTION__;
   if (localConnection && typeof localConnection === "object") return localConnection;
+  const cookieConnection = resolveLoopbackCookieConnection(windowObject);
+  if (cookieConnection) return cookieConnection;
   throw new Error("请通过 Muse 本地启动器打开控制台；浏览器原型不会保存或请求 API 密钥");
+}
+
+function resolveLoopbackCookieConnection(windowObject) {
+  const rawOrigin = windowObject?.location?.origin;
+  if (typeof rawOrigin !== "string") return null;
+  try {
+    const origin = new URL(rawOrigin);
+    if (origin.protocol !== "http:" || !origin.port || !LOOPBACK_HOSTS.has(origin.hostname)
+        || origin.username || origin.password || origin.pathname !== "/" || origin.search || origin.hash) {
+      return null;
+    }
+    return { baseUrl: origin.origin, token: "" };
+  } catch {
+    return null;
+  }
 }

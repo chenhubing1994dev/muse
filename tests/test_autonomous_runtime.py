@@ -384,7 +384,7 @@ class AutonomousRuntimeTests(unittest.TestCase):
         self.assertNotIn("video_pipeline", handlers)
 
 
-    def test_commander_video_worker_dispatches_one_task_when_opted_in(self):
+    def test_commander_video_worker_dispatches_queued_video_pipeline_via_runtime(self):
         with tempfile.TemporaryDirectory() as directory:
             supervisor = self.make_supervisor(Path(directory))
             provider = type("Provider", (), {
@@ -394,36 +394,76 @@ class AutonomousRuntimeTests(unittest.TestCase):
             request_factory = lambda **kwargs: kwargs
             supervisor.video_admission_provider = provider
             supervisor.video_admission_request_factory = request_factory
-            expected = {"status": "idle", "claimed": False}
+            with TaskQueue(supervisor.task_db) as queue:
+                queue.enqueue("ordinary task", {"kind": "general_task"})
+                execution = queue.enqueue(
+                    "approved video execution", {"kind": "video_pipeline"},
+                    recovery_policy="manual",
+                )
+            expected = {"status": "succeeded", "task_id": execution["id"]}
             with patch.dict(os.environ, {"MUSE_ENABLE_VIDEO_WORKER": "1"}):
-                with patch("muse.video_task_worker.VideoTaskWorker.run_once", return_value=expected) as run_once:
-                    result = supervisor._video_worker({})
+                with patch("muse.unified_runtime.MuseRuntime") as runtime_type:
+                    with patch("muse.video_task_worker.VideoTaskWorker") as worker_type:
+                        runtime_type.return_value.dispatch_video_pipeline_once.return_value = expected
+                        result = supervisor._video_worker({})
             self.assertEqual(result, expected)
-            run_once.assert_called_once_with()
+            runtime_type.assert_called_once_with(supervisor.task_db.resolve(), workspace=supervisor.workspace)
+            worker_kwargs = worker_type.call_args.kwargs
+            self.assertEqual(worker_kwargs["worker_id"], "commander-video-worker")
+            self.assertIs(worker_kwargs["admission_provider"], provider)
+            self.assertIs(worker_kwargs["admission_request_factory"], request_factory)
+            self.assertTrue(callable(worker_kwargs["pause_check"]))
+            dispatch = runtime_type.return_value.dispatch_video_pipeline_once
+            dispatch.assert_called_once()
+            self.assertEqual(dispatch.call_args.kwargs["task_id"], execution["id"])
+            self.assertIs(dispatch.call_args.kwargs["approved"], True)
+            self.assertEqual(dispatch.call_args.kwargs["worker_id"], "commander-video-worker")
+            self.assertIs(dispatch.call_args.kwargs["video_worker"], worker_type.return_value)
 
-    def test_commander_video_worker_passes_injected_admission_context(self):
+    def test_commander_video_worker_is_idle_without_queued_video_pipeline(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            provider = type("Provider", (), {"issue_video_admission_grant": lambda self, store, request: {}})()
-            request_factory = lambda **kwargs: kwargs
-            supervisor = AutonomousSupervisor(
-                task_db=root / "tasks.sqlite3", routine_db=root / "routines.sqlite3",
-                state_db=root / "runtime.sqlite3", improvement_db=root / "improvements.sqlite3",
-                knowledge_db=root / "knowledge.sqlite3", reminder_db=root / "reminders.sqlite3",
-                memory_db=root / "memory.sqlite3", conversation_db=root / "conversations.sqlite3",
-                workspace=root, video_admission_provider=provider,
-                video_admission_request_factory=request_factory,
-            )
-            expected = {"status": "idle", "claimed": False}
+            supervisor = self.make_supervisor(Path(directory))
+            provider = type("Provider", (), {
+                "issue_video_admission_grant": lambda self, store, request: {},
+                "readiness": lambda self: {"status": "ready"},
+            })()
+            supervisor.video_admission_provider = provider
+            supervisor.video_admission_request_factory = lambda **kwargs: kwargs
+            with TaskQueue(supervisor.task_db) as queue:
+                queue.enqueue("ordinary task", {"kind": "general_task"})
             with patch.dict(os.environ, {"MUSE_ENABLE_VIDEO_WORKER": "1"}):
-                with patch("muse.video_task_worker.VideoTaskWorker") as worker_type:
-                    worker_type.return_value.run_once.return_value = expected
+                with patch("muse.unified_runtime.MuseRuntime") as runtime_type:
+                    with patch("muse.video_task_worker.VideoTaskWorker") as worker_type:
+                        result = supervisor._video_worker({})
+            self.assertEqual(result["status"], "idle")
+            self.assertFalse(result["claimed"])
+            runtime_type.assert_not_called()
+            worker_type.assert_not_called()
+
+    def test_commander_video_worker_does_not_claim_when_admission_readiness_is_blocked(self):
+        with tempfile.TemporaryDirectory() as directory:
+            supervisor = self.make_supervisor(Path(directory))
+            provider = type("Provider", (), {
+                "issue_video_admission_grant": lambda self, store, request: {},
+                "readiness": lambda self: {"status": "blocked", "reason": "ComfyUI offline"},
+            })()
+            supervisor.video_admission_provider = provider
+            supervisor.video_admission_request_factory = lambda **kwargs: kwargs
+            with TaskQueue(supervisor.task_db) as queue:
+                execution = queue.enqueue(
+                    "approved video execution", {"kind": "video_pipeline"},
+                    recovery_policy="manual",
+                )
+            with patch.dict(os.environ, {"MUSE_ENABLE_VIDEO_WORKER": "1"}):
+                with patch("muse.unified_runtime.MuseRuntime") as runtime_type:
                     result = supervisor._video_worker({})
-            self.assertEqual(result, expected)
-            worker_type.assert_called_once_with(
-                root.resolve(), worker_id="commander-video-worker", admission_provider=provider,
-                admission_request_factory=request_factory,
-            )
+            self.assertEqual(result["status"], "blocked")
+            self.assertFalse(result["claimed"])
+            self.assertEqual(result["reason"], "ComfyUI offline")
+            runtime_type.assert_not_called()
+            with TaskQueue(supervisor.task_db) as queue:
+                self.assertEqual(queue.get(execution["id"])["status"], "queued")
+
 
     def test_supervisor_rejects_partial_video_admission_injection(self):
         with tempfile.TemporaryDirectory() as directory:

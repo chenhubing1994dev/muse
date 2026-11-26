@@ -1,0 +1,1164 @@
+{
+  "api_version": 1,
+  "dag": [
+    "hook_matrix",
+    "rhythm_density",
+    "story_bible_lock",
+    "shot_director",
+    "gpu_preflight",
+    "wan21_workflow",
+    "upscale_1080p_bridge",
+    "dub_subtitle_align",
+    "loudness_qc",
+    "vlm_review",
+    "retention_feedback"
+  ],
+  "nodes": {
+    "hook_matrix": {
+      "status": "done",
+      "output": {
+        "top": [
+          {
+            "hook_id": "hook-sound_break-2",
+            "pattern": "sound_break",
+            "mechanism": "声音打断",
+            "line_yue": "（静音→重击声）AI 自动化赚钱：别卖 AI，卖可验证的结果嘅真相",
+            "visual_interrupt": "hard_cut_to_ecu",
+            "audience": "粤语观众",
+            "beats": [
+              {
+                "t": "0.0-1.0s",
+                "do": "visual pattern interrupt: hard_cut_to_ecu"
+              },
+              {
+                "t": "1.0-2.2s",
+                "do": "spoken hook line (Cantonese first)"
+              },
+              {
+                "t": "2.2-3.0s",
+                "do": "open loop / promise of payoff"
+              }
+            ],
+            "spoken_seconds_estimate": 3.8,
+            "fits_3s": false,
+            "score": 0.54,
+            "label": "heuristic_rank_needs_ab_test"
+          },
+          {
+            "hook_id": "hook-sound_break-1",
+            "pattern": "sound_break",
+            "mechanism": "声音打断",
+            "line_yue": "（静音→重击声）AI 自动化赚钱：别卖 AI，卖可验证的结果嘅真相",
+            "visual_interrupt": "match_cut",
+            "audience": "粤语观众",
+            "beats": [
+              {
+                "t": "0.0-1.0s",
+                "do": "visual pattern interrupt: match_cut"
+              },
+              {
+                "t": "1.0-2.2s",
+                "do": "spoken hook line (Cantonese first)"
+              },
+              {
+                "t": "2.2-3.0s",
+                "do": "open loop / promise of payoff"
+              }
+            ],
+            "spoken_seconds_estimate": 3.8,
+            "fits_3s": false,
+            "score": 0.44,
+            "label": "heuristic_rank_needs_ab_test"
+          },
+          {
+            "hook_id": "hook-visual_shock-1",
+            "pattern": "visual_shock",
+            "mechanism": "视觉打断",
+            "line_yue": "（画面骤变）AI 自动化赚钱：别卖 AI，卖可验证的结果，三秒睇清",
+            "visual_interrupt": "speed_ramp",
+            "audience": "粤语观众",
+            "beats": [
+              {
+                "t": "0.0-1.0s",
+                "do": "visual pattern interrupt: speed_ramp"
+              },
+              {
+                "t": "1.0-2.2s",
+                "do": "spoken hook line (Cantonese first)"
+              },
+              {
+                "t": "2.2-3.0s",
+                "do": "open loop / promise of payoff"
+              }
+            ],
+            "spoken_seconds_estimate": 4.0,
+            "fits_3s": false,
+            "score": 0.37,
+            "label": "heuristic_rank_needs_ab_test"
+          }
+        ],
+        "variants": 12
+      },
+      "output_sha256": "9a3653dcfaa1210522721ff385619a0fb9e8dcd70b08b92c9cdf64e6dca268d6"
+    },
+    "rhythm_density": {
+      "status": "done",
+      "output": {
+        "duration": 20.0,
+        "cuts": 5,
+        "windows": [
+          {
+            "from": 0.0,
+            "to": 3.0,
+            "cuts": 0,
+            "peak_motion": 0.8,
+            "density": 0.667,
+            "dead_air": false
+          },
+          {
+            "from": 3.0,
+            "to": 6.0,
+            "cuts": 1,
+            "peak_motion": 0.3,
+            "density": 0.333,
+            "dead_air": false
+          },
+          {
+            "from": 6.0,
+            "to": 9.0,
+            "cuts": 1,
+            "peak_motion": 0.8,
+            "density": 0.667,
+            "dead_air": false
+          },
+          {
+            "from": 9.0,
+            "to": 12.0,
+            "cuts": 1,
+            "peak_motion": 0.8,
+            "density": 0.667,
+            "dead_air": false
+          },
+          {
+            "from": 12.0,
+            "to": 15.0,
+            "cuts": 1,
+            "peak_motion": 0.3,
+            "density": 0.333,
+            "dead_air": false
+          },
+          {
+            "from": 15.0,
+            "to": 18.0,
+            "cuts": 0,
+            "peak_motion": 0.3,
+            "density": 0.0,
+            "dead_air": true
+          },
+          {
+            "from": 18.0,
+            "to": 20.0,
+            "cuts": 1,
+            "peak_motion": 0.8,
+            "density": 1.0,
+            "dead_air": false
+          }
+        ],
+        "dead_air_windows": [
+          15.0
+        ],
+        "hook_window_ok": true,
+        "avg_shot_length": 3.333
+      },
+      "output_sha256": "374012ba7af818197bf8257a6399918220c7a12bcd2d018382035099ad6e545b"
+    },
+    "story_bible_lock": {
+      "status": "done",
+      "output": {
+        "bible_sha256": "f15217cbce1fc7e9e4d40650f7f399dfc972b24a711ff2bae7047395cbc7a61e",
+        "ok": true,
+        "violations": []
+      },
+      "output_sha256": "1d236096d15a972a51266fa80afa542cec7d0b9c382c4cbb931906d985c18f79"
+    },
+    "shot_director": {
+      "status": "done",
+      "output": [
+        {
+          "shot_id": "s01",
+          "beat_id": "b1",
+          "purpose": "hook",
+          "size": "ECU",
+          "focal_length_mm": 100,
+          "camera_move": "fast push-in",
+          "lighting": "high-key, colored accents, motivated neon",
+          "seconds": 3.0,
+          "rationale": "hook→ECU/100mm, fast push-in; energy lighting",
+          "continuity": "host: wearing black bomber jacket; short hair; props: none"
+        },
+        {
+          "shot_id": "s02",
+          "beat_id": "b2",
+          "purpose": "setup",
+          "size": "WS",
+          "focal_length_mm": 24,
+          "camera_move": "slow dolly",
+          "lighting": "large soft source, 2:1 contrast",
+          "seconds": 4.0,
+          "rationale": "setup→WS/24mm, slow dolly; calm lighting"
+        },
+        {
+          "shot_id": "s03",
+          "beat_id": "b3",
+          "purpose": "escalate",
+          "size": "MS",
+          "focal_length_mm": 35,
+          "camera_move": "handheld drift",
+          "lighting": "low-key, hard side light, 4:1 contrast",
+          "seconds": 4.0,
+          "rationale": "escalate→MS/35mm, handheld drift; tension lighting"
+        },
+        {
+          "shot_id": "s04",
+          "beat_id": "b4",
+          "purpose": "reveal",
+          "size": "CU",
+          "focal_length_mm": 85,
+          "camera_move": "orbit 30°",
+          "lighting": "backlight rim + slow key fade-up",
+          "seconds": 3.0,
+          "rationale": "reveal→CU/85mm, orbit 30°; reveal lighting"
+        },
+        {
+          "shot_id": "s05",
+          "beat_id": "b5",
+          "purpose": "payoff",
+          "size": "MCU",
+          "focal_length_mm": 50,
+          "camera_move": "static lock-off",
+          "lighting": "soft key 45°, warm 3200K practicals",
+          "seconds": 4.0,
+          "rationale": "payoff→MCU/50mm, static lock-off; warm lighting"
+        },
+        {
+          "shot_id": "s06",
+          "beat_id": "b6",
+          "purpose": "cta",
+          "size": "WS",
+          "focal_length_mm": 24,
+          "camera_move": "slow push-in",
+          "lighting": "soft key 45°, warm 3200K practicals",
+          "seconds": 2.0,
+          "rationale": "cta→WS/24mm, slow push-in; warm lighting"
+        }
+      ],
+      "output_sha256": "fb14069927f7397270055cd75b1e95231c09d8d667f3e9baf96477f2aeeab388"
+    },
+    "gpu_preflight": {
+      "status": "blocked",
+      "output": {
+        "ok": false,
+        "reason": "no_gpu_probe",
+        "required_free_mib": 7885
+      },
+      "output_sha256": "a7ce3367497f500b0ada6f7b001ed27ebf9d757a2d160ed8ea6c8c7777c6f76e"
+    },
+    "wan21_workflow": {
+      "status": "blocked_gpu",
+      "output": [
+        {
+          "shot_id": "s01",
+          "workflow": {
+            "1": {
+              "class_type": "UNETLoader",
+              "inputs": {
+                "unet_name": "wan2.1_t2v_1.3B_fp16.safetensors",
+                "weight_dtype": "default"
+              }
+            },
+            "2": {
+              "class_type": "CLIPLoader",
+              "inputs": {
+                "clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+                "type": "wan"
+              }
+            },
+            "3": {
+              "class_type": "VAELoader",
+              "inputs": {
+                "vae_name": "wan_2.1_vae.safetensors"
+              }
+            },
+            "4": {
+              "class_type": "CLIPTextEncode",
+              "inputs": {
+                "text": "cinematic, anamorphic, filmic grain, Hong Kong night neon. ECU 100mm, fast push-in, high-key, colored accents, motivated neon. host: wearing black bomber jacket; short hair; props: none AI 自动化赚钱：别卖 AI，卖可验证的结果",
+                "clip": [
+                  "2",
+                  0
+                ]
+              }
+            },
+            "5": {
+              "class_type": "CLIPTextEncode",
+              "inputs": {
+                "text": "blurry, distorted face, extra fingers, watermark, text",
+                "clip": [
+                  "2",
+                  0
+                ]
+              }
+            },
+            "6": {
+              "class_type": "ModelSamplingSD3",
+              "inputs": {
+                "shift": 8.0,
+                "model": [
+                  "1",
+                  0
+                ]
+              }
+            },
+            "7": {
+              "class_type": "EmptyHunyuanLatentVideo",
+              "inputs": {
+                "width": 832,
+                "height": 480,
+                "length": 81,
+                "batch_size": 1
+              }
+            },
+            "8": {
+              "class_type": "KSampler",
+              "inputs": {
+                "seed": 20261126,
+                "steps": 30,
+                "cfg": 6.0,
+                "sampler_name": "uni_pc",
+                "scheduler": "simple",
+                "denoise": 1.0,
+                "model": [
+                  "6",
+                  0
+                ],
+                "positive": [
+                  "4",
+                  0
+                ],
+                "negative": [
+                  "5",
+                  0
+                ],
+                "latent_image": [
+                  "7",
+                  0
+                ]
+              }
+            },
+            "9": {
+              "class_type": "VAEDecode",
+              "inputs": {
+                "samples": [
+                  "8",
+                  0
+                ],
+                "vae": [
+                  "3",
+                  0
+                ]
+              }
+            },
+            "10": {
+              "class_type": "SaveAnimatedWEBP",
+              "inputs": {
+                "images": [
+                  "9",
+                  0
+                ],
+                "filename_prefix": "muse/s01",
+                "fps": 16.0,
+                "lossless": false,
+                "quality": 90,
+                "method": "default"
+              }
+            }
+          },
+          "graph_errors": [],
+          "prompt_id": null
+        },
+        {
+          "shot_id": "s02",
+          "workflow": {
+            "1": {
+              "class_type": "UNETLoader",
+              "inputs": {
+                "unet_name": "wan2.1_t2v_1.3B_fp16.safetensors",
+                "weight_dtype": "default"
+              }
+            },
+            "2": {
+              "class_type": "CLIPLoader",
+              "inputs": {
+                "clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+                "type": "wan"
+              }
+            },
+            "3": {
+              "class_type": "VAELoader",
+              "inputs": {
+                "vae_name": "wan_2.1_vae.safetensors"
+              }
+            },
+            "4": {
+              "class_type": "CLIPTextEncode",
+              "inputs": {
+                "text": "cinematic, anamorphic, filmic grain, Hong Kong night neon. WS 24mm, slow dolly, large soft source, 2:1 contrast.  AI 自动化赚钱：别卖 AI，卖可验证的结果",
+                "clip": [
+                  "2",
+                  0
+                ]
+              }
+            },
+            "5": {
+              "class_type": "CLIPTextEncode",
+              "inputs": {
+                "text": "blurry, distorted face, extra fingers, watermark, text",
+                "clip": [
+                  "2",
+                  0
+                ]
+              }
+            },
+            "6": {
+              "class_type": "ModelSamplingSD3",
+              "inputs": {
+                "shift": 8.0,
+                "model": [
+                  "1",
+                  0
+                ]
+              }
+            },
+            "7": {
+              "class_type": "EmptyHunyuanLatentVideo",
+              "inputs": {
+                "width": 832,
+                "height": 480,
+                "length": 81,
+                "batch_size": 1
+              }
+            },
+            "8": {
+              "class_type": "KSampler",
+              "inputs": {
+                "seed": 20261127,
+                "steps": 30,
+                "cfg": 6.0,
+                "sampler_name": "uni_pc",
+                "scheduler": "simple",
+                "denoise": 1.0,
+                "model": [
+                  "6",
+                  0
+                ],
+                "positive": [
+                  "4",
+                  0
+                ],
+                "negative": [
+                  "5",
+                  0
+                ],
+                "latent_image": [
+                  "7",
+                  0
+                ]
+              }
+            },
+            "9": {
+              "class_type": "VAEDecode",
+              "inputs": {
+                "samples": [
+                  "8",
+                  0
+                ],
+                "vae": [
+                  "3",
+                  0
+                ]
+              }
+            },
+            "10": {
+              "class_type": "SaveAnimatedWEBP",
+              "inputs": {
+                "images": [
+                  "9",
+                  0
+                ],
+                "filename_prefix": "muse/s02",
+                "fps": 16.0,
+                "lossless": false,
+                "quality": 90,
+                "method": "default"
+              }
+            }
+          },
+          "graph_errors": [],
+          "prompt_id": null
+        },
+        {
+          "shot_id": "s03",
+          "workflow": {
+            "1": {
+              "class_type": "UNETLoader",
+              "inputs": {
+                "unet_name": "wan2.1_t2v_1.3B_fp16.safetensors",
+                "weight_dtype": "default"
+              }
+            },
+            "2": {
+              "class_type": "CLIPLoader",
+              "inputs": {
+                "clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+                "type": "wan"
+              }
+            },
+            "3": {
+              "class_type": "VAELoader",
+              "inputs": {
+                "vae_name": "wan_2.1_vae.safetensors"
+              }
+            },
+            "4": {
+              "class_type": "CLIPTextEncode",
+              "inputs": {
+                "text": "cinematic, anamorphic, filmic grain, Hong Kong night neon. MS 35mm, handheld drift, low-key, hard side light, 4:1 contrast.  AI 自动化赚钱：别卖 AI，卖可验证的结果",
+                "clip": [
+                  "2",
+                  0
+                ]
+              }
+            },
+            "5": {
+              "class_type": "CLIPTextEncode",
+              "inputs": {
+                "text": "blurry, distorted face, extra fingers, watermark, text",
+                "clip": [
+                  "2",
+                  0
+                ]
+              }
+            },
+            "6": {
+              "class_type": "ModelSamplingSD3",
+              "inputs": {
+                "shift": 8.0,
+                "model": [
+                  "1",
+                  0
+                ]
+              }
+            },
+            "7": {
+              "class_type": "EmptyHunyuanLatentVideo",
+              "inputs": {
+                "width": 832,
+                "height": 480,
+                "length": 81,
+                "batch_size": 1
+              }
+            },
+            "8": {
+              "class_type": "KSampler",
+              "inputs": {
+                "seed": 20261128,
+                "steps": 30,
+                "cfg": 6.0,
+                "sampler_name": "uni_pc",
+                "scheduler": "simple",
+                "denoise": 1.0,
+                "model": [
+                  "6",
+                  0
+                ],
+                "positive": [
+                  "4",
+                  0
+                ],
+                "negative": [
+                  "5",
+                  0
+                ],
+                "latent_image": [
+                  "7",
+                  0
+                ]
+              }
+            },
+            "9": {
+              "class_type": "VAEDecode",
+              "inputs": {
+                "samples": [
+                  "8",
+                  0
+                ],
+                "vae": [
+                  "3",
+                  0
+                ]
+              }
+            },
+            "10": {
+              "class_type": "SaveAnimatedWEBP",
+              "inputs": {
+                "images": [
+                  "9",
+                  0
+                ],
+                "filename_prefix": "muse/s03",
+                "fps": 16.0,
+                "lossless": false,
+                "quality": 90,
+                "method": "default"
+              }
+            }
+          },
+          "graph_errors": [],
+          "prompt_id": null
+        },
+        {
+          "shot_id": "s04",
+          "workflow": {
+            "1": {
+              "class_type": "UNETLoader",
+              "inputs": {
+                "unet_name": "wan2.1_t2v_1.3B_fp16.safetensors",
+                "weight_dtype": "default"
+              }
+            },
+            "2": {
+              "class_type": "CLIPLoader",
+              "inputs": {
+                "clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+                "type": "wan"
+              }
+            },
+            "3": {
+              "class_type": "VAELoader",
+              "inputs": {
+                "vae_name": "wan_2.1_vae.safetensors"
+              }
+            },
+            "4": {
+              "class_type": "CLIPTextEncode",
+              "inputs": {
+                "text": "cinematic, anamorphic, filmic grain, Hong Kong night neon. CU 85mm, orbit 30°, backlight rim + slow key fade-up.  AI 自动化赚钱：别卖 AI，卖可验证的结果",
+                "clip": [
+                  "2",
+                  0
+                ]
+              }
+            },
+            "5": {
+              "class_type": "CLIPTextEncode",
+              "inputs": {
+                "text": "blurry, distorted face, extra fingers, watermark, text",
+                "clip": [
+                  "2",
+                  0
+                ]
+              }
+            },
+            "6": {
+              "class_type": "ModelSamplingSD3",
+              "inputs": {
+                "shift": 8.0,
+                "model": [
+                  "1",
+                  0
+                ]
+              }
+            },
+            "7": {
+              "class_type": "EmptyHunyuanLatentVideo",
+              "inputs": {
+                "width": 832,
+                "height": 480,
+                "length": 81,
+                "batch_size": 1
+              }
+            },
+            "8": {
+              "class_type": "KSampler",
+              "inputs": {
+                "seed": 20261129,
+                "steps": 30,
+                "cfg": 6.0,
+                "sampler_name": "uni_pc",
+                "scheduler": "simple",
+                "denoise": 1.0,
+                "model": [
+                  "6",
+                  0
+                ],
+                "positive": [
+                  "4",
+                  0
+                ],
+                "negative": [
+                  "5",
+                  0
+                ],
+                "latent_image": [
+                  "7",
+                  0
+                ]
+              }
+            },
+            "9": {
+              "class_type": "VAEDecode",
+              "inputs": {
+                "samples": [
+                  "8",
+                  0
+                ],
+                "vae": [
+                  "3",
+                  0
+                ]
+              }
+            },
+            "10": {
+              "class_type": "SaveAnimatedWEBP",
+              "inputs": {
+                "images": [
+                  "9",
+                  0
+                ],
+                "filename_prefix": "muse/s04",
+                "fps": 16.0,
+                "lossless": false,
+                "quality": 90,
+                "method": "default"
+              }
+            }
+          },
+          "graph_errors": [],
+          "prompt_id": null
+        },
+        {
+          "shot_id": "s05",
+          "workflow": {
+            "1": {
+              "class_type": "UNETLoader",
+              "inputs": {
+                "unet_name": "wan2.1_t2v_1.3B_fp16.safetensors",
+                "weight_dtype": "default"
+              }
+            },
+            "2": {
+              "class_type": "CLIPLoader",
+              "inputs": {
+                "clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+                "type": "wan"
+              }
+            },
+            "3": {
+              "class_type": "VAELoader",
+              "inputs": {
+                "vae_name": "wan_2.1_vae.safetensors"
+              }
+            },
+            "4": {
+              "class_type": "CLIPTextEncode",
+              "inputs": {
+                "text": "cinematic, anamorphic, filmic grain, Hong Kong night neon. MCU 50mm, static lock-off, soft key 45°, warm 3200K practicals.  AI 自动化赚钱：别卖 AI，卖可验证的结果",
+                "clip": [
+                  "2",
+                  0
+                ]
+              }
+            },
+            "5": {
+              "class_type": "CLIPTextEncode",
+              "inputs": {
+                "text": "blurry, distorted face, extra fingers, watermark, text",
+                "clip": [
+                  "2",
+                  0
+                ]
+              }
+            },
+            "6": {
+              "class_type": "ModelSamplingSD3",
+              "inputs": {
+                "shift": 8.0,
+                "model": [
+                  "1",
+                  0
+                ]
+              }
+            },
+            "7": {
+              "class_type": "EmptyHunyuanLatentVideo",
+              "inputs": {
+                "width": 832,
+                "height": 480,
+                "length": 81,
+                "batch_size": 1
+              }
+            },
+            "8": {
+              "class_type": "KSampler",
+              "inputs": {
+                "seed": 20261130,
+                "steps": 30,
+                "cfg": 6.0,
+                "sampler_name": "uni_pc",
+                "scheduler": "simple",
+                "denoise": 1.0,
+                "model": [
+                  "6",
+                  0
+                ],
+                "positive": [
+                  "4",
+                  0
+                ],
+                "negative": [
+                  "5",
+                  0
+                ],
+                "latent_image": [
+                  "7",
+                  0
+                ]
+              }
+            },
+            "9": {
+              "class_type": "VAEDecode",
+              "inputs": {
+                "samples": [
+                  "8",
+                  0
+                ],
+                "vae": [
+                  "3",
+                  0
+                ]
+              }
+            },
+            "10": {
+              "class_type": "SaveAnimatedWEBP",
+              "inputs": {
+                "images": [
+                  "9",
+                  0
+                ],
+                "filename_prefix": "muse/s05",
+                "fps": 16.0,
+                "lossless": false,
+                "quality": 90,
+                "method": "default"
+              }
+            }
+          },
+          "graph_errors": [],
+          "prompt_id": null
+        },
+        {
+          "shot_id": "s06",
+          "workflow": {
+            "1": {
+              "class_type": "UNETLoader",
+              "inputs": {
+                "unet_name": "wan2.1_t2v_1.3B_fp16.safetensors",
+                "weight_dtype": "default"
+              }
+            },
+            "2": {
+              "class_type": "CLIPLoader",
+              "inputs": {
+                "clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+                "type": "wan"
+              }
+            },
+            "3": {
+              "class_type": "VAELoader",
+              "inputs": {
+                "vae_name": "wan_2.1_vae.safetensors"
+              }
+            },
+            "4": {
+              "class_type": "CLIPTextEncode",
+              "inputs": {
+                "text": "cinematic, anamorphic, filmic grain, Hong Kong night neon. WS 24mm, slow push-in, soft key 45°, warm 3200K practicals.  AI 自动化赚钱：别卖 AI，卖可验证的结果",
+                "clip": [
+                  "2",
+                  0
+                ]
+              }
+            },
+            "5": {
+              "class_type": "CLIPTextEncode",
+              "inputs": {
+                "text": "blurry, distorted face, extra fingers, watermark, text",
+                "clip": [
+                  "2",
+                  0
+                ]
+              }
+            },
+            "6": {
+              "class_type": "ModelSamplingSD3",
+              "inputs": {
+                "shift": 8.0,
+                "model": [
+                  "1",
+                  0
+                ]
+              }
+            },
+            "7": {
+              "class_type": "EmptyHunyuanLatentVideo",
+              "inputs": {
+                "width": 832,
+                "height": 480,
+                "length": 81,
+                "batch_size": 1
+              }
+            },
+            "8": {
+              "class_type": "KSampler",
+              "inputs": {
+                "seed": 20261131,
+                "steps": 30,
+                "cfg": 6.0,
+                "sampler_name": "uni_pc",
+                "scheduler": "simple",
+                "denoise": 1.0,
+                "model": [
+                  "6",
+                  0
+                ],
+                "positive": [
+                  "4",
+                  0
+                ],
+                "negative": [
+                  "5",
+                  0
+                ],
+                "latent_image": [
+                  "7",
+                  0
+                ]
+              }
+            },
+            "9": {
+              "class_type": "VAEDecode",
+              "inputs": {
+                "samples": [
+                  "8",
+                  0
+                ],
+                "vae": [
+                  "3",
+                  0
+                ]
+              }
+            },
+            "10": {
+              "class_type": "SaveAnimatedWEBP",
+              "inputs": {
+                "images": [
+                  "9",
+                  0
+                ],
+                "filename_prefix": "muse/s06",
+                "fps": 16.0,
+                "lossless": false,
+                "quality": 90,
+                "method": "default"
+              }
+            }
+          },
+          "graph_errors": [],
+          "prompt_id": null
+        }
+      ],
+      "output_sha256": "ac2d99482337f972496712c8702ab43859b3f4f9ecf25a1b3eba317a0eeb2eb6"
+    },
+    "upscale_1080p_bridge": {
+      "status": "done",
+      "output": {
+        "workflow": {
+          "1": {
+            "class_type": "LoadImagesFromDirectory",
+            "inputs": {
+              "directory": "output/muse/frames480"
+            }
+          },
+          "2": {
+            "class_type": "UpscaleModelLoader",
+            "inputs": {
+              "model_name": "RealESRGAN_x4plus.pth"
+            }
+          },
+          "3": {
+            "class_type": "ImageUpscaleWithModel",
+            "inputs": {
+              "upscale_model": [
+                "2",
+                0
+              ],
+              "image": [
+                "1",
+                0
+              ]
+            }
+          },
+          "4": {
+            "class_type": "ImageScale",
+            "inputs": {
+              "image": [
+                "3",
+                0
+              ],
+              "upscale_method": "lanczos",
+              "width": 1920,
+              "height": 1080,
+              "crop": "center"
+            }
+          },
+          "5": {
+            "class_type": "SaveImage",
+            "inputs": {
+              "images": [
+                "4",
+                0
+              ],
+              "filename_prefix": "muse/sr1080"
+            }
+          }
+        },
+        "upscale_kind": "ai_model",
+        "gate": {
+          "pass": true,
+          "class": "ai_super_resolved_from_480p",
+          "source_height": 480,
+          "disclosure": "AI super-resolution; not native capture"
+        }
+      },
+      "output_sha256": "6c1a8fac94ffe2190370a94957d5d52cf0f7f9fdb76c7cbb16f9b3cd7d25ceaa"
+    },
+    "dub_subtitle_align": {
+      "status": "skipped_no_script",
+      "output": {},
+      "output_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    "loudness_qc": {
+      "status": "pending_audio",
+      "output": {},
+      "output_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    "vlm_review": {
+      "status": "done",
+      "output": {
+        "automated": [],
+        "human_review_queue": [
+          {
+            "shot_id": "s01",
+            "checklist": [
+              "角色/服装与 Story Bible 一致",
+              "无畸形手指/面部",
+              "字幕无遮挡主体",
+              "前 3 秒有视觉打断",
+              "无水印/乱码文字"
+            ],
+            "reason": "vlm_unavailable_or_invalid",
+            "vlm_issues": []
+          },
+          {
+            "shot_id": "s02",
+            "checklist": [
+              "角色/服装与 Story Bible 一致",
+              "无畸形手指/面部",
+              "字幕无遮挡主体",
+              "前 3 秒有视觉打断",
+              "无水印/乱码文字"
+            ],
+            "reason": "vlm_unavailable_or_invalid",
+            "vlm_issues": []
+          },
+          {
+            "shot_id": "s03",
+            "checklist": [
+              "角色/服装与 Story Bible 一致",
+              "无畸形手指/面部",
+              "字幕无遮挡主体",
+              "前 3 秒有视觉打断",
+              "无水印/乱码文字"
+            ],
+            "reason": "vlm_unavailable_or_invalid",
+            "vlm_issues": []
+          },
+          {
+            "shot_id": "s04",
+            "checklist": [
+              "角色/服装与 Story Bible 一致",
+              "无畸形手指/面部",
+              "字幕无遮挡主体",
+              "前 3 秒有视觉打断",
+              "无水印/乱码文字"
+            ],
+            "reason": "vlm_unavailable_or_invalid",
+            "vlm_issues": []
+          },
+          {
+            "shot_id": "s05",
+            "checklist": [
+              "角色/服装与 Story Bible 一致",
+              "无畸形手指/面部",
+              "字幕无遮挡主体",
+              "前 3 秒有视觉打断",
+              "无水印/乱码文字"
+            ],
+            "reason": "vlm_unavailable_or_invalid",
+            "vlm_issues": []
+          },
+          {
+            "shot_id": "s06",
+            "checklist": [
+              "角色/服装与 Story Bible 一致",
+              "无畸形手指/面部",
+              "字幕无遮挡主体",
+              "前 3 秒有视觉打断",
+              "无水印/乱码文字"
+            ],
+            "reason": "vlm_unavailable_or_invalid",
+            "vlm_issues": []
+          }
+        ],
+        "release_requires_human": true,
+        "mode": "human_only"
+      },
+      "output_sha256": "2435203b92575cfb6f3026196d51cb4a5a59622dbf38e46ad303284f7f857eaa"
+    },
+    "retention_feedback": {
+      "status": "awaiting_publication",
+      "output": {
+        "import": "POST official retention CSV after publishing",
+        "hook_ids": [
+          "hook-sound_break-2",
+          "hook-sound_break-1",
+          "hook-visual_shock-1"
+        ]
+      },
+      "output_sha256": "690b089b0815bf6ea3ceff21a6c36de6bc1984c2938457348aa66f06d25d87dc"
+    }
+  },
+  "ready_for_render": false,
+  "release_requires_human_review": true,
+  "manifest_sha256": "22ded866f330e26546ac13ee3a142dc3ee397c147cb9f4e749655e6aae262edf"
+}

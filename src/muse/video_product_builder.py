@@ -653,7 +653,8 @@ class VideoProductBuilder:
 
     def build_from_source(
         self, source_key: str, title: str, *, audio_name: str | None = None,
-        audio_mode: str = "music", aspect_ratio: str = "16:9", fps: int = 30, image_seconds: float = 4.0,
+        audio_mode: str = "music", narration_script: str | None = None,
+        aspect_ratio: str = "16:9", fps: int = 30, image_seconds: float = 4.0,
         encoder: str = "auto", timeout_seconds: int = 3600, motion_profile: str = "none",
         creator_initiative_id: str | None = None, evolution_cycle_id: str | None = None,
         scene_analysis_metadata: list[dict[str, Any]] | None = None,
@@ -662,6 +663,11 @@ class VideoProductBuilder:
             raise ValueError("title must contain 1-160 characters")
         if audio_mode not in {"music", "narration"}:
             raise ValueError("audio_mode must be music or narration")
+        if narration_script is not None:
+            if not isinstance(narration_script, str) or not narration_script.strip() or len(narration_script) > 20_000:
+                raise ValueError("narration_script must contain 1-20000 characters")
+            if audio_name is not None and audio_mode == "narration":
+                raise ValueError("use narration_script for voiceover; an audio file can only be background music in this mode")
         if isinstance(image_seconds, bool) or not isinstance(image_seconds, (int, float)) or not math.isfinite(image_seconds) or not 0.5 <= image_seconds <= 60:
             raise ValueError("image_seconds must be between 0.5 and 60")
         if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int) or timeout_seconds < 1:
@@ -710,6 +716,10 @@ class VideoProductBuilder:
         audio_fact = ({"name": audio.name, "bytes": audio.stat().st_size, "sha256": _hash_file(audio)} if audio else None)
         identity = hashlib.sha256(("muse-video:" + source_key + ":" + title.strip()).encode("utf-8")).hexdigest()[:32]
         settings = {"aspect_ratio": aspect_ratio, "fps": fps, "image_seconds": float(image_seconds), "encoder": encoder, "audio_mode": audio_mode, "motion_profile": motion_profile}
+        if narration_script is not None:
+            settings["narration_script_sha256"] = hashlib.sha256(narration_script.strip().encode("utf-8")).hexdigest()
+            settings["narration_tts_engine"] = "canto-tts-nano"
+            settings["narration_asr_model"] = "whisper-small-cantonese"
         if shot_directives is not None:
             settings["shot_directives"] = shot_directives
         if scene_analysis_report is not None:
@@ -736,7 +746,8 @@ class VideoProductBuilder:
             rendered = staging / "video.mp4"
             result = assemble_video_from_folder(
                 source, base_rendered, ffmpeg_path=ffmpeg, ffprobe_path=ffprobe,
-                available_encoders=inventory.hardware_encoders, audio_path=audio,
+                available_encoders=inventory.hardware_encoders,
+                audio_path=audio if narration_script is None else None,
                 audio_mode=audio_mode, image_seconds=float(image_seconds), width=width,
                 height=height, fps=fps, encoder_preference=encoder, timeout_seconds=timeout_seconds,
             )
@@ -762,6 +773,43 @@ class VideoProductBuilder:
             current_audio_fact = ({"name": audio.name, "bytes": audio.stat().st_size, "sha256": _hash_file(audio)} if audio else None)
             if current_source_facts != source_facts or current_audio_fact != audio_fact:
                 raise VideoProductError("source assets changed during motion rendering; refusing to publish an inconsistent product")
+            if narration_script is not None:
+                rendered_duration = _probe_media_duration_seconds(rendered, ffprobe)
+                if rendered_duration is None or rendered_duration <= 0:
+                    raise VideoProductError("local motion render duration could not be verified")
+                actual_fps = float(result.get("fps") or fps)
+                motion_record = dict(motion) if isinstance(motion, dict) else {}
+                motion_record["profile"] = motion_profile
+                generation_metadata = {
+                    "status": "completed",
+                    "model": "Muse local asset assembly (Remotion + FFmpeg)",
+                    "aspect_ratio": aspect_ratio,
+                    "width": width,
+                    "height": height,
+                    "fps": actual_fps,
+                    "duration_seconds": rendered_duration,
+                    "frames": max(1, round(rendered_duration * actual_fps)),
+                    "has_audio": bool(result.get("has_audio", False)),
+                    "bytes": rendered.stat().st_size,
+                    "encoder": result.get("encoder", encoder),
+                }
+                return self.package_generated_clip_with_cantonese_narration(
+                    title,
+                    f"Local asset assembly from data/video_sources/{source_key}; source SHA-256 recorded.",
+                    rendered,
+                    narration_script,
+                    model_dir=self.workspace / "data" / "models" / "canto-tts-nano",
+                    asr_model_dir=self.workspace / "models" / "whisper-small-cantonese" / "cts",
+                    background_music_path=audio if audio_mode == "music" else None,
+                    motion_profile="none",
+                    pre_rendered_motion=motion_record,
+                    source_assets=source_facts,
+                    production_mode="local_asset_assembly",
+                    ai_generation="not_requested",
+                    generation_metadata=generation_metadata,
+                    creator_initiative_id=creator_initiative_id,
+                    evolution_cycle_id=evolution_cycle_id,
+                )
             if not rendered.is_file() or rendered.stat().st_size > _MAX_PRODUCT_BYTES:
                 raise VideoProductError("rendered MP4 is missing or exceeds the 2 GiB product limit")
             qa_report = _inspect_product_video(
@@ -1498,10 +1546,14 @@ class VideoProductBuilder:
         subtitle_path: str | Path | None = None, narration_asr: dict[str, Any] | None = None,
         narration_evidence_contract: dict[str, Any] | None = None,
         narration_prosody: dict[str, Any] | None = None,
+        narration_synthesis: dict[str, Any] | None = None,
         background_music_path: str | Path | None = None, motion_profile: str = "none",
+        pre_rendered_motion: dict[str, Any] | None = None,
+        source_assets: list[dict[str, Any]] | None = None,
+        production_mode: str = "local_ai_text_to_video", ai_generation: str = "completed",
         creator_initiative_id: str | None = None, evolution_cycle_id: str | None = None,
     ) -> dict[str, Any]:
-        """Package a completed local AI MP4, optionally enforcing claim-grounded narration."""
+        """Package a verified local MP4, optionally enforcing narration and source provenance."""
         if not isinstance(title, str) or not title.strip() or len(title.strip()) > 160:
             raise ValueError("title must contain 1-160 characters")
         if not isinstance(prompt, str) or not prompt.strip() or len(prompt.strip()) > 2000:
@@ -1509,9 +1561,29 @@ class VideoProductBuilder:
         if not isinstance(negative_prompt, str) or len(negative_prompt) > 1000:
             raise ValueError("negative_prompt must be at most 1000 characters")
         if not isinstance(generation_metadata, dict) or generation_metadata.get("status") != "completed":
-            raise ValueError("generation_metadata must describe a completed AI render")
+            raise ValueError("generation_metadata must describe a completed local render")
+        if production_mode not in {"local_ai_text_to_video", "local_asset_assembly"}:
+            raise ValueError("production_mode is unsupported")
+        expected_ai_generation = "completed" if production_mode == "local_ai_text_to_video" else "not_requested"
+        if ai_generation != expected_ai_generation:
+            raise ValueError("ai_generation does not match production_mode")
         if motion_profile not in {"none", "brand_intro_outro"}:
             raise ValueError("motion_profile must be none or brand_intro_outro")
+        if pre_rendered_motion is not None and motion_profile != "none":
+            raise ValueError("pre_rendered_motion cannot be combined with a second motion_profile")
+        if pre_rendered_motion is not None:
+            if (not isinstance(pre_rendered_motion, dict)
+                    or pre_rendered_motion.get("status") not in {"completed", "disabled"}
+                    or pre_rendered_motion.get("profile") not in {"none", "brand_intro_outro", "brand_scene_transitions"}):
+                raise ValueError("pre_rendered_motion must describe a completed supported Remotion profile")
+            motion_keys = {
+                "status", "profile", "transition", "renderer", "composition_id", "width", "height", "fps",
+                "duration_seconds", "frames", "bytes", "sha256", "scene_count",
+                "scene_transition_seconds", "scene_timeline",
+            }
+            pre_rendered_motion = {key: pre_rendered_motion[key] for key in motion_keys if key in pre_rendered_motion}
+            if len(_safe_json(pre_rendered_motion)) > 64 * 1024:
+                raise ValueError("pre_rendered_motion metadata exceeds 64 KiB")
 
         if scene_records is None:
             normalized_scenes = [{
@@ -1658,6 +1730,29 @@ class VideoProductBuilder:
             {"name": narration.name, "bytes": narration.stat().st_size, "sha256": _hash_file(narration)}
             if narration else None
         )
+        narration_synthesis_fact = None
+        if narration_synthesis is not None:
+            if (narration_fact is None or not isinstance(narration_synthesis, dict)
+                    or narration_synthesis.get("status") != "completed"
+                    or not isinstance(narration_synthesis.get("engine"), str)
+                    or not narration_synthesis.get("engine")
+                    or narration_synthesis.get("audio_sha256") != narration_fact["sha256"]):
+                raise VideoProductError("narration synthesis provenance must bind the completed TTS engine to the exact WAV")
+            synthesis_keys = (
+                "status", "engine", "model_repo", "model_revision", "license",
+                "language", "sample_rate", "channels", "frames", "duration_seconds",
+                "bytes", "segment_count", "inserted_pause_frames", "inserted_pause_seconds",
+                "audio_sha256", "applied_controls", "backend_capabilities", "unsupported_controls",
+            )
+            narration_synthesis_fact = {
+                key: narration_synthesis[key] for key in synthesis_keys if key in narration_synthesis
+            }
+            if len(_safe_json(narration_synthesis_fact)) > 64 * 1024:
+                raise VideoProductError("narration synthesis provenance exceeds 64 KiB")
+        if production_mode == "local_asset_assembly" and narration_fact is None:
+            raise VideoProductError("local asset assembly requires a real synthesized narration track")
+        if production_mode == "local_asset_assembly" and narration_synthesis_fact is None:
+            raise VideoProductError("local asset assembly requires auditable CantoTTS synthesis provenance")
         if narration_prosody is not None:
             runtime_prosody = narration_prosody.get("runtime") if isinstance(narration_prosody, dict) else None
             prosody_segments = narration_prosody.get("segments") if isinstance(narration_prosody, dict) else None
@@ -1750,6 +1845,28 @@ class VideoProductBuilder:
                 raise ValueError("narration_asr metadata exceeds 64 KiB")
 
 
+        normalized_source_assets = []
+        if source_assets is not None:
+            if not isinstance(source_assets, list) or not 1 <= len(source_assets) <= 200:
+                raise ValueError("source_assets must contain between 1 and 200 source records")
+            seen_source_names = set()
+            for item in source_assets:
+                if (not isinstance(item, dict) or set(item) != {"name", "bytes", "sha256"}
+                        or not isinstance(item.get("name"), str) or not item["name"]
+                        or Path(item["name"]).name != item["name"] or item["name"] in seen_source_names
+                        or isinstance(item.get("bytes"), bool) or not isinstance(item.get("bytes"), int)
+                        or item["bytes"] <= 0 or not isinstance(item.get("sha256"), str)
+                        or not re.fullmatch(r"[0-9a-f]{64}", item["sha256"])):
+                    raise ValueError("source_assets contains an invalid provenance record")
+                seen_source_names.add(item["name"])
+                normalized_source_assets.append({
+                    "name": item["name"], "bytes": item["bytes"], "sha256": item["sha256"],
+                })
+        if production_mode == "local_asset_assembly" and not normalized_source_assets:
+            raise VideoProductError("local asset assembly requires source asset provenance")
+        if production_mode == "local_asset_assembly" and (subtitle_fact is None or asr_fact is None):
+            raise VideoProductError("local asset assembly requires passed local ASR and a subtitle file")
+
         metadata_keys = {
             "status", "prompt_id", "model", "seed", "aspect_ratio", "fps",
             "duration_seconds", "frames", "width", "height", "steps", "bytes", "has_audio",
@@ -1764,18 +1881,28 @@ class VideoProductBuilder:
             raise ValueError("generation_metadata must contain bounded JSON values") from None
         if len(metadata_bytes) > 16 * 1024:
             raise ValueError("generation_metadata exceeds 16 KiB")
+        effective_motion_profile = (
+            pre_rendered_motion.get("profile") if pre_rendered_motion is not None else motion_profile
+        )
         settings = {key: value for key, value in metadata.items() if key != "status"}
-        identity = hashlib.sha256(("muse-video-ai:" + title.strip() + ":" + prompt.strip()).encode("utf-8")).hexdigest()[:32]
+        settings.update({
+            "production_mode": production_mode,
+            "ai_generation": ai_generation,
+            "motion_profile": effective_motion_profile,
+        })
+        identity_prefix = "muse-video-local:" if production_mode == "local_asset_assembly" else "muse-video-ai:"
+        identity = hashlib.sha256((identity_prefix + title.strip() + ":" + prompt.strip()).encode("utf-8")).hexdigest()[:32]
         fingerprint_data = {
             "builder_version": self.BUILDER_VERSION, "prompt": prompt.strip(),
             "negative_prompt": negative_prompt, "generation_metadata": metadata,
+            "production_mode": production_mode, "ai_generation": ai_generation,
             "scene_records": normalized_scenes, "generated_clip_sha256": source_sha256,
             "narration_asset": narration_fact, "narration_script": narration_script,
-            "narration_prosody": narration_prosody,
-
-            "motion_profile": motion_profile, "subtitle_asset": subtitle_fact,
-            "narration_asr": asr_fact, "background_music_asset": background_music_fact,
-            "scene_assets": scene_asset_facts,
+            "narration_prosody": narration_prosody, "narration_synthesis": narration_synthesis_fact,
+            "motion_profile": effective_motion_profile, "pre_rendered_motion": pre_rendered_motion,
+            "subtitle_asset": subtitle_fact, "narration_asr": asr_fact,
+            "background_music_asset": background_music_fact,
+            "scene_assets": scene_asset_facts, "source_assets": normalized_source_assets,
         }
         if narration_evidence_contract is not None:
             fingerprint_data["narration_evidence_contract"] = narration_evidence_contract
@@ -1894,11 +2021,15 @@ class VideoProductBuilder:
                 isinstance(value, bool) or not isinstance(value, int) for value in (width, height, fps)
             ):
                 raise VideoProductError("motion packaging requires verified integer width, height and fps metadata")
-            motion = self._apply_motion_profile(
-                base_rendered, rendered, motion_profile=motion_profile, title=title.strip(),
-                width=width or 0, height=height or 0, fps=fps or 0,
-                ffmpeg_path=ffmpeg or "", ffprobe_path=ffprobe or "", timeout_seconds=900,
-            )
+            if pre_rendered_motion is not None:
+                shutil.copyfile(base_rendered, rendered)
+                motion = pre_rendered_motion
+            else:
+                motion = self._apply_motion_profile(
+                    base_rendered, rendered, motion_profile=motion_profile, title=title.strip(),
+                    width=width or 0, height=height or 0, fps=fps or 0,
+                    ffmpeg_path=ffmpeg or "", ffprobe_path=ffprobe or "", timeout_seconds=900,
+                )
             if _hash_file(source) != source_sha256:
                 raise VideoProductError("generated source MP4 changed during motion packaging")
             qa_report = _inspect_product_video(
@@ -1920,15 +2051,19 @@ class VideoProductBuilder:
             video_metadata = _finalize_video_metadata(metadata, qa_report, rendered, motion=motion)
             storyboard = {
                 "schema_version": 1, "title": title.strip(),
-                "production_mode": "local_ai_text_to_video", "ai_generation": "completed",
+                "production_mode": production_mode, "ai_generation": ai_generation,
                 "final_output": {key: video_metadata[key] for key in (
                     "duration_seconds", "frames", "width", "height", "fps", "has_audio", "bytes"
                 ) if key in video_metadata},
-                "model": metadata.get("model", "local AI video model"),
+                **({"model": metadata.get("model", "local AI video model")}
+                   if production_mode == "local_ai_text_to_video" else {}),
+                **({"renderer": metadata.get("model", "Remotion + FFmpeg local asset assembly")}
+                   if production_mode == "local_asset_assembly" else {}),
                 "prompt": prompt.strip(), "negative_prompt": negative_prompt,
                 "settings": settings, "source_video_sha256": source_sha256, "motion": motion,
                 "narration": ({
                     "script": narration_script, "audio": narration_fact, "language": "zh-HK",
+                    **({"synthesis": narration_synthesis_fact} if narration_synthesis_fact is not None else {}),
                     **({"prosody": narration_prosody} if narration_prosody is not None else {}),
                     **({"timeline": narration_timeline} if narration_timeline is not None else {}),
                     "loudness_normalization": {"method": "ffmpeg_loudnorm", "target_lufs": -16, "true_peak_db": -1.5, "lra": 11},
@@ -1946,18 +2081,34 @@ class VideoProductBuilder:
                 **({"background_music_mix": background_music_mix} if background_music_mix else {}),
                 "scenes": normalized_scenes,
                 "scene_assets": scene_asset_facts,
+                "source_assets": normalized_source_assets,
             }
-            readme = (
-                f"# {title.strip()}\n\nMuse 本地 AI 视频产品。此包由已完成的本机生成 MP4 恢复封装。\n\n"
-                f"- 模型：{metadata.get('model', '未记录')}\n- 画幅：{metadata.get('aspect_ratio', '未记录')}\n"
-                f"- 分辨率：{metadata.get('width', '未知')}×{metadata.get('height', '未知')}\n"
-                f"- 帧率：{video_metadata.get('fps', '未知')} fps\n"
-                f"- 时长：{video_metadata.get('duration_seconds', '未知')} 秒\n"
-                f"- 旁白：{'已加入音轨' if narration else '未提供音轨'}；字幕：{'已加入' if subtitles else '未提供'}。\n"
-                f"- 视觉诊断：{visual_quality_summary['status']}；信号 {visual_quality_summary['signal_count']}；必须人工审片。\n"
-                "本版本为 480P 生成母版；发布前必须使用真实 AI 超分达到至少 720P，并完成逐镜人工审片。\n"
-                "技术质检通过不代表内容、事实、版权/肖像、披露或平台审核通过。\n"
-            ).encode("utf-8")
+            if production_mode == "local_asset_assembly":
+                readme = (
+                    f"# {title.strip()}\n\nMuse 本地素材 + Cantonese TTS + Remotion / FFmpeg 视频产品。\n\n"
+                    f"- 来源素材：{len(normalized_source_assets)} 项（文件名、字节数与 SHA-256 已记录）\n"
+                    f"- 渲染器：{metadata.get('model', 'Remotion + FFmpeg')}\n"
+                    f"- 分辨率：{metadata.get('width', '未知')}×{metadata.get('height', '未知')}\n"
+                    f"- 帧率：{video_metadata.get('fps', '未知')} fps\n"
+                    f"- 时长：{video_metadata.get('duration_seconds', '未知')} 秒\n"
+                    f"- 粤语 TTS：{narration_synthesis_fact.get('engine') if narration_synthesis_fact else '未提供'}；"
+                    f"ASR：{asr_fact.get('status') if asr_fact else '未执行'}；字幕：{'已加入' if subtitles else '未提供'}。\n"
+                    f"- Remotion 动效：{motion.get('profile', 'none')}；视觉诊断：{visual_quality_summary['status']}；必须人工审片。\n"
+                    "AI 镜头生成：未执行；本路径不调用 ComfyUI / Wan。\n"
+                    "技术质检通过不代表内容、事实、版权/肖像、披露或平台审核通过。\n"
+                ).encode("utf-8")
+            else:
+                readme = (
+                    f"# {title.strip()}\n\nMuse 本地 AI 视频产品。此包由已完成的本机生成 MP4 恢复封装。\n\n"
+                    f"- 模型：{metadata.get('model', '未记录')}\n- 画幅：{metadata.get('aspect_ratio', '未记录')}\n"
+                    f"- 分辨率：{metadata.get('width', '未知')}×{metadata.get('height', '未知')}\n"
+                    f"- 帧率：{video_metadata.get('fps', '未知')} fps\n"
+                    f"- 时长：{video_metadata.get('duration_seconds', '未知')} 秒\n"
+                    f"- 旁白：{'已加入音轨' if narration else '未提供音轨'}；字幕：{'已加入' if subtitles else '未提供'}。\n"
+                    f"- 视觉诊断：{visual_quality_summary['status']}；信号 {visual_quality_summary['signal_count']}；必须人工审片。\n"
+                    "本版本为 480P 生成母版；发布前必须使用真实 AI 超分达到至少 720P，并完成逐镜人工审片。\n"
+                    "技术质检通过不代表内容、事实、版权/肖像、披露或平台审核通过。\n"
+                ).encode("utf-8")
             (staging / "README.md").write_bytes(readme)
             (staging / "storyboard.json").write_bytes(_safe_json(storyboard))
             (staging / "qa-report.json").write_bytes(_safe_json(qa_report))
@@ -1990,10 +2141,19 @@ class VideoProductBuilder:
             files = {name: _hash_file(staging / name) for name in file_names}
             video_metadata["output"] = "video.mp4"
             video_metadata["motion"] = motion
+            if production_mode == "local_asset_assembly":
+                local_tools_invoked = ["ffmpeg", "ffprobe", "canto_tts", "cantonese_asr"]
+                if effective_motion_profile != "none":
+                    local_tools_invoked.extend(["node", "remotion"])
+            else:
+                local_tools_invoked = ["comfyui", "wan21"] + (["ffmpeg"] if narration else [])
+                if effective_motion_profile != "none":
+                    local_tools_invoked.extend(["node", "remotion", "ffmpeg"])
             manifest = {
                 "schema_version": 1, "builder_version": self.BUILDER_VERSION,
                 "product_kind": "video_creator", "initiative_id": identity, "version_id": version,
                 "title": title.strip(), "status": "testing", "generated_at": datetime.now(timezone.utc).isoformat(),
+                "production_mode": production_mode, "ai_generation": ai_generation,
                 "input_sha256": fingerprint, "files": files, "video_metadata": video_metadata,
                 "quality_gate": quality_gate,
                 "visual_quality": visual_quality_summary,
@@ -2013,11 +2173,13 @@ class VideoProductBuilder:
                             "attack_ms": 20, "release_ms": 450,
                             "loudness_normalization": {"method": "ffmpeg_loudnorm", "target_lufs": -16, "true_peak_db": -1.5, "lra": 11}},
                 } if background_music_fact else None),
-                "source_assets": [], "audio_asset": narration_fact,
+                "source_assets": normalized_source_assets, "audio_asset": narration_fact,
+                "narration_synthesis": narration_synthesis_fact,
                 "narration": ({
                     "script": narration_script, "language": "zh-HK",
                     "loudness_normalization": {"method": "ffmpeg_loudnorm", "target_lufs": -16, "true_peak_db": -1.5, "lra": 11},
                     "audio_file": "narration/voiceover" + narration.suffix.casefold(),
+                    **({"synthesis": narration_synthesis_fact} if narration_synthesis_fact is not None else {}),
                     **({"prosody": narration_prosody} if narration_prosody is not None else {}),
                     **({"subtitles_file": "subtitles.srt"} if subtitles else {}),
                     **({"asr_status": asr_fact["status"]} if asr_fact else {}),
@@ -2027,9 +2189,8 @@ class VideoProductBuilder:
                    if narration_evidence_contract is not None else {}),
                 **({"background_music_mix": background_music_mix} if background_music_mix else {}),
                 "execution": {
-                    "local_tools_invoked": ["comfyui", "wan21"] + (["ffmpeg"] if narration else [])
-                    + (["node", "remotion", "ffmpeg"] if motion_profile != "none" else []),
-                    "ai_generation": "completed",
+                    "local_tools_invoked": local_tools_invoked,
+                    "ai_generation": ai_generation,
                 },
             }
             (staging / "manifest.json").write_text(
@@ -2058,7 +2219,7 @@ class VideoProductBuilder:
         if not isinstance(narration_script, str) or not narration_script.strip() or len(narration_script) > 20_000:
             raise ValueError("narration_script must contain 1-20000 characters")
         if any(key in package_options for key in (
-            "narration_path", "narration_script", "subtitle_path", "narration_asr", "narration_prosody",
+            "narration_path", "narration_script", "subtitle_path", "narration_asr", "narration_prosody", "narration_synthesis",
         )):
             raise ValueError("narration and ASR assets are managed by the Cantonese narration wrapper")
         payload = (
@@ -2098,19 +2259,21 @@ class VideoProductBuilder:
                     raise VideoProductError(
                         f"Cantonese ASR CER gate failed (status={asr_result.get('status')}, cer={cer}); refusing to package narration"
                     )
+            synthesis_summary = {
+                key: synthesis[key] for key in (
+                    "status", "engine", "model_repo", "model_revision", "license",
+                    "language", "sample_rate", "channels", "frames", "duration_seconds", "bytes",
+                    "segment_count", "inserted_pause_frames", "inserted_pause_seconds",
+                    "audio_sha256", "applied_controls", "backend_capabilities", "unsupported_controls",
+                ) if key in synthesis
+            }
             packaged = self.package_generated_clip(
                 title, prompt, source_path, narration_path=audio_path,
                 narration_script=narration_script, narration_prosody=narration_prosody,
+                narration_synthesis=synthesis_summary,
                 subtitle_path=subtitle_path, narration_asr=asr_result, **package_options,
             )
-        packaged["narration_synthesis"] = {
-            key: synthesis[key] for key in (
-                "status", "engine", "model_repo", "model_revision", "license",
-                "language", "sample_rate", "channels", "frames", "duration_seconds", "bytes",
-                "segment_count", "inserted_pause_frames", "inserted_pause_seconds",
-                "audio_sha256", "applied_controls", "backend_capabilities", "unsupported_controls",
-            ) if key in synthesis
-        }
+        packaged["narration_synthesis"] = synthesis_summary
         if narration_prosody is not None:
             packaged["narration_prosody"] = narration_prosody
         if asr_result is not None:
