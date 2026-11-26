@@ -7,6 +7,7 @@
 //! "安全退出" in the tray, or a crash of this process always tears the engine down.
 
 mod backup;
+mod crash;
 mod hardware;
 mod sidecar;
 mod tray;
@@ -84,9 +85,11 @@ fn win_toggle_maximize(window: tauri::WebviewWindow) -> Result<bool, String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    crash::install_panic_hook();
+    crash::launch_breadcrumb(env!("CARGO_PKG_VERSION"));
     sidecar::install_process_guard();
 
-    let app = tauri::Builder::default()
+    let built = tauri::Builder::default()
         .manage(sidecar::EngineState::default())
         .setup(|app| {
             let handle = app.handle().clone();
@@ -114,8 +117,12 @@ pub fn run() {
             win_close,
             win_toggle_maximize
         ])
-        .build(tauri::generate_context!())
-        .expect("无法构建 Muse 桌面客户端");
+        .build(tauri::generate_context!());
+    let app = match built {
+        Ok(app) => app,
+        // Typical: WebView2 runtime missing/broken, or the window could not be created.
+        Err(error) => crash::fatal("创建主窗口（WebView2）", &error.to_string()),
+    };
 
     app.run(|handle, event| match event {
         RunEvent::WindowEvent {

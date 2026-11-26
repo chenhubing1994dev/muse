@@ -707,6 +707,7 @@ fn supervise(app: &AppHandle, data_dir: &Path) {
                     if failures >= MAX_FAILURES {
                         need_start = false;
                         state.set_phase("error", error.clone());
+                        crate::crash::log_error("内置引擎启动失败（已重试 5 次）", &error);
                         if smoke_mode() {
                             write_smoke_report(data_dir, &serde_json::json!({"ok": false, "error": error}));
                             shutdown(app);
@@ -727,6 +728,8 @@ fn supervise(app: &AppHandle, data_dir: &Path) {
                     need_start = true;
                 } else {
                     state.set_phase("error", "内置引擎多次异常退出，请点击“重新启动引擎”或查看日志");
+                    crate::crash::log_error("内置引擎多次异常退出",
+                        &format!("日志：{}", data_dir.join("logs").join("muse-engine.log").display()));
                     navigate_url(app, SPLASH_URL);
                 }
             }

@@ -50,6 +50,9 @@ BACKUP_TAG = "backup-main-pre-omega"
 REMOTE_URL = "https://github.com/chenhubing1994dev/muse.git"
 REPO_SLUG = "chenhubing1994dev/muse"
 WEEKLY_WORKFLOW = "weekly-cross-platform-release.yml"
+# Local Windows build release tag. Deliberately NOT "v*.*.*": that pattern would re-trigger the weekly
+# cross-platform workflow, which then writes its own assets into the same release.
+LOCAL_RELEASE_TAG = "muse-windows-local-{version}"
 OUT_DIR = ROOT / "开箱即用安装包"
 REPORT_DIR = ROOT / "reports" / "autopilot"
 REPORT_MD = REPORT_DIR / "stage2_client_latest.md"
@@ -89,7 +92,7 @@ STAGE2_FILES = [
     "src-tauri/Cargo.toml", "src-tauri/build.rs", "src-tauri/tauri.conf.json",
     "src-tauri/capabilities/default.json", "src-tauri/binaries/.gitkeep",
     "src-tauri/src/main.rs", "src-tauri/src/lib.rs", "src-tauri/src/sidecar.rs", "src-tauri/src/hardware.rs",
-    "src-tauri/src/tray.rs", "src-tauri/src/backup.rs", "src-tauri/sidecar-launcher/main.rs",
+    "src-tauri/src/tray.rs", "src-tauri/src/backup.rs", "src-tauri/src/crash.rs", "src-tauri/sidecar-launcher/main.rs",
     "src-tauri/icons/32x32.png", "src-tauri/icons/128x128.png", "src-tauri/icons/128x128@2x.png",
     "src-tauri/icons/icon.png", "src-tauri/icons/icon.ico", "src-tauri/icons/icon.icns",
     ".github/workflows/weekly-cross-platform-release.yml", ".github/workflows/ci-pr-verify.yml",
@@ -262,6 +265,13 @@ def run_cargo(cmd: list[str], *, cwd: Path = ROOT, timeout: int = 5400, check: b
             time.sleep(2)
             continue
         break
+    global CARGO_TARGET_DIR
+    if code != 0 and re.search(r"os error 5|拒绝访问|Access is denied|PermissionDenied", out, re.I) \
+            and CARGO_TARGET_DIR != LEGACY_CARGO_TARGET_DIR:
+        R.log(f"{CARGO_TARGET_DIR} 持续 os error 5 → 改用已验证可用的 {LEGACY_CARGO_TARGET_DIR} 重新编译")
+        CARGO_TARGET_DIR = LEGACY_CARGO_TARGET_DIR
+        R.facts["cargo_target_dir_fallback"] = str(CARGO_TARGET_DIR)
+        code, out = run(cmd, cwd=cwd, env=cargo_env(), timeout=timeout, check=False, label=label + "（C 盘回退）")
     if check and code != 0:
         raise StepFailed(f"{Path(str(cmd[0])).name} 退出码 {code}：{out[-1500:]}")
     return code, out
@@ -269,7 +279,8 @@ def run_cargo(cmd: list[str], *, cwd: Path = ROOT, timeout: int = 5400, check: b
 
 def release_dirs() -> list[Path]:
     """Cargo release output dirs: C: target dir first, legacy ``src-tauri/target/release`` as fallback."""
-    return [CARGO_TARGET_DIR / "release", SRC_TAURI / "target" / "release"]
+    dirs = [CARGO_TARGET_DIR / "release", LEGACY_CARGO_TARGET_DIR / "release", SRC_TAURI / "target" / "release"]
+    return list(dict.fromkeys(dirs))
 
 
 def find_release_file(*parts: str) -> Path | None:
@@ -302,6 +313,28 @@ def cleanup_legacy_cargo_cache() -> None:
         shutil.rmtree(legacy, ignore_errors=True)
         R.facts["legacy_cargo_cache_removed"] = not legacy.exists()
 
+BUILD_INPUTS = ("src-tauri/src", "src-tauri/sidecar-launcher", "src-tauri/capabilities", "src-tauri/icons",
+                "src-tauri/Cargo.toml", "src-tauri/build.rs", "src-tauri/tauri.conf.json", "client-splash",
+                "src/muse_sidecar_main.py", "src/muse", "ui-prototype/src", "ui-prototype/index.html",
+                "ui-prototype/package.json", "scripts/build_sidecar.py")
+SKIP_PARTS = {"__pycache__", "node_modules", "target", "dist", ".pytest_cache"}
+
+
+def newest_source_change(since: float) -> str | None:
+    """Relative path of a build input modified after ``since`` (installer mtime), else None."""
+    for rel in BUILD_INPUTS:
+        base = ROOT / rel
+        items = [base] if base.is_file() else (p for p in base.rglob("*") if p.is_file()) if base.is_dir() else []
+        for item in items:
+            if SKIP_PARTS.intersection(item.relative_to(ROOT).parts) or item.suffix in {".pyc", ".bak", ".log"}:
+                continue
+            try:
+                if item.stat().st_mtime > since + 2:
+                    return item.relative_to(ROOT).as_posix()
+            except OSError:
+                continue
+    return None
+
 
 def deliverables_ready() -> tuple[bool, str]:
     """True when setup.exe + portable zip + SHA256SUMS.txt exist and every listed hash matches."""
@@ -312,6 +345,9 @@ def deliverables_ready() -> tuple[bool, str]:
     missing = [p.name for p in (setup, portable, sums) if not p.is_file()]
     if missing:
         return False, "缺少 " + "、".join(missing)
+    newer = newest_source_change(min(setup.stat().st_mtime, portable.stat().st_mtime))
+    if newer:
+        return False, f"源码有更新（{newer}），需要重新编译"
     listed: dict[str, str] = {}
     for line in sums.read_text(encoding="utf-8").splitlines():
         parts = line.strip().split(None, 1)
@@ -527,7 +563,9 @@ def step_installer(info: dict[str, object], exe: Path, *, open_explorer: bool) -
     readme = ("Muse 星枢 绿色免安装版\r\n\r\n1. 解压到任意文件夹，双击 Muse.exe 即可使用（无需安装 Python）。\r\n"
               "2. 同目录的 MUSE_PORTABLE 标记让数据保存在 .\\muse-data\\，整个文件夹可直接拷走。\r\n"
               "3. 需要 Microsoft Edge WebView2 运行时（Windows 10/11 默认自带）。\r\n"
-              "4. 常驻自主守护默认关闭（安全 stopped），可在主控台或托盘一键开关。\r\n")
+              "4. 常驻自主守护默认关闭（安全 stopped），可在主控台或托盘一键开关。\r\n"
+              "5. 若双击后没有窗口：会弹出中文错误提示；日志在本文件夹的 muse-crash.log / muse-launch.log，\r\n"
+              "   或 %LOCALAPPDATA%\\Muse\\ 下的同名文件。被杀毒软件拦截时，请把整个文件夹放到 C:\\ 或桌面再运行。\r\n")
     with zipfile.ZipFile(portable, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
         archive.write(exe, "Muse/Muse.exe")
         archive.write(engine, "Muse/muse-engine.exe")
@@ -640,6 +678,88 @@ def squash_clean_release(remote_main: str) -> None:
     R.step("4d+ Squash 干净发布提交", "ok", f"{BRANCH} @ {head}（备份 {tag}）")
 
 
+def ensure_gh_auth() -> str | None:
+    """Return the gh path when logged in; otherwise run the one-time browser login (gh auth login --web)."""
+    gh = which("gh")
+    if not gh:
+        return None
+    if run([gh, "auth", "status", "-h", "github.com"], check=False, stream=False)[0] == 0:
+        return gh
+    print("\n" + "-" * 62)
+    print("  需要一次性登录 GitHub CLI（用于上传安装包到 Releases、触发云端编译）。")
+    print("  接下来会显示一次性验证码，并打开浏览器：粘贴验证码 → 点 Authorize 即可。")
+    print("-" * 62, flush=True)
+    env = dict(ENV, GH_PROMPT_DISABLED="")
+    subprocess.call([gh, "auth", "login", "--web", "-h", "github.com", "-p", "https", "-s", "workflow"], env=env)
+    subprocess.call([gh, "auth", "setup-git"], env=env)
+    if run([gh, "auth", "status", "-h", "github.com"], check=False, stream=False)[0] == 0:
+        R.log("GitHub CLI 登录成功（凭据由 gh 保存在本机，脚本不读取、不记录令牌）")
+        return gh
+    return None
+
+
+def stage_release_assets(version: str) -> list[Path]:
+    """Copy deliverables to ASCII asset names (GitHub mangles CJK attachment names) + matching SHA256SUMS."""
+    staging = Path(tempfile.gettempdir()) / "muse_release_assets"
+    shutil.rmtree(staging, ignore_errors=True)
+    staging.mkdir(parents=True, exist_ok=True)
+    mapping = {
+        OUT_DIR / f"Muse_{version}_x64-setup.exe": f"Muse_{version}_x64-setup.exe",
+        OUT_DIR / "Muse_Windows_x64_绿色免安装版.zip": f"Muse_{version}_Windows_x64_Portable.zip",
+    }
+    assets = []
+    for src, name in mapping.items():
+        dst = staging / name
+        shutil.copy2(src, dst)
+        if dst.stat().st_size != src.stat().st_size:
+            raise StepFailed(f"暂存 Release 附件失败：{name}")
+        assets.append(dst)
+    sums = staging / "SHA256SUMS.txt"
+    sums.write_text("".join(f"{sha256(p)}  {p.name}\n" for p in assets), encoding="utf-8")
+    return assets + [sums]
+
+
+def step_release_upload(gh: str | None) -> None:
+    """4i: upload the locally built Windows installer + portable zip to a GitHub Release (idempotent)."""
+    name = "4i 上传安装包到 GitHub Releases"
+    ready, why = deliverables_ready()
+    if not ready:
+        R.step(name, "warn", f"本地安装包未就绪（{why}），未上传；可加 --rebuild 重新编译")
+        return
+    if not gh:
+        R.step(name, "warn", f"gh 未登录/未安装：可手动上传到 https://github.com/{REPO_SLUG}/releases/new")
+        return
+    version = tauri_version()
+    tag = LOCAL_RELEASE_TAG.format(version=version)
+    assets = stage_release_assets(version)
+    files = [str(p) for p in assets]
+    exists = run([gh, "release", "view", tag, "-R", REPO_SLUG], check=False, stream=False)[0] == 0
+    if exists:
+        code, out = run([gh, "release", "upload", tag, *files, "--clobber", "-R", REPO_SLUG], check=False,
+                        timeout=1800, label="gh release upload（覆盖同名附件）")
+    else:
+        notes = Path(tempfile.gettempdir()) / "muse_release_assets" / "RELEASE_NOTES.md"
+        notes.write_text(
+            f"## Muse 星枢 {version} · Windows x64（本机编译）\n\n"
+            f"| 文件 | 用法 |\n|---|---|\n"
+            f"| `Muse_{version}_x64-setup.exe` | 中文一键安装包，双击安装（当前用户，无需管理员）。 |\n"
+            f"| `Muse_{version}_Windows_x64_Portable.zip` | 绿色免安装版：解压后双击 `Muse.exe`，无需安装 Python。 |\n"
+            f"| `SHA256SUMS.txt` | 校验：`certutil -hashfile <文件> SHA256`。 |\n\n"
+            "- 需要 Microsoft Edge WebView2 运行时（Windows 10/11 默认自带）。\n"
+            "- 用户数据保存在本机，卸载默认保留。\n"
+            "- macOS / Linux 安装包由每周云端全平台编译自动发布（见其他 Release）。\n", encoding="utf-8")
+        code, out = run([gh, "release", "create", tag, *files, "-R", REPO_SLUG, "--target", MAIN,
+                         "--title", f"Muse {version} · Windows x64", "--notes-file", str(notes), "--latest"],
+                        check=False, timeout=1800, label="gh release create")
+    url = f"https://github.com/{REPO_SLUG}/releases/tag/{tag}"
+    if code == 0:
+        R.facts["release"] = {"tag": tag, "url": url, "assets": [p.name for p in assets], "updated": exists}
+        R.step(name, "ok", f"{'已更新' if exists else '已发布'} {url}（{len(assets)} 个附件）")
+    else:
+        R.facts["release_tail"] = out[-1500:]
+        R.step(name, "warn", f"上传失败（源码已推送，不影响 main）：{out[-300:]}")
+
+
 def _push_and_trigger(remote: str, *, skip_push: bool) -> None:
     if skip_push:
         R.step("4g 推送 GitHub", "skip", "--skip-push")
@@ -650,7 +770,7 @@ def _push_and_trigger(remote: str, *, skip_push: bool) -> None:
         raise StepFailed("git push 失败（已保留本地 main 与备份标签，未强推）：" + out[-500:])
     R.step("4g 推送 GitHub main", "ok", f"{remote} → {REMOTE_URL}")
 
-    gh = which("gh")
+    gh = ensure_gh_auth()
     if gh:
         code, out = run([gh, "workflow", "run", WEEKLY_WORKFLOW, "--ref", MAIN, "-R", REPO_SLUG], check=False,
                         stream=False)
@@ -658,9 +778,8 @@ def _push_and_trigger(remote: str, *, skip_push: bool) -> None:
                f"https://github.com/{REPO_SLUG}/actions/workflows/{WEEKLY_WORKFLOW}" if code == 0 else out[-300:])
     else:
         R.step("4h 触发首次全平台云端编译", "warn",
-               f"未安装 gh：已按 cron 每周一 02:00 自动编译，也可在 https://github.com/{REPO_SLUG}/actions 点 Run workflow")
-
-
+               f"gh 未安装或未登录：已按 cron 每周一 02:00 自动编译，也可在 https://github.com/{REPO_SLUG}/actions 点 Run workflow")
+    step_release_upload(gh)
 
 
 def step_audit_and_sync(*, skip_push: bool) -> None:
@@ -824,6 +943,9 @@ def main(argv: list[str] | None = None) -> int:
     print()
     if exit_code == 0:
         print("[完成] 安装包位于 开箱即用安装包\\ ，源码已同步 GitHub main，每周一 02:00 自动全平台编译。")
+        release = R.facts.get("release")
+        if isinstance(release, dict):
+            print(f"[下载页] {release.get('url')}")
     else:
         print(f"[注意] 有步骤未通过，退出码 {exit_code}。请把下面的报告发给 AI 继续修复：")
     print(f"报告：{REPORT_MD.relative_to(ROOT)}", flush=True)
