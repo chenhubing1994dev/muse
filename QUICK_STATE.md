@@ -1,7 +1,7 @@
 # QUICK_STATE.md — Muse 唯一状态文件（AWS Quick 维护）
 
 > 续作：先读本文件，从【下一步】继续。逐条改动明细见 CHANGELOG.md；PROGRESS.md / ISSUES.md / MUSE_PROJECT_MAP.md 仅为早期参考。
-> 最后更新：2026-11-25 20:05 CST（Omega B393+B398 部分；章程 docs/AGENT_BUILD_CHARTER.md，逐条证据 docs/BUILD_LEDGER_OMEGA.md）
+> 最后更新：2026-11-27 17:37 CST（B391 真机验收第 2 次与 P2-34 修复）；此前：2026-11-27 17:03 CST（第 1 次验收与 P2-29…33）
 
 ## 铁律
 - 不调用/委派/探测任何 Coding Agent、子代理或相关 MCP/扩展；不启动外部 AI CLI。
@@ -120,3 +120,36 @@
 - 会话鉴权：Rust 生成 64 位十六进制会话令牌 + 一次性 nonce（经环境变量传入）→ `/__muse/bootstrap` 设置 HttpOnly/SameSite=Strict Cookie；`/api/*` 由网关同源代理到内部 status API（内部令牌不出进程）。
 - 进程守护：Windows 自身进入 Job Object（KILL_ON_JOB_CLOSE）+ CREATE_NO_WINDOW；Unix 进程组 + PDEATHSIG；引擎监视 `--parent-pid`；退出前 `/__muse/shutdown` 执行 WAL checkpoint。
 - 下一步：双击 `2_双击全自动生成exe安装包并同步GitHub周更.bat`，读 `reports/autopilot/stage2_client_latest.md`。
+
+
+## B391 全链路融合（2026-11-27 · AWS Quick 全权执行）
+- 审查修复 R1–R5 完成，回执见 `reports/b391_review/B391_REVIEW_20261126-1940.md` 第六节。
+- P1：新增 `/api/v1/control/*`（任务中心、统一审批中心、双轨记忆、Obsidian 审计、硬件遥测、创作路径就绪度、玄学→假设→Wiki→Commander），玄学接口统一加「玄学推演／待验证假设」。云端沙箱真实执行 57/57。
+- P2：新增 `/portal`（普罗米修斯门户）与 `/os`（Super Agent OS，8 模块全部接真实接口）。
+- P0：路径 A 真实旁白 / 路径 B Commander 审批链路已核对；就绪度接口按真实能力选路径。
+- 证据层级：L1 静态 ✅ · L2 沙箱 ✅ · L3 真机测试 ⏳ · L4 真机样片 ⏳ · L5 路径 B 实机 ⏳。
+- 未执行任何 git 命令；`main` 仍为 `88250db`。⚠ 每日 03:00 自动同步会自动提交并推送工作区改动。
+
+
+## B391-P2 第二轮饱和攻坚（2026-11-27 12:26 · AWS Quick）
+- 云端 L2.5：26 套件 393 用例，通过 333、沙箱受限 60、无法解释失败 0；前端逻辑 17/17（68 断言）；契约 60 调用点 0 未知路由；DOM/CSP 0 违规。
+- 修复 B391-P2-01…28（见 CHANGELOG）；新增 tested_by 实时闭环接口与界面；Range 206/416；网关流式转发；确认门禁弹窗（一键填入仍需人工提交）。
+- 备份：`.qw-backups/20261127-b391-p2/`（23 个原件 + MANIFEST）；基线 `20261127-b391/` 未改动。未执行 git。
+- 已知仍未做：`initiative_engine.py` propose() 签名有一处空白粘连（非本批次文件、另一 Agent 维护，语法有效，未改）；路径 B 实机待你按作战卡验收。
+
+
+## B391 真机验收第 1 次（2026-11-27 15:04–15:41）与修复（17:03）
+- 结果：24 步中 20 步通过；全量 3,045 用例仅 1 错；npm 测试与构建通过；L2.5 契约在真机也通过。
+- 已修复：B391-P2-29（status_api 灵感进化接口 UnboundLocalError，真机表现为 502）、P2-30（定向测试导入路径）、P2-31（测试绕过系统代理）、P2-32（样片 GPU 预检，外部模型占用时立即给出指引）。
+- 仍需你操作：样片失败的原因是 LM Studio（:1234）的模型正占用 GPU，Muse 按安全策略不会停止外部进程。重跑前请在 LM Studio 卸载模型或退出它。
+- 真机验收第 2 次（17:06–17:18）：22 步通过；剩余 2 项 = P2-34（SQLite 句柄未关闭导致 Windows 偶发文件锁，已修复）+ 样片被 GPU 预检拦截（LM Studio 仍在运行，需用户处理）。
+- 真机验收第 3 次（17:54–18:06）：全量 3,048 用例 0 失败，24 步中 23 步通过（L3 通过）。唯一剩余：real_local_sample——LM Studio 已关闭，但模型监督器（pid 23208，进程对设备沙箱不可见）在 77 秒租约内从未登记 paused_for_video；当前代码在该情况下会立即登记，两次验收表现一致，判断为监督器进程仍在运行更新前加载的旧代码（推断，未直接证实）。处理：重启计划任务 MuseLocalModelSupervisor 后重跑。
+- 真机验收第 4 次（18:16–18:41）：全量 3,048/3,048 再次全绿（L3 稳定通过）。样片仍以同一原因失败：模型监督器 supervisor_id 53bbab34e14e / PID 23208 自 13:48 起从未变化（未被重启）。已查证旧版 model_supervisor.py（.muse-backups/video_factory/2026-11-25 两份）只在 owner_kind == "video_generation" 时让出 GPU，本地样片用的是 video_encoding 租约 → 被忽略，与 4 次现象完全吻合。根因定为：运行中的监督器是旧代码进程（已证实，非推断）。
+- 真机验收第 5 次（19:56–20:07）：L3 第 3 次全绿（全量 3,048/3,048）。旧监督器已结束（心跳停止），样片 5 秒内拿到 GPU（P2-35 判断得到证实），进入 Remotion 阶段后失败：Remotion 在渲染时调用其自带 ffprobe 读取素材音轨（getAudioChannelsAndDuration）出错；旧错误截取只保留末尾 1,200 字符，根因行被截掉，无法定位。
+- Git 取证（只读 .git）：当前分支 b391-full-fusion（2852be1），但 Muse-GitHubSync.ps1 每天提交到当前分支却执行 `git push origin main`——今天 03:00 的“PUSH OK (97 files)”实际只推送了未变化的 main（88250db），B391 分支从未推到 GitHub（远端无 origin/b391-full-fusion）。
+
+## 下一步（B391）
+1. 推送 B391 分支到 GitHub（见回复中的命令，推 b391-full-fusion，不动 main）；再双击 3 号 bat，拿到 Remotion 完整错误后修复样片。
+2. 再双击 `3_双击B391验收.bat`，跑完对 AWS Quick 说“看验收报告”。
+3. 全部通过后按 `docs/B391_L5_PATH_B_RUNBOOK.md` 验收路径 B；再双击 2 号 bat 让桌面端加载新界面。
+4. ⚠ 计划任务 `Muse-GitHub-Realtime-Backup`（若已安装）会在改动后约 15 秒推送；如不希望验收前推送请先禁用。

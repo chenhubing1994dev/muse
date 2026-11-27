@@ -22,6 +22,24 @@ class RemotionMotionError(RuntimeError):
     """Remotion motion graphics could not be rendered or safely assembled."""
 
 
+
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+
+
+def _failure_detail(completed: Any, fallback: str, *, head: int = 1500, tail: int = 1500) -> str:
+    """B391-P2-36: keep the START of a failing tool's output (where Node/FFmpeg state the cause) and its end.
+
+    The previous ``[-1200:]`` slice kept only stack frames, so the real error line was never reported.
+    ANSI colour codes from the Remotion CLI are stripped.
+    """
+    text = getattr(completed, "stderr", None) or getattr(completed, "stdout", None) or fallback
+    if isinstance(text, bytes):
+        text = text.decode("utf-8", errors="replace")
+    text = _ANSI_ESCAPE.sub("", str(text)).strip() or fallback
+    if len(text) <= head + tail + 20:
+        return text
+    return text[:head] + "\n… [" + str(len(text) - head - tail) + " characters omitted] …\n" + text[-tail:]
+
 def _run_process(runner: Callable, command: list[str], **kwargs):
     try:
         return runner(command, **kwargs)
@@ -290,7 +308,7 @@ def render_scene_timeline(
                 rendered = _run_process(runner, command, capture_output=True, text=True,
                                          timeout=timeout_seconds, check=False)
                 if rendered.returncode != 0 or not normalized.is_file() or normalized.stat().st_size == 0:
-                    detail = (rendered.stderr or rendered.stdout or "FFmpeg scene normalization failed")[-1000:]
+                    detail = _failure_detail(rendered, "FFmpeg scene normalization failed")
                     raise RemotionMotionError(f"scene {index + 1} normalization failed: {detail}")
                 info = _probe(normalized, ffprobe_path=ffprobe_path, runner=runner, timeout=timeout_seconds)
                 frames = max(2, round(info["duration_seconds"] * fps))
@@ -316,7 +334,7 @@ def render_scene_timeline(
             completed = _run_process(runner, command, cwd=str(motion_root), capture_output=True,
                                      text=True, timeout=timeout_seconds, check=False)
             if completed.returncode != 0 or not timeline.is_file() or timeline.stat().st_size == 0:
-                detail = (completed.stderr or completed.stdout or "Remotion timeline render failed")[-1200:]
+                detail = _failure_detail(completed, "Remotion timeline render failed")
                 raise RemotionMotionError(f"Remotion scene timeline failed: {detail}")
             timeline_info = _probe(timeline, ffprobe_path=ffprobe_path, runner=runner, timeout=timeout_seconds)
             if (timeline_info["width"] != width or timeline_info["height"] != height
@@ -339,7 +357,7 @@ def render_scene_timeline(
                                  timeout=timeout_seconds, check=False)
             if muxed.returncode != 0 or not output.is_file() or output.stat().st_size == 0:
                 output.unlink(missing_ok=True)
-                detail = (muxed.stderr or muxed.stdout or "FFmpeg audio mux failed")[-1000:]
+                detail = _failure_detail(muxed, "FFmpeg audio mux failed")
                 raise RemotionMotionError(f"scene timeline audio mux failed: {detail}")
             created_output = True
         final_info = _probe(output, ffprobe_path=ffprobe_path, runner=runner, timeout=timeout_seconds)
@@ -480,7 +498,7 @@ def render_motion_package(
                 timeout=timeout_seconds, check=False,
             )
             if completed.returncode != 0 or not target.is_file() or target.stat().st_size == 0:
-                detail = (completed.stderr or completed.stdout or "Remotion returned no MP4")[-1200:]
+                detail = _failure_detail(completed, "Remotion returned no MP4")
                 raise RemotionMotionError(f"Remotion {kind} render failed: {detail}")
             bumper = _probe(target, ffprobe_path=ffprobe_path, runner=runner, timeout=timeout_seconds)
             if (bumper["width"] != width or bumper["height"] != height
@@ -539,7 +557,7 @@ def render_motion_package(
         )
         if combined.returncode != 0 or not output.is_file() or output.stat().st_size == 0:
             output.unlink(missing_ok=True)
-            detail = (combined.stderr or combined.stdout or "FFmpeg returned no MP4")[-1200:]
+            detail = _failure_detail(combined, "FFmpeg returned no MP4")
             raise RemotionMotionError(f"Remotion motion assembly failed: {detail}")
 
     final_info = _probe(output, ffprobe_path=ffprobe_path, runner=runner, timeout=timeout_seconds)

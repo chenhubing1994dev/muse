@@ -906,3 +906,318 @@
 - 重写 `scripts/run_full_diag.ps1`（使用解析器，新增 -SmokeOnly/-Quick，探测记录附在 latest.log 末尾）；`run_smoke.bat` 改为委托 ps1，单一代码路径。
 - `scripts/Muse-Start.ps1`：启动前真实探测解释器，失败时给出原因与修复命令（备份 .orig）。
 
+## [B391-R1] src\muse\status_api.py
+- 时间：2026-11-27 09:25
+- 问题：未传入 store_health 时 /api/v1/health 返回 503，导致本机控制台/Web Portal/独立 Status API 全部显示未连接；删除重复分支
+- SHA-256：`dba70a6c29af1007…` → `4773711143017783…`（原件 `.qw-backups/20261127-b391/`）
+
+## [B391-R4b] src\muse\autonomous_runtime.py
+- 时间：2026-11-27 09:25
+- 问题：_video_worker 总取最新一张排队票，且未捕获 RuntimeBlocked：一张校验失败但仍 queued 的票会永久卡住后续票
+- SHA-256：`90aea043fb133598…` → `1e1c5efec6d6e846…`（原件 `.qw-backups/20261127-b391/`）
+
+## [B391-R4b] src\muse\autonomous_runtime.py
+- 时间：2026-11-27 09:25
+- 问题：逐张尝试并跳过领取前被 Commander 拒绝的票（保持 queued 供人工排查），每 tick 最多派发一张
+- SHA-256：`1e1c5efec6d6e846…` → `357497e76eccf1d5…`（原件 `.qw-backups/20261127-b391/`）
+
+## [B391-R1-test] tests\test_status_api.py
+- 时间：2026-11-27 09:25
+- 问题：新增：未配置 store_health 时 health=200；显式不健康时 health/store-health 均 503
+- SHA-256：`d6eb6b422576fca4…` → `e7e2ccf073072859…`（原件 `.qw-backups/20261127-b391/`）
+
+## [B391-R4b-test] tests\test_autonomous_runtime.py
+- 时间：2026-11-27 09:25
+- 问题：新增：领取前被拒的票被跳过且保持 queued，下一张有效票被派发；全部被拒时返回 blocked
+- SHA-256：`0ec744e6079e1208…` → `82063bfb064b389b…`（原件 `.qw-backups/20261127-b391/`）
+
+## [B391-R3] ui-prototype\api.js
+- 时间：2026-11-27 09:26
+- 问题：api.js 两条语句被拼在同一行（与 N1 同类写入损坏），拆回独立行；无逻辑变化
+- SHA-256：`77e2509743ff71ba…` → `0af71a53e41e2b83…`（原件 `.qw-backups/20261127-b391/`）
+
+## [B391-R3] ui-prototype\api.js
+- 时间：2026-11-27 09:26
+- 问题：api.js 两条语句被拼在同一行（与 N1 同类写入损坏），拆回独立行；无逻辑变化
+- SHA-256：`0af71a53e41e2b83…` → `641a328e09597c3d…`（原件 `.qw-backups/20261127-b391/`）
+
+## [B391-R3] ui-prototype\api.js
+- 时间：2026-11-27 09:26
+- 问题：api.js 两条语句被拼在同一行（与 N1 同类写入损坏），拆回独立行；无逻辑变化
+- SHA-256：`641a328e09597c3d…` → `f73f83aa6a5ee27b…`（原件 `.qw-backups/20261127-b391/`）
+
+## [B391-R3] ui-prototype\api.js
+- 时间：2026-11-27 09:26
+- 问题：api.js 两条语句被拼在同一行（与 N1 同类写入损坏），拆回独立行；无逻辑变化
+- SHA-256：`f73f83aa6a5ee27b…` → `03c89b3755328b5b…`（原件 `.qw-backups/20261127-b391/`）
+
+## [B391-R2] ui-prototype\src\App.svelte
+- 时间：2026-11-27 09:26
+- 问题：AI 审批接口只接受 2–5 秒，界面仍可选 1 秒导致 400；删除 1 秒选项
+- SHA-256：`ce9347ad40393106…` → `d459d3fcb885bee6…`（原件 `.qw-backups/20261127-b391/`）
+
+## [B391-R5] ui-prototype\src\App.svelte
+- 时间：2026-11-27 09:26
+- 问题：本地路径旁白稿已必填，选择“音轨用途=旁白”时后端会拒绝（音频只能做背景音乐）；移除该选择器
+- SHA-256：`d459d3fcb885bee6…` → `19f8286df104fd38…`（原件 `.qw-backups/20261127-b391/`）
+
+## [B391-R5] ui-prototype\src\App.svelte
+- 时间：2026-11-27 09:26
+- 问题：本地路径有旁白稿时音频文件固定作为背景音乐提交
+- SHA-256：`19f8286df104fd38…` → `995e5b4d331d951c…`（原件 `.qw-backups/20261127-b391/`）
+
+## [B391-R4a] src\muse\status_api.py
+- 时间：2026-11-27 09:26
+- 问题：审批人固定为 local-dashboard-user：本机无多用户账号体系，改为在响应中如实标注身份范围（local_single_user_session），不伪造身份
+- SHA-256：`4773711143017783…` → `ebcaec35996c0bac…`（原件 `.qw-backups/20261127-b391/`）
+
+## [B391-P1] src\muse\status_api.py
+- 时间：2026-11-27 09:35
+- 问题：挂载 control_center_api 上下文
+- SHA-256：`ebcaec35996c0bac…` → `0ed723244b9ff1e1…`（原件 `.qw-backups/20261127-b391/`）
+
+## [B391-P1] src\muse\status_api.py
+- 时间：2026-11-27 09:35
+- 问题：GET /api/v1/control/*
+- SHA-256：`0ed723244b9ff1e1…` → `f08ce8556155bb41…`（原件 `.qw-backups/20261127-b391/`）
+
+## [B391-P1] src\muse\status_api.py
+- 时间：2026-11-27 09:35
+- 问题：POST /api/v1/control/*（loopback + Origin + Bearer 已在入口校验；JSON 限 16 KiB、拒绝重复键）
+- SHA-256：`f08ce8556155bb41…` → `43264a763b099480…`（原件 `.qw-backups/20261127-b391/`）
+
+## [B391-P1-label] src\muse\status_api.py
+- 时间：2026-11-27 09:35
+- 问题：玄学类接口（/api/v1/metaphysics/*、/api/v1/omega/xuanshu/*、/api/v1/control/xuanshu/*）2xx 响应自动加「玄学推演／待验证假设」标签，强制 is_evidence/is_prediction=false
+- SHA-256：`43264a763b099480…` → `ff0741b3b828be84…`（原件 `.qw-backups/20261127-b391/`）
+
+## [B391-P2] ui-prototype\vite.config.js
+- 时间：2026-11-27 09:48
+- 问题：构建入口新增 portal.html（/portal）与 os.html（/os）
+- SHA-256：`dad95cf92ab19974…` → `8a986049459368bd…`（原件 `.qw-backups/20261127-b391/`）
+
+## [B391-P2] src\muse\local_dashboard.py
+- 时间：2026-11-27 09:48
+- 问题：本机控制台支持 /portal 与 /os 无扩展名路由（桌面网关已有同等映射）
+- SHA-256：`bd4c101f5bc304ba…` → `4eb06168fc2a93f3…`（原件 `.qw-backups/20261127-b391/`）
+
+## [B391-P2] ui-prototype\src\App.svelte
+- 时间：2026-11-27 10:12
+- 问题：主控台导航栏新增门户（/portal）与 Super Agent OS（/os）入口
+- SHA-256：`995e5b4d331d951c…` → `3ca74e7188abc40e…`（原件 `.qw-backups/20261127-b391/`）
+
+## [B391-P2] src\muse\omega_api.py
+- 时间：2026-11-27 10:12
+- 问题：Omega 导航新增门户与 OS（页面无内联脚本/样式/事件，满足 test_omega_security_contract 的 CSP 约束）
+- SHA-256：`bf2ac301ec073902…` → `2c33f4f72a46a76b…`（原件 `.qw-backups/20261127-b391/`）
+
+# B391-P2 · 第二轮饱和攻坚（2026-11-27 11:39–12:26，AWS Quick）
+
+> 编号说明：本轮编号 `B391-P2-01…28`（P2 = 第二轮，对应备份目录 `.qw-backups/20261127-b391-p2/`），与上一轮界面阶段标签 `[B391-P2]` 不同。
+> 本轮首次触碰的每个文件都先原样备份到 `.qw-backups/20261127-b391-p2/<路径>.orig`（SHA-256 见同目录 MANIFEST.txt）；上一轮 `20261127-b391/` 基线备份未被覆盖。未执行任何 git 命令。
+> 证据层级：以下全部为 L1 + L2/L2.5（云端沙箱真实执行）；L3–L5 需真机。
+
+## [B391-P2-01/03] src\muse\control_center_api.py
+- 时间：2026-11-27 12:26
+- 问题/改动：JSON 请求体此前接受 NaN/Infinity/1e999（解析为非有限浮点）且不限嵌套深度；新增 parse_json_object：拒绝非有限数、嵌套 >32 层、BOM、顶层非对象、重复键，统一 400 + 可读原因
+- 回归用例：test_b391_p2_hardening.JsonBoundaryTests（5 例）
+- SHA-256：`f9a3930e317a419e…` → `b487e406d30af6b6…`（原件 `.qw-backups/20261127-b391-p2/`）
+
+## [B391-P2-05/06/07/08] src\muse\control_center_api.py
+- 时间：2026-11-27 12:26
+- 问题/改动：①并发同 request_id 提交时两个请求都返回 201（同一张票被报告为“新建”两次）→ 进程内锁 + UNIQUE 冲突回放/409；②RETRY 的 request_id 复用到另一张 Ticket 时静默回放别的票 → 409；③重试丢失 workload_class → 保留；④重试会剥掉 `_signed_review` 等专用门禁标记、生成无门禁新票 → 拒绝并指向专用流程
+- 回归用例：IdempotencyTests（4 例）、DedicatedGateTests
+- SHA-256：`f9a3930e317a419e…` → `b487e406d30af6b6…`（原件 `.qw-backups/20261127-b391-p2/`）
+
+## [B391-P2-10] src\muse\control_center_api.py
+- 时间：2026-11-27 12:26
+- 问题/改动：新增 POST /control/creation/feedback（LINK-FEEDBACK-TO-CLAIM）：创作账本 + Research Wiki `claim —tested_by→ 实测反馈记录`，按 request_id 双库幂等、改载荷 409；成片 SHA-256 由服务器从 Product Vault 计算（客户端不能提供）；claim 状态与玄学本体不被改写。新增 GET /control/knowledge/claims 与 claims/<id>/tested-by（原始假设来源与实测反馈分栏）
+- 回归用例：TestedByLoopTests（4 例）+ TestedByHttpEndToEndTests（真实 HTTP 全链路）
+- SHA-256：`f9a3930e317a419e…` → `b487e406d30af6b6…`（原件 `.qw-backups/20261127-b391-p2/`）
+
+## [B391-P2-12] src\muse\control_center_api.py
+- 时间：2026-11-27 12:26
+- 问题/改动：Obsidian 审计：audit_vault() 把计数放在顶层，接口却读不存在的 counts 键 → 界面永远没有计数、conflicts 恒为 null；改为读取真实字段
+- 回归用例：ObsidianAuditTests
+- SHA-256：`f9a3930e317a419e…` → `b487e406d30af6b6…`（原件 `.qw-backups/20261127-b391-p2/`）
+
+## [B391-P2-10/11] src\muse\status_api.py
+- 时间：2026-11-27 12:26
+- 问题/改动：接入 Product Vault 解析器（哈希校验 + 服务器侧 SHA-256）与创作账本写入器；成片 preview/video 支持单段 Range：206 + Content-Range、越界 416 + `bytes */size`、空文件不除零、多段/畸形 Range 回退 200；新增 parse_byte_range；顺带拆开第 3057 行拼行（AST 等价）
+- 回归用例：ByteRangeParserTests、VaultRangeHttpTests、TestedByHttpEndToEndTests
+- SHA-256：`ff0741b3b828be84…` → `9014eb8de6783e27…`（原件 `.qw-backups/20261127-b391-p2/`）
+
+## [B391-P2-13] src\muse\obsidian_vault.py
+- 时间：2026-11-27 12:26
+- 问题/改动：只读镜像审计把带 UTF-8 BOM 的笔记误报为冲突（malformed_managed_note）；读取改用 utf-8-sig。CRLF 与反斜杠路径经实测本来就不会误报，未改动
+- 回归用例：ObsidianAuditTests（LF/CRLF/BOM/真实修改 四种）
+- SHA-256：`43986e8404e349cd…` → `0ea0ab043d28b57e…`（原件 `.qw-backups/20261127-b391-p2/`）
+
+## [B391-P2-14] src\muse_sidecar_main.py
+- 时间：2026-11-27 12:26
+- 问题/改动：桌面网关代理把整段响应 read() 进内存（成片最大 2 GiB）；>8 MiB 或 video/audio/zip 响应改为按块转发并透传 Content-Length，Range/206 头保持
+- 回归用例：GatewayStreamingTests（≈10 MiB 实测哈希一致 + 206 透传）
+- SHA-256：`dd5a621070fc4bd0…` → `910c11e3d8014bad…`（原件 `.qw-backups/20261127-b391-p2/`）
+
+## [B391-P2-09] src\muse\autonomous_runtime.py
+- 时间：2026-11-27 12:26
+- 问题/改动：两处语句粘连拆行（for 循环体、if…break），AST 完全一致，无逻辑变化
+- SHA-256：`357497e76eccf1d5…` → `7703aee558ced6f3…`（原件 `.qw-backups/20261127-b391-p2/`）
+
+## [B391-P2-09] ui-prototype\src\App.svelte
+- 时间：2026-11-27 12:26
+- 问题/改动：修复第 128 行历史拼行（两个 let 声明），并拆开 5 处标签粘连行；保持 CRLF；去空白后内容逐字节一致
+- SHA-256：`3ca74e7188abc40e…` → `387fef93df0e7c09…`（原件 `.qw-backups/20261127-b391-p2/`）
+
+## [B391-P2-09] tests\test_status_api.py
+- 时间：2026-11-27 12:26
+- 问题/改动：4 处表达式粘连拆行，AST 一致
+- SHA-256：`e7e2ccf073072859…` → `f18eb13a883d6e52…`（原件 `.qw-backups/20261127-b391-p2/`）
+
+## [B391-P2-09] tests\test_autonomous_runtime.py
+- 时间：2026-11-27 12:26
+- 问题/改动：1 处表达式粘连拆行，AST 一致
+- SHA-256：`82063bfb064b389b…` → `f1f1ce75b70c6d2d…`（原件 `.qw-backups/20261127-b391-p2/`）
+
+## [B391-P2-28] tests\test_b391_control_center.py
+- 时间：2026-11-27 12:26
+- 问题/改动：TemporaryDirectory 改为 ignore_cleanup_errors=True，避免 Windows 杀软/索引短暂占用导致的 WinError 32 假失败
+- SHA-256：`427aa979409bf668…` → `a7bc739dd23be531…`（原件 `.qw-backups/20261127-b391-p2/`）
+
+## [B391-P2-01..14] tests\test_b391_p2_hardening.py
+- 时间：2026-11-27 12:26
+- 问题/改动：新增 20 个对抗式回归用例（先写复现断言：5 例在旧代码首跑即红；并发用例在压测中复现“双 201”；Obsidian 两项先手工复现再固化为用例；修复后全绿）
+- SHA-256：`—` → `82916c76dc0742fc…`（原件 `.qw-backups/20261127-b391-p2/`；本轮新建）
+
+## [B391-P2-18] scripts\b391_l25_contract.py
+- 时间：2026-11-27 12:26
+- 问题/改动：新增 L2.5 契约核验器：启动真实 Status API（临时库），回放 os.js/portal.js 全部 60 个调用点；DOM id 引用/重复、CSP（内联 script/style/on*）、确认短语前后端一致性一并核验
+- SHA-256：`—` → `0e1158db538f1b6d…`（原件 `.qw-backups/20261127-b391-p2/`；本轮新建）
+
+## [B391-P2-15] scripts\b391_verify.py
+- 时间：2026-11-27 12:26
+- 问题/改动：验收脚本装甲：环境快照（Python/Node/npm/FFmpeg/ffprobe/Remotion/TTS/ASR/ComfyUI/GPU/编码/路径空格）、每步后原子落盘 reports/b391_acceptance/LATEST_REPORT.{json,md}（兼容旧 verify_latest）、失败用例完整堆栈、输出末尾 40 行、样片 MP4 SHA-256、npm 经 node npm-cli.js 调用、全部列表传参 shell=False
+- SHA-256：`708ee5d58eba0c0b…` → `f53d6ed4eff283c5…`（原件 `.qw-backups/20261127-b391-p2/`）
+
+## [B391-P2-16] 3_双击B391验收.bat
+- 时间：2026-11-27 12:26
+- 问题/改动：显式 PYTHONUTF8/PYTHONIOENCODING/PYTHONDONTWRITEBYTECODE、仅在 .venv 存在时探测、报告路径改为 b391_acceptance；保持 CRLF、无 BOM、块内 echo 无 ASCII 括号
+- SHA-256：`094b28daa6024ae8…` → `859e057999f97756…`（原件 `.qw-backups/20261127-b391-p2/`）
+
+## [B391-P2-17] ui-prototype\package.json
+- 时间：2026-11-27 12:26
+- 问题/改动：`node --test *.test.js` 依赖 shell 展开通配符，Windows cmd 不展开（Node 20 会报找不到文件）；改为 `node --test` 默认发现
+- SHA-256：`d3ab690eb13c57c6…` → `34d9377b22e91921…`（原件 `.qw-backups/20261127-b391-p2/`）
+
+## [B391-P2-19] docs\B391_L5_PATH_B_RUNBOOK.md
+- 时间：2026-11-27 12:26
+- 问题/改动：新增路径 B（L5）实机作战卡：端口探测、提单参数、唯一人工批准位置、Worker 开关与观察点、失败日志路径、判定标准
+- SHA-256：`—` → `93981c4aaa00de26…`（原件 `.qw-backups/20261127-b391-p2/`；本轮新建）
+
+## [B391-P2-20] ui-prototype\muse-os-logic.js
+- 时间：2026-11-27 12:26
+- 问题/改动：lineDiff：空文本按 0 行处理（首版修订不再出现幽灵删除行）；新增纯函数 phraseProgress / pollDelay / describeApiError / rowsChanged / evidenceChainView
+- 回归用例：muse-os-logic.test.js（12→17 例，68 个断言）
+- SHA-256：`db3be2b78a29a9f5…` → `e2f8b0b881d06558…`（原件 `.qw-backups/20261127-b391-p2/`）
+
+## [B391-P2-20] ui-prototype\muse-os-logic.test.js
+- 时间：2026-11-27 12:26
+- 问题/改动：更新 lineDiff 期望并新增 5 组用例
+- SHA-256：`4afe147efa780625…` → `c4c4e7a592dda168…`（原件 `.qw-backups/20261127-b391-p2/`）
+
+## [B391-P2-21] ui-prototype\omega-common.js
+- 时间：2026-11-27 12:26
+- 问题/改动：call() 失败时只抛后端文本、无状态码，网络错误/超时无中文说明；新增 ApiError（`HTTP 409 · 后端原因（含义）`）、30 s/60 s 超时、guarded() 加 aria-busy
+- SHA-256：`fa88a0e59c6f301e…` → `77f9849937980e8e…`（原件 `.qw-backups/20261127-b391-p2/`）
+
+## [B391-P2-22] ui-prototype\cosmos-fx.js
+- 时间：2026-11-27 12:26
+- 问题/改动：星轨：resize 去抖、页面隐藏时暂停 rAF、返回 destroy() 释放全部监听
+- SHA-256：`261ca7542a160778…` → `ed63b6c32bbc2c08…`（原件 `.qw-backups/20261127-b391-p2/`）
+
+## [B391-P2-23/24/26/27] ui-prototype\os.js
+- 时间：2026-11-27 12:26
+- 问题/改动：①统一确认门禁弹窗：显示后端校验的精确短语、“一键填入”（仍需人工点确认）、实时拼写校验、错误原位显示（含 HTTP 码）、防连点；替换全部 window.confirm/prompt 写操作；②成片反馈可关联假设 → tested_by，知识图谱 claim 抽屉显示证据链；③后台刷新：数据未变不重绘、用户输入中/弹窗打开时跳过、页面隐藏降频、恢复可见立即同步；④resize 去抖且不再每次重新请求图谱；Esc 关闭弹窗/抽屉；记忆检索防抖、图谱回车检索；⑤就绪度缓存永不过期（装好 ComfyUI 也不更新）→ 60 s TTL；⑥成片库刷新不再清空反馈草稿/中断播放，播放改走 inline preview；⑦图谱画布 DPR 上限 3（4K 清晰）；⑧退出页面清理定时器
+- SHA-256：`dbf36e9fb669cb93…` → `3224426a49738ccf…`（原件 `.qw-backups/20261127-b391-p2/`）
+
+## [B391-P2-23] ui-prototype\os.html
+- 时间：2026-11-27 12:26
+- 问题/改动：新增确认门禁对话框（aria-modal）；检索框 type=search；抽屉可聚焦；文案更新
+- SHA-256：`86bd06737ed6e1b1…` → `8f1427a18591d14e…`（原件 `.qw-backups/20261127-b391-p2/`）
+
+## [B391-P2-24] ui-prototype\muse-cosmos.css
+- 时间：2026-11-27 12:26
+- 问题/改动：焦点可见环、忙碌态、门禁对话框、证据链样式、表格长文本换行、1281–1600 px 与 ≥2200 px 布局
+- SHA-256：`7b8f0f51bb5cd3a0…` → `45b8b35ec978361e…`（原件 `.qw-backups/20261127-b391-p2/`）
+
+## [B391-P2-25] ui-prototype\portal.js
+- 时间：2026-11-27 12:26
+- 问题/改动：门户每 30 s 轮询都会重建 <video>，正在播放的成片被打断；改为成片未变化则不重绘，并按页面可见性调节轮询
+- SHA-256：`48369003057d2b61…` → `dd9d33e14dca24c6…`（原件 `.qw-backups/20261127-b391-p2/`）
+
+## [B391-P2-29] src\muse\status_api.py
+- 时间：2026-11-27 17:03（真机验收 15:04–15:41 的 full_suite 失败）
+- 问题：`do_POST` 内另有两处函数内 `from muse.task_queue import TaskQueue`（另一程序早先写入），使 `TaskQueue` 在整个函数里成为局部变量；`POST /api/v1/inspirations/evolve` 分支在这两行之前使用它 → 每次都 `UnboundLocalError`、服务端线程崩溃、连接被断开（真机经系统代理 127.0.0.1:7890 表现为 HTTP 502）。云端已复现。
+- 修复：只在该分支补一行同样的函数内导入（保持其他分支的晚绑定行为——`test_status_api` 依赖它做 mock；整体删除这些导入会打破该契约，已试并回退）。
+- 回归用例：`test_b391_p2_hardening.ShadowedImportGuardTests`（AST 守卫：旧代码精确报 `do_POST():3715`，修复后为空；含自检样例）；`test_inspiration_evolution.test_status_api_evolves_inspiration_but_blocks_video_without_persisted_commander_plan` 云端已越过 202 断言（后续步骤受沙箱 sqlite backup 限制，需真机复验）。
+- SHA-256：`9014eb8de6783e27…` → `81e812a6ec80e2fb…`（本轮前原件见 `.qw-backups/20261127-b391-p2/src/muse/status_api.py.orig`；本次修改前版本另存 `status_api.py.p2b.orig`）
+
+## [B391-P2-30] scripts\b391_verify.py
+- 问题：定向测试在 `tests/` 目录下运行，PYTHONPATH 缺项目根目录 → `test_unified_runtime` 的 `from tests.video_reviewer_test_support import …` 报 `No module named 'tests'`（全量测试从根目录运行，故未受影响）。
+- 修复：PYTHONPATH 首位加入项目根目录。
+
+## [B391-P2-31] scripts\b391_verify.py
+- 问题：本机设置了系统代理 127.0.0.1:7890，测试子进程的本机回环请求可能经过代理（上条 502 即经代理返回）。
+- 修复：子进程设置 `NO_PROXY/no_proxy=127.0.0.1,localhost,::1`（urllib 因此只用环境变量代理设置，回环流量始终直连）。
+
+## [B391-P2-32] scripts\b391_verify.py
+- 问题：真实样片失败 `video assembly failed: waiting for the Muse model supervisor to pause its managed model process`。取证（只读）：模型监督器在线（心跳实测每 30 s）、本地模型健康、且不是监督器启动的子进程（child_pid 为空），即外部模型（LM Studio :1234 在监听）；GPU 租约 15:40:35 获取、15:41:52 释放（等满 75 s）。按设计 Muse 不会停止外部进程，因此样片拿不到 GPU。监督器在租约期间为何没有写入新状态尚未查清（代码逻辑应写 external_model_active 并立即报“无法让出 GPU”），已如实标为未知。
+- 修复：样片步骤前加入 GPU 只读预检：外部模型占用或已有租约时立即失败并给出中文操作指引，不再空等 75 s；不改变任何 GPU/模型行为。
+- 回归：云端 5 种状态（无库/外部模型/托管模型/模型离线/已有租约）结果全部符合预期。
+- SHA-256（b391_verify.py，P2-30/31/32 合计）：`f53d6ed4eff283c5…` → `d287117f90e6ffae…`；本次修改前版本另存 `.p2b.orig`
+
+## [B391-P2-33] tests\test_b391_p2_hardening.py
+- 新增 `ShadowedImportGuardTests`（2 例）；云端全套 22/22。
+- SHA-256：`82916c76dc0742fc…` → `e31641ec9fa0d8e2…`
+
+### 真机验收（L3/L4）第 1 次结果（2026-11-27 15:04–15:41，报告 reports/b391_acceptance/LATEST_REPORT.md）
+- 24 步中 20 步通过：compileall、17 个定向套件中 16 个、L2.5 契约/DOM/CSP、冒烟、npm test、npm run build（portal/os 均已产出）。
+- 全量 3,045 个用例中仅 1 个错误（即 P2-29）。
+- 失败 3 步：unit_test_unified_runtime（P2-30）、full_suite（P2-29）、real_local_sample（P2-32，环境：外部模型占用 GPU）。
+- 环境快照：Python 3.11.9、Node v24.20.0、npm 11.19.0、FFmpeg 8.1.1、Remotion 4.0.543、CantoTTS/ASR 模型齐备、ComfyUI 未运行、GPU AMD Radeon RX 6750 GRE 12GB。
+
+## [B391-P2-34] src\muse\store_health.py
+- 时间：2026-11-27 17:37（真机验收第 2 次 17:06–17:18 的 full_suite 失败）
+- 问题：启动自检 `_probe_sqlite` 用 `with sqlite3.connect(...) as connection:`。Python 的 sqlite3 连接上下文只提交/回滚、**不关闭**连接，文件句柄要等垃圾回收才释放；Windows 上临时目录删除时偶发 `WinError 32`（`data\agents\registry.sqlite3` 被占用）→ `test_muse_sidecar_feedback` 在全量测试中失败（同一用例在定向测试中通过，故为偶发）。桌面引擎每次启动也会遗留这 3 个句柄。
+- 修复：改为 `with closing(sqlite3.connect(...))`。全仓 src/ 与 scripts/ 扫描：此写法仅此 1 处。
+- 回归用例：`test_b391_p2_hardening.StoreProbeClosesConnectionsTests`（旧代码红：连接未关闭；修复后绿）；云端全套 23/23。
+- SHA-256：`25d9f6cf367d15cc…` → `49b60986e39b7d5f…`（原件 `.qw-backups/20261127-b391-p2/src/muse/store_health.py.orig`）
+- 测试文件 SHA-256：`e31641ec9fa0d8e2…` → `2e401f4e0a076747…`（改前版本 `.p2c.orig`）
+
+### 真机验收第 2 次（2026-11-27 17:06–17:18）
+- 22 步通过（含 unit_test_unified_runtime 80/80，P2-30 生效；P2-29 修复后灵感进化用例通过）；全量 3,047 用例仅 1 个偶发错误（即 P2-34）。
+- real_local_sample：GPU 预检（P2-32）按预期立即拦截——LM Studio :1234 仍在运行，需用户先卸载/退出。
+
+### 真机验收第 3 次（2026-11-27 17:54–18:06）
+- 全量 3,048 用例 0 失败，24 步中 23 步通过（L3 通过）。唯一剩余：real_local_sample——LM Studio 已关闭，但模型监督器（pid 23208，进程对设备沙箱不可见）在 77 秒租约内从未登记 paused_for_video；当前代码在该情况下会立即登记，两次验收表现一致，判断为监督器进程仍在运行更新前加载的旧代码（推断，未直接证实）。处理：重启计划任务 MuseLocalModelSupervisor 后重跑。
+- 本次无代码改动。
+
+## [B391-P2-35] scripts\b391_verify.py
+- 时间：2026-11-27 19:45
+- 问题：样片因旧版模型监督器不让出 GPU 而超时时，报告只显示通用错误。
+- 修复：识别该错误并在报告中写明原因与监督器 PID、处理办法（结束该进程后重启监督器）；不改变任何 GPU/模型行为。
+- SHA-256：`d287117f90e6ffae…` → `ddbb6554ff85951f…`（改前版本 `.p2d.orig`）
+
+### 真机验收第 4 次
+- 全量 3,048/3,048 再次全绿（L3 稳定通过）。样片仍以同一原因失败：模型监督器 supervisor_id 53bbab34e14e / PID 23208 自 13:48 起从未变化（未被重启）。已查证旧版 model_supervisor.py（.muse-backups/video_factory/2026-11-25 两份）只在 owner_kind == "video_generation" 时让出 GPU，本地样片用的是 video_encoding 租约 → 被忽略，与 4 次现象完全吻合。根因定为：运行中的监督器是旧代码进程（已证实，非推断）。
+
+## [B391-P2-36] src\muse\remotion_motion.py
+- 时间：2026-11-27 20:13
+- 问题：5 处 Remotion/FFmpeg 失败信息只截取输出末尾（[-1000:]/[-1200:]），Node/FFmpeg 写在开头的真正错误行被丢掉，且夹带终端颜色码。
+- 修复：新增 `_failure_detail`：保留开头 1,500 + 末尾 1,500 字符、去掉 ANSI 颜色码；只改错误信息，不改任何渲染逻辑（Remotion 失败仍硬失败）。
+- 回归：`RemotionFailureDetailTests`（2 例）；云端 hardening 25/25、test_remotion_motion 7/7。
+- SHA-256：`afe3e34827f94327…` → `2cfbafc8ac6f8dcf…`（原件 `.qw-backups/20261127-b391-p2/src/muse/remotion_motion.py.orig`）
+
+### 真机验收第 5 次
+- 真机验收第 5 次（19:56–20:07）：L3 第 3 次全绿（全量 3,048/3,048）。旧监督器已结束（心跳停止），样片 5 秒内拿到 GPU（P2-35 判断得到证实），进入 Remotion 阶段后失败：Remotion 在渲染时调用其自带 ffprobe 读取素材音轨（getAudioChannelsAndDuration）出错；旧错误截取只保留末尾 1,200 字符，根因行被截掉，无法定位。
+- Git 取证（只读 .git）：当前分支 b391-full-fusion（2852be1），但 Muse-GitHubSync.ps1 每天提交到当前分支却执行 `git push origin main`——今天 03:00 的“PUSH OK (97 files)”实际只推送了未变化的 main（88250db），B391 分支从未推到 GitHub（远端无 origin/b391-full-fusion）。

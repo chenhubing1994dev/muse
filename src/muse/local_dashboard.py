@@ -361,6 +361,14 @@ def create_local_dashboard_server(
             if path.startswith("/__muse__/"):
                 self._send_bytes(404, b"not found", "text/plain; charset=utf-8")
                 return
+            if path in {"/portal", "/os"}:
+                # B391 P2: extension-less routes for the Portal and Super Agent OS pages.
+                page = self.server.dist_dir / (path.lstrip("/") + ".html")
+                if page.is_file():
+                    self._send_bytes(200, page.read_bytes(), "text/html; charset=utf-8")
+                else:
+                    self._send_bytes(404, b"page not built; run npm run build", "text/plain; charset=utf-8")
+                return
             super().do_GET()
 
         def do_POST(self):

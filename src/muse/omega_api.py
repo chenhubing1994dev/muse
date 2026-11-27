@@ -25,6 +25,8 @@ OMEGA_PAGES = (
     {"href": "./evolution-lab.html", "label": "自我进化实验室", "icon": "⟳"},
     {"href": "./research-bridge.html", "label": "深度研究 · 反馈回传", "icon": "⌕"},
     {"href": "./video-factory.html", "label": "一键电影级视频工坊", "icon": "🎬"},
+    {"href": "./portal.html", "label": "普罗米修斯计划门户", "icon": "∞"},
+    {"href": "./os.html", "label": "Super Agent OS 调度中心", "icon": "☯"},
 )
 _CLAIM = re.compile(r"[a-z0-9][a-z0-9._-]{0,95}\Z")
 

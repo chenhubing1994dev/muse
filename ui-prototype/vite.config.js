@@ -23,6 +23,8 @@ export default defineConfig({
         evolutionLab: "evolution-lab.html",
         researchBridge: "research-bridge.html",
         videoFactory: "video-factory.html",
+        portal: "portal.html",
+        os: "os.html",
       },
     },
   },

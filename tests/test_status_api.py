@@ -245,7 +245,8 @@ class StatusApiTests(unittest.TestCase):
                 "Host: 127.0.0.1\r\n"
                 f"Authorization: Bearer {token}\r\n"
                 "Content-Length: -1\r\n"
-                "\r\n"            ).encode("ascii"))
+                "\r\n"
+            ).encode("ascii"))
             client.shutdown(socket.SHUT_WR)
             response = b""
             while True:
@@ -342,7 +343,8 @@ class StatusApiTests(unittest.TestCase):
         video_hash = hashlib.sha256(video.read_bytes()).hexdigest()
         sheet = release_dir / "contact-sheet.png"
         sheet.write_bytes(
-            b"\x89PNG\r\n\x1a\n" + (13).to_bytes(4, "big") + b"IHDR"            + (640).to_bytes(4, "big") + (480).to_bytes(4, "big") + b"fixture"
+            b"\x89PNG\r\n\x1a\n" + (13).to_bytes(4, "big") + b"IHDR"
+            + (640).to_bytes(4, "big") + (480).to_bytes(4, "big") + b"fixture"
         )
         sheet_hash = hashlib.sha256(sheet.read_bytes()).hexdigest()
         report = {"can_publish": False, "checks": {"visual_anomaly_review": {
@@ -1129,6 +1131,63 @@ class StatusApiTests(unittest.TestCase):
             server.server_close()
             thread.join(timeout=3)
 
+    def test_health_is_ok_when_store_registry_is_not_configured(self) -> None:
+        """B391-R1: dashboards that do not pass store_health must not be reported as degraded."""
+        server, token = create_status_server(
+            task_db=self.task_db, progress_db=self.progress_db,
+            capability_db=self.capability_db, agent_db=self.agent_db,
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        try:
+            with urlopen(Request(base + "/api/v1/health", headers={"Authorization": f"Bearer {token}"}), timeout=3) as response:
+                self.assertEqual(response.status, 200)
+                body = json.loads(response.read())
+            self.assertEqual(body["status"], "ok")
+            self.assertIsNone(body["stores_healthy"])
+            self.assertFalse(body["stores_configured"])
+            with self.assertRaises(HTTPError) as unconfigured:
+                urlopen(Request(base + "/api/v1/store-health", headers={"Authorization": f"Bearer {token}"}), timeout=3)
+            self.assertEqual(unconfigured.exception.code, 503)
+            self.assertEqual(json.loads(unconfigured.exception.read())["status"], "not_configured")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
+    def test_health_degrades_only_for_an_explicit_unhealthy_store(self) -> None:
+        for store_health, expected_status, expected_code in (
+            ({"feedback": {"status": "healthy"}}, "ok", 200),
+            ({"feedback": {"status": "healthy"}, "inspiration": {"status": "missing"}}, "degraded", 503),
+            ({}, "degraded", 503),
+        ):
+            server, token = create_status_server(
+                task_db=self.task_db, progress_db=self.progress_db,
+                capability_db=self.capability_db, store_health=store_health,
+            )
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_address[1]}"
+            try:
+                for path in ("/api/v1/health", "/api/v1/store-health"):
+                    request = Request(base + path, headers={"Authorization": f"Bearer {token}"})
+                    if expected_code == 200:
+                        with urlopen(request, timeout=3) as response:
+                            self.assertEqual(response.status, 200)
+                            body = json.loads(response.read())
+                    else:
+                        with self.assertRaises(HTTPError) as failed:
+                            urlopen(request, timeout=3)
+                        self.assertEqual(failed.exception.code, expected_code)
+                        body = json.loads(failed.exception.read())
+                    self.assertEqual(body["status"], expected_status, (path, store_health))
+                    self.assertTrue(body["stores_configured"])
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=3)
+
     def test_disallowed_origin_is_rejected(self) -> None:
         server, token = create_status_server(
             task_db=self.task_db, progress_db=self.progress_db,
@@ -1390,7 +1449,8 @@ class StatusApiTests(unittest.TestCase):
         from muse.research_knowledge import ResearchKnowledgeStore
         with ResearchKnowledgeStore(knowledge_db) as knowledge:
             source_claim = knowledge.upsert_node(
-                "claim", "状态变化实验工具灵感", summary="分层状态有助于复盘，仍需独立证据与反证。",                external_ref="test:creator-product-feedback-source",
+                "claim", "状态变化实验工具灵感", summary="分层状态有助于复盘，仍需独立证据与反证。",
+                external_ref="test:creator-product-feedback-source",
                 metadata={
                     "epistemic_status": "creator_inspired_hypothesis_only",
                     "creator_context_is_evidence": False,
@@ -1402,7 +1462,8 @@ class StatusApiTests(unittest.TestCase):
             initiative = initiatives.propose(
                 "状态变化实验工具", kind="tool", creator_value="把灵感变成实验",
                 concept=json.dumps({"research_question": "如何识别变化？",
-                                    "key_discoveries": {"creator_inspired_hypotheses": ["分层状态有助于复盘。"], "testable_experiments": ["记录不同状态变化前后的复盘完整度，并比较实验组与对照组。"]}}, ensure_ascii=False),                first_step="记录状态", expected_output="离线实验工具",
+                                    "key_discoveries": {"creator_inspired_hypotheses": ["分层状态有助于复盘。"], "testable_experiments": ["记录不同状态变化前后的复盘完整度，并比较实验组与对照组。"]}}, ensure_ascii=False),
+                first_step="记录状态", expected_output="离线实验工具",
                 inspiration_refs=[f"inspiration:{source_claim['id']}"],
             )
             product = LocalProductBuilder(workspace).build(initiatives, initiative["id"])

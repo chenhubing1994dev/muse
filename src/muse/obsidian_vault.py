@@ -176,7 +176,7 @@ def audit_research_wiki(knowledge: Any, vault_path: str | Path) -> dict[str, Any
                     items.append({"path": note_path.relative_to(root).as_posix(), "status": "malformed",
                                   "reason": "path_outside_vault_or_not_regular_file"})
                     continue
-                content = note_path.read_text(encoding="utf-8")
+                content = note_path.read_text(encoding="utf-8-sig")  # B391-P2-13: a BOM is not an edit
             except (OSError, UnicodeError, ValueError):
                 counts["malformed"] += 1
                 items.append({"path": note_path.relative_to(root).as_posix(), "status": "malformed",
@@ -354,7 +354,7 @@ def audit_vault(memory: MemoryStore, vault_path: str | Path) -> dict[str, Any]:
         if not note_path.is_file():
             status = "missing"
         else:
-            content = note_path.read_text(encoding="utf-8")
+            content = note_path.read_text(encoding="utf-8-sig")  # B391-P2-13: a BOM is not an edit
             actual_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
             lines = content.splitlines()
             if not lines or lines[0].strip() != "---" or "---" not in lines[1:]:
@@ -396,7 +396,7 @@ def audit_vault(memory: MemoryStore, vault_path: str | Path) -> dict[str, Any]:
         if relative in expected_paths or relative == INDEX_NAME:
             continue
         try:
-            content = note_path.read_text(encoding="utf-8")
+            content = note_path.read_text(encoding="utf-8-sig")  # B391-P2-13: a BOM is not an edit
         except (OSError, UnicodeError):
             unmanaged += 1
             continue
@@ -451,7 +451,7 @@ def export_approved_memories(
         links.append(f"- {link} — {str(record['project'])} · Memory {int(record['id'])}")
 
     index_path = root / INDEX_NAME
-    existing = index_path.read_text(encoding="utf-8") if index_path.exists() else "# Muse Memory Index\n\n"
+    existing = index_path.read_text(encoding="utf-8-sig") if index_path.exists() else "# Muse Memory Index\n\n"
     if not existing.startswith("# Muse Memory Index"):
         existing = "# Muse Memory Index\n\n" + existing
         index_path.write_text(existing, encoding="utf-8")

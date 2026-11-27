@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#070412">
+<meta name="color-scheme" content="dark">
+<title>Muse Super Agent OS · 超级智能体调度中心</title>
+<link rel="stylesheet" href="./muse-cosmos.css">
+</head>
+<body>
+<canvas class="starfield" id="starfield" aria-hidden="true"></canvas>
+<div class="layer os">
+  <header class="glass os-top">
+    <a class="brand" href="./portal.html" aria-label="返回普罗米修斯计划门户">
+      <span class="inf">∞</span><span><b>Muse</b><small>Super Agent OS</small></span>
+    </a>
+    <span class="badge tone-info" id="conn">连接中…</span>
+    <span class="slogan">超越时空 · 智启未来</span>
+    <div class="winctl hidden" id="winctl" aria-label="窗口控制">
+      <button type="button" id="win-min" title="最小化">—</button>
+      <button type="button" id="win-max" title="最大化">☐</button>
+      <button type="button" id="win-close" title="关闭">✕</button>
+    </div>
+  </header>
+
+  <nav class="glass os-nav" id="os-nav" aria-label="Super Agent OS 模块">
+    <div class="spirit"><span class="glyph">☯</span>Commander 是唯一调度中枢<br>所有执行都经人工审批</div>
+  </nav>
+
+  <main class="os-main" id="os-main">
+    <!-- 总览 -->
+    <section class="view" id="view-overview" aria-label="总览">
+      <div class="glass stage" id="stage">
+        <svg class="orbit" id="orbit" viewBox="0 0 1000 470" preserveAspectRatio="none" aria-hidden="true"></svg>
+        <div class="core"><div class="sun">Muse</div><div class="plate">超级智能体调度中心</div></div>
+      </div>
+      <div class="bottom3">
+        <article class="glass pad"><h3>任务总览</h3><div class="row"><div id="ov-ring"></div><dl class="kv" id="ov-counts"></dl></div></article>
+        <article class="glass pad"><div class="row spread"><h3>正在执行的任务</h3><a href="#tasks" class="muted">更多 ›</a></div><div id="ov-running"></div></article>
+        <article class="glass pad"><h3>神话级能力 <small>实时判定</small></h3><ul class="check-list" id="ov-caps"></ul></article>
+      </div>
+    </section>
+
+    <!-- 任务中心 -->
+    <section class="view" id="view-tasks" aria-label="任务中心">
+      <div class="split">
+        <article class="glass pad">
+          <div class="row spread"><h2>TaskQueue 实时列表</h2>
+            <div class="row"><select id="task-filter" aria-label="按状态筛选">
+              <option value="">全部状态</option><option value="waiting_approval">待审批</option><option value="queued">排队中</option>
+              <option value="running">执行中</option><option value="succeeded">已完成</option><option value="failed">失败</option><option value="cancelled">已取消</option>
+            </select><button class="btn small" type="button" id="task-refresh">刷新</button></div></div>
+          <dl class="kv" id="task-counts"></dl>
+          <table class="data" id="task-table"></table>
+        </article>
+        <article class="glass pad">
+          <h2>新建任务 <small>提交后进入待审批，不会直接执行</small></h2>
+          <label class="field">标题<input id="nt-title" maxlength="160" placeholder="例如：调研本地粤语 TTS 的可替代方案"></label>
+          <label class="field">目标描述<textarea id="nt-goal" maxlength="4000" placeholder="写清楚要 Commander 做什么、验收标准是什么"></textarea></label>
+          <label class="field">类型<select id="nt-kind"><option value="research">研究</option><option value="creative">创作</option><option value="engineering">工程</option><option value="operations">运维</option></select></label>
+          <button class="btn primary" type="button" id="nt-submit">提交给 Commander</button>
+          <div id="task-detail" class="glass pad hidden" tabindex="-1"></div>
+        </article>
+      </div>
+      <article class="glass pad">
+        <h2>待审批门禁操作台 <small>人工决定会写入 human.decision；批准不等于执行</small></h2>
+        <div class="grid" id="approval-desk"></div>
+      </article>
+    </section>
+
+    <!-- 智能体 -->
+    <section class="view" id="view-agents" aria-label="智能体">
+      <article class="glass pad"><h2>Commander 与专家角色路由白名单</h2><p class="muted">在线状态只来自 Agent 注册表心跳；没有登记或心跳过期的角色如实显示阻塞原因，不播放假派发动画。</p>
+        <table class="data" id="agent-table"></table></article>
+      <article class="glass pad"><h2>注册表中的全部 Agent</h2><table class="data" id="agent-registry"></table></article>
+    </section>
+
+    <!-- 记忆库 -->
+    <section class="view" id="view-memory" aria-label="记忆库">
+      <article class="glass pad">
+        <div class="row spread"><h2>双轨记忆</h2>
+          <div class="tabs" id="mem-tabs"><button class="btn small" type="button" data-track="user" aria-pressed="true">User Track · 用户事实</button><button class="btn small" type="button" data-track="agent" aria-pressed="false">Agent Track · 工作经验</button></div></div>
+        <p class="muted" id="mem-semantics"></p>
+        <div class="row"><input id="mem-q" maxlength="200" placeholder="检索记忆…（输入后自动检索）" type="search"><button class="btn small" id="mem-search" type="button">检索</button></div>
+        <table class="data" id="mem-table"></table>
+      </article>
+      <div class="split">
+        <article class="glass pad"><h3>修订历史 · 时光回溯</h3><div id="mem-history" class="diff"><div class="muted">点击某条记忆的“历史”查看逐版 Diff（含软删除状态）。</div></div></article>
+        <article class="glass pad"><h3>Obsidian 镜像哈希审计</h3><div id="mem-obsidian"></div>
+          <h3>待审批记忆候选</h3><div id="mem-candidates"></div></article>
+      </div>
+    </section>
+
+    <!-- 知识图谱 -->
+    <section class="view" id="view-knowledge" aria-label="知识图谱">
+      <article class="glass pad">
+        <div class="row spread"><h2>Research Wiki 知识图谱</h2><span class="muted" id="kg-totals"></span></div>
+        <div class="legend" id="kg-legend"></div>
+        <div class="row"><label class="field">关系过滤<select id="kg-edge"><option value="">全部关系</option></select></label>
+          <label class="field">检索<input id="kg-q" maxlength="120" placeholder="标题关键字（回车检索）" type="search"></label>
+          <button class="btn small" type="button" id="kg-load">加载</button></div>
+        <div class="graph-wrap"><canvas id="kg-canvas" aria-label="知识图谱画布，点击节点查看详情"></canvas></div>
+      </article>
+      <article class="glass pad hidden" id="kg-detail" tabindex="-1"></article>
+    </section>
+
+    <!-- 工具箱 -->
+    <section class="view" id="view-toolbox" aria-label="工具箱">
+      <article class="glass pad"><h2>智能创作入口 <small>按实际可用能力自动选路径</small></h2><div id="tb-ready"></div>
+        <div class="split">
+          <div>
+            <label class="field">影片名称<input id="tb-title" maxlength="120" placeholder="例如：AI 自动化工作流的真实一天"></label>
+            <label class="field">制作路径<select id="tb-path"><option value="auto">智能自动（按就绪度选择）</option><option value="local">纯本地动效 + 粤语配音（Remotion / FFmpeg）</option><option value="ai">AI 镜头（Wan · 需 Commander 审批）</option></select></label>
+            <label class="field">本地素材文件夹（data/video_sources/）<select id="tb-source"></select></label>
+            <label class="field">粤语旁白稿（本地路径必填；会真实合成 TTS 并用 ASR 校验字幕）<textarea id="tb-script" maxlength="12000"></textarea></label>
+            <label class="field">AI 画面描述（AI 路径必填）<textarea id="tb-prompt" maxlength="1800"></textarea></label>
+            <label class="field">Remotion 动效<select id="tb-motion"><option value="brand_scene_transitions">逐镜头转场 + 片头片尾</option><option value="brand_intro_outro">片头 + 片尾</option><option value="none">不添加</option></select></label>
+            <button class="btn primary" type="button" id="tb-create">开始制作</button>
+          </div>
+          <div><h3>制作进度</h3><pre class="mono" id="tb-progress">尚未开始。</pre></div>
+        </div>
+      </article>
+      <article class="glass pad"><h2>成片库 · 审片反馈 <small>反馈写入创作账本；关联假设时同时在 Research Wiki 建立 tested_by 回链</small></h2><div id="tb-products"></div></article>
+      <article class="glass pad"><h2>玄学灵感引擎 <span class="badge label-meta">玄学推演／待验证假设</span></h2>
+        <p class="muted">仅作象征观察与可检验假设生成；不是事实、证据、建议或预测。</p>
+        <div class="row"><input id="xs-q" maxlength="500" placeholder="围绕什么主题寻找灵感？"><input id="xs-seed" maxlength="200" placeholder="种子（如今天日期）"></div>
+        <div class="row"><button class="btn" type="button" id="xs-preview">推演假设（不写入）</button><button class="btn qi" type="button" id="xs-write">写入 Research Wiki（proposed）</button></div>
+        <div id="xs-result"></div>
+      </article>
+      <article class="glass pad"><h2>更多工坊</h2><div class="row" id="tb-links"></div></article>
+    </section>
+
+    <!-- 工作流 -->
+    <section class="view" id="view-workflow" aria-label="工作流">
+      <article class="glass pad"><h2>视频审批与执行 Ticket</h2><table class="data" id="wf-approvals"></table></article>
+      <article class="glass pad"><h2>视频创作产能账本</h2><pre class="mono" id="wf-attempts"></pre></article>
+      <div class="split">
+        <article class="glass pad"><h2>流水线配方</h2><table class="data" id="wf-recipes"></table></article>
+        <article class="glass pad"><h2>流水线作业</h2><table class="data" id="wf-jobs"></table></article>
+      </div>
+    </section>
+
+    <!-- 设置 -->
+    <section class="view" id="view-settings" aria-label="设置">
+      <div class="split">
+        <article class="glass pad"><h2>自治运行时</h2><dl class="kv" id="st-daemon"></dl>
+          <h3>安全控制器</h3><dl class="kv" id="st-safety"></dl>
+          <div class="row"><button class="btn small" type="button" id="st-pause">暂停自治</button><button class="btn small qi" type="button" id="st-resume">恢复自治</button></div></article>
+        <article class="glass pad"><h2>硬件与资源仲裁遥测</h2><dl class="kv" id="st-telemetry"></dl><h3>GPU WAL 租约</h3><pre class="mono" id="st-gpu"></pre></article>
+      </div>
+      <div class="split">
+        <article class="glass pad"><h2>存储健康</h2><pre class="mono" id="st-stores"></pre></article>
+        <article class="glass pad"><h2>独立 Reviewer 密钥</h2><pre class="mono" id="st-reviewer"></pre><a class="btn small" href="./review-desk.html">打开待签名审查台</a></article>
+      </div>
+    </section>
+  </main>
+
+  <aside class="os-side">
+    <div class="glass clock"><div><b id="clock-time">--:--:--</b><div class="muted" id="clock-date"></div></div><span class="moon" id="clock-moon">☾</span></div>
+    <article class="glass pad"><h3>系统状态</h3><dl class="kv" id="side-status"></dl></article>
+    <article class="glass pad"><h3>资源概览</h3><div id="side-res"></div></article>
+    <article class="glass pad"><h3>最新动态</h3><ul class="feed" id="side-feed"></ul></article>
+  </aside>
+
+  <div class="glass dock" id="dock" aria-label="快捷入口">
+    <button type="button" data-go="knowledge"><span class="ic">✺</span>一键探索</button>
+    <button type="button" data-go="toolbox"><span class="ic">✎</span>智能创作</button>
+    <button type="button" data-go="tasks" data-focus="nt-title"><span class="ic">⌕</span>深度研究</button>
+    <button type="button" class="yin" data-go="overview" aria-label="回到总览">☯</button>
+    <button type="button" data-go="workflow"><span class="ic">⟳</span>自动执行</button>
+    <button type="button" data-go="memory"><span class="ic">▤</span>知识管理</button>
+    <button type="button" data-go="memory" data-focus="mem-history"><span class="ic">⌛</span>时光回溯</button>
+  </div>
+</div>
+<div class="gate-backdrop hidden" id="gate" role="dialog" aria-modal="true" aria-labelledby="gate-title" aria-describedby="gate-detail">
+  <form class="glass pad gate" id="gate-form" autocomplete="off">
+    <h2 id="gate-title">确认操作</h2>
+    <p id="gate-detail" class="muted"></p>
+    <div class="gate-phrase"><span>需要输入的确认短语：</span><code id="gate-phrase"></code>
+      <button class="btn small" type="button" id="gate-fill" title="只把短语填进输入框，仍需你点击最终提交">一键填入</button></div>
+    <label class="field">确认短语<input id="gate-input" spellcheck="false" autocapitalize="off" aria-describedby="gate-check"></label>
+    <small id="gate-check" class="gate-check" role="status" aria-live="polite"></small>
+    <label class="field hidden" id="gate-reason-wrap">原因（可选）<input id="gate-reason" maxlength="300"></label>
+    <p class="gate-error hidden" id="gate-error" role="alert"></p>
+    <div class="row gate-actions"><button class="btn" type="button" id="gate-cancel">取消（Esc）</button><button class="btn primary" type="submit" id="gate-submit" disabled>确认提交</button></div>
+  </form>
+</div>
+<div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+<script type="module" src="./os.js"></script>
+</body>
+</html>

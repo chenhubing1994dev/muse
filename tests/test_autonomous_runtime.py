@@ -464,6 +464,63 @@ class AutonomousRuntimeTests(unittest.TestCase):
             with TaskQueue(supervisor.task_db) as queue:
                 self.assertEqual(queue.get(execution["id"])["status"], "queued")
 
+    def test_commander_video_worker_skips_ticket_rejected_before_claim_and_dispatches_next(self):
+        """B391-R4: a queued Ticket rejected by Commander validation must not starve later Tickets."""
+        from muse.unified_runtime import RuntimeBlocked
+        with tempfile.TemporaryDirectory() as directory:
+            supervisor = self.make_supervisor(Path(directory))
+            provider = type("Provider", (), {
+                "issue_video_admission_grant": lambda self, store, request: {},
+                "readiness": lambda self: {"status": "ready"},
+            })()
+            supervisor.video_admission_provider = provider
+            supervisor.video_admission_request_factory = lambda **kwargs: kwargs
+            with TaskQueue(supervisor.task_db) as queue:
+                bad = queue.enqueue("stale video execution", {"kind": "video_pipeline"}, recovery_policy="manual")
+            time.sleep(0.01)
+            with TaskQueue(supervisor.task_db) as queue:
+                good = queue.enqueue("valid video execution", {"kind": "video_pipeline"}, recovery_policy="manual")
+            calls = []
+
+            def dispatch(**kwargs):
+                calls.append(kwargs["task_id"])
+                if kwargs["task_id"] == bad["id"]:
+                    raise RuntimeBlocked("approval digest mismatch")
+                return {"status": "succeeded", "task_id": kwargs["task_id"]}
+
+            with patch.dict(os.environ, {"MUSE_ENABLE_VIDEO_WORKER": "1"}):
+                with patch("muse.unified_runtime.MuseRuntime") as runtime_type:
+                    with patch("muse.video_task_worker.VideoTaskWorker"):
+                        runtime_type.return_value.dispatch_video_pipeline_once.side_effect = dispatch
+                        result = supervisor._video_worker({})
+            self.assertEqual(calls, [bad["id"], good["id"]])
+            self.assertEqual(result["status"], "succeeded")
+            self.assertEqual(result["task_id"], good["id"])
+            self.assertEqual([item["task_id"] for item in result["skipped"]], [bad["id"]])
+            with TaskQueue(supervisor.task_db) as queue:
+                self.assertEqual(queue.get(bad["id"])["status"], "queued")
+
+    def test_commander_video_worker_reports_blocked_when_every_ticket_is_rejected(self):
+        from muse.unified_runtime import RuntimeBlocked
+        with tempfile.TemporaryDirectory() as directory:
+            supervisor = self.make_supervisor(Path(directory))
+            provider = type("Provider", (), {
+                "issue_video_admission_grant": lambda self, store, request: {},
+                "readiness": lambda self: {"status": "ready"},
+            })()
+            supervisor.video_admission_provider = provider
+            supervisor.video_admission_request_factory = lambda **kwargs: kwargs
+            with TaskQueue(supervisor.task_db) as queue:
+                only = queue.enqueue("stale video execution", {"kind": "video_pipeline"}, recovery_policy="manual")
+            with patch.dict(os.environ, {"MUSE_ENABLE_VIDEO_WORKER": "1"}):
+                with patch("muse.unified_runtime.MuseRuntime") as runtime_type:
+                    with patch("muse.video_task_worker.VideoTaskWorker"):
+                        runtime_type.return_value.dispatch_video_pipeline_once.side_effect = RuntimeBlocked("no approval")
+                        result = supervisor._video_worker({})
+            self.assertEqual(result["status"], "blocked")
+            self.assertFalse(result["claimed"])
+            self.assertEqual(result["skipped"][0]["task_id"], only["id"])
+
 
     def test_supervisor_rejects_partial_video_admission_injection(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -708,7 +765,8 @@ class AutonomousRuntimeTests(unittest.TestCase):
                 def run_once(self, *, stop_event=None):
                     context = current_model_call_context()
                     self.assert_context(context)
-                    test_case.assertTrue(record_current_model_usage(                        "lm-studio-local", "research-local-model",
+                    test_case.assertTrue(record_current_model_usage(
+                        "lm-studio-local", "research-local-model",
                         {"prompt_tokens": 31, "completion_tokens": 9, "total_tokens": 40},
                     ))
                     return {

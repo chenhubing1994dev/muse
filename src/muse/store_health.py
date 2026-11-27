@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import tempfile
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
@@ -39,7 +40,9 @@ def registered_stores() -> tuple[StoreSpec, ...]:
 
 def _probe_sqlite(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(str(path), timeout=3.0) as connection:
+    # B391-P2-34: ``with sqlite3.connect(...)`` only commits/rolls back; it never closes the handle, which kept the
+    # database file locked on Windows until garbage collection (WinError 32 when deleting temp dirs).
+    with closing(sqlite3.connect(str(path), timeout=3.0)) as connection:
         connection.execute("PRAGMA busy_timeout=3000")
         connection.execute("CREATE TEMP TABLE muse_startup_probe (value INTEGER NOT NULL)")
         connection.execute("INSERT INTO muse_startup_probe(value) VALUES (1)")

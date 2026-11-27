@@ -50,6 +50,7 @@ if str(SRC_DIR) not in sys.path:
 
 COOKIE_NAME = "muse_session"
 MAX_PROXY_BODY = 96 * 1024 * 1024
+PROXY_BUFFER_LIMIT = 8 * 1024 * 1024  # responses above this are relayed in chunks
 PORTABLE_MARKER = "MUSE_PORTABLE"
 SQLITE_SUFFIXES = (".sqlite3", ".sqlite", ".db")
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; "
@@ -444,6 +445,25 @@ def _make_gateway_handler(engine: "MuseEngine") -> type[BaseHTTPRequestHandler]:
                             break
                         self.wfile.write(chunk)
                         self.wfile.flush()
+                    return
+                upstream_length = resp.getheader("Content-Length")
+                upstream_type = (resp.getheader("Content-Type") or "").split(";", 1)[0].strip().lower()
+                if (upstream_length is not None and upstream_length.isdigit()
+                        and (int(upstream_length) > PROXY_BUFFER_LIMIT
+                             or upstream_type.startswith(("video/", "audio/")) or upstream_type == "application/zip")):
+                    # B391-P2-14: relay large / media bodies (Product Vault MP4, 206 ranges, ZIP) in chunks
+                    # instead of buffering up to 2 GiB in the gateway process.
+                    self.send_header("Content-Length", upstream_length)
+                    self.end_headers()
+                    remaining = int(upstream_length)
+                    while method != "HEAD" and remaining > 0:
+                        chunk = resp.read(min(1024 * 1024, remaining))
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                        remaining -= len(chunk)
+                    if remaining > 0 and method != "HEAD":
+                        self.close_connection = True
                     return
                 data = resp.read()
                 self.send_header("Content-Length", str(len(data)))

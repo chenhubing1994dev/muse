@@ -823,6 +823,30 @@ def build_artifacts(report_dir: str | Path, *, limit: int = 50) -> list[dict[str
         })
     return sorted(rows, key=lambda item: item["modified_at"], reverse=True)[:limit]
 
+def parse_byte_range(header: str | None, size: int) -> tuple[int, int] | str | None:
+    """Parse a single ``bytes=`` range (RFC 9110 §14).
+
+    Returns ``(start, end)`` inclusive, ``"unsatisfiable"`` for a syntactically valid range that cannot
+    be served (→ 416), or ``None`` when the header is absent or not a single byte range (→ full 200).
+    """
+    if not header or not isinstance(size, int) or size < 0:
+        return None
+    match = re.fullmatch(r"\s*bytes\s*=\s*([0-9]{0,19})\s*-\s*([0-9]{0,19})\s*", header)
+    if not match or (match.group(1) == "" and match.group(2) == ""):
+        return None
+    first, last = match.group(1), match.group(2)
+    if first == "":
+        suffix = int(last)
+        if suffix == 0 or size == 0:
+            return "unsatisfiable"
+        return max(0, size - suffix), size - 1
+    start = int(first)
+    end = int(last) if last != "" else size - 1
+    if start >= size or (last != "" and end < start):
+        return "unsatisfiable"
+    return start, min(end, size - 1)
+
+
 def _verified_product_files(products_dir: str | Path, initiative_id: str, version: str):
     if not re.fullmatch(r"[0-9a-f]{32}", initiative_id) or not re.fullmatch(r"[0-9a-f]{20}", version):
         raise ValueError("invalid product identity")
@@ -1515,6 +1539,65 @@ def create_status_server(
     video_jobs: dict[str, dict[str, Any]] = {}
     video_jobs_lock = Lock()
     video_job_slot = BoundedSemaphore(1)
+    # B391 P1: interactive control-plane (task center, approvals, dual-track memory,
+    # telemetry, creation readiness, Xuanshu hypotheses). Same auth as every route.
+    from muse.control_center_api import ControlContext
+
+    def _control_products() -> list[dict[str, Any]]:
+        return build_products(products_path, limit=100) if products_path is not None else []
+
+    def _control_gpu() -> dict[str, Any]:
+        return build_gpu_resource_status(gpu_resource_path)
+
+    def _control_video_engines() -> dict[str, Any]:
+        engines = inspect_video_engines(timeout_seconds=0.5)
+        return {"comfyui": engines.get("comfyui"), "commander_planner": _commander_planner_readiness()}
+
+    def _control_video_resolver(initiative_id: str, version: str) -> dict[str, Any]:
+        """B391-P2-10: hash-verified Product Vault lookup; the video SHA-256 is computed here."""
+        if products_path is None:
+            raise FileNotFoundError("product store is not configured")
+        try:
+            _, manifest, files = _verified_product_files(products_path, initiative_id, version)
+        except FileNotFoundError:
+            raise
+        except Exception as exc:  # integrity / manifest failures must not be recorded as feedback
+            raise ValueError(f"video product failed integrity verification ({type(exc).__name__})") from None
+        if manifest.get("product_kind") != "video_creator" or "video.mp4" not in files:
+            raise FileNotFoundError("video product not found")
+        digest = hashlib.sha256()
+        with files["video.mp4"][0].open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        title = manifest.get("title") if isinstance(manifest.get("title"), str) else None
+        return {"initiative_id": initiative_id, "version_id": version, "video_sha256": digest.hexdigest(),
+                "title": title}
+
+    def _control_feedback_writer(creator_initiative_id: str, *, feedback: str, decision: str,
+                                 idempotency_key: str) -> dict[str, Any]:
+        from muse.initiative_engine import FeedbackIdempotencyConflict, InitiativeStore
+        if initiatives_path is None or not initiatives_path.is_file():
+            raise RuntimeError("creator ledger (initiative store) is not configured")
+        with InitiativeStore(initiatives_path) as initiatives:
+            try:
+                saved = initiatives.record_feedback(
+                    creator_initiative_id, feedback, decision=decision, reviewer="creator",
+                    source="muse_os_claim_feedback", idempotency_key=idempotency_key,
+                )
+            except FeedbackIdempotencyConflict as exc:
+                raise PermissionError(str(exc)[:300]) from None
+        return {"id": saved["id"], "decision": saved["decision"], "created_at": saved.get("created_at"),
+                "deduplicated": bool(saved.get("deduplicated", False))}
+
+    control_context = ControlContext(
+        workspace_root=workspace_root, task_path=resolved_task_path, memory_path=memory_path,
+        knowledge_path=knowledge_path, improvement_path=improvement_path,
+        gpu_resource_path=gpu_resource_path,
+        vault_path=(workspace_root / "vault") if (workspace_root / "vault").is_dir() else None,
+        products_provider=_control_products, gpu_status_provider=_control_gpu,
+        video_engines_provider=_control_video_engines,
+        video_product_resolver=_control_video_resolver, feedback_ledger_writer=_control_feedback_writer,
+    )
 
     def _run_video_job(job_id: str, payload: dict[str, Any]) -> None:
         from muse.initiative_engine import InitiativeStore
@@ -1611,6 +1694,11 @@ def create_status_server(
             return
 
         def _send(self, status: int, payload: dict[str, Any]) -> None:
+            if 200 <= status < 300:
+                # B391: every metaphysical response carries 「玄学推演／待验证假设」.
+                from muse.metaphysics_label import label_payload, needs_label
+                if needs_label(urlsplit(self.path).path):
+                    payload = label_payload(payload)
             body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -1640,20 +1728,31 @@ def create_status_server(
                     from muse.omega_api import handle_omega  # B394-B398 Omega routes
                     omega_status, omega_body = handle_omega("GET", parsed.path, parsed.query, b"", workspace_root)
                     self._send(omega_status, omega_body)
+                elif parsed.path.startswith("/api/v1/control/"):
+                    from muse.control_center_api import handle_control  # B391 P1 control plane
+                    control_status, control_body = handle_control("GET", parsed.path, parsed.query, b"", control_context)
+                    self._send(control_status, control_body)
                 elif parsed.path in {"/api/v1/health", "/api/v1/store-health"}:
+                    # B391-R1: an unconfigured store registry is "not monitored", not "unhealthy".
+                    # Only an explicitly supplied registry with a non-healthy store degrades health.
+                    stores_configured = store_health is not None
                     store_snapshot = {key: dict(value) for key, value in (store_health or {}).items()}
-                    stores_healthy = bool(store_snapshot) and all(
-                        value.get("status") == "healthy" for value in store_snapshot.values()
-                    )
+                    stores_healthy = (
+                        bool(store_snapshot) and all(
+                            value.get("status") == "healthy" for value in store_snapshot.values()
+                        )
+                    ) if stores_configured else None
+                    degraded = stores_configured and stores_healthy is not True
                     payload = {
-                        "service": "muse-status-api", "status": "ok" if stores_healthy else "degraded",
+                        "service": "muse-status-api", "status": "degraded" if degraded else "ok",
                         "api_version": 1, "agent_registry_configured": agent_path is not None,
                         "stores": store_snapshot, "stores_healthy": stores_healthy,
+                        "stores_configured": stores_configured,
                     }
-                    if parsed.path == "/api/v1/store-health":
-                        self._send(200 if stores_healthy else 503, payload)
+                    if parsed.path == "/api/v1/store-health" and not stores_configured:
+                        self._send(503, {**payload, "status": "not_configured"})
                     else:
-                        self._send(200 if stores_healthy else 503, payload)
+                        self._send(503 if degraded else 200, payload)
                 elif parsed.path == "/api/v1/companion/pairings":
                     from muse.companion_security import CompanionDeviceStore
                     limit = int(parse_qs(parsed.query).get("limit", ["20"])[0])
@@ -2320,9 +2419,26 @@ def create_status_server(
                         if size > 20 * 1024 * 1024:
                             self._send(413, {"error": "product exceeds 20 MiB"})
                             return
-                    self.send_response(200)
+                    # B391-P2-11: single-range requests for vault media (seeking in <video>).
+                    byte_range = None
+                    if body is None and name == "video.mp4":
+                        byte_range = parse_byte_range(self.headers.get("Range"), size)
+                        if byte_range == "unsatisfiable":
+                            self.send_response(416)
+                            self.send_header("Content-Range", f"bytes */{size}")
+                            self.send_header("Content-Length", "0")
+                            self.send_header("Accept-Ranges", "bytes")
+                            self.send_header("Cache-Control", "no-store")
+                            self.end_headers()
+                            return
+                    start, end = (byte_range if isinstance(byte_range, tuple) else (0, size - 1))
+                    self.send_response(206 if isinstance(byte_range, tuple) else 200)
                     self.send_header("Content-Type", content_type)
-                    self.send_header("Content-Length", str(size))
+                    self.send_header("Content-Length", str(max(0, end - start + 1)))
+                    if body is None and name == "video.mp4":
+                        self.send_header("Accept-Ranges", "bytes")
+                    if isinstance(byte_range, tuple):
+                        self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
                     filename = (f"muse-video-{initiative_id[:8]}.mp4" if is_video and name == "video.mp4"
                                 else f"muse-product-{initiative_id[:8]}.zip" if name == "product.zip" else "index.html")
                     self.send_header("Content-Disposition", disposition + '; filename="' + filename + '"')
@@ -2331,10 +2447,16 @@ def create_status_server(
                     self.end_headers()
                     if body is not None:
                         self.wfile.write(body)
-                    else:
+                    elif size > 0:
                         with file_path.open("rb") as stream:
-                            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                            stream.seek(start)
+                            remaining = end - start + 1
+                            while remaining > 0:
+                                chunk = stream.read(min(1024 * 1024, remaining))
+                                if not chunk:
+                                    break
                                 self.wfile.write(chunk)
+                                remaining -= len(chunk)
                 elif parsed.path == "/api/v1/artifacts":
                     if reports_path is None:
                         self._send(503, {"error": "artifact store is not configured"})
@@ -2429,6 +2551,25 @@ def create_status_server(
                     return
                 omega_status, omega_body = handle_omega("POST", parsed.path, parsed.query, raw, workspace_root)
                 self._send(omega_status, omega_body)
+                return
+            if parsed.path.startswith("/api/v1/control/"):
+                from muse.control_center_api import handle_control, max_body_bytes as control_max_body
+                if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json":
+                    self._send(415, {"error": "application/json required"})
+                    return
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                except ValueError:
+                    length = -1
+                if not 1 <= length <= control_max_body(parsed.path):
+                    self._send(413 if length > 0 else 400, {"error": "request body size not allowed"})
+                    return
+                raw = self.rfile.read(length)
+                if len(raw) != length:
+                    self._send(400, {"error": "incomplete request body"})
+                    return
+                control_status, control_body = handle_control("POST", parsed.path, parsed.query, raw, control_context)
+                self._send(control_status, control_body)
                 return
             decide_match = re.fullmatch(r"/api/v1/signed-reviews/([0-9a-f]{32})/decide", parsed.path)
             if decide_match or parsed.path == "/api/v1/reviewer-key/initialize":
@@ -2997,7 +3138,8 @@ def create_status_server(
                                 node = knowledge.upsert_node(
                                     "decision",
                                     f"产品反馈：{initiative.get('title') or initiative_id}（{payload['decision']}）"[:500],
-                                    summary=feedback_text,                                    external_ref=f"initiative-feedback:{initiative_id}:{saved['id']}",
+                                    summary=feedback_text,
+                                    external_ref=f"initiative-feedback:{initiative_id}:{saved['id']}",
                                     metadata={
                                         "origin": "creator_product_feedback",
                                         "source_kind": "web_portal_product_feedback",
@@ -3313,6 +3455,10 @@ def create_status_server(
                         "attempt_id": queued["attempt"]["attempt_id"],
                         "execution_ticket_id": queued["execution_ticket_id"],
                         "gpu_execution": "not_started",
+                        # B391-R4a: the loopback dashboard has no per-person accounts; the
+                        # approver is the authenticated local session, recorded honestly.
+                        "approved_by": "local-dashboard-user",
+                        "approver_scope": "local_single_user_session",
                     })
                 except (UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError, PermissionError, KeyError) as exc:
                     self._send(409, {
@@ -3566,6 +3712,7 @@ def create_status_server(
                         "create_offline_product": create_offline_product,
                     }
                     idempotency_key = "inspiration-evolution:" + request_id
+                    from muse.task_queue import TaskQueue  # B391-P2-29: do_POST re-imports TaskQueue elsewhere, so it is function-local
                     with TaskQueue(task_path) as queue:
                         existing = queue.get_by_idempotency_key(idempotency_key)
                         if existing is not None:

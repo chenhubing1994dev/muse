@@ -290,7 +290,8 @@ export function createApiClient({ baseUrl, token, fetchImpl = globalThis.fetch, 
   if (!hasBearerToken && !cookieSession) throw new Error("本地 API 会话信息无效");
   const fetchCredentials = sameOriginDashboard ? "same-origin" : "omit";
   const authorizationHeader = hasBearerToken ? { Authorization: "Bearer " + token } : {};
-  if (typeof fetchImpl !== "function") throw new Error("当前环境不支持 Fetch API");  async function request(path, { method = "GET", body, requestTimeoutMs } = {}) {
+  if (typeof fetchImpl !== "function") throw new Error("当前环境不支持 Fetch API");
+  async function request(path, { method = "GET", body, requestTimeoutMs } = {}) {
     const controller = new AbortController();
     const effectiveTimeout = (Number.isInteger(requestTimeoutMs) && requestTimeoutMs >= 100 && requestTimeoutMs <= 120000)
       ? requestTimeoutMs
@@ -302,7 +303,8 @@ export function createApiClient({ baseUrl, token, fetchImpl = globalThis.fetch, 
       const response = await fetchImpl(new URL(path, origin), {
         method, headers, body: body === undefined ? undefined : JSON.stringify(body),
         cache: "no-store", credentials: fetchCredentials, redirect: "error", signal: controller.signal,
-      });      if (!response.ok) {
+      });
+      if (!response.ok) {
         let detail = "";
         try { detail = (await response.json())?.error || ""; } catch {}
         throw new Error(detail || "本地 API 返回 HTTP " + response.status);
@@ -327,7 +329,8 @@ export function createApiClient({ baseUrl, token, fetchImpl = globalThis.fetch, 
     }
     const response = await fetchImpl(new URL("/api/v1/events/stream", origin), {
       method: "GET", headers, cache: "no-store", credentials: fetchCredentials, redirect: "error", signal,
-    });    if (!response.ok) throw new Error("事件流返回 HTTP " + response.status);
+    });
+    if (!response.ok) throw new Error("事件流返回 HTTP " + response.status);
     if (!(response.headers?.get?.("content-type") || "").toLowerCase().startsWith("text/event-stream")) throw new Error("事件流响应类型不兼容");
     const body = await response.text();
     let cursor = lastEventId;
@@ -364,7 +367,8 @@ export function createApiClient({ baseUrl, token, fetchImpl = globalThis.fetch, 
     ), {
       headers: { ...authorizationHeader },
       cache: "no-store", credentials: fetchCredentials, redirect: "error",
-    });    if (!response.ok) throw new Error("产品读取失败，HTTP " + response.status);
+    });
+    if (!response.ok) throw new Error("产品读取失败，HTTP " + response.status);
     return response.blob();
   }
   return {

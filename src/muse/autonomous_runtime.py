@@ -518,8 +518,13 @@ class AutonomousSupervisor:
             ]
         if not candidates:
             return {"status": "idle", "claimed": False, "pending": 0}
-        execution_task_id = candidates[0].get("id")
-        if not isinstance(execution_task_id, str) or not execution_task_id.strip():
+        # B391-R4: oldest first (FIFO); list_tasks returns newest first.
+        candidates.sort(key=lambda item: (str(item.get("created_at") or ""), str(item.get("id") or "")))
+        candidate_ids = [
+            item["id"] for item in candidates
+            if isinstance(item.get("id"), str) and item["id"].strip()
+        ]
+        if not candidate_ids:
             return {"status": "blocked", "claimed": False, "reason": "queued video_pipeline Ticket has no valid ID"}
 
         if self._stop_event is not None and self._stop_event.is_set():
@@ -544,12 +549,14 @@ class AutonomousSupervisor:
         from muse.video_task_worker import VideoTaskWorker
         from muse.unified_runtime import MuseRuntime
 
+        from muse.unified_runtime import RuntimeBlocked
+
         worker_id = "commander-video-worker"
         try:
             runtime = MuseRuntime(self.task_db.resolve(), workspace=self.workspace)
         except (OSError, ValueError, RuntimeError) as exc:
             return {
-                "status": "blocked", "claimed": False, "task_id": execution_task_id,
+                "status": "blocked", "claimed": False, "task_id": candidate_ids[0],
                 "reason": f"Commander Runtime is unavailable ({type(exc).__name__}): {str(exc)[:240]}",
             }
         worker = VideoTaskWorker(
@@ -561,12 +568,38 @@ class AutonomousSupervisor:
         )
         # The approval flag is only a dispatch switch; Runtime revalidates the
         # exact persisted approval Ticket, human.decision event, DAG and digest.
-        return runtime.dispatch_video_pipeline_once(
-            task_id=execution_task_id,
-            approved=True,
-            worker_id=worker_id,
-            video_worker=worker,
-        )
+        # A Ticket rejected *before* claim stays queued for human inspection; it is
+        # reported and skipped so it cannot starve later valid Tickets. At most one
+        # Ticket is dispatched per tick.
+        skipped: list[dict[str, str]] = []
+        for execution_task_id in candidate_ids[:20]:
+            if self._stop_event is not None and self._stop_event.is_set():
+                return {"status": "stopping", "claimed": False, "skipped": skipped}
+            try:
+                result = runtime.dispatch_video_pipeline_once(
+                    task_id=execution_task_id,
+                    approved=True,
+                    worker_id=worker_id,
+                    video_worker=worker,
+                )
+            except RuntimeBlocked as exc:
+                with TaskQueue(self.task_db) as queue:
+                    current = queue.get(execution_task_id)
+                if isinstance(current, dict) and current.get("status") == "queued":
+                    skipped.append({"task_id": execution_task_id, "reason": str(exc)[:300]})
+                    continue
+                return {
+                    "status": "blocked", "claimed": True, "task_id": execution_task_id,
+                    "reason": str(exc)[:300], "skipped": skipped,
+                }
+            if isinstance(result, dict) and skipped:
+                result = {**result, "skipped": skipped}
+            return result
+        return {
+            "status": "blocked", "claimed": False, "pending": len(candidate_ids),
+            "reason": "every queued video_pipeline Ticket was rejected by Commander validation before claim",
+            "skipped": skipped,
+        }
 
     def _knowledge_lint(self, _payload: dict[str, Any]) -> dict[str, Any]:
         if not self.knowledge_db.is_file():
@@ -1185,7 +1218,8 @@ class AutonomousSupervisor:
                 connection.close()
             counts = {str(status): int(count) for status, count in rows}
             for state in ("proposed", "researching", "ready_for_review", "approved",
-                          "implemented", "rejected", "rolled_back"):                 counts.setdefault(state, 0)
+                          "implemented", "rejected", "rolled_back"):
+                counts.setdefault(state, 0)
             review_blockers = counts["ready_for_review"]
             approval_blockers = counts["approved"]
             return {
@@ -1274,7 +1308,8 @@ class AutonomousSupervisor:
                 if current.get("state") == "stopping":
                     break
                 if current.get("state") == "paused":
-                    if stop_event.wait(poll_seconds):                        break
+                    if stop_event.wait(poll_seconds):
+                        break
                     continue
                 if current.get("state") != "running":
                     break

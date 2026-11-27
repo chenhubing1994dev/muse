@@ -125,7 +125,8 @@
   let subtitleReviewReviewerId = "";
   let subtitleReviewReviewerRole = "subtitle_editor";
   let subtitleReviewRationale = "";
-  let subtitleReviewEvidenceRefs = "";  let subtitleReviewConfirmation = "";
+  let subtitleReviewEvidenceRefs = "";
+  let subtitleReviewConfirmation = "";
   let subtitleReviewBusy = false;
   let subtitleReviewSubmitting = false;
   let subtitleReviewMessage = "";
@@ -1371,7 +1372,7 @@
         mode: "local_assets" as const,
         source: videoSourceKey.trim(),
         title: videoTitle.trim(),
-        audio_mode: videoAudioMode,
+        audio_mode: videoNarrationScript.trim() ? ("music" as const) : videoAudioMode,
         narration_script: videoNarrationScript.trim(),
         motion_profile: videoMotionProfile,
         ...(videoAudioName.trim() ? { audio: videoAudioName.trim() } : {}),
@@ -1705,6 +1706,9 @@
   <a class="rail-item" href="./evolution-lab.html" title="自我进化实验室 · 熔断与回滚"><Icon name="flame" size={19} /><span>进化</span></a>
   <a class="rail-item" href="./research-bridge.html" title="深度研究 · 创作反馈回传"><Icon name="search" size={19} /><span>研究</span></a>
   <a class="rail-item" href="./video-factory.html" title="一键电影级视频工坊"><Icon name="studio" size={19} /><span>出片</span></a>
+  <!-- B391 P2: Prometheus Portal and Super Agent OS -->
+  <a class="rail-item" href="./portal.html" title="普罗米修斯计划品牌门户"><Icon name="core" size={19} /><span>门户</span></a>
+  <a class="rail-item" href="./os.html" title="Muse Super Agent OS 超级智能体调度中心"><Icon name="tasks" size={19} /><span>OS</span></a>
   <div class="rail-foot">
     <b>璇</b>
     <small>v0.3<br />LOCAL</small>
@@ -2494,7 +2498,6 @@
               </select>
               <label for="video-duration">预览时长（秒）</label>
               <select id="video-duration" bind:value={videoDuration}>
-                <option value="1">约 1 秒</option>
                 <option value="2">约 2 秒</option>
                 <option value="3">约 3 秒</option>
                 <option value="4">约 4 秒</option>
@@ -2508,11 +2511,6 @@
               <textarea id="video-narration-script-local" bind:value={videoNarrationScript} rows="4" maxlength="12000" placeholder="写下这条视频的粤语旁白内容；Muse 会用本地 CantoTTS 合成，并用粤语 ASR 校验字幕。"></textarea>
               <label for="video-audio-name">背景音乐文件名（可选）</label>
               <input id="video-audio-name" bind:value={videoAudioName} maxlength="180" placeholder="例如 music.mp3" />
-              <label for="video-audio-mode">音轨用途</label>
-              <select id="video-audio-mode" bind:value={videoAudioMode}>
-                <option value="music">背景音乐（循环铺底）</option>
-                <option value="narration">旁白 / 人声（按原时长）</option>
-              </select>
               <small>支持 PNG/JPG/WebP 与 MP4/MOV/MKV/WebM；最多 100 个镜头素材。素材放在 data/video_sources/素材文件夹名。留空旁白稿不会启动本地配音路径；同时添加音频文件时请将用途设为背景音乐。</small>
             {/if}
             <label for="video-motion-profile">Remotion 动效包装</label>
@@ -2601,7 +2599,8 @@
                 {@const recipeTraceLink = resolveProductAttempt(product, videoAttemptSummary?.attempts ?? [])}
                 <div class="artifact-row">
                   <span>
-                    <b>{product.kind === "video_creator" ? "🎬 " : "◇ "}{product.name}</b>                  <small>{product.kind === "video_creator" ? "视频成片" : "离线原型"} · {product.version} · {product.status} · {(product.size_bytes / 1024).toFixed(1)} KB · {relativeTime(product.modified_at)}</small>
+                    <b>{product.kind === "video_creator" ? "🎬 " : "◇ "}{product.name}</b>
+                  <small>{product.kind === "video_creator" ? "视频成片" : "离线原型"} · {product.version} · {product.status} · {(product.size_bytes / 1024).toFixed(1)} KB · {relativeTime(product.modified_at)}</small>
                   {#if product.kind === "video_creator"}
                     <small class="video-delivery-metrics">MP4 / ZIP 完整性校验通过 · MP4 {(Number(product.video_bytes ?? 0) / 1024 / 1024).toFixed(2)} MB
                       {#if product.video_metrics}
@@ -2674,7 +2673,8 @@
                         <small>这些是黑帧、静帧或静音的启发式提示；有意的暗场、定格与留白不自动判为缺陷，也不会单独阻断技术 QA。</small>
                       </div>
                     {/if}
-                  </span>                <div class="product-actions">
+                  </span>
+                <div class="product-actions">
                   <button type="button" class="radar-scan" onclick={() => toggleInitiativeTimeline(product)} disabled={timelineBusy} aria-expanded={selectedTimelineId === timelineInitiativeId(product)}>{selectedTimelineId === timelineInitiativeId(product) ? "收起时间线" : "创作时间线"}</button>
                   {#if product.kind === "video_creator" && recipeTraceLink.status === "matched" && recipeTraceLink.attemptId}
                     <button type="button" class="radar-scan" onclick={() => toggleVideoRecipeTrace(recipeTraceLink.attemptId!)} disabled={recipeTraceBusy} aria-expanded={selectedRecipeTraceAttemptId === recipeTraceLink.attemptId}>{selectedRecipeTraceAttemptId === recipeTraceLink.attemptId ? "收起配方追溯" : "配方追溯"}</button>
@@ -2733,7 +2733,8 @@
               {/if}
               {#if selectedSubtitleReviewProductId === product.id}
                 <section class="product-review-form subtitle-review-workbench" aria-label="粤语字幕逐条人工审校">
-                  <b>粤语旁白 · 逐条字幕审校</b>                  <div class="product-actions">
+                  <b>粤语旁白 · 逐条字幕审校</b>
+                  <div class="product-actions">
                     <button type="button" class="radar-scan" onclick={() => previewProduct(product)}>打开原片听审</button>
                     <span>{subtitleReviewReviewedIndexes.length} / {subtitleReviewDocument?.segments.length ?? 0} 条已确认</span>
                   </div>
@@ -2770,7 +2771,8 @@
                     </label>
                     <label>证据引用（每行一条，填写本次实际核对过的材料）
                       <textarea rows="2" maxlength="2000" placeholder="例如 subtitle-review.json#segments" bind:value={subtitleReviewEvidenceRefs}></textarea>
-                    </label>                    <label>明确批准口令
+                    </label>
+                    <label>明确批准口令
                       <input maxlength="40" placeholder="输入 APPROVE-HUMAN-REVIEW" bind:value={subtitleReviewConfirmation} />
                     </label>
                     <button type="button" class="feedback-submit" onclick={() => approveSubtitleReview(product)}
@@ -2778,7 +2780,8 @@
                       {subtitleReviewSubmitting ? "正在生成新版本…" : "确认人工审校并生成新版本"}
                     </button>
                   {:else if subtitleReviewMessage}
-                    <small role="status">{subtitleReviewMessage}</small>                  {/if}
+                    <small role="status">{subtitleReviewMessage}</small>
+                  {/if}
 
                 </section>
               {/if}

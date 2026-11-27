@@ -45,22 +45,22 @@
             "feedback": {
               "name": "Feedback Store",
               "status": "healthy",
-              "path": "C:\\Users\\Administrator\\Desktop\\museapp\\Muse\\muse-data\\data\\evolution\\improvements.sqlite3"
+              "path": "X:\\PATH\\TO\\USER\\Desktop\\museapp\\Muse\\muse-data\\data\\evolution\\improvements.sqlite3"
             },
             "inspiration": {
               "name": "Inspiration / Knowledge Store",
               "status": "healthy",
-              "path": "C:\\Users\\Administrator\\Desktop\\museapp\\Muse\\muse-data\\data\\research\\knowledge.sqlite3"
+              "path": "X:\\PATH\\TO\\USER\\Desktop\\museapp\\Muse\\muse-data\\data\\research\\knowledge.sqlite3"
             },
             "artifacts": {
               "name": "Artifact Store",
               "status": "healthy",
-              "path": "C:\\Users\\Administrator\\Desktop\\museapp\\Muse\\muse-data\\data\\research\\reports"
+              "path": "X:\\PATH\\TO\\USER\\Desktop\\museapp\\Muse\\muse-data\\data\\research\\reports"
             },
             "agents": {
               "name": "Agent Registry",
               "status": "healthy",
-              "path": "C:\\Users\\Administrator\\Desktop\\museapp\\Muse\\muse-data\\data\\agents\\registry.sqlite3"
+              "path": "X:\\PATH\\TO\\USER\\Desktop\\museapp\\Muse\\muse-data\\data\\agents\\registry.sqlite3"
             }
           },
           "stores_healthy": true
@@ -77,22 +77,22 @@
             "feedback": {
               "name": "Feedback Store",
               "status": "healthy",
-              "path": "C:\\Users\\Administrator\\Desktop\\museapp\\Muse\\muse-data\\data\\evolution\\improvements.sqlite3"
+              "path": "X:\\PATH\\TO\\USER\\Desktop\\museapp\\Muse\\muse-data\\data\\evolution\\improvements.sqlite3"
             },
             "inspiration": {
               "name": "Inspiration / Knowledge Store",
               "status": "healthy",
-              "path": "C:\\Users\\Administrator\\Desktop\\museapp\\Muse\\muse-data\\data\\research\\knowledge.sqlite3"
+              "path": "X:\\PATH\\TO\\USER\\Desktop\\museapp\\Muse\\muse-data\\data\\research\\knowledge.sqlite3"
             },
             "artifacts": {
               "name": "Artifact Store",
               "status": "healthy",
-              "path": "C:\\Users\\Administrator\\Desktop\\museapp\\Muse\\muse-data\\data\\research\\reports"
+              "path": "X:\\PATH\\TO\\USER\\Desktop\\museapp\\Muse\\muse-data\\data\\research\\reports"
             },
             "agents": {
               "name": "Agent Registry",
               "status": "healthy",
-              "path": "C:\\Users\\Administrator\\Desktop\\museapp\\Muse\\muse-data\\data\\agents\\registry.sqlite3"
+              "path": "X:\\PATH\\TO\\USER\\Desktop\\museapp\\Muse\\muse-data\\data\\agents\\registry.sqlite3"
             }
           },
           "stores_healthy": true
