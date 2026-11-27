@@ -6,6 +6,7 @@ No network access, shell interpolation, or source-media mutation is performed.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -45,6 +46,50 @@ def _run_process(runner: Callable, command: list[str], **kwargs):
         return runner(command, **kwargs)
     except (OSError, subprocess.SubprocessError) as exc:
         raise RemotionMotionError("a local Remotion/FFmpeg process could not be completed") from exc
+
+
+
+def _stage_remotion_binaries(source: Path, target: Path) -> None:
+    """Copy the Remotion compositor toolchain into a directory with clean ACLs.
+
+    On some Windows hosts the installed compositor directory inherits a DACL that
+    denies ``Everyone`` a right required to load its native executables; those
+    executables then exit with STATUS_ACCESS_DENIED (0xC0000022). The system temp
+    root has a normal DACL, so staging there lets the identical binaries run.
+    Nothing under node_modules or the user's data is modified.
+    """
+    required = {"remotion.exe", "ffmpeg.exe", "ffprobe.exe"}
+    if not source.is_dir():
+        raise RemotionMotionError("the local Remotion compositor toolchain is missing")
+    available = {item.name for item in source.iterdir() if item.is_file()}
+    if not required <= available:
+        raise RemotionMotionError("the local Remotion compositor toolchain is incomplete")
+    target.mkdir(parents=True, exist_ok=True)
+    for item in source.iterdir():
+        if item.is_file() and not item.is_symlink() and item.suffix.casefold() in {".exe", ".dll"}:
+            shutil.copyfile(item, target / item.name)
+    if not all((target / name).is_file() for name in required):
+        raise RemotionMotionError("the staged Remotion compositor toolchain is incomplete")
+
+
+@contextlib.contextmanager
+def _remotion_binaries(source: Path, runner: Callable, timeout: int):
+    """Stage Remotion's native compositor outside the restricted project ACL."""
+    directory = Path(tempfile.mkdtemp(prefix=".muse-remotion-binaries-"))
+    try:
+        _stage_remotion_binaries(source, directory)
+        probe = _run_process(
+            runner, [str(directory / "ffprobe.exe"), "-version"],
+            capture_output=True, text=True, timeout=min(timeout, 45), check=False,
+        )
+        if probe.returncode != 0:
+            raise RemotionMotionError(
+                "Remotion compositor binaries are not executable: "
+                + _failure_detail(probe, "staged Remotion ffprobe could not start")
+            )
+        yield directory
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
 
 
 def _parse_rate(value: object) -> float | None:
@@ -288,78 +333,84 @@ def render_scene_timeline(
     output.parent.mkdir(parents=True, exist_ok=True)
     created_output = False
     try:
-        with tempfile.TemporaryDirectory(prefix=".muse-scene-timeline-", dir=str(output.parent)) as temporary:
-            work = Path(temporary)
-            clips: list[dict[str, Any]] = []
-            filter_value = (
-                f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
-                f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,"
-                f"fps={fps},setsar=1,format=yuv420p"
-            )
-            for index, source in enumerate(sources):
-                normalized = work / f"scene-{index:04d}.mp4"
-                command = [ffmpeg_path, "-hide_banner", "-loglevel", "error", "-nostdin", "-y"]
-                if source.suffix.casefold() in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
-                    command.extend(["-loop", "1", "-framerate", str(fps), "-i", str(source), "-t", str(image_seconds)])
+        with contextlib.ExitStack() as stack:
+            binaries = stack.enter_context(_remotion_binaries(
+                motion_root / "node_modules" / "@remotion" / "compositor-win32-x64-msvc",
+                runner, timeout_seconds,
+            ))
+            with tempfile.TemporaryDirectory(prefix=".muse-scene-timeline-", dir=str(output.parent)) as temporary:
+                work = Path(temporary)
+                clips: list[dict[str, Any]] = []
+                filter_value = (
+                    f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+                    f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,"
+                    f"fps={fps},setsar=1,format=yuv420p"
+                )
+                for index, source in enumerate(sources):
+                    normalized = work / f"scene-{index:04d}.mp4"
+                    command = [ffmpeg_path, "-hide_banner", "-loglevel", "error", "-nostdin", "-y"]
+                    if source.suffix.casefold() in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
+                        command.extend(["-loop", "1", "-framerate", str(fps), "-i", str(source), "-t", str(image_seconds)])
+                    else:
+                        command.extend(["-i", str(source)])
+                    command.extend(["-vf", filter_value, "-an", "-c:v", "libx264", "-preset", "veryfast",
+                                    "-crf", "20", "-r", str(fps), "-pix_fmt", "yuv420p", str(normalized)])
+                    rendered = _run_process(runner, command, capture_output=True, text=True,
+                                             timeout=timeout_seconds, check=False)
+                    if rendered.returncode != 0 or not normalized.is_file() or normalized.stat().st_size == 0:
+                        detail = _failure_detail(rendered, "FFmpeg scene normalization failed")
+                        raise RemotionMotionError(f"scene {index + 1} normalization failed: {detail}")
+                    info = _probe(normalized, ffprobe_path=ffprobe_path, runner=runner, timeout=timeout_seconds)
+                    frames = max(2, round(info["duration_seconds"] * fps))
+                    staged_name = f"scene-{index:04d}.mp4"
+                    shutil.copyfile(normalized, public_stage / staged_name)
+                    directive = directives[index]
+                    clips.append({"src": f"{stage_name}/{staged_name}", "durationInFrames": frames,
+                                  "cameraMove": directive["camera_move"], "vfx": directive["vfx"],
+                                  "accent": directive["accent"]})
+                min_frames = min(item["durationInFrames"] for item in clips)
+                transition_frames = min(max(1, round(transition_seconds * fps)), max(1, min_frames // 3))
+                total_frames = sum(item["durationInFrames"] for item in clips) - transition_frames * (len(clips) - 1)
+                scene_timings = _scene_timing_records(clips, transition_frames=transition_frames, fps=fps)
+                props = {"scenes": clips, "width": width, "height": height, "fps": fps,
+                         "transitionDurationInFrames": transition_frames}
+                props_path = work / "timeline.json"
+                props_path.write_text(json.dumps(props, ensure_ascii=False), encoding="utf-8")
+                timeline = work / "timeline.mp4"
+                command = [node, str(cli), "render", "src/index.tsx", "MuseSceneTimeline", str(timeline),
+                           f"--props={props_path}", "--codec=h264", "--pixel-format=yuv420p",
+                           f"--binaries-directory={binaries}"]
+                if browser is not None:
+                    command.extend(["--browser-executable", str(browser)])
+                completed = _run_process(runner, command, cwd=str(motion_root), capture_output=True,
+                                         text=True, timeout=timeout_seconds, check=False)
+                if completed.returncode != 0 or not timeline.is_file() or timeline.stat().st_size == 0:
+                    detail = _failure_detail(completed, "Remotion timeline render failed")
+                    raise RemotionMotionError(f"Remotion scene timeline failed: {detail}")
+                timeline_info = _probe(timeline, ffprobe_path=ffprobe_path, runner=runner, timeout=timeout_seconds)
+                if (timeline_info["width"] != width or timeline_info["height"] != height
+                        or abs(timeline_info["fps"] - fps) > 0.5 or timeline_info["has_audio"]):
+                    raise RemotionMotionError("Remotion scene timeline does not match the requested silent video canvas")
+                expected_duration = total_frames / fps
+                if abs(timeline_info["duration_seconds"] - expected_duration) > max(0.15, 2 / fps):
+                    raise RemotionMotionError("Remotion scene timeline duration does not match its transition frame plan")
+                audio_info = _probe(audio_input, ffprobe_path=ffprobe_path, runner=runner, timeout=timeout_seconds)
+                command = [ffmpeg_path, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+                           "-i", str(timeline)]
+                if audio_info["has_audio"]:
+                    command.extend(["-i", str(audio_input), "-map", "0:v:0", "-map", "1:a:0",
+                                    "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-af", "apad",
+                                    "-t", f"{expected_duration:.6f}"])
                 else:
-                    command.extend(["-i", str(source)])
-                command.extend(["-vf", filter_value, "-an", "-c:v", "libx264", "-preset", "veryfast",
-                                "-crf", "20", "-r", str(fps), "-pix_fmt", "yuv420p", str(normalized)])
-                rendered = _run_process(runner, command, capture_output=True, text=True,
-                                         timeout=timeout_seconds, check=False)
-                if rendered.returncode != 0 or not normalized.is_file() or normalized.stat().st_size == 0:
-                    detail = _failure_detail(rendered, "FFmpeg scene normalization failed")
-                    raise RemotionMotionError(f"scene {index + 1} normalization failed: {detail}")
-                info = _probe(normalized, ffprobe_path=ffprobe_path, runner=runner, timeout=timeout_seconds)
-                frames = max(2, round(info["duration_seconds"] * fps))
-                staged_name = f"scene-{index:04d}.mp4"
-                shutil.copyfile(normalized, public_stage / staged_name)
-                directive = directives[index]
-                clips.append({"src": f"{stage_name}/{staged_name}", "durationInFrames": frames,
-                              "cameraMove": directive["camera_move"], "vfx": directive["vfx"],
-                              "accent": directive["accent"]})
-            min_frames = min(item["durationInFrames"] for item in clips)
-            transition_frames = min(max(1, round(transition_seconds * fps)), max(1, min_frames // 3))
-            total_frames = sum(item["durationInFrames"] for item in clips) - transition_frames * (len(clips) - 1)
-            scene_timings = _scene_timing_records(clips, transition_frames=transition_frames, fps=fps)
-            props = {"scenes": clips, "width": width, "height": height, "fps": fps,
-                     "transitionDurationInFrames": transition_frames}
-            props_path = work / "timeline.json"
-            props_path.write_text(json.dumps(props, ensure_ascii=False), encoding="utf-8")
-            timeline = work / "timeline.mp4"
-            command = [node, str(cli), "render", "src/index.tsx", "MuseSceneTimeline", str(timeline),
-                       f"--props={props_path}", "--codec=h264", "--pixel-format=yuv420p"]
-            if browser is not None:
-                command.extend(["--browser-executable", str(browser)])
-            completed = _run_process(runner, command, cwd=str(motion_root), capture_output=True,
-                                     text=True, timeout=timeout_seconds, check=False)
-            if completed.returncode != 0 or not timeline.is_file() or timeline.stat().st_size == 0:
-                detail = _failure_detail(completed, "Remotion timeline render failed")
-                raise RemotionMotionError(f"Remotion scene timeline failed: {detail}")
-            timeline_info = _probe(timeline, ffprobe_path=ffprobe_path, runner=runner, timeout=timeout_seconds)
-            if (timeline_info["width"] != width or timeline_info["height"] != height
-                    or abs(timeline_info["fps"] - fps) > 0.5 or timeline_info["has_audio"]):
-                raise RemotionMotionError("Remotion scene timeline does not match the requested silent video canvas")
-            expected_duration = total_frames / fps
-            if abs(timeline_info["duration_seconds"] - expected_duration) > max(0.15, 2 / fps):
-                raise RemotionMotionError("Remotion scene timeline duration does not match its transition frame plan")
-            audio_info = _probe(audio_input, ffprobe_path=ffprobe_path, runner=runner, timeout=timeout_seconds)
-            command = [ffmpeg_path, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
-                       "-i", str(timeline)]
-            if audio_info["has_audio"]:
-                command.extend(["-i", str(audio_input), "-map", "0:v:0", "-map", "1:a:0",
-                                "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-af", "apad",
-                                "-t", f"{expected_duration:.6f}"])
-            else:
-                command.extend(["-map", "0:v:0", "-c:v", "copy"])
-            command.extend(["-movflags", "+faststart", str(output)])
-            muxed = _run_process(runner, command, capture_output=True, text=True,
-                                 timeout=timeout_seconds, check=False)
-            if muxed.returncode != 0 or not output.is_file() or output.stat().st_size == 0:
-                output.unlink(missing_ok=True)
-                detail = _failure_detail(muxed, "FFmpeg audio mux failed")
-                raise RemotionMotionError(f"scene timeline audio mux failed: {detail}")
-            created_output = True
+                    command.extend(["-map", "0:v:0", "-c:v", "copy"])
+                command.extend(["-movflags", "+faststart", str(output)])
+                muxed = _run_process(runner, command, capture_output=True, text=True,
+                                     timeout=timeout_seconds, check=False)
+                if muxed.returncode != 0 or not output.is_file() or output.stat().st_size == 0:
+                    output.unlink(missing_ok=True)
+                    detail = _failure_detail(muxed, "FFmpeg audio mux failed")
+                    raise RemotionMotionError(f"scene timeline audio mux failed: {detail}")
+                created_output = True
         final_info = _probe(output, ffprobe_path=ffprobe_path, runner=runner, timeout=timeout_seconds)
         if (final_info["width"] != width or final_info["height"] != height
                 or abs(final_info["fps"] - fps) > 0.5
@@ -472,93 +523,99 @@ def render_motion_package(
     transition_seconds = min(0.5, intro_seconds / 4, outro_seconds / 4, base_info["duration_seconds"] / 4)
     intro_frames = max(1, round(intro_seconds * fps))
     outro_frames = max(1, round(outro_seconds * fps))
-    with tempfile.TemporaryDirectory(prefix=".muse-remotion-", dir=str(output.parent)) as temporary:
-        work = Path(temporary)
-        rendered: dict[str, Path] = {}
-        for kind, duration, frames in (
-            ("intro", intro_seconds, intro_frames), ("outro", outro_seconds, outro_frames),
-        ):
-            props = {
-                "title": title.strip() if kind == "intro" else "让灵感，成为作品。",
-                "subtitle": subtitle if kind == "intro" else "MUSE · RESEARCH / CREATE / EVOLVE",
-                "accent": "#d8b46a", "width": width, "height": height,
-                "fps": fps, "durationInFrames": frames, "kind": kind,
-            }
-            props_path = work / f"{kind}.json"
-            props_path.write_text(json.dumps(props, ensure_ascii=False), encoding="utf-8")
-            target = work / f"{kind}.mp4"
-            command = [
-                node, str(cli), "render", "src/index.tsx", "MuseBumper", str(target),
-                f"--props={props_path}", "--codec=h264", "--pixel-format=yuv420p",
-            ]
-            if browser is not None:
-                command.extend(["--browser-executable", str(browser)])
-            completed = _run_process(
-                runner, command, cwd=str(motion_root), capture_output=True, text=True,
-                timeout=timeout_seconds, check=False,
-            )
-            if completed.returncode != 0 or not target.is_file() or target.stat().st_size == 0:
-                detail = _failure_detail(completed, "Remotion returned no MP4")
-                raise RemotionMotionError(f"Remotion {kind} render failed: {detail}")
-            bumper = _probe(target, ffprobe_path=ffprobe_path, runner=runner, timeout=timeout_seconds)
-            if (bumper["width"] != width or bumper["height"] != height
-                    or abs(bumper["fps"] - fps) > 0.5 or bumper["has_audio"]):
-                raise RemotionMotionError(f"Remotion {kind} output does not match the target canvas")
-            rendered[kind] = target
+    with contextlib.ExitStack() as stack:
+        binaries = stack.enter_context(_remotion_binaries(
+            motion_root / "node_modules" / "@remotion" / "compositor-win32-x64-msvc",
+            runner, timeout_seconds,
+        ))
+        with tempfile.TemporaryDirectory(prefix=".muse-remotion-", dir=str(output.parent)) as temporary:
+            work = Path(temporary)
+            rendered: dict[str, Path] = {}
+            for kind, duration, frames in (
+                ("intro", intro_seconds, intro_frames), ("outro", outro_seconds, outro_frames),
+            ):
+                props = {
+                    "title": title.strip() if kind == "intro" else "让灵感，成为作品。",
+                    "subtitle": subtitle if kind == "intro" else "MUSE · RESEARCH / CREATE / EVOLVE",
+                    "accent": "#d8b46a", "width": width, "height": height,
+                    "fps": fps, "durationInFrames": frames, "kind": kind,
+                }
+                props_path = work / f"{kind}.json"
+                props_path.write_text(json.dumps(props, ensure_ascii=False), encoding="utf-8")
+                target = work / f"{kind}.mp4"
+                command = [
+                    node, str(cli), "render", "src/index.tsx", "MuseBumper", str(target),
+                    f"--props={props_path}", "--codec=h264", "--pixel-format=yuv420p",
+                    f"--binaries-directory={binaries}",
+                ]
+                if browser is not None:
+                    command.extend(["--browser-executable", str(browser)])
+                completed = _run_process(
+                    runner, command, cwd=str(motion_root), capture_output=True, text=True,
+                    timeout=timeout_seconds, check=False,
+                )
+                if completed.returncode != 0 or not target.is_file() or target.stat().st_size == 0:
+                    detail = _failure_detail(completed, "Remotion returned no MP4")
+                    raise RemotionMotionError(f"Remotion {kind} render failed: {detail}")
+                bumper = _probe(target, ffprobe_path=ffprobe_path, runner=runner, timeout=timeout_seconds)
+                if (bumper["width"] != width or bumper["height"] != height
+                        or abs(bumper["fps"] - fps) > 0.5 or bumper["has_audio"]):
+                    raise RemotionMotionError(f"Remotion {kind} output does not match the target canvas")
+                rendered[kind] = target
 
-        intro_info = _probe(rendered["intro"], ffprobe_path=ffprobe_path, runner=runner, timeout=timeout_seconds)
-        outro_info = _probe(rendered["outro"], ffprobe_path=ffprobe_path, runner=runner, timeout=timeout_seconds)
-        main_duration = base_info["duration_seconds"]
-        intro_duration = intro_info["duration_seconds"]
-        outro_duration = outro_info["duration_seconds"]
-        total_duration = intro_duration + main_duration + outro_duration - 2 * transition_seconds
-        first_offset = intro_duration - transition_seconds
-        second_offset = intro_duration + main_duration - 2 * transition_seconds
-        filters = [
-            f"[0:v]fps={fps},settb=AVTB,setsar=1,format=yuv420p,setpts=PTS-STARTPTS[v0]",
-            f"[1:v]fps={fps},settb=AVTB,setsar=1,format=yuv420p,setpts=PTS-STARTPTS[v1]",
-            f"[2:v]fps={fps},settb=AVTB,setsar=1,format=yuv420p,setpts=PTS-STARTPTS[v2]",
-            f"[v0][v1]xfade=transition=fade:duration={transition_seconds:.6f}:offset={first_offset:.6f}[vm]",
-            f"[vm][v2]xfade=transition=fade:duration={transition_seconds:.6f}:offset={second_offset:.6f},format=yuv420p[v]",
-        ]
-        command = [
-            ffmpeg_path, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
-            "-i", str(rendered["intro"]), "-i", str(base), "-i", str(rendered["outro"]),
-        ]
-        if base_info["has_audio"] and audio_mode == "music":
-            command.extend(["-stream_loop", "-1", "-i", str(base)])
-            filters.append(
-                f"[3:a:0]atrim=duration={total_duration:.6f},"
-                f"afade=t=in:st=0:d=0.35,"
-                f"afade=t=out:st={max(0.0, total_duration - 0.8):.6f}:d=0.8[a]"
+            intro_info = _probe(rendered["intro"], ffprobe_path=ffprobe_path, runner=runner, timeout=timeout_seconds)
+            outro_info = _probe(rendered["outro"], ffprobe_path=ffprobe_path, runner=runner, timeout=timeout_seconds)
+            main_duration = base_info["duration_seconds"]
+            intro_duration = intro_info["duration_seconds"]
+            outro_duration = outro_info["duration_seconds"]
+            total_duration = intro_duration + main_duration + outro_duration - 2 * transition_seconds
+            first_offset = intro_duration - transition_seconds
+            second_offset = intro_duration + main_duration - 2 * transition_seconds
+            filters = [
+                f"[0:v]fps={fps},settb=AVTB,setsar=1,format=yuv420p,setpts=PTS-STARTPTS[v0]",
+                f"[1:v]fps={fps},settb=AVTB,setsar=1,format=yuv420p,setpts=PTS-STARTPTS[v1]",
+                f"[2:v]fps={fps},settb=AVTB,setsar=1,format=yuv420p,setpts=PTS-STARTPTS[v2]",
+                f"[v0][v1]xfade=transition=fade:duration={transition_seconds:.6f}:offset={first_offset:.6f}[vm]",
+                f"[vm][v2]xfade=transition=fade:duration={transition_seconds:.6f}:offset={second_offset:.6f},format=yuv420p[v]",
+            ]
+            command = [
+                ffmpeg_path, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+                "-i", str(rendered["intro"]), "-i", str(base), "-i", str(rendered["outro"]),
+            ]
+            if base_info["has_audio"] and audio_mode == "music":
+                command.extend(["-stream_loop", "-1", "-i", str(base)])
+                filters.append(
+                    f"[3:a:0]atrim=duration={total_duration:.6f},"
+                    f"afade=t=in:st=0:d=0.35,"
+                    f"afade=t=out:st={max(0.0, total_duration - 0.8):.6f}:d=0.8[a]"
+                )
+                command.extend(["-filter_complex", ";".join(filters), "-map", "[v]", "-map", "[a]"])
+                command.extend(["-c:a", "aac", "-b:a", "192k"])
+            elif base_info["has_audio"]:
+                delay_ms = round(first_offset * 1000)
+                fade_out_start = max(0.0, first_offset + main_duration - 0.5)
+                filters.append(
+                    f"[1:a:0]adelay={delay_ms}:all=1,"
+                    f"afade=t=in:st={first_offset:.6f}:d=0.35,"
+                    f"afade=t=out:st={fade_out_start:.6f}:d=0.5,"
+                    f"apad,atrim=duration={total_duration:.6f}[a]"
+                )
+                command.extend(["-filter_complex", ";".join(filters), "-map", "[v]", "-map", "[a]"])
+                command.extend(["-c:a", "aac", "-b:a", "192k"])
+            else:
+                command.extend(["-filter_complex", ";".join(filters), "-map", "[v]"])
+            command.extend([
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                "-pix_fmt", "yuv420p", "-r", str(fps), "-movflags", "+faststart",
+                "-t", f"{total_duration:.6f}", str(output),
+            ])
+            combined = _run_process(
+                runner, command, capture_output=True, text=True, timeout=timeout_seconds, check=False,
             )
-            command.extend(["-filter_complex", ";".join(filters), "-map", "[v]", "-map", "[a]"])
-            command.extend(["-c:a", "aac", "-b:a", "192k"])
-        elif base_info["has_audio"]:
-            delay_ms = round(first_offset * 1000)
-            fade_out_start = max(0.0, first_offset + main_duration - 0.5)
-            filters.append(
-                f"[1:a:0]adelay={delay_ms}:all=1,"
-                f"afade=t=in:st={first_offset:.6f}:d=0.35,"
-                f"afade=t=out:st={fade_out_start:.6f}:d=0.5,"
-                f"apad,atrim=duration={total_duration:.6f}[a]"
-            )
-            command.extend(["-filter_complex", ";".join(filters), "-map", "[v]", "-map", "[a]"])
-            command.extend(["-c:a", "aac", "-b:a", "192k"])
-        else:
-            command.extend(["-filter_complex", ";".join(filters), "-map", "[v]"])
-        command.extend([
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-            "-pix_fmt", "yuv420p", "-r", str(fps), "-movflags", "+faststart",
-            "-t", f"{total_duration:.6f}", str(output),
-        ])
-        combined = _run_process(
-            runner, command, capture_output=True, text=True, timeout=timeout_seconds, check=False,
-        )
-        if combined.returncode != 0 or not output.is_file() or output.stat().st_size == 0:
-            output.unlink(missing_ok=True)
-            detail = _failure_detail(combined, "FFmpeg returned no MP4")
-            raise RemotionMotionError(f"Remotion motion assembly failed: {detail}")
+            if combined.returncode != 0 or not output.is_file() or output.stat().st_size == 0:
+                output.unlink(missing_ok=True)
+                detail = _failure_detail(combined, "FFmpeg returned no MP4")
+                raise RemotionMotionError(f"Remotion motion assembly failed: {detail}")
 
     final_info = _probe(output, ffprobe_path=ffprobe_path, runner=runner, timeout=timeout_seconds)
     if (final_info["width"] != width or final_info["height"] != height

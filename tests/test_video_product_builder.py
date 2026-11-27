@@ -163,7 +163,7 @@ class VideoProductBuilderTests(unittest.TestCase):
         self.assertEqual(len(kwargs["source_assets"]), 2)
         self.assertEqual(kwargs["generation_metadata"]["width"], 1920)
         self.assertEqual(kwargs["generation_metadata"]["height"], 1080)
-        self.assertTrue(str(kwargs["asr_model_dir"]).casefold().endswith(r"\models\whisper-small-cantonese\cts"))
+        self.assertTrue(str(kwargs["asr_model_dir"]).casefold().endswith(r"\models\whisper-small-cantonese"))
         self.assertTrue(str(kwargs["model_dir"]).casefold().endswith(r"\data\models\canto-tts-nano"))
     def test_scene_timeline_metadata_is_persisted_and_drives_qa_mapping(self):
         qa_report = {

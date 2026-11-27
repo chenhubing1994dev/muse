@@ -3500,6 +3500,15 @@ class AutonomousResearchEngine:
                         key_discoveries["testable_experiments"] = experiment_candidates[:1]
                         concept_text = json.dumps(concept_data, ensure_ascii=False, default=str)
                     if len(concept_text) > 3900:
+                        # Keep every structured field and its semantics; only shorten
+                        # free-text payloads that have no asserted minimum length.
+                        creator_brief["video"]["prompt"] = creator_brief["video"]["prompt"][:240]
+                        for scene in creator_brief["video"]["scenes"]:
+                            scene["prompt"] = scene["prompt"][:60]
+                        narration = creator_brief["video"]["narration"]
+                        narration["research_text"] = narration["research_text"][:120]
+                        concept_text = json.dumps(concept_data, ensure_ascii=False, default=str)
+                    if len(concept_text) > 3900:
                         raise ValueError("creator brief and evidence context exceed the initiative concept storage limit")
                     initiative = initiatives.propose(
                         initiative_title,

@@ -68,6 +68,35 @@ class ZhenyiBaziProvider:
 
     bridge_script = _BRIDGE_SCRIPT
 
+    @staticmethod
+    def _resolve_node_executable() -> str:
+        """Prefer a real node binary over a `.cmd`/`.bat` wrapper on PATH.
+
+        Python's ``subprocess.run(..., shell=False)`` cannot feed stdin to or
+        capture stdout from a Windows command-script wrapper reliably, which
+        makes the bridge look like it returned empty JSON. Skip such shims and
+        use the first real executable on PATH instead.
+        """
+        import os as _os
+
+        script_suffixes = {".cmd", ".bat", ".ps1", ".sh"}
+        seen: set[str] = set()
+        found_wrapper = ""
+        for directory in _os.environ.get("PATH", "").split(_os.pathsep):
+            for name in ("node.exe", "node"):
+                candidate = _os.path.join(directory, name)
+                if not _os.path.isfile(candidate):
+                    continue
+                normalized = _os.path.normcase(_os.path.abspath(candidate))
+                if normalized in seen:
+                    continue
+                seen.add(normalized)
+                if _os.path.splitext(candidate)[1].lower() in script_suffixes:
+                    found_wrapper = found_wrapper or candidate
+                    continue
+                return candidate
+        return found_wrapper or shutil.which("node") or ""
+
     def __init__(
         self,
         *,
@@ -81,7 +110,12 @@ class ZhenyiBaziProvider:
             Path(engine_root).resolve() if engine_root
             else self.project_root / "third_party" / "zhenyi-bazi-review"
         )
-        self.executable = str(executable or shutil.which("node") or "")
+        supplied = str(executable) if executable else ""
+        if supplied.lower().endswith((".cmd", ".bat", ".ps1", ".sh")):
+            # A caller may pass shutil.which("node"), which prefers a command
+            # wrapper over the real binary. Subprocess cannot capture its stdout.
+            supplied = ""
+        self.executable = supplied or self._resolve_node_executable()
         self._command_runner = command_runner or subprocess.run
 
     @staticmethod
