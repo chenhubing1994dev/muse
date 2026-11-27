@@ -1,7 +1,7 @@
 # One-command release: pre-build contract -> build/self-test -> post-build hash verify -> safe deploy/restart.
 [CmdletBinding()]
 param(
-    [string]$DesktopRoot = 'X:\PATH\TO\USER\Desktop\museapp\Muse',
+    [string]$DesktopRoot = (Join-Path ([Environment]::GetFolderPath('Desktop')) 'museapp\Muse'),
     [string]$Target = 'x86_64-pc-windows-msvc'
 )
 $ErrorActionPreference = 'Stop'

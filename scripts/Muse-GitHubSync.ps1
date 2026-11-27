@@ -1,4 +1,4 @@
-﻿# Muse -> GitHub auto backup sync
+# Muse -> GitHub auto backup sync
 # Usage: powershell -File scripts/Muse-GitHubSync.ps1 [-Once] [-IntervalSeconds 60] [-Quiet]
 param(
     [switch]$Once,
@@ -45,9 +45,28 @@ function Invoke-Sync {
         $staged = git diff --cached --name-only 2>$null
         if (-not $staged) { return $false }
 
+        # Zero-leak gate: never commit or push anything the project's secret scan rejects.
+        $audit = Join-Path $PSScriptRoot 'pre_github_sync_audit.py'
+        if (Test-Path $audit) {
+            $auditOut = py -3.11 $audit --history-range origin/main..HEAD 2>&1
+            $auditCode = $LASTEXITCODE
+            if ($auditCode -ne 0) {
+                git reset 2>&1 | Out-Null
+                Write-Log "AUDIT BLOCKED sync; staged changes reset :: $((Remove-Secret ($auditOut | Out-String)).Trim())"
+                return $false
+            }
+        }
+
         $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
         $count = ($staged | Measure-Object -Line).Lines
         git -c user.name='Muse Workspace' -c user.email='muse@localhost' commit -m "auto-sync: $ts ($count files)" --quiet 2>&1 | Out-Null
+
+        # Push the branch we are actually on, not a hard-coded 'main'.
+        $branch = (git rev-parse --abbrev-ref HEAD 2>$null).Trim()
+        if (-not $branch -or $branch -eq 'HEAD') {
+            Write-Log 'ERROR: detached HEAD, skipping push'
+            return $false
+        }
 
         $env:GIT_TERMINAL_PROMPT = '0'
 
@@ -80,7 +99,7 @@ function Invoke-Sync {
         for ($attempt = 1; $attempt -le 6; $attempt++) {
             $proxy = $candidates[($attempt - 1) % $candidates.Count]
             $via = if ($proxy) { $proxy } else { 'direct' }
-            $out = git -c http.sslBackend=schannel -c "http.proxy=$proxy" -c "https.proxy=$proxy" push origin main 2>&1
+            $out = git -c http.sslBackend=schannel -c "http.proxy=$proxy" -c "https.proxy=$proxy" push origin $branch 2>&1
             $code = $LASTEXITCODE
             $lastSafe = (Remove-Secret ($out | Out-String)).Trim()
             if ($code -eq 0) { $ok = $true; Write-Log "PUSH transport OK via $via (attempt $attempt)"; break }
