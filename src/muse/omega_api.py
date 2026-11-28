@@ -107,8 +107,14 @@ def _post(path: str, payload: dict[str, Any], workspace: Path) -> tuple[int, dic
             raise ValueError("version must be a positive integer")
         if payload.get("confirmation") != f"ROLLBACK-{version}":
             raise ValueError(f"explicit ROLLBACK-{version} confirmation required")
-        with EvolutionVersionLedger(p["versions"], workspace) as ledger:
-            return 200, {"result": ledger.rollback(version, actor="dashboard")}
+        # C5: rolling back rewrites project files → high-risk Commander ticket; a user:/human: approval in
+        # the Commander panel runs it. The confirmation phrase alone no longer touches files.
+        from muse.commander_routes import HANDLER_ROLLBACK, submit_and_wait
+        routed = submit_and_wait(workspace, handler=HANDLER_ROLLBACK, route_args={"version": version, "workspace": str(workspace)},
+                                 title=f"Evolution rollback v{version}", objective=f"回滚进化版本 {version}（改写项目文件）",
+                                 request_key=f"rollback:{version}", risk_override="high")
+        return 202, {"result": {"status": routed["status"], "version": version},
+                     "commander": {k: routed.get(k) for k in ("ticket_id", "status", "risk")}}
     if path == "/api/v1/omega/xuanshu/fuse":
         from muse.xuanshu_fusion import fuse
         from muse.xuanshu_symbolic_fallback import today_in_shanghai

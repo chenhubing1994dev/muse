@@ -19,6 +19,7 @@
   import VideoReleaseReview from "./lib/VideoReleaseReview.svelte";
   import VideoVisualReview from "./lib/VideoVisualReview.svelte";
   import MemPalacePanel from "./lib/MemPalacePanel.svelte";
+  import CommanderPanel from "./lib/CommanderPanel.svelte";
   import CompanionPanel from "./lib/CompanionPanel.svelte";
   import MobileCompanionPanel from "./lib/MobileCompanionPanel.svelte";
   import {
@@ -1835,6 +1836,10 @@
           <b>{products.length}</b>
           <em>需人工验收后发布</em>
         </div>
+      </section>
+
+      <section class="card" id="commander-control">
+        <CommanderPanel {client} {connected} />
       </section>
 
       <section class="card" id="mempalace">

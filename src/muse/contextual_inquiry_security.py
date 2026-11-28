@@ -9,6 +9,7 @@ import base64
 import binascii
 import os
 from typing import Any
+from muse.error_journal import record_suppressed_error
 
 
 ENVELOPE_VERSION = 1
@@ -97,8 +98,8 @@ def _dpapi_transform(data: bytes, *, protect: bool) -> bytes:
         if "output_blob" in locals() and output_blob.pbData:
             try:
                 kernel32.LocalFree(ctypes.cast(output_blob.pbData, wintypes.HLOCAL))
-            except Exception:
-                pass
+            except Exception as _muse_suppressed:
+                record_suppressed_error("contextual_inquiry_security.py:100", _muse_suppressed)
 
 
 def protect_case_bytes(plaintext: bytes) -> dict[str, Any]:

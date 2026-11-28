@@ -1,0 +1,45 @@
+{
+  "_comment": "Copy to config/external_agents.json to enable. Only loopback http URLs are accepted. Every invoke is a high-risk Commander ticket that needs a user:/human: approval.",
+  "dsh": {
+    "enabled": false,
+    "base_url": "http://127.0.0.1:8326",
+    "health_path": "/v1/models",
+    "invoke_path": "/v1/chat/completions",
+    "timeout_seconds": 60,
+    "kernel_url": "http://127.0.0.1:3099",
+    "kernel_health_path": "/api/our-free-model/summary",
+    "egress": {
+      "allowed_fields": [
+        "model",
+        "messages",
+        "max_tokens",
+        "temperature"
+      ],
+      "max_chars": 8000,
+      "allowed_roles": [
+        "system",
+        "user"
+      ]
+    }
+  },
+  "super_agent_party": {
+    "enabled": false,
+    "base_url": "",
+    "health_path": "/v1/models",
+    "invoke_path": "/v1/chat/completions",
+    "timeout_seconds": 60,
+    "egress": {
+      "allowed_fields": [
+        "model",
+        "messages",
+        "max_tokens",
+        "temperature"
+      ],
+      "max_chars": 8000,
+      "allowed_roles": [
+        "system",
+        "user"
+      ]
+    }
+  }
+}

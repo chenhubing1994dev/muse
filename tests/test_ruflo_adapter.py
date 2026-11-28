@@ -1,10 +1,13 @@
 import tempfile
 import unittest
 import subprocess
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
+from muse.commander_gate import BypassCommanderError, ruflo_ticket_scope
 from muse.ruflo_adapter import RufloMCPAdapter, RufloError, resolve_lmstudio_ruflo_config
+from muse.task_queue import TaskQueue
 
 
 class RufloAdapterTests(unittest.TestCase):
@@ -17,6 +20,23 @@ class RufloAdapterTests(unittest.TestCase):
     def tearDown(self):
         if hasattr(self, "tmp"):
             self.tmp.cleanup()
+
+    @contextmanager
+    def ticket(self):
+        """Contract since T6: executing Ruflo tools run only inside a running, leased Commander ticket."""
+        db = Path(self.tmp.name) / "tasks.sqlite3"
+        with TaskQueue(db) as queue:
+            task = queue.enqueue("ruflo test", {"kind": "test"})
+            queue.claim_next(worker_id="w1", task_id=task["id"], lease_seconds=60)
+        with ruflo_ticket_scope(db, task["id"], "w1", self.tmp.name):
+            yield
+
+    def test_executing_tool_without_commander_ticket_is_refused(self):
+        adapter = self.make_adapter(("agent_execute",))
+        with patch("muse.ruflo_adapter.subprocess.run") as run:
+            with self.assertRaises(BypassCommanderError):
+                adapter.call_tool("agent_execute", {"agentId": "a", "prompt": "p"}, approved=True)
+            run.assert_not_called()
 
     @patch("muse.ruflo_adapter.subprocess.run")
     def test_read_only_status_calls_pinned_cli_without_shell(self, run):
@@ -38,9 +58,10 @@ class RufloAdapterTests(unittest.TestCase):
             "",
         )
         adapter = self.make_adapter(("agent_execute",))
-        result = adapter.call_tool(
-            "agent_execute", {"agentId": "agent-test", "prompt": "short"}, approved=True,
-        )
+        with self.ticket():
+            result = adapter.call_tool(
+                "agent_execute", {"agentId": "agent-test", "prompt": "short"}, approved=True,
+            )
         self.assertEqual(result.result["usage"], {
             "inputTokens": 12, "outputTokens": 4, "totalTokens": 16,
         })
@@ -50,7 +71,8 @@ class RufloAdapterTests(unittest.TestCase):
     def test_agent_execute_gets_bounded_local_generation_timeout(self, run):
         run.return_value = subprocess.CompletedProcess([], 0, 'Result:\n{"output":"ok"}', "")
         adapter = self.make_adapter(("agent_execute",))
-        adapter.call_tool("agent_execute", {"agentId": "agent-test", "prompt": "short"}, approved=True)
+        with self.ticket():
+            adapter.call_tool("agent_execute", {"agentId": "agent-test", "prompt": "short"}, approved=True)
         self.assertEqual(run.call_args.kwargs["timeout"], 180.0)
 
     @patch("muse.ruflo_adapter.subprocess.run")
@@ -86,7 +108,8 @@ class RufloAdapterTests(unittest.TestCase):
             adapter.call_tool("swarm_init", {"topology": "hierarchical"})
         with patch("muse.ruflo_adapter.subprocess.run") as run:
             run.return_value = subprocess.CompletedProcess([], 0, 'Result:\n{"ok":true}', "")
-            result = adapter.call_tool("swarm_init", {"topology": "hierarchical"}, approved=True)
+            with self.ticket():
+                result = adapter.call_tool("swarm_init", {"topology": "hierarchical"}, approved=True)
         self.assertEqual(result.result, {"ok": True})
 
     def test_rejects_high_risk_invalid_params_and_oversized_payload(self):
@@ -106,7 +129,8 @@ class RufloAdapterTests(unittest.TestCase):
             adapter.call_tool("coordination_topology", {"topology": "mesh"})
         with patch("muse.ruflo_adapter.subprocess.run") as run:
             run.return_value = subprocess.CompletedProcess([], 0, 'Result:\n{"ok":true}', "")
-            result = adapter.call_tool("coordination_topology", {"topology": "mesh"}, approved=True)
+            with self.ticket():
+                result = adapter.call_tool("coordination_topology", {"topology": "mesh"}, approved=True)
         self.assertEqual(result.result, {"ok": True})
 
     @patch("muse.ruflo_adapter.subprocess.run")

@@ -32,6 +32,28 @@ from muse.workflow_profiles import WorkflowContract, WorkflowController, Workflo
 from muse.agent_registry import AgentRegistry
 from muse.artifact_evidence import ArtifactEvidenceError, LocalArtifactEvidenceVerifier
 from muse.model_call_context import model_call_scope, record_current_model_usage
+from muse.error_journal import record_suppressed_error
+def _ruflo_ticket_bound(method):
+    """T6: bind every Ruflo execution inside ``method`` to the ticket it claims (task_id + worker_id).
+
+    RufloMCPAdapter.call_tool re-verifies at each executing call that this ticket is ``running`` and
+    leased to ``worker_id`` and that the global Commander gate is open; otherwise it refuses.
+    """
+    import functools
+    import inspect
+    signature = inspect.signature(method)
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        bound = signature.bind(self, *args, **kwargs)
+        bound.apply_defaults()
+        from muse.commander_gate import ruflo_ticket_scope
+        with ruflo_ticket_scope(self.database, bound.arguments.get("task_id"), bound.arguments.get("worker_id"),
+                                self.workspace):
+            return method(self, *args, **kwargs)
+    return wrapper
+
+
 class RuntimeBlocked(RuntimeError):
     """The requested execution cannot safely proceed with current providers/policy."""
 
@@ -138,9 +160,9 @@ class MuseRuntime:
             try:
                 with AgentRegistry(self.agent_database) as registry:
                     registry.set_model_id(agent_id, model.strip())
-            except Exception:
+            except Exception as _muse_suppressed:
                 # Keep observability best-effort; telemetry must not fail completed work.
-                pass
+                record_suppressed_error("unified_runtime.py:141", _muse_suppressed)
         usage = response.get("usage")
         if not isinstance(usage, dict):
             return False
@@ -237,7 +259,8 @@ class MuseRuntime:
                 if settings["model"]:
                     local_env["MUSE_LLAMA_CPP_MODEL" if requested == "llama_cpp" else "MUSE_LMSTUDIO_MODEL"] = settings["model"]
                 resolve_lmstudio_ruflo_config(local_env)
-            except Exception:
+            except Exception as _muse_suppressed:
+                record_suppressed_error("unified_runtime.py:241", _muse_suppressed)
                 return None
             return "ollama"
         if requested in {"chatanywhere", "ollama"}:
@@ -389,11 +412,42 @@ class MuseRuntime:
             return task
 
     def initialize_swarm(self, *, approved: bool = False, max_agents: int = 8) -> dict[str, Any]:
+        """T6: an approved swarm_init runs as a Muse Commander ticket (review, receipt, cost ledger)."""
+        if not approved:
+            return self._initialize_swarm_impl(approved=False, max_agents=max_agents)
+        from muse.commander_gate import commander_root, ruflo_ticket_scope
+        from muse.muse_commander import MuseCommander
+        root = commander_root(self.workspace)
+        box: dict[str, Any] = {}
+
+        def handler(ctx: dict[str, Any]) -> dict[str, Any]:
+            with ruflo_ticket_scope(root / "tasks.sqlite3", ctx["task_id"], ctx["worker_id"], self.workspace):
+                out = self._initialize_swarm_impl(approved=True, max_agents=max_agents)
+            box["out"] = out
+            return {"artifact": json.dumps(out, ensure_ascii=False, sort_keys=True, default=str),
+                    "builder_id": "worker:ruflo", "evidence": "swarm_confirmed: PASS", "output": out,
+                    "usage": {"provider": "ruflo", "model": "swarm_init", "token_source": "not_reported"}}
+
+        with MuseCommander(root) as commander:
+            commander.register_handler("ruflo.swarm_init", handler)
+            plan = commander.submit_goal("Ruflo swarm init", [{
+                "key": "swarm_init", "title": "Ruflo 集群初始化", "role": "researcher",
+                "objective": "初始化 Ruflo 多智能体集群（调用方已显式批准）", "handler": "ruflo.swarm_init"}],
+                plan_id=uuid.uuid4().hex[:16])
+            ticket_id = plan["tickets"][0]["task_id"]
+            outcome = commander.run_next(task_id=ticket_id, timeout_seconds=600)
+        if outcome.get("status") != "succeeded" or "out" not in box:
+            detail = (outcome.get("result") or {}).get("detail") or outcome.get("gate") or outcome.get("status")
+            raise RuntimeBlocked(f"Commander ticket for swarm_init did not succeed: {detail}")
+        return {**box["out"], "commander_ticket_id": ticket_id}
+
+    def _initialize_swarm_impl(self, *, approved: bool = False, max_agents: int = 8) -> dict[str, Any]:
         existing = self._state("ruflo_swarm_id")
         if existing:
             try:
                 status = self.ruflo.call_tool("swarm_status", {"swarmId": existing}).result
-            except Exception:
+            except Exception as _muse_suppressed:
+                record_suppressed_error("unified_runtime.py:397", _muse_suppressed)
                 status = None
             if isinstance(status, dict):
                 capacity = status.get("maxAgents")
@@ -416,6 +470,7 @@ class MuseRuntime:
         self._set_state("ruflo_swarm_id", result["swarmId"])
         return {"success": True, "swarm_id": result["swarmId"], "reused": False,
                 "rotated": bool(existing), "max_agents": max_agents}
+    @_ruflo_ticket_bound
     def dispatch_once(
         self, *, task_id: str | None = None, approved: bool = False,
         worker_id: str = "muse-ruflo",
@@ -855,6 +910,7 @@ class MuseRuntime:
             "claimed": False,
         }
 
+    @_ruflo_ticket_bound
     def dispatch_commander_once(
         self, *, task_id: str | None = None, approved: bool = False,
         worker_id: str = "muse-commander", max_workers: int = 4,
@@ -863,6 +919,10 @@ class MuseRuntime:
         """Execute one explicitly approved ticket through Muse's validated Commander DAG."""
         if not approved:
             raise RuntimeBlocked("Commander execution requires explicit per-ticket approval")
+        from muse.commander_gate import check_global_gate
+        _gate = check_global_gate(self.workspace)
+        if not _gate["allowed"]:
+            raise RuntimeBlocked(f"Muse Commander global gate is closed ({_gate['reason']}); no ticket was claimed")
         if not isinstance(task_id, str) or not task_id.strip():
             raise RuntimeBlocked("Commander dispatch requires an explicit task_id")
         if isinstance(max_workers, bool) or not isinstance(max_workers, int) or not 1 <= max_workers <= 8:
@@ -1515,8 +1575,8 @@ class MuseRuntime:
                             reason_to_avoid="Inspect Ticket events and fresh evidence before retrying; do not blindly repeat.",
                             task_id=task_id, provenance=(f"task:{task_id}",),
                         )
-                except Exception:
-                    pass
+                except Exception as _muse_suppressed:
+                    record_suppressed_error("unified_runtime.py:1518", _muse_suppressed)
                 current = queue.get(task_id)
                 if workflow_bound and current is not None and current["status"] == "running" and current["lease_owner"] == worker_id:
                     try:
@@ -1525,8 +1585,8 @@ class MuseRuntime:
                             expected_revision=queue.workflow_revision(task_id),
                             stop_reason=type(exc).__name__,
                         )
-                    except Exception:
-                        pass
+                    except Exception as _muse_suppressed:
+                        record_suppressed_error("unified_runtime.py:1528", _muse_suppressed)
                 if current is not None and current["status"] == "running":
                     queue.record_event(
                         task_id, "commander.execution_failed", actor="commander",
@@ -1810,8 +1870,8 @@ class MuseRuntime:
                                     attempt_commit=worker_result["attempt_commit"], worker_id=worker_id,
                                     reason="completion_evidence_rejected",
                                 )
-                            except Exception:
-                                pass
+                            except Exception as _muse_suppressed:
+                                record_suppressed_error("unified_runtime.py:1813", _muse_suppressed)
                         rejected_result = {
                             **worker_result,
                             "status": "completion_evidence_rejected",
@@ -1850,8 +1910,8 @@ class MuseRuntime:
                                         attempt_commit=worker_result["attempt_commit"], worker_id=worker_id,
                                         reason="runtime_finalization_failed",
                                     )
-                                except Exception:
-                                    pass
+                                except Exception as _muse_suppressed:
+                                    record_suppressed_error("unified_runtime.py:1853", _muse_suppressed)
                             failed_result = {
                                 **worker_result, "status": "attempt_finalize_failed",
                                 "error_code": "video_pipeline_attempt_finalize_failed",
@@ -1879,8 +1939,8 @@ class MuseRuntime:
                                 attempt_commit=worker_result["attempt_commit"], worker_id=worker_id,
                                 reason="worker_result_not_succeeded",
                             )
-                        except Exception:
-                            pass
+                        except Exception as _muse_suppressed:
+                            record_suppressed_error("unified_runtime.py:1882", _muse_suppressed)
                     queue.finish(task_id, status="failed", result=worker_result, worker_id=worker_id)
             return {
                 "status": worker_result.get("status", "unknown"),

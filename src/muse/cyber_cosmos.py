@@ -41,6 +41,7 @@ from muse.specialist_router import (
 )
 from muse.task_queue import TaskQueue
 from muse.yijing import TRIGRAM_BY_BITS, analyze_yijing_lines, seeded_three_coin_cast
+from muse.error_journal import record_suppressed_error
 
 
 BAGUA_TRIGRAMS: tuple[dict[str, str], ...] = (
@@ -740,7 +741,8 @@ def build_knowledge_graph(
     governance = None
     try:
         governance = audit_database(knowledge_db, limit=5)["summary"]
-    except Exception:
+    except Exception as _muse_suppressed:
+        record_suppressed_error("cyber_cosmos.py:743", _muse_suppressed)
         governance = None
 
     return {

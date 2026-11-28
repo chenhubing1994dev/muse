@@ -26,6 +26,22 @@ from muse.video_commander_admission import VideoAdmissionBlocked, VideoAdmission
 from muse.video_checkpoint_adapter import cleanup_video_attempt_staging_directory
 
 
+def trigger_publish_bundle_after_video(workspace: Any, *, initiative_id: str, package_sha256: str,
+                                       relative_path: str | None = None) -> dict[str, Any]:
+    """T4 post-commit hook: hand a completed video package to Workflow C (bundle → revenue → publish gate).
+
+    Runs only after the Attempt is committed and never reverses that success; any failure is
+    journaled (muse.error_journal) and visible in the Commander store instead of being swallowed.
+    """
+    try:
+        from muse.workflow_c import on_video_completed
+        return on_video_completed(workspace, initiative_id=initiative_id, package_sha256=package_sha256,
+                                  relative_path=relative_path, title=f"视频成片 {str(initiative_id)[:8]}")
+    except Exception as exc:
+        from muse.error_journal import record_suppressed_error
+        record_suppressed_error("video_task_worker.publish_bundle_hook", exc, initiative_id=initiative_id)
+        return {"status": "hook_failed", "error": f"{type(exc).__name__}: {exc}"[:300]}
+
 def _checkpoint_scene_fingerprint_inputs(scenes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Bind per-scene negative conditioning into the legacy checkpoint input digest.
 
@@ -937,6 +953,8 @@ class VideoTaskWorker:
                     "Could not clean committed video Attempt staging %s",
                     attempt_commit["attempt_id"], exc_info=True,
                 )
+        trigger_publish_bundle_after_video(self.workspace, initiative_id=attempt_commit["initiative_id"],
+                                           package_sha256=attempt_commit["package_sha256"])
         return {"status": "succeeded", "attempt_id": completed["attempt_id"],
                 "product_id": completed["product_id"], "version_id": completed["version_id"]}
 
@@ -1533,6 +1551,10 @@ class VideoTaskWorker:
                             "Could not clean verified video Attempt staging for %s; committed success is retained",
                             attempt_id, exc_info=True,
                         )
+                if completed.get("status") == "succeeded":
+                    trigger_publish_bundle_after_video(self.workspace, initiative_id=result["initiative_id"],
+                                                       package_sha256=result["package_sha256"],
+                                                       relative_path=result.get("relative_path"))
                 return {
                     "status": completed["status"], "attempt_id": attempt_id,
                     "product_id": completed["product_id"], "version_id": completed["version_id"],

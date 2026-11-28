@@ -9,6 +9,7 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Callable
+from muse.error_journal import record_suppressed_error
 
 
 def run_smoke_test(
@@ -75,8 +76,8 @@ def run_smoke_test(
                 if callable(stop_daemon):
                     try:
                         stop_daemon(("daemon", "stop"), timeout=30)
-                    except Exception:
-                        pass
+                    except Exception as _muse_suppressed:
+                        record_suppressed_error("chatanywhere_smoke.py:78", _muse_suppressed)
     finally:
         for name, value in previous.items():
             if value is None:

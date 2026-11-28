@@ -153,3 +153,16 @@
 2. 再双击 `3_双击B391验收.bat`，跑完对 AWS Quick 说“看验收报告”。
 3. 全部通过后按 `docs/B391_L5_PATH_B_RUNBOOK.md` 验收路径 B；再双击 2 号 bat 让桌面端加载新界面。
 4. ⚠ 计划任务 `Muse-GitHub-Realtime-Backup`（若已安装）会在改动后约 15 秒推送；如不希望验收前推送请先禁用。
+
+## 完全体工程 Wave 0 + Wave 1 首轮（2026-11-27 21:xx · AWS Quick）
+- 新台账：`docs_quick_state/00–04`（46 条 AC、拓扑断层图、四态矩阵、缺陷总账、波次断点）——此后以该目录为续接权威。
+- 新诊断：`run_diag.bat` → `scripts/muse_diag.py`（L1–L7，27 探针，按 AC 宣判）→ `reports/muse_diag/latest.json|log`。
+- 新模块：muse_commander（唯一统帅门面）、adapter_hub、expert_fleet、epistemics、dual_track_memory、research_wiki、publish_gate、error_journal。
+- 清剿：17 处 `except Exception: pass` → error_journal 结构化落账。
+- 一键启动：`start_muse.bat`（仅本机回环）。手册：`docs/USER_GUIDE_LIVE.md`。
+- 下一步：双击 `run_diag.bat`，跑完回复“继续”。
+- 实测第 1 次（21:26）：AC 31/47；第 2 次（21:55）：AC 45/47（剩 Commander HTTP POST 405）。第 3 轮改动：POST 挂载补齐、24 处吞错返回空值落账、L1.3 规则升级、ResearchPipeline 接 Wiki 契约（AC-046）、全局 Kill Switch 覆盖 Ruflo DAG 与自治运行时（AC-034）。AC 总数 49。详见 docs_quick_state/04。
+- 实测第 3 次（22:08）：AC 48/49（仅 Kill 复位顺序，已修）。Wave 2 第 1 轮：控制台 CommanderPanel、视频包→发布准备包桥接、46 个私有认知标签统一映射 + 治理探针。AC 总数 52。下一步：双击 run_diag.bat。
+- 实测第 4 次（22:17）：AC 50/52（Kill 两步解除缺 resume、6 个未登记私有标签，均已修）。新增：对话抽取→双轨记忆候选（AC-014）。AC 总数 53。
+- 实测第 5 次（22:22）：探针 32/32、AC 53/53 首次全绿。新增 Workflow A 统帅主干 `python -m muse.workflow_a`（AC-048）。AC 总数 54。
+- 全自主 T1–T10（22:41–23:1x）：经诊断监听器自跑；新增 Workflow C、接口走统帅、视频交付包钩子、接口认知标签、Ruflo 票据守卫、旧记忆迁移、dsh/SAP 适配器、本地推理探针。AC 62 条，结果以 reports/diag_latest.json 为准。

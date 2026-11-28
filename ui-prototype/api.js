@@ -647,6 +647,25 @@ export function createApiClient({ baseUrl, token, fetchImpl = globalThis.fetch, 
     submitFeedback: (feedback) => request("/api/v1/feedback", { method: "POST", body: feedback }),
     runRadarScan: () => request("/api/v1/radar/scan", { method: "POST" }),
     overview: () => get("/api/v1/overview"),
+    commanderStatus: () => get("/api/v1/commander/status"),
+    commanderApprovals: () => get("/api/v1/commander/approvals"),
+    commanderCapacity: () => get("/api/v1/commander/capacity"),
+    commanderAdapters: () => get("/api/v1/commander/adapters"),
+    commanderFleet: () => get("/api/v1/commander/fleet"),
+    commanderApprove: (taskId, approvedBy) => {
+      if (typeof taskId !== "string" || !/^[a-f0-9]{32}$/.test(taskId)) throw new Error("票据编号无效");
+      if (typeof approvedBy !== "string" || !/^(user|human):[\w.@-]{1,64}$/.test(approvedBy)) throw new Error("批准人必须是 user: 或 human: 身份");
+      return request("/api/v1/commander/approve", { method: "POST", body: { task_id: taskId, approved_by: approvedBy, confirmation: "APPROVE" } });
+    },
+    commanderCancel: (taskId, by, reason = "") => {
+      if (typeof taskId !== "string" || !/^[a-f0-9]{32}$/.test(taskId)) throw new Error("票据编号无效");
+      if (typeof by !== "string" || !/^(user|human):[\w.@-]{1,64}$/.test(by)) throw new Error("取消人必须是 user: 或 human: 身份");
+      return request("/api/v1/commander/cancel", { method: "POST", body: { task_id: taskId, by, reason: String(reason).slice(0, 500) } });
+    },
+    commanderKill: (actor, reason) => {
+      if (typeof actor !== "string" || !/^(user|human):[\w.@-]{1,64}$/.test(actor)) throw new Error("紧急停止必须由 user: 或 human: 身份发起");
+      return request("/api/v1/commander/kill", { method: "POST", body: { actor, reason: String(reason || "manual").slice(0, 300), confirmation: "KILL" } });
+    },
     mempalaceStatus: () => get("/api/v1/mempalace/status"),
     systemDashboard: () => get("/api/v1/system-dashboard"),
     fusionJobs: (limit = 20) => {

@@ -242,6 +242,10 @@ class RufloMCPAdapter:
             raise PermissionError("Ruflo tool is not allowlisted: " + name)
         if name not in _READ_ONLY_TOOLS and approved is not True:
             raise PermissionError("non-read-only Ruflo tool requires explicit approval: " + name)
+        if name not in _READ_ONLY_TOOLS:
+            # T6: every executing Ruflo tool must belong to a running, leased Commander ticket.
+            from muse.commander_gate import require_ruflo_scope
+            require_ruflo_scope(name, workspace=self.workspace)
         if not isinstance(params, dict):
             raise ValueError("Ruflo tool parameters must be a JSON object")
         try:

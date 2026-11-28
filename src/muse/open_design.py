@@ -26,6 +26,7 @@ from urllib.parse import quote, urlsplit
 
 from muse.software_crafting import MCPStdioClient, SoftwareCraftingError
 from muse.task_queue import TaskQueue
+from muse.error_journal import record_suppressed_error
 
 
 READ_ONLY_TOOLS = frozenset({
@@ -331,8 +332,8 @@ class OpenDesignAdapter:
             return
         except PermissionError:
             raise
-        except Exception:
-            pass
+        except Exception as _muse_suppressed:
+            record_suppressed_error("open_design.py:334", _muse_suppressed)
 
         parsed = urlsplit(self.daemon_url)
         host, port = str(parsed.hostname), int(parsed.port)

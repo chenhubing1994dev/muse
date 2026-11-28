@@ -27,6 +27,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Any
+from muse.error_journal import record_suppressed_error
 
 ATTESTATION_SCHEMA = "muse-reviewer-attestation-v1"
 TRUST_STORE_SCHEMA = "muse-reviewer-trust-store-v1"
@@ -169,7 +170,8 @@ def _require_seed(seed: bytes) -> None:
 def _cryptography_available() -> bool:
     try:
         from cryptography.hazmat.primitives.asymmetric import ed25519  # noqa: F401
-    except Exception:
+    except Exception as _muse_suppressed:
+        record_suppressed_error("reviewer_attestation.py:172", _muse_suppressed)
         return False
     return True
 

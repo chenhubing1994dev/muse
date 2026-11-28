@@ -18,6 +18,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from muse.research_fetch import _validate_public_url
+from muse.error_journal import record_suppressed_error
 
 MAX_CAPTURE_CHARS = 50_000
 MAX_LINKS = 200
@@ -115,8 +116,8 @@ class LightpandaBrowserAdapter:
             if browser is not None:
                 try:
                     browser.close()
-                except Exception:
-                    pass
+                except Exception as _muse_suppressed:
+                    record_suppressed_error("lightpanda_adapter.py:118", _muse_suppressed)
             return {**status, "status": "not_ready", "runtime_ready": False,
                     "runtime_error": type(exc).__name__}
 
@@ -202,7 +203,8 @@ class LightpandaBrowserAdapter:
                             item = locator.nth(index).evaluate(
                                 "(node) => ({text: (node.innerText || node.getAttribute('aria-label') || '').trim(), url: node.href})"
                             )
-                        except Exception:
+                        except Exception as _muse_suppressed:
+                            record_suppressed_error("lightpanda_adapter.py:206", _muse_suppressed)
                             continue
                         if not isinstance(item, dict):
                             continue
@@ -212,7 +214,8 @@ class LightpandaBrowserAdapter:
                             continue
                         try:
                             _validate_public_url(link_url)
-                        except Exception:
+                        except Exception as _muse_suppressed:
+                            record_suppressed_error("lightpanda_adapter.py:216", _muse_suppressed)
                             continue
                         links.append({"text": str(item.get("text") or "")[:300], "url": link_url})
                 captured_at = datetime.now(timezone.utc).isoformat()
@@ -259,10 +262,10 @@ class LightpandaBrowserAdapter:
             if context is not None:
                 try:
                     context.close()
-                except Exception:
-                    pass
+                except Exception as _muse_suppressed:
+                    record_suppressed_error("lightpanda_adapter.py:262", _muse_suppressed)
             if browser is not None:
                 try:
                     browser.close()
-                except Exception:
-                    pass
+                except Exception as _muse_suppressed:
+                    record_suppressed_error("lightpanda_adapter.py:267", _muse_suppressed)

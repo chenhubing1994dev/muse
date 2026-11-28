@@ -345,8 +345,29 @@ class InspirationEvolutionTests(unittest.TestCase):
             with urlopen(req, timeout=10) as resp:
                 self.assertEqual(resp.status, 202)
                 body = json.loads(resp.read())
-            task_id = body["task_id"]
-            self.assertEqual(body["status"], "queued")
+            # Contract since T2: a video/product evolution is a medium-risk Commander ticket that waits for
+            # a human; nothing reaches the runtime queue before approval.
+            self.assertEqual(body["status"], "pending_approval")
+            self.assertIsNone(body["task_id"])
+            ticket_id = body["commander"]["ticket_id"]
+            with TaskQueue(task_db) as queue:
+                self.assertIsNone(queue.get_by_idempotency_key("inspiration-evolution:" + request_id))
+
+            def approve(approver: str):
+                approval = Request(base + "/api/v1/commander/approve", data=json.dumps(
+                    {"task_id": ticket_id, "approved_by": approver, "confirmation": "APPROVE"}).encode("utf-8"),
+                    headers=headers, method="POST")
+                with urlopen(approval, timeout=30) as resp:
+                    return resp.status, json.loads(resp.read())
+
+            with self.assertRaises(HTTPError) as agent_approval:
+                approve("agent:self")
+            self.assertEqual(agent_approval.exception.code, 403)
+            approved_status, approved_body = approve("user:tester")  # temp workspace only
+            self.assertEqual(approved_status, 200)
+            self.assertEqual(approved_body["execution"]["status"], "succeeded")
+            with TaskQueue(task_db) as queue:
+                task_id = queue.get_by_idempotency_key("inspiration-evolution:" + request_id)["id"]
             with TaskQueue(task_db) as queue:
                 queued = queue.get(task_id)
                 self.assertEqual(queued["status"], "queued")

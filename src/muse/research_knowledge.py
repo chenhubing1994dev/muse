@@ -587,6 +587,19 @@ class ResearchKnowledgeStore:
             if row is None or row["id"] == claim_id or row["node_type"] not in {"source", "experiment"}:
                 raise ValueError(f"evidence reference must identify a stored source or experiment: {ref[:80]}")
             evidence_nodes.append(row["id"])
+        # K-3 (D-032): an experiment proves nothing unless it actually ran, its raw output hash was captured and
+        # its outcome matches the requested status (the experiment bridge checked this; direct calls did not).
+        allowed_runs = {"supported": {"succeeded"}, "refuted": {"failed", "budget_exceeded"},
+                        "contested": {"succeeded", "failed", "budget_exceeded"}}.get(status)
+        if allowed_runs is not None:
+            for evidence_id in evidence_nodes:
+                node = self.get_node(evidence_id)
+                if node is not None and node["node_type"] == "experiment":
+                    run_meta = node["metadata"]
+                    if (run_meta.get("status") not in allowed_runs
+                            or len(str(run_meta.get("raw_evidence_sha256") or "")) != 64):
+                        raise ValueError("experiment evidence must be a completed run with captured raw evidence "
+                                         "whose outcome matches the claim status")
         if status in {"supported", "refuted", "contested"}:
             required_reviews = {
                 "supported": (("support_search_candidate", "supports"),),

@@ -37,6 +37,7 @@ from muse.plugin_platform import (
 )
 from muse.status_api import create_status_server
 from muse.task_queue import TaskQueue
+from muse.error_journal import record_suppressed_error
 
 
 SESSION_COOKIE = "MuseWebSession"
@@ -658,7 +659,8 @@ class PortalRequestHandler(BaseHTTPRequestHandler):
         cookie = SimpleCookie()
         try:
             cookie.load(self.headers.get("Cookie", ""))
-        except Exception:
+        except Exception as _muse_suppressed:
+            record_suppressed_error("web_portal.py:661", _muse_suppressed)
             return ""
         morsel = cookie.get(SESSION_COOKIE)
         return morsel.value if morsel else ""

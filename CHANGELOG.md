@@ -1221,3 +1221,56 @@
 ### 真机验收第 5 次
 - 真机验收第 5 次（19:56–20:07）：L3 第 3 次全绿（全量 3,048/3,048）。旧监督器已结束（心跳停止），样片 5 秒内拿到 GPU（P2-35 判断得到证实），进入 Remotion 阶段后失败：Remotion 在渲染时调用其自带 ffprobe 读取素材音轨（getAudioChannelsAndDuration）出错；旧错误截取只保留末尾 1,200 字符，根因行被截掉，无法定位。
 - Git 取证（只读 .git）：当前分支 b391-full-fusion（2852be1），但 Muse-GitHubSync.ps1 每天提交到当前分支却执行 `git push origin main`——今天 03:00 的“PUSH OK (97 files)”实际只推送了未变化的 main（88250db），B391 分支从未推到 GitHub（远端无 origin/b391-full-fusion）。
+
+## 2026-11-27 全自主连续开发（T1–T10，AWS Quick）
+- 新增：`scripts/diag_auto.py`、`run_diag_auto.bat`（非交互诊断）、`scripts/diag_watcher.py`、`start_diag_watcher.bat`；`muse_diag.py` 单探针 120s 超时、`--probe`。
+- T2 `commander_routes.py`：灵感/研究写接口改为 Commander 票据（status_api、control_center_api、commander_api 审批后执行）；`BypassCommanderError` + 审计。`MuseCommander`：`run_next(task_id=)`、`drain_plan`、结果落盘 `results/<id>.json`、`route_args`。
+- T3 `workflow_c.py`（Workflow C 统帅主干）；T4 `video_task_worker.trigger_publish_bundle_after_video`（两条成功路径）+ `workflow_c.on_video_completed`。
+- T5 `api_epistemics.py`：status_api 所有 JSON 响应附认知标签。
+- T6 `commander_gate.ruflo_ticket_scope/require_ruflo_scope`；`RufloMCPAdapter.call_tool` 执行型工具强制票据作用域；`unified_runtime` 派发方法加 `_ruflo_ticket_bound`，`initialize_swarm` 改走 Commander 票据；`orchestration` 线程池传递 contextvars。
+- T7 `memory_migration.py` + `scripts/migrate_legacy_memory.py`/`rollback_legacy_memory.py`；真实库已迁移（3 条 legacy_unverified）。
+- T8 `external_agents.py`（dsh / SAP 统一协议、外发白名单、仅 loopback）、`config/external_agents.example.json`；adapter_hub 接入。
+- T9 L5.M1 本地最小推理探针（显存保护）。
+- 新探针：L5.A3、L5.C1、L5.C3、L6.7、L4.10、L3.6、L4.11、L5.M1；新 AC：049、076、077、084、035、015、036、093（共 62 条）。
+
+## 2026-11-27 持续开发 C1
+- 新增 `scripts/diag_unit_stage.py`（单测阶段 + 真实数据守卫 + 同步栅栏/源码清单），diag_auto 合并其退出码并在报告回显 `sync_fence_token`、`source_manifest_sha256`。
+- 修复：commander_routes 幂等键含目标库；commander_api 统一 commander_root；ResearchPipeline 不再把正文摘录写入知识元数据；灵感进化回放返回当前运行时状态；ResearchTaskError 带原因。
+- 测试：test_ruflo_adapter（+1 新用例）、test_inspiration_evolution 按新契约更新。
+
+## 2026-11-28 持续开发 C2
+- muse_diag：MUSE_DIAG_SRC_ROOT/MUSE_DIAG_REPORT_DIR、运行目录加 pid；新增 L7.2/L7.3 变异测试（10 个注入缺陷）与 L7.4 台账一致性。
+- 新增 scripts/ledger_summary.py（diag_auto 末尾自动生成 05_LEDGER_AUTO.md / reports/ledger_latest.json）。
+
+## 2026-11-28 持续开发 C3–C4
+- C3：src/muse/entrypoint_registry.py + L4.12 全入口审计（AC-037）；test_research_task_handler 改为固定 DNS 解析（去网络依赖）。
+- C4：status_api 守护进程控制拆为 guard/safety/start 三段：start|resume|once 走 Commander 票据（route.daemon_control），stop|pause 为审计的安全动作；新增 L5.D1（AC-038）。
+
+## 2026-11-28 持续开发 C5–C7
+- C5：统一停止开关（commander_gate 与 MuseCommander 服从 Omega SafetyController）；/api/v1/radar/scan 与 omega 进化回滚改走票据（回滚高风险）；L5.D2（AC-039）。
+- C6：src/muse/redline_policy.py + L1.6 红线静态审计（AC-096）+ L7.5 变异。
+- C7：src/muse/audit.py（哈希链审计 + `python -m muse.audit verify`），越权/安全/Ruflo 审计与成本记账入链；L5.H1（AC-097）。
+
+## 2026-11-28 持续开发 C8–C11
+- C8：MuseCommander 崩溃恢复（凭证已写则从凭证结票、链损坏失败关闭、高风险 recovery_policy=manual、并发提交 UNIQUE 竞争）；Workflow A/C 状态文件原子写；L5.B2（AC-098）。
+- C9：L6.8 性能测量（AC-099）+ scripts/perf_budget.py 性能预算阶段（冻结基线 ×1.5）。
+- C10：L7.6 实操手册可执行性（AC-100）。
+- C11：scripts/diag_unit_stage.py 单测期间真实工作区全部 SQLite（19 库，除 handoff/memory）行级逻辑指纹硬断言，仅豁免快照后自检追加行；非白名单变化即失败并从运行前备份恢复（D-029）；新增 tests/test_diag_unit_stage_store_guard.py（15 例）。
+
+## 2026-11-28 持续开发 C12–C17（补记，详见 reports/cycle_log.md）
+- C12 legacy_memory_review + scripts/review_legacy_memory.py（L3.7/AC-101）；C13 C11 守卫环形表剪枝规则；C14 MemoryStore.approve_candidate User Track 身份门（D-031）+ 体检#2；C15 L3.3 断言/变异/手册；C16 Research claim 状态机（L5.R2/AC-102）；C17 L5.R 外联疑点核查（无改动）。
+
+## 2026-11-28 持续开发 C18（待办 J-1 深度健康检查）
+- 新增 `src/muse/deep_health.py`：只读汇总统帅票据积压/待审批、`muse.audit.verify` 审计链、账本大小、磁盘余量、Kill 开关、最近诊断新鲜度与结果、PENDING_HUMAN 条数；检查抛错 → error → unhealthy（fail closed）。
+- status_api 新增 `GET /api/v1/health/deep`（同鉴权；unhealthy → 503）。
+- muse_diag 新增 L6.9（AC-103）；变异 deep_health_ignores_audit / deep_health_swallows_check_error 并入 L7.3（9/9 被杀）。AC 矩阵 74 → 75。
+
+## 2026-11-28 持续开发 C19–C20
+- C19 体检#3：性能 within_budget，红线文件未改、白名单未放宽、探针/断言/变异只增不减。
+- C20 待办 H：删除 `TaskQueue.workflow_revision` 逐字重复定义（task_queue.py 原 779 行，遮蔽 302 行同名方法）；新增 L1.7 代码健康（AC-104：警告即错误编译 + 同作用域重复定义=0），变异 duplicate_def_injected / syntax_warning_injected 并入 L7.5。AC 矩阵 75 → 76。
+
+## 2026-11-28 持续开发 C21
+- `muse-memory approve` 被拒时返回退出码 3（身份）/2（候选无效）并在 stderr 输出 JSON，不再抛栈（D-033）；tests/test_memory_cli.py +3 例；test_memory_candidates 旧“抛异常”断言更新为退出码+零写入断言。单测 3149 → 3152。
+
+## 2026-11-28 持续开发 C22
+- docs/USER_GUIDE_LIVE.md：新增 10.12 深度健康检查、10.13 代码健康；10.7 补 approve 退出码（D-033）。

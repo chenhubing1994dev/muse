@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import math
 import json
+import uuid
 import csv
 import io
 import subprocess
@@ -44,6 +45,7 @@ from muse.cyber_cosmos import (
     run_yijing_inquiry,
 )
 from datetime import datetime, timezone
+from muse.error_journal import record_suppressed_error
 
 
 class VideoProductBuilder:
@@ -1530,6 +1532,9 @@ def create_status_server(
     studio_db.parent.mkdir(parents=True, exist_ok=True)
     from muse.daemon_control import MuseDaemonController, DaemonError
     from muse.pipeline_control import PipelineController, PipelineError
+    DAEMON_SAFETY_ROUTES = frozenset({"/api/v1/daemon/stop", "/api/v1/daemon/pause"})
+    DAEMON_START_ROUTES = frozenset({"/api/v1/daemon/start", "/api/v1/daemon/resume", "/api/v1/daemon/once"})
+    DAEMON_CONTROL_ROUTES = DAEMON_SAFETY_ROUTES | DAEMON_START_ROUTES
     daemon = MuseDaemonController(
         workspace=workspace_root,
         state_db=workspace_root / "data" / "autonomy" / "runtime.sqlite3",
@@ -1670,8 +1675,8 @@ def create_status_server(
                                 error_type=type(exc).__name__,
                                 evolution_cycle_id=payload.get("evolution_cycle_id"),
                             )
-                except Exception:
-                    pass
+                except Exception as _muse_suppressed:
+                    record_suppressed_error("status_api.py:1673", _muse_suppressed)
             outcome = {"status": "failed", "error": str(exc)[:500]}
         finally:
             video_job_slot.release()
@@ -1699,6 +1704,9 @@ def create_status_server(
                 from muse.metaphysics_label import label_payload, needs_label
                 if needs_label(urlsplit(self.path).path):
                     payload = label_payload(payload)
+            # T5: every JSON response carries an epistemic tag from the shared 8-value enum.
+            from muse.api_epistemics import attach_epistemic
+            payload = attach_epistemic(payload, urlsplit(self.path).path)
             body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -1724,7 +1732,11 @@ def create_status_server(
                 return
             parsed = urlsplit(self.path)
             try:
-                if parsed.path.startswith("/api/v1/omega/"):
+                if parsed.path.startswith("/api/v1/commander/"):
+                    from muse.commander_api import handle_commander  # Muse Commander control plane
+                    commander_status, commander_body = handle_commander("GET", parsed.path, b"", workspace_root)
+                    self._send(commander_status, commander_body)
+                elif parsed.path.startswith("/api/v1/omega/"):
                     from muse.omega_api import handle_omega  # B394-B398 Omega routes
                     omega_status, omega_body = handle_omega("GET", parsed.path, parsed.query, b"", workspace_root)
                     self._send(omega_status, omega_body)
@@ -1732,6 +1744,11 @@ def create_status_server(
                     from muse.control_center_api import handle_control  # B391 P1 control plane
                     control_status, control_body = handle_control("GET", parsed.path, parsed.query, b"", control_context)
                     self._send(control_status, control_body)
+                elif parsed.path == "/api/v1/health/deep":
+                    # J-1: read-only deep health (tickets, audit chain, ledgers, disk, kill switch, last diag).
+                    from muse.deep_health import build_deep_health
+                    deep = build_deep_health(workspace_root)
+                    self._send(503 if deep["status"] == "unhealthy" else 200, deep)
                 elif parsed.path in {"/api/v1/health", "/api/v1/store-health"}:
                     # B391-R1: an unconfigured store registry is "not monitored", not "unhealthy".
                     # Only an explicitly supplied registry with a non-healthy store degrades health.
@@ -2207,7 +2224,8 @@ def create_status_server(
                                         execution_ticket_id = execution.get("id")
                                         worker_available = execution.get("status") in {"queued", "running"}
                                         break
-                        except Exception:
+                        except Exception as _muse_suppressed:
+                            record_suppressed_error("status_api.py:2215", _muse_suppressed)
                             worker_available = False
                     recovered = {
                         "id": job_id,
@@ -2551,6 +2569,25 @@ def create_status_server(
                     return
                 omega_status, omega_body = handle_omega("POST", parsed.path, parsed.query, raw, workspace_root)
                 self._send(omega_status, omega_body)
+                return
+            if parsed.path.startswith("/api/v1/commander/"):
+                from muse.commander_api import MAX_BODY as commander_max_body, handle_commander
+                if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json":
+                    self._send(415, {"error": "application/json required"})
+                    return
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                except ValueError:
+                    length = -1
+                if not 1 <= length <= commander_max_body:
+                    self._send(413 if length > 0 else 400, {"error": "request body size not allowed"})
+                    return
+                raw = self.rfile.read(length)
+                if len(raw) != length:
+                    self._send(400, {"error": "incomplete request body"})
+                    return
+                commander_status, commander_body = handle_commander("POST", parsed.path, raw, workspace_root)
+                self._send(commander_status, commander_body)
                 return
             if parsed.path.startswith("/api/v1/control/"):
                 from muse.control_center_api import handle_control, max_body_bytes as control_max_body
@@ -2928,10 +2965,7 @@ def create_status_server(
                         self._send(503, {"error": "subtitle review approval unavailable"})
                 return
             # ── Bounded local runtime lifecycle + reproducible pipeline control ──
-            if parsed.path in {
-                "/api/v1/daemon/start", "/api/v1/daemon/pause",
-                "/api/v1/daemon/resume", "/api/v1/daemon/stop", "/api/v1/daemon/once",
-            }:
+            if parsed.path in DAEMON_CONTROL_ROUTES:
                 try:
                     length = int(self.headers.get("Content-Length", "0"))
                 except ValueError:
@@ -2945,23 +2979,45 @@ def create_status_server(
                     return
                 if length:
                     self.rfile.read(length)
+            if parsed.path in DAEMON_SAFETY_ROUTES:
+                # Safety-down actions (stop/pause) only reduce activity: always allowed, even while the
+                # Commander kill switch is engaged, and written to the Commander audit trail.
+                from muse.commander_routes import audit_safety_action
+                action = parsed.path.rsplit("/", 1)[-1]
                 try:
-                    action = parsed.path.rsplit("/", 1)[-1]
-                    if action == "start":
-                        result = daemon.start()
-                    elif action == "pause":
-                        result = daemon.pause()
-                    elif action == "resume":
-                        result = daemon.resume()
-                    elif action == "stop":
-                        result = daemon.stop()
-                    else:
-                        result = {"changed": True, "action": "once", **daemon.run_once()}
+                    result = daemon.stop() if action == "stop" else daemon.pause()
+                    audit_safety_action(workspace_root, action=f"daemon.{action}", outcome="ok")
                     self._send(200, {"api_version": 1, "result": result})
                 except DaemonError as exc:
+                    audit_safety_action(workspace_root, action=f"daemon.{action}", outcome=f"refused: {exc}")
                     self._send(409, {"error": str(exc)})
                 except (ValueError, OSError):
                     self._send(503, {"error": "runtime control unavailable"})
+                return
+            if parsed.path in DAEMON_START_ROUTES:
+                # Starting / resuming / one-shot runs create autonomous activity: a Commander ticket each time
+                # (global gate, receipt, cost ledger). A closed gate refuses instead of starting work.
+                from muse.commander_routes import HANDLER_DAEMON, submit_and_wait
+                action = parsed.path.rsplit("/", 1)[-1]
+                try:
+                    routed = submit_and_wait(
+                        workspace_root, handler=HANDLER_DAEMON,
+                        route_args={"action": action, "workspace": str(workspace_root),
+                                    "state_db": str(workspace_root / "data" / "autonomy" / "runtime.sqlite3"),
+                                    "control_log": str(workspace_root / "data" / "autonomy" / "control-log.jsonl")},
+                        title=f"Runtime control: {action}", objective=f"自治运行时控制：{action}",
+                        request_key=f"{action}:{uuid.uuid4().hex}")
+                except (ValueError, OSError):
+                    self._send(503, {"error": "runtime control unavailable"})
+                    return
+                commander_info = {key: routed.get(key) for key in ("ticket_id", "status", "risk", "receipt_sha256", "gate")}
+                if routed["status"] == "succeeded" and isinstance(routed.get("output"), dict):
+                    self._send(200, {"api_version": 1, "result": routed["output"], "commander": commander_info})
+                elif routed["status"] == "queued":
+                    self._send(409, {"error": "blocked by the Muse Commander global gate", "commander": commander_info})
+                else:
+                    self._send(409, {"error": str(routed.get("detail") or routed.get("error_code") or "runtime control refused"),
+                                     "commander": commander_info})
                 return
             if parsed.path == "/api/v1/pipelines/submit":
                 if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json":
@@ -3618,8 +3674,8 @@ def create_status_server(
                                     failure_code="video.worker_start_failed",
                                     initiative_id=creator_initiative_id,
                                 )
-                        except Exception:
-                            pass
+                        except Exception as _muse_suppressed:
+                            record_suppressed_error("status_api.py:3621", _muse_suppressed)
                         with video_jobs_lock:
                             video_jobs[job_id]["status"] = "failed"
                             video_jobs[job_id]["error"] = "video worker could not start"
@@ -3642,8 +3698,23 @@ def create_status_server(
                 if length != 0:
                     self._send(400, {"error": "radar scan does not accept a request body"})
                     return
+                if not Path(task_path).is_file():  # same 400 contract as before C5
+                    self._send(400, {"error": f"task database does not exist: {task_path}"})
+                    return
                 try:
-                    result = scan_capabilities(task_path, improvement_path, lookback_hours=24)
+                    # C5: the scan writes improvement proposals → runs as a Commander ticket.
+                    from muse.commander_routes import HANDLER_RADAR, submit_and_wait
+                    routed = submit_and_wait(
+                        workspace_root, handler=HANDLER_RADAR,
+                        route_args={"task_path": str(task_path), "improvement_path": str(improvement_path)},
+                        title="Capability radar scan", objective="能力雷达扫描（生成待审批改进提案）",
+                        request_key=uuid.uuid4().hex)
+                    if routed["status"] != "succeeded" or not isinstance(routed.get("output"), dict):
+                        self._send(409 if routed["status"] == "queued" else 503,
+                                   {"error": f"commander ticket {routed['status']}", "detail": routed.get("detail"),
+                                    "commander": {k: routed.get(k) for k in ("ticket_id", "status", "gate")}})
+                        return
+                    result = routed["output"]
                     self._send(200, {
                         "api_version": 1,
                         "signals_seen": result["signals_seen"],
@@ -3651,6 +3722,7 @@ def create_status_server(
                         "existing": result["existing"],
                         "trend": result["trend"],
                         "approval_required": True,
+                        "commander": {k: routed.get(k) for k in ("ticket_id", "status", "receipt_sha256")},
                     })
                 except (ValueError, FileNotFoundError) as exc:
                     self._send(400, {"error": str(exc)})
@@ -3711,29 +3783,47 @@ def create_status_server(
                         "aspect_ratios": ratios,
                         "create_offline_product": create_offline_product,
                     }
-                    idempotency_key = "inspiration-evolution:" + request_id
-                    from muse.task_queue import TaskQueue  # B391-P2-29: do_POST re-imports TaskQueue elsewhere, so it is function-local
+                    # T2: the runtime enqueue happens only inside a Muse Commander ticket; video/product
+                    # evolutions spend GPU or create products, so they wait for a human approval.
+                    from muse.commander_routes import HANDLER_EVOLVE, submit_and_wait
+                    payload_digest = hashlib.sha256(json.dumps(task_payload, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+                    from muse.task_queue import TaskQueue  # read-only conflict check, function-local by design (B391-P2-29)
                     with TaskQueue(task_path) as queue:
-                        existing = queue.get_by_idempotency_key(idempotency_key)
-                        if existing is not None:
-                            existing_payload = existing.get("payload")
-                            existing_request = (
-                                {key: existing_payload.get(key, False) if key == "create_offline_product" else existing_payload.get(key)
-                                 for key in task_payload}
-                                if isinstance(existing_payload, dict) else None
-                            )
-                            if existing_request != task_payload:
-                                raise ValueError("request_id was already used for a different inspiration evolution")
-                        task = queue.enqueue(
-                            "Evolve creator inspiration", task_payload,
-                            priority=65, workload_class="research", recovery_policy="retry",
-                            idempotency_key=idempotency_key,
-                        )
-                    self._send(202, {
-                        "api_version": 1, "accepted": True, "task_id": task["id"],
-                        "status": task["status"], "deduplicated": existing is not None,
-                        "execution": "commander_task_queue",
-                    })
+                        existing = queue.get_by_idempotency_key("inspiration-evolution:" + request_id)
+                    if existing is not None and isinstance(existing.get("payload"), dict):
+                        existing_request = {key: existing["payload"].get(key, False) if key == "create_offline_product"
+                                            else existing["payload"].get(key) for key in task_payload}
+                        if existing_request != task_payload:
+                            raise ValueError("request_id was already used for a different inspiration evolution")
+                    routed = submit_and_wait(
+                        workspace_root, handler=HANDLER_EVOLVE,
+                        route_args={"task_path": str(task_path), "task_payload": task_payload},
+                        title="Evolve creator inspiration", objective="灵感进化交接到运行时队列",
+                        request_key=request_id + ":" + payload_digest,
+                        risk_override="medium" if (enqueue_video or create_offline_product) else None,
+                    )
+                    commander_info = {key: routed.get(key) for key in ("ticket_id", "status", "risk", "receipt_sha256", "gate")}
+                    if routed["status"] == "succeeded" and isinstance(routed.get("output"), dict):
+                        out = routed["output"]
+                        # Report the runtime ticket's *current* status (the stored output is a handoff snapshot).
+                        with TaskQueue(task_path) as queue:
+                            runtime_task = queue.get(out["runtime_task_id"])
+                        current_status = runtime_task["status"] if runtime_task is not None else out["runtime_status"]
+                        self._send(202, {
+                            "api_version": 1, "accepted": True, "task_id": out["runtime_task_id"],
+                            "status": current_status, "deduplicated": bool(out["deduplicated"] or routed.get("replayed")),
+                            "execution": "commander_ticket_then_runtime_queue", "commander": commander_info,
+                        })
+                    elif routed["status"] == "pending_approval":
+                        self._send(202, {
+                            "api_version": 1, "accepted": True, "task_id": None, "status": "pending_approval",
+                            "deduplicated": bool(routed.get("replayed")),
+                            "execution": "commander_ticket_waiting_human_approval", "commander": commander_info,
+                        })
+                    else:
+                        self._send(503 if routed["status"] == "queued" else 502,
+                                   {"error": f"commander ticket {routed['status']}", "error_code": routed.get("error_code"),
+                                    "commander": commander_info})
                 except KeyError as exc:
                     self._send(404, {"error": str(exc)})
                 except (UnicodeDecodeError, json.JSONDecodeError, ValueError, PipelineError) as exc:
@@ -3809,34 +3899,23 @@ def create_status_server(
                     source_kind = payload.get("source", "muse_local_dashboard")
                     if not isinstance(source_kind, str) or source_kind not in {"chatgpt_daily_inspiration", "muse_local_dashboard", "user_manual"}:
                         raise ValueError("source must be chatgpt_daily_inspiration, muse_local_dashboard, or user_manual")
-                    content_sha256 = hashlib.sha256(content.encode("utf-8")).hexdigest()
-                    external_ref = "creator-inspiration:sha256:" + content_sha256
-                    with ResearchKnowledgeStore(knowledge_path) as knowledge:
-                        node = knowledge.upsert_node(
-                            "claim", title, summary=content,
-                            external_ref=external_ref,
-                            metadata={
-                                "origin": "creator_inspiration_inbox",
-                                "epistemic_status": "creator_inspired_hypothesis_only",
-                                "creator_context_is_evidence": False,
-                                "requires_support_and_counter_evidence": True,
-                                "review_state": "not_researched",
-                                "allow_external_research": allow_external,
-                                "submitted_via": "muse_local_dashboard",
-                                "source_kind": source_kind,
-                                "content_sha256": content_sha256,
-                                "tags": tags,
-                                "research_domains": research_domains,
-                            },
-                            provenance=(source_kind,),
-                            status="proposed",
-                        )
-                    self._send(201, {"api_version": 1, "inspiration": {
-                        "id": node["id"], "title": node["title"], "content": node["summary"],
-                        "created_at": node["created_at"], "status": node.get("metadata", {}).get("review_state", "not_researched"),
-                        "allow_external_research": allow_external,
-                        "tags": tags, "research_domains": research_domains, "source": source_kind,
-                    }})
+                    # T2: no direct write — the capture runs inside a Muse Commander ticket.
+                    from muse.commander_routes import HANDLER_CAPTURE, submit_and_wait
+                    fields = {"content": content, "title": title, "allow_external_research": allow_external,
+                              "tags": tags, "research_domains": research_domains, "source": source_kind}
+                    routed = submit_and_wait(
+                        workspace_root, handler=HANDLER_CAPTURE,
+                        route_args={"knowledge_path": str(knowledge_path), "fields": fields},
+                        title="Capture creator inspiration", objective="记录创作者灵感（待验证假设）",
+                        request_key=hashlib.sha256(json.dumps(fields, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest(),
+                    )
+                    commander_info = {key: routed.get(key) for key in ("ticket_id", "status", "risk", "receipt_sha256", "gate")}
+                    if routed["status"] == "succeeded" and isinstance(routed.get("output"), dict):
+                        self._send(201, {"api_version": 1, "inspiration": routed["output"], "commander": commander_info})
+                    else:
+                        self._send(503 if routed["status"] in {"queued", "pending_approval"} else 502,
+                                   {"error": f"commander ticket {routed['status']}", "error_code": routed.get("error_code"),
+                                    "commander": commander_info})
                 except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
                     self._send(400, {"error": str(exc)})
                 except (OSError, sqlite3.Error):

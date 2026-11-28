@@ -60,6 +60,7 @@ def run_turn(
             memory=memory,
             memory_candidate_extractor=extractor,
         )
+        stack.callback(assistant.close)
         if current_model_call_context() is not None:
             result = assistant.reply(thread_id, message)
         else:

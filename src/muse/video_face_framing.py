@@ -10,6 +10,7 @@ import math
 import statistics
 from pathlib import Path
 from typing import Any
+from muse.error_journal import record_suppressed_error
 
 
 def _finite(value: object, label: str) -> float:
@@ -181,7 +182,8 @@ def _track_face_center_with_lk(
             "inlier_ratio": round(float(valid.sum()) / len(original), 6),
             "forward_backward_error_px": round(float(np.median(fb_error[valid])), 6),
         }
-    except Exception:
+    except Exception as _muse_suppressed:
+        record_suppressed_error("video_face_framing.py:184", _muse_suppressed)
         # Optical flow is an optional bridge, never a reason to fail rendering.
         return None
 

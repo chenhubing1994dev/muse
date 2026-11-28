@@ -776,14 +776,6 @@ class TaskQueue:
         )
 
 
-    def workflow_revision(self, task_id: str) -> int:
-        if self.get(task_id) is None:
-            raise KeyError(task_id)
-        return int(self._connection.execute(
-            "SELECT COUNT(*) FROM task_events WHERE task_id=? AND event_type LIKE 'workflow.%'",
-            (task_id,),
-        ).fetchone()[0])
-
     def workflow_events(self, task_id: str, *, limit: int = 500) -> list[dict[str, Any]]:
         """Read the binding plus recent workflow events from the existing Ticket log."""
         if not isinstance(limit, int) or isinstance(limit, bool) or not 2 <= limit <= 500:

@@ -26,6 +26,7 @@ import wave
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
+from muse.error_journal import record_suppressed_error
 
 REQUIRED_FREE_VRAM_MIB = 7885          # 7.7 GiB
 HOOK_WINDOW_SECONDS = 3.0
@@ -436,7 +437,8 @@ def review_shots(shots: Sequence[dict[str, Any]], vlm: Callable[[dict[str, Any]]
                         and isinstance(data.get("issues", []), list) and all(isinstance(i, str) for i in data.get("issues", [])):
                     verdict = {"shot_id": shot["shot_id"], "verdict": data["verdict"],
                                "issues": [i[:200] for i in data.get("issues", [])][:10], "by": "vlm_untrusted_advisory"}
-            except Exception:
+            except Exception as _muse_suppressed:
+                record_suppressed_error("cinematic_factory.py:439", _muse_suppressed)
                 verdict = None
         if verdict is None or verdict["verdict"] == "fail":
             human_queue.append({"shot_id": shot["shot_id"], "checklist": checklist,

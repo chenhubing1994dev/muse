@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Protocol
 
 from muse.conversations import ConversationStore
+from muse.error_journal import record_suppressed_error
 
 
 class ChatModel(Protocol):
@@ -53,6 +54,18 @@ class MuseAssistant:
         self.memory = memory
         self.memory_limit = memory_limit
         self.memory_candidate_extractor = memory_candidate_extractor
+        # Optional DualTrackMemory gate bound to the same SQLite file as ``memory``.
+        self.dual_track = None
+        database = getattr(memory, "database", None)
+        if memory_candidate_extractor is not None and database is not None:
+            from muse.dual_track_memory import DualTrackMemory
+            self.dual_track = DualTrackMemory(database)
+
+    def close(self) -> None:
+        """Release the Dual-Track gate's SQLite handle (Windows holds file locks until closed)."""
+        if self.dual_track is not None:
+            self.dual_track.close()
+            self.dual_track = None
 
     def _context_window(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Bounded short-term working memory sent to the model.
@@ -138,19 +151,32 @@ class MuseAssistant:
                 candidates = self.memory_candidate_extractor.extract(content.strip())
                 sink = self.memory
                 assert sink is not None
+                gate = getattr(self, "dual_track", None)
                 for candidate in candidates:
                     try:
-                        staged = sink.propose(
-                            candidate["content"],
-                            project=candidate.get("project", "general"),
-                            source=f"conversation:{thread_id}",
-                            confidence=candidate.get("confidence", 0.6),
-                        )
+                        if gate is not None:
+                            # Dual-Track rule: a model-extracted fact about the user is an agent
+                            # inference, staged as a pending User Track promotion with its tag.
+                            staged = gate.propose_user_promotion(
+                                candidate["content"], source=f"conversation:{thread_id}",
+                                tag=str(candidate.get("epistemic_tag") or "interpretation"),
+                                kind=str(candidate.get("kind") or "preference"),
+                                project=candidate.get("project", "general"),
+                                confidence=min(float(candidate.get("confidence", 0.6)), 0.8),
+                            )
+                        else:
+                            staged = sink.propose(
+                                candidate["content"],
+                                project=candidate.get("project", "general"),
+                                source=f"conversation:{thread_id}",
+                                confidence=candidate.get("confidence", 0.6),
+                            )
                         candidate_ids.append(int(staged["id"]))
                     except ValueError:
                         rejected_candidates += 1
-            except Exception:
+            except Exception as exc:
                 extraction_status = "failed"
+                record_suppressed_error("assistant.memory_candidate_extraction", exc, thread_id=thread_id)
         return {
             "thread_id": thread_id,
             "reply": response,

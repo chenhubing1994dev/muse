@@ -31,8 +31,9 @@ class MemoryCandidateTests(unittest.TestCase):
                     "User prefers concise Cantonese replies",
                     project="voice", source="conversation:thread-1", confidence=0.9,
                 )
-                approved = memory.approve_candidate(candidate["id"], approved_by="user")
-                repeated = memory.approve_candidate(candidate["id"], approved_by="user")
+                # D-031 new contract: User Track approvals need a user:/human: identity (was any text, e.g. "user").
+                approved = memory.approve_candidate(candidate["id"], approved_by="user:tester")
+                repeated = memory.approve_candidate(candidate["id"], approved_by="user:tester")
                 self.assertEqual(approved["status"], "approved")
                 self.assertEqual(repeated["memory_id"], approved["memory_id"])
                 self.assertEqual(len(memory.search("Cantonese")), 1)
@@ -41,6 +42,35 @@ class MemoryCandidateTests(unittest.TestCase):
                 self.assertEqual(saved["project"], "voice")
                 self.assertEqual(saved["confidence"], 0.9)
                 self.assertEqual(memory.history(saved["id"])[0]["content"], saved["content"])
+
+    def test_user_track_candidate_cannot_be_approved_without_human_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with MemoryStore(Path(directory) / "memory.sqlite3") as memory:
+                candidate = memory.propose("User prefers short answers", project="voice", source="agent_inference:chat")
+                for approver in ("agent:muse", "muse", "user", "dashboard", "model:gpt"):
+                    with self.assertRaises(PermissionError, msg=approver):
+                        memory.approve_candidate(candidate["id"], approved_by=approver)
+                self.assertEqual(memory.get_candidate(candidate["id"])["status"], "pending")
+                self.assertEqual(memory.search("short answers"), [])
+                approved = memory.approve_candidate(candidate["id"], approved_by="human:reviewer")
+                self.assertEqual(approved["status"], "approved")
+                self.assertEqual(approved["reviewed_by"], "human:reviewer")
+                self.assertEqual(len(memory.search("short answers")), 1)
+
+    def test_refused_approval_leaves_the_store_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "memory.sqlite3"
+            with MemoryStore(database) as memory:
+                candidate = memory.propose("User lives near the sea", project="general", source="agent_inference:x")
+            with MemoryStore(database) as memory:
+                with self.assertRaises(PermissionError):
+                    memory.approve_candidate(candidate["id"], approved_by="agent:muse")
+                con = memory._connection
+                self.assertEqual(con.execute("SELECT count(*) FROM memories").fetchone()[0], 0)
+                self.assertEqual(con.execute("SELECT count(*) FROM memory_revisions").fetchone()[0], 0)
+                row = con.execute("SELECT status, memory_id FROM memory_candidates WHERE id=?",
+                                  (candidate["id"],)).fetchone()
+                self.assertEqual(tuple(row), ("pending", None))
 
     def test_rejection_is_idempotent_and_never_promotes_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -90,8 +120,21 @@ class MemoryCandidateCliTests(unittest.TestCase):
             self.assertEqual(proposed["status"], "pending")
             listed = json.loads(self.run_cli(database, "list-pending"))
             self.assertEqual([item["id"] for item in listed], [proposed["id"]])
-            approved = json.loads(self.run_cli(database, "approve", str(proposed["id"]), "--by", "user"))
+            # D-031: an agent identity cannot approve via the CLI. D-033: the refusal is reported as exit
+            # code 3 with a JSON error on stderr (no traceback) and nothing is written.
+            refused_out, refused_err = io.StringIO(), io.StringIO()
+            with patch("sys.argv", ["muse-memory", "--db", str(database), "approve", str(proposed["id"]), "--by", "agent:muse"]):
+                with contextlib.redirect_stdout(refused_out), contextlib.redirect_stderr(refused_err):
+                    refused_code = main()
+            self.assertEqual(refused_code, 3)
+            self.assertEqual(refused_out.getvalue(), "")
+            self.assertEqual(json.loads(refused_err.getvalue())["error_type"], "PermissionError")
+            with MemoryStore(database) as memory:
+                self.assertEqual(memory.get_candidate(proposed["id"])["status"], "pending")
+                self.assertEqual(len(memory.search("Cantonese")), 0)
+            approved = json.loads(self.run_cli(database, "approve", str(proposed["id"]), "--by", "user:cli"))
             self.assertEqual(approved["status"], "approved")
+            self.assertEqual(approved["reviewed_by"], "user:cli")
             with MemoryStore(database) as memory:
                 self.assertEqual(len(memory.search("Cantonese")), 1)
 

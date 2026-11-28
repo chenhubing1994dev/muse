@@ -19,6 +19,7 @@ from muse.progress import ProgressEventStore
 from muse.experiment_bridge import ExperimentBridge
 from muse.research_knowledge import ResearchKnowledgeStore
 from muse.process_limits import ProcessLimitError, WindowsJobLimits
+from muse.error_journal import record_suppressed_error
 
 def _record(progress_events: ProgressEventStore | None, subject_id: str, event: str,
             *, summary: str, error_code: str | None = None) -> bool:
@@ -29,7 +30,8 @@ def _record(progress_events: ProgressEventStore | None, subject_id: str, event: 
             "test", subject_id, event, summary=summary, error_code=error_code
         )
         return True
-    except Exception:
+    except Exception as _muse_suppressed:
+        record_suppressed_error("test_runner.py:33", _muse_suppressed)
         # Telemetry must not prevent a requested test run.
         return False
 
@@ -66,8 +68,8 @@ def run_suite(suite: unittest.TestSuite, *,
                     manifest_id, status="failed", duration_seconds=time.monotonic() - started,
                     metrics={}, summary="Unittest runner raised an exception.", exit_code=1, run_id=run_id,
                 )
-            except Exception:
-                pass
+            except Exception as _muse_suppressed:
+                record_suppressed_error("test_runner.py:69", _muse_suppressed)
         raise
     duration = time.monotonic() - started
     failures = len(result.failures) + len(result.errors)

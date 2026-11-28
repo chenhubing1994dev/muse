@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Callable
 
 from muse.progress import ProgressEventStore
+from muse.error_journal import record_suppressed_error
 
 
 def _parse_reviewer_json(raw: str) -> dict[str, object]:
@@ -50,7 +51,8 @@ def _record_review_progress(
             "failed": "Independent review failed validation or execution.",
         }[event]
         store.record("review", run_id, event, summary=summary, error_code=error_code)
-    except Exception:
+    except Exception as _muse_suppressed:
+        record_suppressed_error("review_gate.py:53", _muse_suppressed)
         # Observability must not change the review decision or block delivery.
         return
 

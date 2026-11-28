@@ -969,6 +969,21 @@ export interface FusionRecord {
   safety: { external_code_executed: false; dependencies_installed: false; activation: string };
   registered_capability_ids?: string[]; activation?: string; approved_by?: string; duplicate?: boolean;
 }
+export interface CommanderApproval {
+  task_id: string;
+  title: string;
+  created_at: string;
+  risk?: string | null;
+  risk_reasons?: string[];
+  plan_id?: string | null;
+  goal?: string | null;
+}
+export interface CommanderStatusResponse {
+  api_version: 1;
+  status: { tasks: Record<string, number>; safety: { mode: string; reason: string; kill_switch_file_present?: boolean }; receipts: { ok: boolean; count?: number } };
+}
+export interface CommanderAdapterRow { adapter: string; framework: string; state: string; detail: string; risk: string }
+
 export interface ApiClient {
   companionPairings(limit?: number): Promise<{ api_version: 1; pairings: CompanionPairing[] }>;
   companionDevices(limit?: number): Promise<{ api_version: 1; devices: CompanionDevice[] }>;
@@ -982,6 +997,14 @@ export interface ApiClient {
   overview(): Promise<OverviewResponse>;
   contextualInquiryReviews(limit?: number): Promise<{ api_version: number; count: number; reviews: ContextualInquiryReviewSummary[] }>;
   contextualInquiryReviewResult(taskId: string): Promise<{ api_version: number; task_id: string; review: ContextualInquiryReviewResult }>;
+  commanderStatus(): Promise<CommanderStatusResponse>;
+  commanderApprovals(): Promise<{ api_version: 1; approvals: CommanderApproval[] }>;
+  commanderCapacity(): Promise<{ api_version: 1; capacity: Record<string, unknown> }>;
+  commanderAdapters(): Promise<{ api_version: 1; adapters: CommanderAdapterRow[] }>;
+  commanderFleet(): Promise<{ api_version: 1; fleet: Array<Record<string, unknown>> }>;
+  commanderApprove(taskId: string, approvedBy: string): Promise<{ api_version: 1; task: Record<string, unknown> }>;
+  commanderCancel(taskId: string, by: string, reason?: string): Promise<{ api_version: 1; result: Record<string, unknown> }>;
+  commanderKill(actor: string, reason: string): Promise<{ api_version: 1; result: Record<string, unknown> }>;
   mempalaceStatus(): Promise<MemPalaceStatusResponse>;
   systemDashboard(): Promise<SystemDashboardResponse>;
   fusionJobs(limit?: number): Promise<{ api_version: 1; jobs: FusionRecord[] }>;

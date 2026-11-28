@@ -13,6 +13,7 @@ from muse.progress import ProgressEventStore
 from muse.task_queue import TaskQueue
 from muse.research_knowledge import ResearchKnowledgeStore
 from muse.initiative_engine import InitiativeStore
+from muse.error_journal import record_suppressed_error
 
 
 _SIGNAL_SPECS: dict[str, dict[str, Any]] = {
@@ -387,9 +388,9 @@ def scan_capabilities(
                 "system", "capability-radar", "completed",
                 summary=f"Capability scan completed: signals={len(signals)}; created={len(created)}; existing={len(existing)}.",
             )
-    except Exception:
+    except Exception as _muse_suppressed:
         # A telemetry failure must not undo a proposal or block the scheduled self-check.
-        pass
+        record_suppressed_error("capability_radar.py:390", _muse_suppressed)
 
     from muse.value_forge import ValueForge
 

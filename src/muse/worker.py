@@ -19,6 +19,7 @@ from muse.progress import ProgressEventStore
 from muse.failure_taxonomy import FailureDescriptor, MuseTaskError, classify_failure
 from muse.resource_governor import ResourcePolicy, probe_host_resources
 from muse.model_call_context import model_call_scope
+from muse.error_journal import record_suppressed_error
 
 Handler = Callable[[dict[str, Any]], Any]
 
@@ -133,7 +134,8 @@ def run_contextual_inquiry_review_once(
                     )
                 if renewed is None:
                     return
-            except Exception:
+            except Exception as _muse_suppressed:
+                record_suppressed_error("worker.py:137", _muse_suppressed)
                 return
 
     heartbeat_thread = threading.Thread(target=keep_lease_alive, daemon=True)
@@ -370,7 +372,8 @@ def _record_progress(
     try:
         with ProgressEventStore(database) as store:
             store.record("task", task_id, event, summary=summary, error_code=error_code)
-    except Exception:
+    except Exception as _muse_suppressed:
+        record_suppressed_error("worker.py:374", _muse_suppressed)
         # Observability must not prevent a task from running or being finalized.
         return
 
@@ -454,7 +457,8 @@ def run_once(
                         )
                     if renewed is None:
                         return
-                except Exception:
+                except Exception as _muse_suppressed:
+                    record_suppressed_error("worker.py:458", _muse_suppressed)
                     return
 
         heartbeat_thread = threading.Thread(target=keep_lease_alive, daemon=True)
@@ -708,7 +712,8 @@ def run_forever(
                 with ProgressEventStore(database) as runtime_store:
                     if not runtime_store.heartbeat_worker(runtime_id):
                         return
-            except Exception:
+            except Exception as _muse_suppressed:
+                record_suppressed_error("worker.py:712", _muse_suppressed)
                 return
 
     heartbeat_thread = threading.Thread(target=heartbeat_runtime, daemon=True)
@@ -735,8 +740,8 @@ def run_forever(
                             summary=f"Worker loop error; retry {consecutive_errors}.",
                             error_code=classify_failure(exc).code,
                         )
-                except Exception:
-                    pass
+                except Exception as _muse_suppressed:
+                    record_suppressed_error("worker.py:738", _muse_suppressed)
                 delay = min(
                     poll_interval * (2 ** min(consecutive_errors - 1, 10)),
                     max_error_backoff_seconds,

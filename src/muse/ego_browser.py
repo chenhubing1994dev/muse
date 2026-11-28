@@ -19,6 +19,7 @@ from typing import Any
 from urllib.parse import parse_qsl, quote, urlsplit
 
 from muse.process_utils import no_console_window_kwargs
+from muse.error_journal import record_suppressed_error
 
 MAX_OUTPUT_BYTES = 4 * 1024 * 1024
 MAX_CAPTURE_CHARS = 50_000
@@ -309,7 +310,8 @@ cliLog("MUSE_EGO_RESULT:" + JSON.stringify({task_space: task.name, snapshot, sea
                 try:
                     result_url = self._validate_url(str(item.get("url") or ""))
                     _validate_public_url(result_url)
-                except Exception:
+                except Exception as _muse_suppressed:
+                    record_suppressed_error("ego_browser.py:312", _muse_suppressed)
                     continue
                 host = (urlsplit(result_url).hostname or "").casefold()
                 if host == "google.com" or host.endswith(".google.com") or host.startswith("google."):

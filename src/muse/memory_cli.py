@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Sequence
 
@@ -195,7 +196,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "list-pending":
             print(json.dumps(memory.list_pending(limit=args.limit), ensure_ascii=False, indent=2))
         elif args.command == "approve":
-            result = memory.approve_candidate(args.candidate_id, approved_by=args.by)
+            # A refused approval is an expected outcome, not a crash: report it as JSON on stderr with a
+            # distinct exit code (3 = identity refused, 2 = invalid candidate); nothing is written either way.
+            try:
+                result = memory.approve_candidate(args.candidate_id, approved_by=args.by)
+            except (PermissionError, ValueError) as exc:
+                code = 3 if isinstance(exc, PermissionError) else 2
+                print(json.dumps({"approved": False, "candidate_id": args.candidate_id, "error": str(exc),
+                                  "error_type": type(exc).__name__}, ensure_ascii=False), file=sys.stderr)
+                return code
             print(json.dumps(result, ensure_ascii=False, indent=2))
         elif args.command == "reject":
             result = memory.reject_candidate(

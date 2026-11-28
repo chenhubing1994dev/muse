@@ -144,7 +144,7 @@ class ResearchTaskHandler:
                 claim_id, reason=f"Search/read produced no sources: {reason}",
                 error_code="research_no_sources_after_failure",
             )
-            raise ResearchTaskError("search/read failed and produced no usable sources")
+            raise ResearchTaskError(f"search/read failed and produced no usable sources: {reason}"[:500])
 
         self._check_lease(execution_context)
         if self.state.get_status(claim_id) != "researching":

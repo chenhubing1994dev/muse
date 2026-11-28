@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import sqlite3
 import tempfile
@@ -9,6 +10,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
+from unittest.mock import patch
 
 from muse.research_knowledge import ResearchKnowledgeStore
 from muse.research_state_machine import ResearchStateMachine
@@ -66,6 +68,14 @@ class FakeExecutionContext:
 
 
 class ResearchTaskHandlerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Hermetic: the evidence store validates public URLs via DNS; on proxied (fake-IP) networks that
+        # falls back to DNS-over-HTTPS. Resolve the fixture host to a fixed public address instead.
+        resolver = patch("muse.research_fetch._resolve_public_addresses",
+                         return_value=[ipaddress.ip_address("93.184.216.34")])
+        resolver.start()
+        self.addCleanup(resolver.stop)
+
     def _claim(self, root: Path, *, status: str = "queued") -> tuple[Path, str, str]:
         knowledge_db = root / "knowledge.sqlite3"
         node_sha = hashlib.sha256(b"test-claim-content").hexdigest()

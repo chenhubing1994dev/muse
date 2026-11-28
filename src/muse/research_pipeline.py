@@ -21,6 +21,7 @@ from muse.resource_governor import ResourcePolicy, probe_host_resources
 from muse.progress import ProgressEventStore
 from muse.research_knowledge import ResearchKnowledgeStore
 from muse.source_identity import build_source_identity_candidates, find_exact_content_matches
+from muse.error_journal import record_suppressed_error
 
 
 
@@ -35,6 +36,13 @@ _MULTI_LABEL_PUBLIC_SUFFIXES = frozenset({
     "co.nz", "org.nz", "com.br", "com.cn", "com.hk", "co.jp", "co.kr",
 })
 
+
+def _wiki_source_contract(url: str, *, fetch_status: str) -> dict[str, Any]:
+    """Research Wiki contract: a search hit is ``pending_fetch``; only a read page may back evidence."""
+    from muse.epistemics import stamp
+    from muse.research_wiki import _domain
+    return {"wiki_object": "source", "fetch_status": fetch_status, "registrable_domain": _domain(url),
+            **stamp("observation", source=url, confidence=0.5, origin="web_research").as_dict()}
 
 def _registrable_domain_hint(hostname: str) -> str | None:
     """Return a conservative registrable-domain grouping hint without a PSL dependency.
@@ -241,7 +249,8 @@ class ResearchPipeline:
                 "research", subject_id, event, summary=summary, error_code=error_code
             )
             return True
-        except Exception:
+        except Exception as _muse_suppressed:
+            record_suppressed_error("research_pipeline.py:251", _muse_suppressed)
             # Progress telemetry is best-effort and must not interrupt evidence collection.
             return False
 
@@ -293,7 +302,8 @@ class ResearchPipeline:
         if self.knowledge_store is not None:
             try:
                 prior_knowledge = self.knowledge_store.search_context(" ".join(cleaned), limit=8)
-            except Exception:
+            except Exception as _muse_suppressed:
+                record_suppressed_error("research_pipeline.py:303", _muse_suppressed)
                 prior_knowledge = []
         progress_count = int(self._record_progress(
             progress_id, "started", summary="Multi-angle research started."
@@ -359,6 +369,7 @@ class ResearchPipeline:
         knowledge_node_ids: set[str] = set()
         knowledge_source_refs: dict[str, str] = {}
         knowledge_failures: list[dict[str, str]] = []
+        knowledge_source_refs_read: set[str] = set()  # Research Wiki: never downgrade read -> pending
         for source in search_results:
             try:
                 self.evidence.save_attribution(source)
@@ -370,7 +381,9 @@ class ResearchPipeline:
                     source_node = self.knowledge_store.upsert_node(
                         "source", str(source.get("title", source["url"]))[:500],
                         external_ref=source["url"],
-                        metadata={"source_identity": _source_identity_signals(source["url"]),
+                        metadata={**_wiki_source_contract(source["url"], fetch_status=(
+                                      "read" if source["url"] in knowledge_source_refs_read else "pending_fetch")),
+                                  "source_identity": _source_identity_signals(source["url"]),
                                   "attributions": [{
                             "query": source["query"], "engine": str(source.get("engine", ""))[:100],
                             "published_at": str(source.get("published_at", ""))[:80],
@@ -443,6 +456,8 @@ class ResearchPipeline:
                                         **_source_identity_signals(page["url"]),
                                         **(page.get("source_metadata") or {}),
                                     },
+                                    **_wiki_source_contract(page["url"], fetch_status="read"),
+                                    "content_sha256": page["sha256"],  # source bodies never enter knowledge metadata
                                     "content_hash": page["sha256"],
                                     "fetched_at": page["fetched_at"],
                                     "chars": len(page["text"]),
@@ -457,7 +472,7 @@ class ResearchPipeline:
                                     "structured_extract_error": page.get("structured_extract_error"),
                                 },
                             )
-                            knowledge_node_ids.add(page_source_node["id"]); knowledge_source_refs[page["url"]] = page_source_node["id"]
+                            knowledge_node_ids.add(page_source_node["id"]); knowledge_source_refs[page["url"]] = page_source_node["id"]; knowledge_source_refs_read.add(page["url"])
                         except Exception as exc:
                             knowledge_failures.append({"stage": "knowledge_evidence", "url": source["url"],
                                                        "error": type(exc).__name__})

@@ -7,6 +7,7 @@ from __future__ import annotations
 import re
 import sqlite3
 import uuid
+import contextvars
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -391,7 +392,7 @@ class MultiAgentOrchestrator:
                 self.store.update_agent(
                     run_id, AgentOutcome(agent.agent_id, agent.role, "running")
                 )
-                futures[pool.submit(agent.call, prompt)] = agent
+                futures[pool.submit(contextvars.copy_context().run, agent.call, prompt)] = agent  # carry Commander scope
             for future in as_completed(futures):
                 agent = futures[future]
                 try:
@@ -486,7 +487,7 @@ class MultiAgentOrchestrator:
                     )
                     self.store.update_agent(run_id, AgentOutcome(agent.agent_id, agent.role, "running"))
                     self.store.record_message(run_id, agent.agent_id, "started")
-                    futures[pool.submit(agent.call, agent_prompt)] = agent
+                    futures[pool.submit(contextvars.copy_context().run, agent.call, agent_prompt)] = agent  # carry Commander scope
                 for future in as_completed(futures):
                     agent = futures[future]
                     try:

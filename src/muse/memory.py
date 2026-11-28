@@ -13,6 +13,8 @@ from typing import Any
 
 MEMORY_KINDS = frozenset({"profile", "preference", "fact", "task", "interest", "episode", "atomic_fact", "foresight", "skill", "case"})
 MEMORY_TRACKS = frozenset({"user", "agent"})
+# Same identities as muse.dual_track_memory.HUMAN_APPROVER_PREFIXES (kept local: memory.py has no muse imports).
+HUMAN_APPROVER_PREFIXES = ("user:", "human:")
 
 class MemoryStore:
     """Persist searchable memories with provenance and revision history metadata."""
@@ -470,6 +472,11 @@ class MemoryStore:
                 return result
             if row["status"] != "pending":
                 raise ValueError("only pending memory candidates can be approved")
+            # K-2 (D-031): the User Track holds only what a human stated or confirmed. Every path that turns a
+            # candidate into a User Track memory (memory_cli approve, control center, DualTrackMemory) must carry
+            # a human identity; an agent or an unprefixed name can never promote a candidate itself.
+            if row["track"] == "user" and not approved_by.startswith(HUMAN_APPROVER_PREFIXES):
+                raise PermissionError("User Track memory candidates require a human approver (user:<name> or human:<name>)")
             if row["kind"] == "skill" and row["track"] == "agent":
                 evaluation = self._connection.execute(
                     "SELECT passed FROM skill_candidate_evaluations WHERE candidate_id=?",

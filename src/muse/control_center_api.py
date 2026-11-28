@@ -37,8 +37,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs
+from muse.error_journal import record_suppressed_error
 
 APPROVER = "local-dashboard-user"
+# K-2 (D-031): memory decisions are typed by the human in the local single-user dashboard (confirmation phrase
+# APPROVE-MEMORY), so they carry a user: identity; MemoryStore refuses User Track approvals without one.
+MEMORY_APPROVER = "user:local-dashboard"
 MAX_JSON_DEPTH = 32
 _SUBMIT_LOCK = threading.Lock()
 APPROVER_SCOPE = "local_single_user_session"
@@ -182,7 +186,8 @@ def task_detail(ctx: ControlContext, task_id: str) -> dict[str, Any]:
         events = queue.events(task_id, limit=100)
         try:
             workflow = queue.workflow_status(task_id)
-        except Exception:
+        except Exception as _muse_suppressed:
+            record_suppressed_error("control_center_api.py:185", _muse_suppressed)
             workflow = None
     detail = _public_task(task)
     detail["events"] = [_event_projection(event) for event in events]
@@ -429,9 +434,9 @@ def decide_memory_candidate(ctx: ControlContext, candidate_id: int, payload: dic
         if memory.get_candidate(candidate_id) is None:
             raise ControlNotFound("memory candidate not found")
         if decision == "approve":
-            result = memory.approve_candidate(candidate_id, approved_by=APPROVER)
+            result = memory.approve_candidate(candidate_id, approved_by=MEMORY_APPROVER)
         else:
-            result = memory.reject_candidate(candidate_id, rejected_by=APPROVER,
+            result = memory.reject_candidate(candidate_id, rejected_by=MEMORY_APPROVER,
                                              reason=_text(payload, "reason", 300, required=False) or "rejected in Muse OS")
     return {"candidate": result, "decision": decision, "approver_scope": APPROVER_SCOPE}
 
@@ -584,7 +589,8 @@ def summary(ctx: ControlContext) -> dict[str, Any]:
     if ctx.products_provider is not None:
         try:
             products = ctx.products_provider() or []
-        except Exception:
+        except Exception as _muse_suppressed:
+            record_suppressed_error("control_center_api.py:587", _muse_suppressed)
             products = []
     videos = [item for item in products if item.get("kind") == "video_creator" and item.get("video_path")]
     videos.sort(key=lambda item: str(item.get("modified_at") or ""), reverse=True)
@@ -629,10 +635,19 @@ def xuanshu_hypotheses(ctx: ControlContext, payload: dict[str, Any]) -> tuple[in
         _confirm(payload, "WRITE-HYPOTHESES")
         if ctx.knowledge_path is None:
             raise ControlNotFound("Research Wiki store is not configured")
-        from muse.research_knowledge import ResearchKnowledgeStore
-        ctx.knowledge_path.parent.mkdir(parents=True, exist_ok=True)
-        with ResearchKnowledgeStore(ctx.knowledge_path) as store:
-            body["written"] = write_hypotheses_to_wiki(store, hypotheses)
+        # T2: the Wiki write runs inside a Muse Commander ticket (receipt + cost ledger + review).
+        import hashlib as _hashlib
+        from muse.commander_routes import HANDLER_XUANSHU, submit_and_wait
+        routed = submit_and_wait(
+            ctx.workspace_root, handler=HANDLER_XUANSHU,
+            route_args={"knowledge_path": str(ctx.knowledge_path), "hypotheses": hypotheses},
+            title="Write symbolic hypotheses to Research Wiki", objective="写入待验证象征假设",
+            request_key=_hashlib.sha256(json.dumps(hypotheses, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest(),
+        )
+        body["commander"] = {key: routed.get(key) for key in ("ticket_id", "status", "risk", "receipt_sha256", "gate")}
+        if routed["status"] != "succeeded":
+            raise RuntimeError(f"commander ticket {routed['status']}")
+        body["written"] = routed["output"]
         return 201, body
     return 200, body
 

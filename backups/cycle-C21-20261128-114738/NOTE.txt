@@ -1,0 +1,3 @@
+tests\test_memory_candidates.py was edited before being copied here (process slip). Original lines 123-124 were:
+            with self.assertRaises(PermissionError):      # D-031: an agent identity cannot approve via the CLI
+                self.run_cli(database, "approve", str(proposed["id"]), "--by", "agent:muse")

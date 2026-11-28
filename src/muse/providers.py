@@ -15,6 +15,7 @@ from typing import Protocol, runtime_checkable
 
 from muse.provider_policy import CloudExecutionPolicy, FreeOnlyRouter, ProviderBudget
 from muse.model_client import LMStudioClient
+from muse.error_journal import record_suppressed_error
 
 @dataclass(frozen=True)
 class ProviderDescriptor:
@@ -254,7 +255,8 @@ class ProviderRegistry:
                         continue
                     try:
                         self._quota_router.select([budget], now=now)
-                    except Exception:
+                    except Exception as _muse_suppressed:
+                        record_suppressed_error("providers.py:257", _muse_suppressed)
                         continue
                 elif descriptor.requires_verified_free_quota and not paid_cloud_allowed:
                     budget = budgets.get(descriptor.provider_id)
@@ -262,7 +264,8 @@ class ProviderRegistry:
                         continue
                     try:
                         self._quota_router.select([budget], now=now)
-                    except Exception:
+                    except Exception as _muse_suppressed:
+                        record_suppressed_error("providers.py:265", _muse_suppressed)
                         continue
                 latency = metric.average_latency_ms if metric.average_latency_ms is not None else float("inf")
                 failure_rate = metric.failures / max(1, metric.successes + metric.failures)

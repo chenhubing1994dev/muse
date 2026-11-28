@@ -1126,7 +1126,11 @@ class AutonomousSupervisor:
         return None
 
     def run_tick(self, *, stop_event: threading.Event | None = None) -> dict[str, Any]:
-        """Run one tick, gated by the optional SafetyController (B394)."""
+        """Run one tick, gated by Muse Commander's global gate and the optional SafetyController (B394)."""
+        from muse.commander_gate import check_global_gate
+        global_gate = check_global_gate(self.workspace)
+        if not global_gate["allowed"]:
+            return {"routines": {"processed": 0, "outcomes": []}, "task": None, "safety": global_gate}
         controller = self.safety_controller
         if controller is None:
             return self._run_tick_unguarded(stop_event=stop_event)

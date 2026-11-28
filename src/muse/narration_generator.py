@@ -12,6 +12,7 @@ from collections.abc import Sequence
 import re
 from enum import Enum
 from typing import Any, Callable
+from muse.error_journal import record_suppressed_error
 
 _MAX_TOPIC_CHARS = 200
 _MAX_INSPIRATION_CHARS = 200
@@ -243,7 +244,8 @@ class NarrationGenerator:
                     "Return a JSON array of objects with text and emotion fields.",
                 ])
             )
-        except Exception:
+        except Exception as _muse_suppressed:
+            record_suppressed_error("narration_generator.py:246", _muse_suppressed)
             return None
         if not isinstance(payload, dict):
             payload = {"segments": payload}
